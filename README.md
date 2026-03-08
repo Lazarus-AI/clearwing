@@ -16,6 +16,15 @@ A comprehensive, modular vulnerability scanner and exploiter with an AI-powered 
 - **Kali Docker Integration**: Spin up Kali Linux containers for specialized security tools
 - **Runtime Tool Creation**: Create custom tools on the fly during interactive sessions
 
+## Advanced / Military-Grade Capabilities
+
+- **Tactical Edge Autonomy**: Support for local, open-weights LLM execution (Llama-3, Mistral) for air-gapped or disconnected environments.
+- **Advanced OPSEC**: Polymorphic payload obfuscation (XOR/Base64) to evade static EDR signatures.
+- **Cryptographic Deconfliction**: HMAC-SHA256 watermarking of all payloads to prevent "cyber fratricide" and allow friendly force identification.
+- **Asynchronous C2 Mesh**: Generation of resilient sleeper beacons with randomized jitter for stealthy persistence.
+- **Kinetic/OT Operations**: Specialized scanning for Industrial Control Systems (ICS) including Modbus, Siemens S7, and DNP3.
+- **Interactive Attack Graph**: Live, interactive D3.js visualization of the attack surface and lateral movement paths.
+
 ## Installation
 
 ```bash
