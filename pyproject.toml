@@ -56,6 +56,11 @@ browser = ["playwright>=1.40.0"]
 vector = [
     "sentence-transformers>=2.2.0",
 ]
+web = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "websockets>=11.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -64,7 +69,7 @@ dev = [
     "mypy>=1.0.0",
 ]
 all = [
-    "vulnexploit[metasploit,browser,vector,dev]",
+    "vulnexploit[metasploit,browser,vector,web,dev]",
 ]
 
 [project.scripts]
