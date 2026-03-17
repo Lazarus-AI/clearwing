@@ -1,12 +1,23 @@
 import pytest
 import os
+from vulnexploit.payloads.authorization import AuthorizationGate
 from vulnexploit.payloads.obfuscator import PayloadObfuscator
 from vulnexploit.payloads.watermark import Watermarker
 
+
+def test_payload_obfuscation_requires_authorization():
+    """Test that obfuscation is gated behind authorization."""
+    AuthorizationGate.revoke()
+    with pytest.raises(PermissionError):
+        PayloadObfuscator.generate_polymorphic_python("print('test')")
+
+
 def test_payload_obfuscation():
     """Test that polymorphic Python payloads execute correctly."""
+    AuthorizationGate.authorize("payload_obfuscation")
     original_payload = "print('HELLOWORLD')"
     obfuscated = PayloadObfuscator.generate_polymorphic_python(original_payload)
+    AuthorizationGate.revoke()
     
     assert "import base64" in obfuscated
     assert "exec(" in obfuscated

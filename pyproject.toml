@@ -79,7 +79,7 @@ vulnexploit = "vulnexploit:main"
 include = ["vulnexploit*"]
 
 [tool.setuptools.package-data]
-vulnexploit = ["config/*.yaml", "skills/vulnerabilities/*.md"]
+vulnexploit = ["core/config_data/*.yaml", "core/skills/vulnerabilities/*.md", "skills/vulnerabilities/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "vulnexploit/tests"]
