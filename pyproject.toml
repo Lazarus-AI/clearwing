@@ -140,35 +140,21 @@ ignore_missing_imports = true
 # Strict (`disallow_untyped_defs = true`):
 #   - clearwing.findings.*          (Phase 3e)
 #   - clearwing.capabilities        (Phase 4c)
+#   - clearwing.sourcehunt.*        (Phase 5 — flipped from relaxed, all
+#                                    ~37 untyped-def errors cleaned up
+#                                    via real annotations, not suppressions)
 #
-# Relaxed (annotation enforcement off, all other strict checks on —
-# catches wrong arg types, Literal narrowing, dict vs Finding
-# mismatches, attribute typos, call-arg drift on external APIs):
-#   - clearwing.sourcehunt.*        (Phase 3e)
-#
-# TODO Phase 5 — flip `disallow_untyped_defs = true` for
-# `clearwing.sourcehunt.*` and expand the gate to `clearwing.agent.tools.*`
-# and `clearwing.core.*` after the broader typing pass:
-#   ~40 untyped defs remain in clearwing/sourcehunt/ (runner.py, pool.py,
-#   hunter.py, webhook_server.py, taint.py, callgraph.py,
-#   harness_generator.py, poc_runner.py, verifier.py, variant_loop.py,
-#   reporter.py, patcher.py).
-#   ~78 type errors remain in clearwing/agent/tools/ + clearwing/core/ —
-#   mostly implicit Optional (`param: str = None`), no-any-return from
-#   json.loads and .invoke() calls, and a handful of dict/None attr
-#   errors. These are a mix of real bugs and cosmetic typing debt that
-#   belong to the Phase 5 "tighten mypy globally" pass.
+# Still deferred:
+#   - clearwing.agent.tools.*  and  clearwing.core.*
+#     ~78 type errors remain here (implicit Optional, no-any-return from
+#     json.loads/.invoke(), a handful of dict/None attr errors, real
+#     arg-type mismatches). These are a mix of real bugs and typing
+#     debt that belongs in a dedicated pass rather than piecemeal fixes.
 [[tool.mypy.overrides]]
 module = [
     "clearwing.findings.*",
     "clearwing.capabilities",
-]
-disallow_untyped_defs = true
-warn_unused_ignores = true
-
-[[tool.mypy.overrides]]
-module = [
     "clearwing.sourcehunt.*",
 ]
-disallow_untyped_defs = false
+disallow_untyped_defs = true
 warn_unused_ignores = true

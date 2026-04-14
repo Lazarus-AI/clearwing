@@ -113,7 +113,7 @@ class _FileHunterRunner:
         self.file_target = file_target
         self._pool = hunter_pool
 
-    def run(self):
+    def run(self) -> Any:
         findings, cost = self._pool._run_one_hunter(self.file_target, 0.0)
         # Build a CICDResult-shaped result for ParallelExecutor to consume
         from clearwing.runners.cicd.runner import CICDResult
@@ -122,7 +122,11 @@ class _FileHunterRunner:
             exit_code=0,
             target=self.file_target.get("path", ""),
             depth="sourcehunt",
-            findings=list(findings),
+            # CICDResult.findings is declared `list[dict]` but sourcehunt
+            # stashes real `Finding` dataclasses — the pool unpacks them
+            # back out at the boundary via the `cast(list[Finding], ...)`
+            # in HunterPool.run().
+            findings=cast(list, findings),
             duration_seconds=0.0,
             cost_usd=cost,
             tokens_used=0,
@@ -150,7 +154,7 @@ class HunterPool:
         # Build an R3-compatible runner_factory that closes over self so
         # the inner runner can reach back into the pool for sandbox + llm
         # configuration.
-        def factory(item: Any, pe_config: ParallelScanConfig):
+        def factory(item: Any, pe_config: ParallelScanConfig) -> _FileHunterRunner:
             return _FileHunterRunner(item, self)
 
         # The executor's item_cost_limits replaces the per-tier caps.
@@ -195,7 +199,7 @@ class HunterPool:
                             logger.debug("on_finding callback failed", exc_info=True)
         return all_findings
 
-    def cancel(self):
+    def cancel(self) -> None:
         self._executor.cancel()
 
     @property
@@ -252,7 +256,7 @@ class HunterPool:
                 except Exception:
                     pass
 
-    def _build_hunter_for_file(self, file_target: FileTarget, sandbox):
+    def _build_hunter_for_file(self, file_target: FileTarget, sandbox: Any) -> Any:
         """Either invoke the user-supplied hunter_factory or import build_hunter_agent."""
         import uuid
 

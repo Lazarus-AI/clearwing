@@ -19,8 +19,10 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +184,7 @@ class CallGraph:
 class CallGraphBuilder:
     """Build a CallGraph by parsing every source file in a repo with tree-sitter."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._languages = _load_languages()
         self._parsers: dict[str, object] = {}
 
@@ -224,14 +226,14 @@ class CallGraphBuilder:
 
     # --- internals ----------------------------------------------------------
 
-    def _get_parser(self, lang_name: str):
+    def _get_parser(self, lang_name: str) -> Any:
         if lang_name not in self._parsers:
             from tree_sitter import Parser
 
             self._parsers[lang_name] = Parser(self._languages[lang_name])
         return self._parsers[lang_name]
 
-    def _walk_repo(self, repo_path: str):
+    def _walk_repo(self, repo_path: str) -> Iterator[str]:
         skip_dirs = {
             ".git",
             "node_modules",
@@ -293,7 +295,7 @@ class CallGraphBuilder:
             # DFS
             stack.extend(node.children)
 
-    def _extract_definition_name(self, node, lang_name: str, source: bytes) -> str | None:
+    def _extract_definition_name(self, node: Any, lang_name: str, source: bytes) -> str | None:
         """Find the name identifier for a function-definition node.
 
         Walks `child_by_field_name('name')` when available, else searches for
@@ -315,7 +317,7 @@ class CallGraphBuilder:
         # Fallback: the first identifier anywhere in the signature
         return self._first_identifier(node, source)
 
-    def _extract_call_name(self, node, lang_name: str, source: bytes) -> str | None:
+    def _extract_call_name(self, node: Any, lang_name: str, source: bytes) -> str | None:
         """Find the callee name for a call-expression node.
 
         For `foo(x)` the name is `foo`.
@@ -335,7 +337,7 @@ class CallGraphBuilder:
         ident = self._rightmost_identifier(sub, source)
         return ident
 
-    def _first_identifier(self, node, source: bytes) -> str | None:
+    def _first_identifier(self, node: Any, source: bytes) -> str | None:
         """Return the first identifier token found in node's subtree."""
         if node is None:
             return None
@@ -350,7 +352,7 @@ class CallGraphBuilder:
             stack[0:0] = list(n.children)
         return None
 
-    def _rightmost_identifier(self, node, source: bytes) -> str | None:
+    def _rightmost_identifier(self, node: Any, source: bytes) -> str | None:
         """Return the rightmost identifier token in node's subtree.
 
         Used for call sites: `a.b.c()` → `c`.

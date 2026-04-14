@@ -9,6 +9,7 @@ different prompts but the same graph structure.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
@@ -404,7 +405,7 @@ def _choose_specialist(file_target: FileTarget) -> str:
 # --- Hunter system prompt builder -------------------------------------------
 
 
-def _no_op_state_updater(tool_name, data, state):
+def _no_op_state_updater(tool_name: str, data: Any, state: dict) -> dict:
     """Hunter agents update SourceHuntState via record_finding directly,
     so no implicit tool-result→state mapping is needed."""
     return {}
@@ -549,7 +550,7 @@ def build_hunter_agent(
     seeded_crash: dict | None = None,
     semgrep_hints: list[dict] | None = None,
     variant_seed: dict | None = None,
-    sandbox_manager=None,  # v0.4: HunterSandbox manager for variants
+    sandbox_manager: Any = None,  # v0.4: HunterSandbox manager for variants
     default_sanitizers: tuple = ("asan", "ubsan"),  # v0.4: primary sanitizer combo
 ) -> tuple[CompiledStateGraph, HunterContext]:
     """Build a per-file ReAct hunter agent.
@@ -609,7 +610,7 @@ def build_hunter_agent(
     # Bind tools to the LLM
     llm_with_tools = llm.bind_tools(tools)
 
-    def system_prompt_fn(state):
+    def system_prompt_fn(state: dict) -> str:
         # The prompt is fixed per-hunter (the file is the context). We don't
         # need to re-render from state — return the captured prompt string.
         return prompt

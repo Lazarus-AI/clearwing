@@ -26,6 +26,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class _Handler(BaseHTTPRequestHandler):
     """Request handler. Attached config + stats come from the server instance."""
 
     # Silence the default stderr request log — we do our own logging
-    def log_message(self, format, *args):
+    def log_message(self, format: str, *args: Any) -> None:
         logger.debug("webhook: " + format, *args)
 
     def _respond(self, status: int, body: str) -> None:
@@ -134,15 +135,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body_bytes)
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         """Health-check endpoint."""
         if self.path in ("/health", "/healthz"):
             self._respond(200, "ok\n")
             return
         self._respond(404, "not found\n")
 
-    def do_POST(self):
-        server: WebhookServer = self.server
+    def do_POST(self) -> None:
+        # BaseHTTPRequestHandler.server is declared as `BaseServer` on the
+        # base class, but the ThreadingHTTPServer subclass below is always
+        # the one attached at runtime. Cast to tell mypy what we know.
+        server = cast("WebhookServer", self.server)
         config = server.config
         stats = server.stats
 
@@ -204,11 +208,12 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Dispatch the callback in a background thread so GitHub gets a
         # prompt 202 Accepted and doesn't hit its 10-second timeout.
-        if config.on_push is not None:
+        on_push = config.on_push
+        if on_push is not None:
 
-            def _run():
+            def _run() -> None:
                 try:
-                    config.on_push(
+                    on_push(
                         push_info["full_name"],
                         push_info["head_sha"],
                         payload,
@@ -277,7 +282,7 @@ def serve_forever(config: WebhookConfig) -> WebhookServer:
 # --- CommitMonitor integration helper --------------------------------------
 
 
-def commit_monitor_on_push_factory(monitor) -> Callable:
+def commit_monitor_on_push_factory(monitor: Any) -> Callable:
     """Build an on_push callback that invokes CommitMonitor.scan_commit().
 
     Usage:

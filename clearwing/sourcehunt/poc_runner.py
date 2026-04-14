@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from clearwing.sandbox.container import SandboxContainer
 
@@ -313,7 +315,7 @@ def build_rerun_poc_callback(
     sandbox: SandboxContainer,
     repo_path_in_sandbox: str = "/workspace",
     config: PocRunnerConfig | None = None,
-):
+) -> Callable[[Any, Finding, str], bool]:
     """Return a callable `(sandbox, finding) -> still_crashes: bool` suitable
     for passing to Verifier.run_patch_oracle / AutoPatcher.attempt.
 
@@ -324,7 +326,7 @@ def build_rerun_poc_callback(
     # expects.
     runner = PocRunner(sandbox, repo_path_in_sandbox, config)
 
-    def rerun(_sandbox, finding, candidate_diff: str = "") -> bool:
+    def rerun(_sandbox: Any, finding: Finding, candidate_diff: str = "") -> bool:
         report = runner.replay(finding, candidate_diff)
         return bool(report.get("still_crashes", True))
 

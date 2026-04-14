@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -452,7 +453,7 @@ class TaintAnalyzer:
         "third_party",
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._languages = _load_tree_sitter_languages()
         self._parsers: dict[str, Any] = {}
 
@@ -624,7 +625,7 @@ class TaintAnalyzer:
 
     # --- AST walkers --------------------------------------------------------
 
-    def _iter_function_nodes(self, root: Any, lang: str):
+    def _iter_function_nodes(self, root: Any, lang: str) -> Iterator[Any]:
         """Yield the bodies of every function defined at or under `root`.
 
         For C, function bodies are `function_definition` nodes. For Python,
@@ -643,7 +644,9 @@ class TaintAnalyzer:
                 continue
             stack.extend(list(node.children))
 
-    def _iter_call_expressions(self, func_node: Any, lang: str, source_text: bytes | str):
+    def _iter_call_expressions(
+        self, func_node: Any, lang: str, source_text: bytes | str
+    ) -> Iterator[tuple[Any, str, int]]:
         """Yield (call_node, callee_name, line_number) for every call in func_node."""
         call_types = _CALL_EXPR_TYPES.get(lang, set())
         if not call_types:
@@ -891,14 +894,14 @@ class TaintAnalyzer:
             return "python" if "python" in self._languages else None
         return None
 
-    def _get_parser(self, lang: str):
+    def _get_parser(self, lang: str) -> Any:
         if lang not in self._parsers:
             from tree_sitter import Parser
 
             self._parsers[lang] = Parser(self._languages[lang])
         return self._parsers[lang]
 
-    def _walk(self, repo_path: str):
+    def _walk(self, repo_path: str) -> Iterator[str]:
         for dirpath, dirnames, filenames in os.walk(repo_path):
             dirnames[:] = [d for d in dirnames if d not in self.SKIP_DIRS]
             for fname in filenames:

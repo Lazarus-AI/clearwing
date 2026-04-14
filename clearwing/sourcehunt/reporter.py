@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from clearwing.runners.cicd.sarif import SARIFGenerator
 
@@ -223,7 +224,7 @@ def _severity_rank(f: Finding) -> int:
     return _SEVERITY_ORDER.get(sev, 0)
 
 
-def _json_default(obj):
+def _json_default(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return obj.__dict__
     return str(obj)
