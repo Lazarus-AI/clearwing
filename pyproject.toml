@@ -130,15 +130,32 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 
-# Phase 3e: scoped strict gate anchored on the unified Finding types.
-# Phase 3 narrowed the gate to `clearwing.findings.*` only — the
-# `clearwing.sourcehunt.*` package carries ~60 pre-existing
-# missing-annotation errors that are out of scope for the Finding
-# unification. Phase 5 expands this override to include sourcehunt
-# once the annotations land.
+# Phase 3e: scoped mypy gate anchored on the unified Finding types.
+#
+# `clearwing.findings.*` gets the full strict treatment.
+# `clearwing.sourcehunt.*` gets `warn_unused_ignores` + the rest of the
+# strict settings but NOT `disallow_untyped_defs` — the sourcehunt
+# package carries pre-existing missing-annotation debt that is
+# orthogonal to the Finding unification. The relaxed gate still catches
+# real type regressions (wrong arg types, Literal narrowing, dict vs
+# Finding mismatches, attribute typos, call-arg drift on external APIs).
+#
+# TODO Phase 5: ~40 untyped defs remain in clearwing/sourcehunt/ (across
+# runner.py, pool.py, hunter.py, webhook_server.py, taint.py,
+# callgraph.py, harness_generator.py, poc_runner.py, verifier.py,
+# variant_loop.py, reporter.py, patcher.py). When Phase 5's broader
+# typing pass lands, flip `disallow_untyped_defs = true` for
+# clearwing.sourcehunt.* and delete this comment.
 [[tool.mypy.overrides]]
 module = [
     "clearwing.findings.*",
 ]
 disallow_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "clearwing.sourcehunt.*",
+]
+disallow_untyped_defs = false
 warn_unused_ignores = true

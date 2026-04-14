@@ -356,7 +356,7 @@ class TaintAnalyzer:
     def _walk_ast_for_taint(
         self,
         root: Any,
-        source_text: str,
+        source_text: bytes | str,
         lang: str,
         rel_path: str,
     ) -> list[TaintPath]:
@@ -449,7 +449,7 @@ class TaintAnalyzer:
                 continue
             stack.extend(list(node.children))
 
-    def _iter_call_expressions(self, func_node: Any, lang: str, source_text: str):
+    def _iter_call_expressions(self, func_node: Any, lang: str, source_text: bytes | str):
         """Yield (call_node, callee_name, line_number) for every call in func_node."""
         call_types = _CALL_EXPR_TYPES.get(lang, set())
         if not call_types:
@@ -464,7 +464,7 @@ class TaintAnalyzer:
                     yield node, name, line
             stack.extend(list(node.children))
 
-    def _callee_name(self, call_node: Any, lang: str, source_text: str) -> Optional[str]:
+    def _callee_name(self, call_node: Any, lang: str, source_text: bytes | str) -> Optional[str]:
         """Extract the callee name from a call_expression / call node.
 
         Returns the FULL dotted callee path as it appears in source, so the
@@ -556,7 +556,7 @@ class TaintAnalyzer:
         self,
         call_node: Any,
         lang: str,
-        source_text: str,
+        source_text: bytes | str,
     ) -> Optional[str]:
         """For `x = foo()`, return `"x"`. None if the call isn't an rvalue.
 
@@ -609,7 +609,7 @@ class TaintAnalyzer:
         call_node: Any,
         arg_index: int,
         lang: str,
-        source_text: str,
+        source_text: bytes | str,
     ) -> Optional[str]:
         """Return the identifier name of the arg at `arg_index`, if it's a
         plain identifier (not a complex expression).
@@ -649,7 +649,7 @@ class TaintAnalyzer:
         # For attribute chains like `self.buf`, take the rightmost identifier
         return self._rightmost_identifier_text(target_arg, source_text)
 
-    def _rightmost_identifier_text(self, node: Any, source_text: str) -> Optional[str]:
+    def _rightmost_identifier_text(self, node: Any, source_text: bytes | str) -> Optional[str]:
         """Walk a node subtree and return the rightmost identifier token."""
         if node is None:
             return None
@@ -667,7 +667,7 @@ class TaintAnalyzer:
             stack[0:0] = list(n.children)
         return result
 
-    def _function_name(self, func_node: Any, lang: str, source_text: str) -> Optional[str]:
+    def _function_name(self, func_node: Any, lang: str, source_text: bytes | str) -> Optional[str]:
         """Extract the name of the function being defined."""
         try:
             name_field = func_node.child_by_field_name("name")
@@ -739,7 +739,7 @@ def _node_text(node: Any, source: Any) -> str:
             return bytes(source[node.start_byte:node.end_byte]).decode(
                 "utf-8", errors="replace",
             )
-        return source[node.start_byte:node.end_byte]
+        return str(source[node.start_byte:node.end_byte])
     except Exception:
         return ""
 

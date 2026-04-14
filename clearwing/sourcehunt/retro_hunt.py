@@ -194,9 +194,10 @@ class RetroHunter:
         if not match:
             return None
         try:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _format_semgrep_rule(self, rule_info: dict) -> str:
         """Build a minimal Semgrep rule YAML from the parsed rule_info dict."""

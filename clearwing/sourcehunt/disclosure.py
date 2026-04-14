@@ -21,9 +21,9 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 
-from .state import EVIDENCE_LEVELS, Finding, evidence_at_or_above
+from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # "Findings that reach patch_validated are the highest confidence in reports."
 # We accept anything >= root_cause_explained — a reviewer still has to sign
 # off before submission.
-DEFAULT_MIN_EVIDENCE: str = "root_cause_explained"
+DEFAULT_MIN_EVIDENCE: EvidenceLevel = "root_cause_explained"
 
 
 # --- Result types -----------------------------------------------------------
@@ -76,7 +76,7 @@ class DisclosureGenerator:
         reporter_name: str = "(your name)",
         reporter_affiliation: str = "(your affiliation)",
         reporter_email: str = "(your email)",
-        min_evidence_level: str = DEFAULT_MIN_EVIDENCE,
+        min_evidence_level: EvidenceLevel = DEFAULT_MIN_EVIDENCE,
     ):
         self.repo_url = repo_url
         self.project_name = project_name or _project_name_from_url(repo_url)
@@ -120,7 +120,7 @@ class DisclosureGenerator:
     def _should_skip(self, finding: Finding) -> Optional[str]:
         if not finding.get("verified", False):
             return "unverified"
-        level = finding.get("evidence_level", "suspicion")
+        level = cast(EvidenceLevel, finding.get("evidence_level", "suspicion"))
         if not evidence_at_or_above(level, self.min_evidence_level):
             return f"evidence_level<{self.min_evidence_level}"
         # Variant-loop matches are only suspicion-level hypotheses until a

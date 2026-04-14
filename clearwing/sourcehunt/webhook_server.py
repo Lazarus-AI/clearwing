@@ -139,7 +139,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._respond(404, "not found\n")
 
     def do_POST(self):
-        server: WebhookServer = self.server  # type: ignore[assignment]
+        server: WebhookServer = self.server
         config = server.config
         stats = server.stats
 

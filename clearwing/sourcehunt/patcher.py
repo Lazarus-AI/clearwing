@@ -21,12 +21,12 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .state import EVIDENCE_LEVELS, Finding, evidence_at_or_above
+from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class AutoPatcher:
         (severity is verified_severity if set, else the original severity)
     """
 
-    PATCH_GATE = "root_cause_explained"
+    PATCH_GATE: EvidenceLevel = "root_cause_explained"
     _ELIGIBLE_SEVERITIES = {"critical", "high"}
 
     def __init__(self, llm: BaseChatModel):
@@ -92,7 +92,7 @@ class AutoPatcher:
         if sev not in self._ELIGIBLE_SEVERITIES:
             return False
         return evidence_at_or_above(
-            finding.get("evidence_level", "suspicion"),
+            cast(EvidenceLevel, finding.get("evidence_level", "suspicion")),
             self.PATCH_GATE,
         )
 
@@ -218,9 +218,10 @@ class AutoPatcher:
         if not match:
             return None
         try:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 def apply_patch_attempt(

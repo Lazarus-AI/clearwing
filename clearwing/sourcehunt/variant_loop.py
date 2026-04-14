@@ -20,7 +20,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -137,9 +137,10 @@ class VariantPatternGenerator:
         if not match:
             return None
         try:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 # --- Variant searcher -------------------------------------------------------
@@ -230,7 +231,7 @@ class VariantLoopConfig:
     max_variants_per_finding: int = 5    # cap hunt-back queue per finding per pass
     enable_llm_pattern_gen: bool = True  # turn off for offline / cheap mode
     # v0.4 fixpoint driver:
-    per_iteration_callback: Optional[object] = None  # Callable[[VariantLoopResult], None]
+    per_iteration_callback: Optional[Callable[["VariantLoopResult"], None]] = None
     stop_on_empty_iteration: bool = True  # terminate when a pass yields zero seeds
 
 
@@ -268,7 +269,7 @@ class VariantLoop:
         verified_findings: list[Finding],
         repo_path: str,
         already_seen_locations: Optional[set] = None,
-        reverify_callback: Optional[object] = None,
+        reverify_callback: Optional[Callable[[list[Any]], list[Finding]]] = None,
     ) -> VariantLoopResult:
         """Drive the variant loop until fixpoint or budget exhausted.
 

@@ -19,7 +19,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -154,7 +154,7 @@ class Verifier:
         self,
         llm: BaseChatModel,
         adversarial: bool = False,
-        adversarial_threshold: Optional[str] = "static_corroboration",
+        adversarial_threshold: Optional[EvidenceLevel] = "static_corroboration",
     ):
         self.llm = llm
         self.adversarial = adversarial
@@ -175,7 +175,7 @@ class Verifier:
             return VERIFIER_SYSTEM_PROMPT_V01
         if self.adversarial_threshold is None:
             return VERIFIER_SYSTEM_PROMPT_V02
-        level = finding.get("evidence_level", "suspicion")
+        level = cast(EvidenceLevel, finding.get("evidence_level", "suspicion"))
         try:
             gated = evidence_at_or_above(level, self.adversarial_threshold)
         except KeyError:
@@ -269,7 +269,7 @@ class Verifier:
             finding_id=finding.get("id", "unknown"),
             is_real=is_real,
             severity_verified=severity if is_real else None,
-            evidence_level=evidence_level,  # type: ignore[arg-type]
+            evidence_level=evidence_level,
             pro_argument=str(parsed.get("pro_argument", "")),
             counter_argument=str(parsed.get("counter_argument", "")),
             tie_breaker=str(parsed.get("tie_breaker", "")),
@@ -389,9 +389,10 @@ class Verifier:
         if not match:
             return None
         try:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 def apply_verifier_result(

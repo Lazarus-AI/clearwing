@@ -150,7 +150,7 @@ def _render_markdown(
     lines.append("")
 
     # Severity histogram
-    sev_counts = {}
+    sev_counts: dict[str, int] = {}
     for f in findings:
         s = (f.get("severity_verified") or f.get("severity") or "info").lower()
         sev_counts[s] = sev_counts.get(s, 0) + 1

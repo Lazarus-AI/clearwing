@@ -31,7 +31,7 @@ from .mechanism_memory import (
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
-from .state import Finding, evidence_at_or_above, filter_by_evidence
+from .state import EvidenceLevel, Finding, evidence_at_or_above, filter_by_evidence
 from .variant_loop import (
     VariantLoop,
     VariantLoopConfig,
@@ -93,7 +93,7 @@ class SourceHuntRunner:
         no_verify: bool = False,
         no_exploit: bool = False,
         adversarial_verifier: bool = True,      # v0.2: on by default
-        adversarial_threshold: Optional[str] = "static_corroboration",  # v0.4: budget gate
+        adversarial_threshold: Optional[EvidenceLevel] = "static_corroboration",  # v0.4: budget gate
         enable_mechanism_memory: bool = True,   # v0.3: cross-run mechanism store
         mechanism_store_path=None,              # override default store location
         enable_patch_oracle: bool = True,       # v0.3: patch oracle truth test
@@ -808,7 +808,12 @@ class SourceHuntRunner:
         """Build a single LLM from a model string. Used by --model override."""
         try:
             from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(model=model)
+            # Spread kwargs to match graph.py's construction pattern and
+            # to bypass mypy's strict call-arg check on langchain's Chat*
+            # classes (which declare many required-but-factory-defaulted
+            # fields that can't be expressed in a plain call).
+            kwargs: dict = {"model_name": model}
+            return ChatAnthropic(**kwargs)
         except Exception:
             logger.warning("Failed to build LLM from model string", exc_info=True)
             return None

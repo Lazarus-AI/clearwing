@@ -421,10 +421,11 @@ class GitHubChecksPublisher:
             return None
 
         try:
-            return json.loads(proc.stdout)
+            parsed = json.loads(proc.stdout)
         except json.JSONDecodeError:
             logger.warning("gh api %s %s returned non-JSON", method, endpoint)
             return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 # --- Helpers ---------------------------------------------------------------

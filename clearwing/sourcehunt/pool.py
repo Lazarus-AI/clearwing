@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional, cast
 
 from clearwing.runners.parallel.executor import (
     ParallelExecutor,
@@ -38,7 +38,7 @@ TierBudget = _ExecutorTierBudget
 # --- Tier assignment --------------------------------------------------------
 
 
-def assign_tier(file_target: FileTarget) -> str:
+def assign_tier(file_target: FileTarget) -> Literal["A", "B", "C"]:
     """Return 'A', 'B', or 'C' from the file's priority.
 
     Thresholds:
@@ -178,12 +178,13 @@ class HunterPool:
         all_findings: list[Finding] = []
         for tr in target_results:
             if tr.status == "completed":
-                # TargetResult.findings is list[dict] but we stashed full
-                # Finding dicts in there — they pass through unchanged.
-                for f in tr.findings:
+                # TargetResult.findings is typed as list[dict] by the
+                # ParallelExecutor contract, but hunter_tools stashes real
+                # `Finding` dataclass instances. Cast at the boundary.
+                for f in cast(list[Finding], tr.findings):
                     all_findings.append(f)
                 if self.config.on_finding:
-                    for f in tr.findings:
+                    for f in cast(list[Finding], tr.findings):
                         try:
                             self.config.on_finding(f)
                         except Exception:
@@ -272,7 +273,7 @@ class HunterPool:
             file_target=file_target,
             repo_path=self.config.repo_path,
             sandbox=sandbox,
-            llm=self.config.llm,
+            llm=self.config.llm,  # type: ignore[arg-type]
             session_id=session_id,
             seeded_crash=seeded_crash,
             semgrep_hints=semgrep_hints,

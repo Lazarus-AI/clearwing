@@ -190,9 +190,10 @@ class MechanismExtractor:
         if not match:
             return None
         try:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 # --- Store ------------------------------------------------------------------
@@ -424,11 +425,11 @@ class MechanismStore:
                 # chromadb itself.
                 if self._chromadb_client is None:
                     self._chromadb_client = chromadb.EphemeralClient()
+                assert self._chromadb_client is not None  # for mypy
                 # Rebuild the collection from the current mechanism set
                 coll_name = f"mechanisms_{uuid.uuid4().hex[:8]}"
-                self._chromadb_collection = self._chromadb_client.create_collection(
-                    name=coll_name,
-                )
+                collection = self._chromadb_client.create_collection(name=coll_name)
+                self._chromadb_collection = collection
                 docs = [self._mechanism_to_doc(m) for m in mechanisms]
                 ids = [m.id for m in mechanisms]
                 metadatas = [
@@ -436,11 +437,13 @@ class MechanismStore:
                      "cwe": m.cwe}
                     for m in mechanisms
                 ]
-                self._chromadb_collection.add(
+                collection.add(
                     documents=docs,
                     ids=ids,
                     metadatas=metadatas,
                 )
+            else:
+                collection = self._chromadb_collection
 
             # Query
             query_parts = []
@@ -451,7 +454,7 @@ class MechanismStore:
             query_parts.extend(tags)
             query = " ".join(query_parts) or "vulnerability"
 
-            result = self._chromadb_collection.query(
+            result = collection.query(
                 query_texts=[query],
                 n_results=min(top_n, len(mechanisms)),
             )

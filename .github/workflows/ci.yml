@@ -38,7 +38,7 @@ jobs:
         run: pytest -q
 
       - name: Mypy scoped gate (Phase 3e)
-        run: mypy --follow-imports=silent clearwing/findings
+        run: mypy --follow-imports=silent clearwing/findings clearwing/sourcehunt
 
       - name: Build wheel + sdist
         run: python -m build
