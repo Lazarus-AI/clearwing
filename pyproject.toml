@@ -131,25 +131,33 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 
-# Phase 3e: scoped mypy gate anchored on the unified Finding types.
+# Scoped mypy gate, built up across phases.
 #
-# `clearwing.findings.*` gets the full strict treatment.
-# `clearwing.sourcehunt.*` gets `warn_unused_ignores` + the rest of the
-# strict settings but NOT `disallow_untyped_defs` — the sourcehunt
-# package carries pre-existing missing-annotation debt that is
-# orthogonal to the Finding unification. The relaxed gate still catches
-# real type regressions (wrong arg types, Literal narrowing, dict vs
-# Finding mismatches, attribute typos, call-arg drift on external APIs).
+# Strict (`disallow_untyped_defs = true`):
+#   - clearwing.findings.*          (Phase 3e)
+#   - clearwing.capabilities        (Phase 4c)
 #
-# TODO Phase 5: ~40 untyped defs remain in clearwing/sourcehunt/ (across
-# runner.py, pool.py, hunter.py, webhook_server.py, taint.py,
-# callgraph.py, harness_generator.py, poc_runner.py, verifier.py,
-# variant_loop.py, reporter.py, patcher.py). When Phase 5's broader
-# typing pass lands, flip `disallow_untyped_defs = true` for
-# clearwing.sourcehunt.* and delete this comment.
+# Relaxed (annotation enforcement off, all other strict checks on —
+# catches wrong arg types, Literal narrowing, dict vs Finding
+# mismatches, attribute typos, call-arg drift on external APIs):
+#   - clearwing.sourcehunt.*        (Phase 3e)
+#
+# TODO Phase 5 — flip `disallow_untyped_defs = true` for
+# `clearwing.sourcehunt.*` and expand the gate to `clearwing.agent.tools.*`
+# and `clearwing.core.*` after the broader typing pass:
+#   ~40 untyped defs remain in clearwing/sourcehunt/ (runner.py, pool.py,
+#   hunter.py, webhook_server.py, taint.py, callgraph.py,
+#   harness_generator.py, poc_runner.py, verifier.py, variant_loop.py,
+#   reporter.py, patcher.py).
+#   ~78 type errors remain in clearwing/agent/tools/ + clearwing/core/ —
+#   mostly implicit Optional (`param: str = None`), no-any-return from
+#   json.loads and .invoke() calls, and a handful of dict/None attr
+#   errors. These are a mix of real bugs and cosmetic typing debt that
+#   belong to the Phase 5 "tighten mypy globally" pass.
 [[tool.mypy.overrides]]
 module = [
     "clearwing.findings.*",
+    "clearwing.capabilities",
 ]
 disallow_untyped_defs = true
 warn_unused_ignores = true
