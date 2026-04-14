@@ -1,11 +1,16 @@
 """Repo-root pytest configuration."""
 
-# Phase 1f will activate the DeprecationWarning-as-error filter once every
-# known shim call site has been rewritten. The filter locks the trunk against
-# regression so any accidental re-introduction of a deprecated import path
-# fails CI loudly.
-#
-# import warnings
-#
-# def pytest_configure(config):
-#     warnings.filterwarnings("error", category=DeprecationWarning, module=r"vulnexploit\..*")
+import warnings
+
+
+def pytest_configure(config):
+    """Turn any vulnexploit DeprecationWarning into a hard test failure.
+
+    Phase 1e deleted the 22 legacy shim packages; this filter locks the trunk
+    against accidental re-introduction of a deprecated import path.
+    """
+    warnings.filterwarnings(
+        "error",
+        category=DeprecationWarning,
+        module=r"vulnexploit\..*",
+    )
