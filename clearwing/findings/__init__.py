@@ -15,10 +15,8 @@ from .types import (
     Severity,
     EvidenceLevel,
     SEVERITY_VALUES,
-    from_source_dict,
     from_cicd_dict,
     from_analysis_finding,
-    to_source_dict,
     to_cicd_dict,
 )
 
@@ -27,9 +25,7 @@ __all__ = [
     "Severity",
     "EvidenceLevel",
     "SEVERITY_VALUES",
-    "from_source_dict",
     "from_cicd_dict",
     "from_analysis_finding",
-    "to_source_dict",
     "to_cicd_dict",
 ]

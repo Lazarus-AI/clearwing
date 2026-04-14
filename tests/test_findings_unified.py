@@ -11,9 +11,7 @@ from clearwing.findings import (
     Finding,
     from_analysis_finding,
     from_cicd_dict,
-    from_source_dict,
     to_cicd_dict,
-    to_source_dict,
 )
 from clearwing.findings.types import _coerce_severity
 
@@ -85,86 +83,6 @@ class TestCoerceSeverity:
 
     def test_unknown_maps_to_info(self):
         assert _coerce_severity("apocalyptic") == "info"
-
-
-# --- from_source_dict / to_source_dict round-trip --------------------------
-
-
-class TestSourceDictRoundtrip:
-    def _full_source_dict(self) -> dict:
-        return {
-            "id": "hunter-abc",
-            "file": "src/codec.c",
-            "line_number": 47,
-            "end_line": None,
-            "finding_type": "memory_safety",
-            "cwe": "CWE-787",
-            "severity": "critical",
-            "confidence": "high",
-            "description": "memcpy overflow",
-            "code_snippet": "memcpy(buf, input, user_len);",
-            "crash_evidence": "ASan: heap-buffer-overflow",
-            "poc": "AAAA",
-            "evidence_level": "crash_reproduced",
-            "discovered_by": "hunter:memory_safety",
-            "related_finding_id": None,
-            "related_cve": None,
-            "seeded_from_crash": False,
-            "verified": True,
-            "severity_verified": "critical",
-            "verifier_pro_argument": "strong",
-            "verifier_counter_argument": "weak",
-            "verifier_tie_breaker": "evidence A",
-            "patch_oracle_passed": None,
-            "auto_patch": None,
-            "auto_patch_validated": None,
-            "exploit": None,
-            "exploit_success": None,
-            "hunter_session_id": "sess-1",
-            "verifier_session_id": "verif-1",
-        }
-
-    def test_roundtrip_preserves_all_fields(self):
-        d = self._full_source_dict()
-        f = from_source_dict(d)
-        assert f.id == "hunter-abc"
-        assert f.file == "src/codec.c"
-        assert f.severity == "critical"
-        assert f.evidence_level == "crash_reproduced"
-        assert f.verified is True
-
-        back = to_source_dict(f)
-        for key in d:
-            assert back[key] == d[key], f"field {key!r} did not round-trip"
-
-    def test_extra_keys_preserved_in_extra_field(self):
-        d = self._full_source_dict()
-        d["custom_v04_field"] = "preserved"
-        f = from_source_dict(d)
-        assert f.extra["custom_v04_field"] == "preserved"
-        back = to_source_dict(f)
-        assert back["custom_v04_field"] == "preserved"
-
-    def test_empty_string_optional_fields_become_none(self):
-        d = {
-            "id": "x",
-            "file": "",               # empty → None after normalization
-            "crash_evidence": "",     # empty → None
-            "severity_verified": "",  # empty → None
-        }
-        f = from_source_dict(d)
-        assert f.file is None
-        assert f.crash_evidence is None
-        assert f.severity_verified is None
-
-    def test_minimal_source_dict(self):
-        """A bare-minimum dict still produces a valid Finding."""
-        f = from_source_dict({"id": "x", "severity": "low"})
-        assert f.id == "x"
-        assert f.severity == "low"
-        # Defaults fill in
-        assert f.evidence_level == "suspicion"
-        assert f.verified is False
 
 
 # --- from_cicd_dict / to_cicd_dict round-trip ------------------------------
@@ -292,17 +210,14 @@ class TestCrossShapeConversions:
         assert f.is_network_finding
         assert not f.is_source_finding
 
-    def test_source_finding_as_finding_is_source(self):
-        d = {
-            "id": "x", "file": "a.c", "line_number": 10,
-            "severity": "high", "description": "bug",
-        }
-        f = from_source_dict(d)
+    def test_source_finding_construction_is_source(self):
+        f = Finding(id="x", file="a.c", line_number=10, severity="high", description="bug")
         assert f.is_source_finding
         assert not f.is_network_finding
 
-    def test_finding_can_be_passed_to_both_report_pipelines(self):
-        """A unified Finding roundtrips through BOTH shapes without losing info."""
+    def test_finding_can_be_converted_to_cicd_for_reports(self):
+        """A source-hunt Finding casts cleanly into the CICDRunner dict shape
+        so the file-aware SARIF generator can render it."""
         f = Finding(
             id="x", file="src/codec.c", line_number=47,
             severity="critical", description="bug",
@@ -310,13 +225,8 @@ class TestCrossShapeConversions:
             evidence_level="root_cause_explained",
             verified=True,
         )
-        source_dict = to_source_dict(f)
         cicd_dict = to_cicd_dict(f)
-        # Source dict has all the source-hunt fields
-        assert source_dict["file"] == "src/codec.c"
-        assert source_dict["evidence_level"] == "root_cause_explained"
-        assert source_dict["verified"] is True
-        # CICD dict has the legacy fields plus file/line for SARIF
         assert cicd_dict["description"] == "bug"
+        assert cicd_dict["severity"] == "critical"
         assert cicd_dict["file"] == "src/codec.c"
         assert cicd_dict["line_number"] == 47

@@ -122,14 +122,10 @@ class FileTarget(TypedDict, total=False):
     fuzz_harness_path: Optional[str]   # v0.2: filled by Harness Generator
 
 
-# --- SourceFinding -----------------------------------------------------------
-#
-# Phase-3 transitional alias: `SourceFinding` is the unified `Finding`
-# dataclass. The legacy `TypedDict` is deleted in Phase 3d once every call
-# site has migrated from dict-style construction (`{"id": ..., "file": ...}`)
-# to dataclass construction (`Finding(id=..., file=...)`).
-
-SourceFinding = Finding
+# Phase 3 unified the legacy sourcehunt finding TypedDict with the
+# canonical `Finding` dataclass from `clearwing.findings.types`. The
+# dataclass is imported at the top of this module and used directly in
+# the state TypedDicts below.
 
 
 # --- SourceHuntState ---------------------------------------------------------

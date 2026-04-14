@@ -401,8 +401,8 @@ def apply_verifier_result(
 ) -> Finding:
     """Merge a VerifierResult into a Finding (in-place + return).
 
-    Accepts either a Finding dataclass or a legacy SourceFinding dict — dict
-    subscripting works on both via the transitional `Finding` compat shim.
+    Accepts either a Finding dataclass or a plain dict — dict subscripting
+    works on both via the Finding compat shim.
     """
     finding["verified"] = result.is_real
     finding["severity_verified"] = result.severity_verified

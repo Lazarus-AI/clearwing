@@ -289,7 +289,7 @@ class GitHubChecksPublisher:
         return summary
 
     def _build_annotations(self, findings: list[Finding]) -> list[dict]:
-        """Turn SourceFindings into GitHub check-run annotation dicts."""
+        """Turn Findings into GitHub check-run annotation dicts."""
         annotations: list[dict] = []
         for f in findings:
             path = f.get("file")

@@ -286,7 +286,7 @@ class VariantLoop:
             reverify_callback: Optional callable
                 `(seeds: list[VariantSeed]) -> list[Finding]`. If
                 supplied, the driver calls it after each iteration to
-                re-verify the seeds as SourceFindings, then feeds those
+                re-verify the seeds as Findings, then feeds those
                 new findings into the NEXT iteration's pattern generation.
                 If None, seeds are accumulated but NOT re-verified —
                 subsequent iterations only operate on the original

@@ -272,7 +272,7 @@ class KnowledgeGraph:
         file_path: str,
         finding: dict,
     ) -> Entity:
-        """Add a SourceFinding into the graph and link it to its file.
+        """Add a source-hunt Finding into the graph and link it to its file.
 
         If the finding has `related_finding_id`, an edge is drawn from this
         finding to that parent finding (VARIANT_OF). If it has `related_cve`,

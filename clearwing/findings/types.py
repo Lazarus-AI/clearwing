@@ -1,9 +1,8 @@
 """Unified Finding dataclass and converters.
 
 This type is a superset of every finding shape the project uses. The field
-set is dominated by `sourcehunt.state.SourceFinding` (which was already the
-most complete shape), extended with optional network fields for CICDRunner
-compatibility.
+set is dominated by the sourcehunt pipeline (the most complete shape),
+extended with optional network fields for CICDRunner compatibility.
 
 Conversion functions are pure — they never mutate their inputs. Round-trip
 through `from_*` + `to_*` preserves every field present in the source shape.
@@ -155,11 +154,12 @@ class Finding:
         except ValueError:
             return False
 
-    # --- Phase-3 migration shim -------------------------------------------
-    # Transitional dict-style access so callers still using the legacy
-    # SourceFinding TypedDict access patterns (.get / ["k"] / ["k"]=v / `in`)
-    # keep working while we migrate file-by-file. Removed in Phase 3d once
-    # every call site uses attribute access.
+    # --- Dict-style access shim --------------------------------------------
+    # Phase-3 bridge for callers still using the legacy TypedDict access
+    # patterns (`.get`, `["k"]`, `["k"] = v`, `in`). Every call site under
+    # clearwing/ can construct a `Finding` dataclass, but some apply_* merge
+    # functions and many test fixtures still supply plain dicts — these four
+    # methods let both shapes flow through the same API.
 
     def __getitem__(self, key: str) -> Any:
         if key in self.__dataclass_fields__:
@@ -195,34 +195,6 @@ class Finding:
 
 
 # --- Converters: from legacy shapes → Finding ------------------------------
-
-
-def from_source_dict(d: dict) -> Finding:
-    """Build a Finding from a sourcehunt SourceFinding dict.
-
-    Unknown keys are preserved in the `extra` field so round-tripping via
-    `to_source_dict()` doesn't lose them.
-    """
-    known_fields = {f.name for f in Finding.__dataclass_fields__.values()}
-    extra: dict[str, Any] = {}
-    kwargs: dict[str, Any] = {}
-    for k, v in d.items():
-        if k in known_fields:
-            kwargs[k] = v
-        else:
-            extra[k] = v
-
-    # Normalize Optional fields that may come in as "" → None
-    for opt_field in ("file", "target", "crash_evidence", "poc", "related_finding_id",
-                      "related_cve", "exploit", "auto_patch", "verifier_pro_argument",
-                      "verifier_counter_argument", "verifier_tie_breaker",
-                      "verifier_session_id", "cve", "severity_verified"):
-        if opt_field in kwargs and kwargs[opt_field] == "":
-            kwargs[opt_field] = None
-
-    if extra:
-        kwargs["extra"] = extra
-    return Finding(**kwargs)
 
 
 def from_cicd_dict(d: dict, *, target: Optional[str] = None) -> Finding:
@@ -282,51 +254,6 @@ def from_analysis_finding(finding) -> Finding:
 
 
 # --- Converters: Finding → legacy shapes -----------------------------------
-
-
-def to_source_dict(finding: Finding) -> dict:
-    """Build a sourcehunt SourceFinding dict from a Finding.
-
-    Preserves the exact shape `SourceFinding` expects — including optional
-    fields set to None rather than omitted — so existing consumers work
-    without change.
-    """
-    out: dict[str, Any] = {
-        "id": finding.id,
-        "file": finding.file,
-        "line_number": finding.line_number,
-        "end_line": finding.end_line,
-        "finding_type": finding.finding_type,
-        "cwe": finding.cwe,
-        "severity": finding.severity,
-        "confidence": finding.confidence,
-        "description": finding.description,
-        "code_snippet": finding.code_snippet,
-        "crash_evidence": finding.crash_evidence,
-        "poc": finding.poc,
-        "evidence_level": finding.evidence_level,
-        "discovered_by": finding.discovered_by,
-        "related_finding_id": finding.related_finding_id,
-        "related_cve": finding.related_cve,
-        "seeded_from_crash": finding.seeded_from_crash,
-        "verified": finding.verified,
-        "severity_verified": finding.severity_verified,
-        "verifier_pro_argument": finding.verifier_pro_argument,
-        "verifier_counter_argument": finding.verifier_counter_argument,
-        "verifier_tie_breaker": finding.verifier_tie_breaker,
-        "patch_oracle_passed": finding.patch_oracle_passed,
-        "auto_patch": finding.auto_patch,
-        "auto_patch_validated": finding.auto_patch_validated,
-        "exploit": finding.exploit,
-        "exploit_success": finding.exploit_success,
-        "hunter_session_id": finding.hunter_session_id,
-        "verifier_session_id": finding.verifier_session_id,
-    }
-    # Merge any extra keys from the legacy dict shape
-    for k, v in finding.extra.items():
-        if k not in out:
-            out[k] = v
-    return out
 
 
 def to_cicd_dict(finding: Finding) -> dict:
