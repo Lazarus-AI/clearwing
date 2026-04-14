@@ -88,6 +88,22 @@ asyncio_mode = "strict"
 line-length = 100
 target-version = ["py310"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Present but not gated in CI until Phase 4. The select set is deliberately
+# conservative — pycodestyle errors, pyflakes, import order, pyupgrade, bugbear.
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # line-too-long — deferred; many tool docstrings exceed 100
+    "B008",  # function calls in default args — frequent in langgraph/pydantic
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B", "E501"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
