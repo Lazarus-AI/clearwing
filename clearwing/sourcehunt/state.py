@@ -11,16 +11,16 @@ The Exploiter only runs on findings >= crash_reproduced.
 The Auto-Patcher only runs on findings >= root_cause_explained.
 Findings reaching patch_validated are the gold standard in reports.
 """
+
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from clearwing.findings.types import Finding
-
 
 # --- Evidence ladder ---------------------------------------------------------
 
@@ -67,8 +67,7 @@ def filter_by_evidence(
     Used as a budget gate before passing to expensive downstream agents.
     """
     return [
-        f for f in findings
-        if evidence_at_or_above(f.get("evidence_level", "suspicion"), threshold)
+        f for f in findings if evidence_at_or_above(f.get("evidence_level", "suspicion"), threshold)
     ]
 
 
@@ -87,6 +86,7 @@ FileTag = Literal[
 
 # --- FileTarget --------------------------------------------------------------
 
+
 class FileTarget(TypedDict, total=False):
     """A source file to be ranked and (potentially) hunted.
 
@@ -98,13 +98,14 @@ class FileTarget(TypedDict, total=False):
     fuzz_harness_path, reachability_rationale) are present from v0.1 with
     safe defaults so the schema is forward-compatible.
     """
-    path: str            # relative to repo root
+
+    path: str  # relative to repo root
     absolute_path: str
-    surface: int         # 1-5 — direct vulnerability likelihood
-    influence: int       # 1-5 — downstream danger if this file is wrong
-    reachability: int    # 1-5 — attacker-reachability through callgraph
-                         # v0.1: defaults to 3 (unknown); v0.2: real propagation
-    priority: float      # surface*0.5 + influence*0.2 + reachability*0.3
+    surface: int  # 1-5 — direct vulnerability likelihood
+    influence: int  # 1-5 — downstream danger if this file is wrong
+    reachability: int  # 1-5 — attacker-reachability through callgraph
+    # v0.1: defaults to 3 (unknown); v0.2: real propagation
+    priority: float  # surface*0.5 + influence*0.2 + reachability*0.3
     tier: Literal["A", "B", "C"]
     tags: list[FileTag]  # v0.1: heuristic tagger; v0.2: + LLM polish
     language: str
@@ -112,14 +113,14 @@ class FileTarget(TypedDict, total=False):
     surface_rationale: str
     influence_rationale: str
     reachability_rationale: str
-    static_hint: int     # SourceAnalyzer regex hits → surface boost
-    semgrep_hint: int    # v0.2: Semgrep findings count → surface boost + hint
-    taint_hits: int      # v0.4: tree-sitter taint paths touching this file
-    imports_by: int      # v0.1 cheap influence signal
-    transitive_callers: int   # v0.2: tree-sitter callgraph (better influence)
+    static_hint: int  # SourceAnalyzer regex hits → surface boost
+    semgrep_hint: int  # v0.2: Semgrep findings count → surface boost + hint
+    taint_hits: int  # v0.4: tree-sitter taint paths touching this file
+    imports_by: int  # v0.1 cheap influence signal
+    transitive_callers: int  # v0.2: tree-sitter callgraph (better influence)
     defines_constants: bool
-    has_fuzz_entry_point: bool   # v0.2: detected by tagger
-    fuzz_harness_path: Optional[str]   # v0.2: filled by Harness Generator
+    has_fuzz_entry_point: bool  # v0.2: detected by tagger
+    fuzz_harness_path: str | None  # v0.2: filled by Harness Generator
 
 
 # Phase 3 unified the legacy sourcehunt finding TypedDict with the
@@ -130,6 +131,7 @@ class FileTarget(TypedDict, total=False):
 
 # --- SourceHuntState ---------------------------------------------------------
 
+
 class SourceHuntState(TypedDict, total=False):
     """LangGraph state for hunter/verifier/exploiter sub-graphs.
 
@@ -137,37 +139,46 @@ class SourceHuntState(TypedDict, total=False):
     schema is forward-compatible. v0.1 code paths simply don't read or
     write the future fields.
     """
+
     messages: Annotated[list[BaseMessage], add_messages]
     repo_url: str
     repo_path: str
     branch: str
     files: list[FileTarget]
     files_scanned: list[str]
-    current_file: Optional[str]
+    current_file: str | None
 
     # v0.2 seams
-    callgraph: Optional[dict]              # tree-sitter callgraph
-    semgrep_findings: list[dict]           # pre-scan hits used as hints
-    fuzz_corpora: list[dict]               # detected OSS-Fuzz / project corpora
-    seeded_crashes: list[dict]             # harness generator output
+    callgraph: dict | None  # tree-sitter callgraph
+    semgrep_findings: list[dict]  # pre-scan hits used as hints
+    fuzz_corpora: list[dict]  # detected OSS-Fuzz / project corpora
+    seeded_crashes: list[dict]  # harness generator output
 
     findings: list[Finding]
     verified_findings: list[Finding]
 
     # v0.3 seams
-    variant_seeds: list[dict]              # hypotheses from variant hunter loop
+    variant_seeds: list[dict]  # hypotheses from variant hunter loop
     exploited_findings: list[Finding]
-    patch_attempts: list[dict]             # auto-patcher output (validated or not)
+    patch_attempts: list[dict]  # auto-patcher output (validated or not)
 
     # Budget & cost
     budget_usd: float
     spent_usd: float
-    spent_per_tier: dict[str, float]       # {"A": ..., "B": ..., "C": ...}
+    spent_per_tier: dict[str, float]  # {"A": ..., "B": ..., "C": ...}
     total_tokens: int
 
     phase: Literal[
-        "preprocess", "tag", "rank", "fuzz", "hunt", "verify", "variant_loop",
-        "exploit", "auto_patch", "report"
+        "preprocess",
+        "tag",
+        "rank",
+        "fuzz",
+        "hunt",
+        "verify",
+        "variant_loop",
+        "exploit",
+        "auto_patch",
+        "report",
     ]
-    session_id: Optional[str]
+    session_id: str | None
     flags_found: list[dict]

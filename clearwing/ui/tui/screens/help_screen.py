@@ -7,7 +7,6 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-
 HELP_TEXT = """\
 [bold cyan]Clearwing TUI — Help[/bold cyan]
 

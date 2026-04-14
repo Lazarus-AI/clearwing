@@ -14,14 +14,15 @@ marked as validated.
 A candidate patch that PASSES validation is included in the report as a
 suggestion. Optionally, `--auto-pr` opens a draft PR via the `gh` CLI.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
-import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional, cast
+from typing import cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -59,14 +60,15 @@ Return ONLY a JSON object:
 @dataclass
 class PatchAttempt:
     """Result of one auto-patch run on a finding."""
+
     finding_id: str
     attempted: bool
-    validated: bool              # True only if recompile+rerun-PoC confirmed the fix
+    validated: bool  # True only if recompile+rerun-PoC confirmed the fix
     diff: str
     commit_message: str
     explanation: str
-    confidence: str              # high | medium | low
-    notes: str                   # free-form (failure reason, etc.)
+    confidence: str  # high | medium | low
+    notes: str  # free-form (failure reason, etc.)
     raw_response: str = ""
 
 
@@ -101,7 +103,7 @@ class AutoPatcher:
         finding: Finding,
         file_content: str = "",
         sandbox=None,
-        rerun_poc: Optional[Callable] = None,
+        rerun_poc: Callable | None = None,
     ) -> PatchAttempt:
         """Attempt an auto-patch. Validates ONLY if sandbox + rerun_poc are both provided.
 
@@ -129,10 +131,12 @@ class AutoPatcher:
         # 1. Ask the LLM for a patch
         user_msg = self._build_user_message(finding, file_content)
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=PATCHER_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=PATCHER_SYSTEM_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception as e:
             logger.warning("Patcher LLM call failed", exc_info=True)
             return PatchAttempt(
@@ -213,7 +217,7 @@ class AutoPatcher:
             msg += f"\n\nCurrent file content (capped to 8 KB):\n{file_content[:8000]}"
         return msg
 
-    def _parse_response(self, content: str) -> Optional[dict]:
+    def _parse_response(self, content: str) -> dict | None:
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None

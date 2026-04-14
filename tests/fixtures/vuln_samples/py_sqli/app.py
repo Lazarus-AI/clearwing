@@ -3,6 +3,7 @@
 The file mixes a clean parameterised query (login_safe) with a vulnerable
 f-string concatenation (search_books). The hunter should flag search_books.
 """
+
 import sqlite3
 
 

@@ -4,14 +4,15 @@ from rich.table import Table
 
 
 def add_parser(subparsers):
-    parser = subparsers.add_parser('history', help='Show scan history')
-    parser.add_argument('target', nargs='?', help='Target IP address (optional)')
+    parser = subparsers.add_parser("history", help="Show scan history")
+    parser.add_argument("target", nargs="?", help="Target IP address (optional)")
     return parser
 
 
 def handle(cli, args):
     """Show scan history."""
     from ...data.database import Database
+
     db = Database()
 
     if args.target:
@@ -30,9 +31,7 @@ def handle(cli, args):
 
     for target in history:
         table.add_row(
-            target['ip_address'],
-            target.get('os', 'Unknown'),
-            target.get('last_scan', 'Unknown')
+            target["ip_address"], target.get("os", "Unknown"), target.get("last_scan", "Unknown")
         )
 
     cli.console.print(table)

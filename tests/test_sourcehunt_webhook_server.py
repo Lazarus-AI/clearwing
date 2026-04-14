@@ -12,6 +12,7 @@ Covers:
     - Signature mismatch → 401
     - Health check endpoint
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,8 +23,6 @@ import time
 import urllib.request
 from unittest.mock import MagicMock
 
-import pytest
-
 from clearwing.sourcehunt.webhook_server import (
     WebhookConfig,
     WebhookServer,
@@ -31,7 +30,6 @@ from clearwing.sourcehunt.webhook_server import (
     parse_push_payload,
     verify_signature,
 )
-
 
 # --- verify_signature -----------------------------------------------------
 
@@ -131,7 +129,8 @@ class _LiveServer:
     def __enter__(self):
         self.server = WebhookServer(self.config)
         self.thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True,
+            target=self.server.serve_forever,
+            daemon=True,
         )
         self.thread.start()
         # Wait briefly for the server to bind
@@ -179,11 +178,13 @@ class TestLiveWebhookServer:
         )
         with _LiveServer(config) as server:
             port = server.server_port
-            body = json.dumps({
-                "repository": {"full_name": "acme/tool"},
-                "after": "deadbeefcafe",
-                "ref": "refs/heads/main",
-            }).encode()
+            body = json.dumps(
+                {
+                    "repository": {"full_name": "acme/tool"},
+                    "after": "deadbeefcafe",
+                    "ref": "refs/heads/main",
+                }
+            ).encode()
             status, text = _signed_post(
                 f"http://127.0.0.1:{port}/webhook",
                 body,
@@ -253,11 +254,13 @@ class TestLiveWebhookServer:
         )
         with _LiveServer(config) as server:
             port = server.server_port
-            body = json.dumps({
-                "repository": {"full_name": "acme/other"},
-                "after": "sha",
-                "ref": "refs/heads/main",
-            }).encode()
+            body = json.dumps(
+                {
+                    "repository": {"full_name": "acme/other"},
+                    "after": "sha",
+                    "ref": "refs/heads/main",
+                }
+            ).encode()
             status, _ = _signed_post(
                 f"http://127.0.0.1:{port}/webhook",
                 body,
@@ -277,11 +280,13 @@ class TestLiveWebhookServer:
         )
         with _LiveServer(config) as server:
             port = server.server_port
-            body = json.dumps({
-                "repository": {"full_name": "acme/tool"},
-                "after": "sha",
-                "ref": "refs/heads/feature-x",
-            }).encode()
+            body = json.dumps(
+                {
+                    "repository": {"full_name": "acme/tool"},
+                    "after": "sha",
+                    "ref": "refs/heads/feature-x",
+                }
+            ).encode()
             status, _ = _signed_post(
                 f"http://127.0.0.1:{port}/webhook",
                 body,
@@ -295,7 +300,8 @@ class TestLiveWebhookServer:
         with _LiveServer(config) as server:
             port = server.server_port
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/health", timeout=2,
+                f"http://127.0.0.1:{port}/health",
+                timeout=2,
             ) as resp:
                 assert resp.status == 200
                 assert b"ok" in resp.read()

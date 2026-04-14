@@ -1,7 +1,8 @@
-import re
 import importlib
 import importlib.util
+import re
 from pathlib import Path
+
 from langchain_core.tools import tool
 
 _CUSTOM_TOOL_REGISTRY: dict = {}
@@ -104,10 +105,12 @@ def list_custom_tools() -> list[dict]:
     """
     result = []
     for name, func in _CUSTOM_TOOL_REGISTRY.items():
-        result.append({
-            "name": name,
-            "description": getattr(func, "description", ""),
-        })
+        result.append(
+            {
+                "name": name,
+                "description": getattr(func, "description", ""),
+            }
+        )
     return result
 
 

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
-from .tracer import Tracer, InMemoryExporter, ConsoleExporter
 from .metrics import MetricsCollector
+from .tracer import ConsoleExporter, InMemoryExporter, Tracer
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class ObservabilityIntegration:
 
         try:
             from clearwing.core.events import EventBus
+
             bus = EventBus()
             for event_type, handler in self._handlers.items():
                 bus.unsubscribe(event_type, handler)
@@ -117,14 +118,10 @@ class ObservabilityIntegration:
     def _on_cost_update(self, data: Any) -> None:
         if not isinstance(data, dict):
             return
-        self.metrics.increment("llm_calls_total",
-                               labels={"model": data.get("model", "unknown")})
-        self.metrics.increment("input_tokens_total",
-                               value=float(data.get("input_tokens", 0)))
-        self.metrics.increment("output_tokens_total",
-                               value=float(data.get("output_tokens", 0)))
-        self.metrics.set_gauge("total_cost_usd",
-                               data.get("total_cost_usd", 0.0))
+        self.metrics.increment("llm_calls_total", labels={"model": data.get("model", "unknown")})
+        self.metrics.increment("input_tokens_total", value=float(data.get("input_tokens", 0)))
+        self.metrics.increment("output_tokens_total", value=float(data.get("output_tokens", 0)))
+        self.metrics.set_gauge("total_cost_usd", data.get("total_cost_usd", 0.0))
 
     def _on_flag_found(self, data: Any) -> None:
         self.metrics.increment("flags_found_total")

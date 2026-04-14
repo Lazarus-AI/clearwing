@@ -7,7 +7,6 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -19,7 +18,7 @@ class SessionInfo:
     model: str
     status: str  # running, paused, completed, error
     start_time: datetime
-    end_time: Optional[datetime] = None
+    end_time: datetime | None = None
     flags_found: list[dict] = field(default_factory=list)  # {flag, context, timestamp}
     cost_usd: float = 0.0
     token_count: int = 0
@@ -27,8 +26,8 @@ class SessionInfo:
     services: list[dict] = field(default_factory=list)
     vulnerabilities: list[dict] = field(default_factory=list)
     exploit_results: list[dict] = field(default_factory=list)
-    os_info: Optional[str] = None
-    kali_container_id: Optional[str] = None
+    os_info: str | None = None
+    kali_container_id: str | None = None
     custom_tool_names: list[str] = field(default_factory=list)
     langgraph_thread_id: str = ""
 
@@ -96,7 +95,7 @@ class SessionStore:
         raw = _datetime_decoder(raw)
         return SessionInfo(**raw)
 
-    def list_sessions(self, target: Optional[str] = None) -> list[SessionInfo]:
+    def list_sessions(self, target: str | None = None) -> list[SessionInfo]:
         """Return all persisted sessions, optionally filtered by *target*."""
         sessions: list[SessionInfo] = []
         for path in sorted(self.BASE_DIR.glob("*.json")):
@@ -110,7 +109,7 @@ class SessionStore:
                 continue
         return sessions
 
-    def get_latest(self, target: Optional[str] = None) -> Optional[SessionInfo]:
+    def get_latest(self, target: str | None = None) -> SessionInfo | None:
         """Return the most recent session (by start_time), optionally for *target*."""
         sessions = self.list_sessions(target=target)
         if not sessions:

@@ -4,8 +4,8 @@ from rich.table import Table
 
 
 def add_parser(subparsers):
-    parser = subparsers.add_parser('sessions', help='List past interactive sessions')
-    parser.add_argument('--target', help='Filter sessions by target')
+    parser = subparsers.add_parser("sessions", help="List past interactive sessions")
+    parser.add_argument("--target", help="Filter sessions by target")
     return parser
 
 
@@ -14,7 +14,7 @@ def handle(cli, args):
     from ...data.memory import SessionStore
 
     store = SessionStore()
-    sessions = store.list_sessions(target=getattr(args, 'target', None))
+    sessions = store.list_sessions(target=getattr(args, "target", None))
 
     if not sessions:
         cli.console.print("[yellow]No sessions found.[/yellow]")

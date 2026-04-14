@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage
 
 
 @dataclass
@@ -15,7 +13,7 @@ class Subtask:
     description: str
     agent: str  # "recon", "exploit", "reporter"
     status: str = "pending"  # pending, in_progress, completed, skipped
-    result: Optional[str] = None
+    result: str | None = None
 
 
 @dataclass
@@ -24,7 +22,7 @@ class Plan:
     subtasks: list[Subtask] = field(default_factory=list)
     current_index: int = 0
 
-    def next_task(self) -> Optional[Subtask]:
+    def next_task(self) -> Subtask | None:
         for st in self.subtasks:
             if st.status == "pending":
                 return st
@@ -43,7 +41,15 @@ class Plan:
     def summary(self) -> str:
         lines = [f"Plan: {self.goal}"]
         for st in self.subtasks:
-            marker = "\u2713" if st.status == "completed" else "\u25cb" if st.status == "pending" else "\u2192" if st.status == "in_progress" else "\u2717"
+            marker = (
+                "\u2713"
+                if st.status == "completed"
+                else "\u25cb"
+                if st.status == "pending"
+                else "\u2192"
+                if st.status == "in_progress"
+                else "\u2717"
+            )
             lines.append(f"  {marker} [{st.agent}] {st.description} ({st.status})")
         return "\n".join(lines)
 
@@ -89,13 +95,15 @@ class PlannerAgent:
         """Refine an existing plan based on results so far."""
         messages = [
             SystemMessage(content=PLANNER_PROMPT),
-            HumanMessage(content=(
-                f"Original goal: {plan.goal}\n\n"
-                f"Current plan status:\n{plan.summary()}\n\n"
-                f"Feedback/new findings: {feedback}\n\n"
-                "Revise the remaining subtasks (keep completed ones as-is). "
-                "Return the full updated subtask list as JSON."
-            )),
+            HumanMessage(
+                content=(
+                    f"Original goal: {plan.goal}\n\n"
+                    f"Current plan status:\n{plan.summary()}\n\n"
+                    f"Feedback/new findings: {feedback}\n\n"
+                    "Revise the remaining subtasks (keep completed ones as-is). "
+                    "Return the full updated subtask list as JSON."
+                )
+            ),
         ]
         response = self.llm.invoke(messages)
         content = response.content if isinstance(response.content, str) else str(response.content)
@@ -127,9 +135,11 @@ class PlannerAgent:
 
         subtasks = []
         for i, item in enumerate(raw[:15]):  # Max 15 subtasks
-            subtasks.append(Subtask(
-                id=i + 1,
-                description=item.get("description", str(item)),
-                agent=item.get("agent", "recon"),
-            ))
+            subtasks.append(
+                Subtask(
+                    id=i + 1,
+                    description=item.get("description", str(item)),
+                    agent=item.get("agent", "recon"),
+                )
+            )
         return subtasks

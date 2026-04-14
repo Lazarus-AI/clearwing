@@ -1,12 +1,10 @@
-import asyncio
-from typing import Optional
 from langchain_core.tools import tool
 
 
 @tool
 async def scan_ports(
     target: str,
-    ports: Optional[list[int]] = None,
+    ports: list[int] | None = None,
     scan_type: str = "syn",
     threads: int = 100,
 ) -> list[dict]:

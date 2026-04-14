@@ -3,9 +3,8 @@
 The evidence_level field gates downstream budget allocation in the source-hunt
 pipeline. These tests pin down the ordering and the budget-gate filter.
 """
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from clearwing.sourcehunt.state import (
     EVIDENCE_LEVELS,
@@ -81,7 +80,7 @@ class TestFilterByEvidence:
         assert kept == []
 
     def test_missing_evidence_level_treated_as_suspicion(self):
-        findings = [{"id": "noisy"}]   # no evidence_level field
+        findings = [{"id": "noisy"}]  # no evidence_level field
         # Suspicion >= suspicion → kept
         assert filter_by_evidence(findings, "suspicion") == findings
         # Suspicion < crash_reproduced → dropped

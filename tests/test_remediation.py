@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from clearwing.reporting.remediation import RemediationAdvice, RemediationGenerator, REMEDIATION_DB
-
+from clearwing.reporting.remediation import REMEDIATION_DB, RemediationAdvice, RemediationGenerator
 
 # --- RemediationAdvice dataclass ---
 
@@ -63,9 +62,7 @@ class TestRemediationDB:
     def test_effort_values_are_valid(self):
         valid_efforts = {"low", "medium", "high"}
         for key, advice in REMEDIATION_DB.items():
-            assert advice.effort in valid_efforts, (
-                f"{key} has invalid effort: {advice.effort}"
-            )
+            assert advice.effort in valid_efforts, f"{key} has invalid effort: {advice.effort}"
 
 
 # --- RemediationGenerator ---
@@ -104,9 +101,7 @@ class TestGetAdvice:
 
 class TestGetAdviceForCve:
     def test_sql_injection_description(self, generator):
-        advice = generator.get_advice_for_cve(
-            "CVE-2023-1234", "SQL injection in login form"
-        )
+        advice = generator.get_advice_for_cve("CVE-2023-1234", "SQL injection in login form")
         assert advice is not None
         assert "SQL Injection" in advice.vulnerability
 
@@ -124,16 +119,12 @@ class TestGetAdviceForCve:
         assert advice is None
 
     def test_attaches_cve_id(self, generator):
-        advice = generator.get_advice_for_cve(
-            "CVE-2023-1234", "SQL injection vulnerability"
-        )
+        advice = generator.get_advice_for_cve("CVE-2023-1234", "SQL injection vulnerability")
         assert advice is not None
         assert "CVE-2023-1234" in advice.vulnerability
 
     def test_attaches_nvd_reference(self, generator):
-        advice = generator.get_advice_for_cve(
-            "CVE-2023-1234", "SQL injection vulnerability"
-        )
+        advice = generator.get_advice_for_cve("CVE-2023-1234", "SQL injection vulnerability")
         assert advice is not None
         assert "https://nvd.nist.gov/vuln/detail/CVE-2023-1234" in advice.references
 

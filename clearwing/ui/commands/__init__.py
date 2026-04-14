@@ -1,5 +1,33 @@
 """CLI subcommand modules."""
 
-from . import scan, report, history, config, interactive, graph, sessions, ci, parallel, mcp, operate, webui, sourcehunt
+from . import (
+    ci,
+    config,
+    graph,
+    history,
+    interactive,
+    mcp,
+    operate,
+    parallel,
+    report,
+    scan,
+    sessions,
+    sourcehunt,
+    webui,
+)
 
-ALL_COMMANDS = [scan, report, history, config, interactive, graph, sessions, ci, parallel, mcp, operate, webui, sourcehunt]
+ALL_COMMANDS = [
+    scan,
+    report,
+    history,
+    config,
+    interactive,
+    graph,
+    sessions,
+    ci,
+    parallel,
+    mcp,
+    operate,
+    webui,
+    sourcehunt,
+]

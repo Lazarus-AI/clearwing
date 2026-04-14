@@ -4,6 +4,7 @@ Uses a mocked LLM for rule generation and mocked subprocess for the Semgrep
 invocation. Also verifies that the retro-hunter writes rules to a temp file
 and parses Semgrep JSON output correctly.
 """
+
 from __future__ import annotations
 
 import json
@@ -40,7 +41,6 @@ class TestFetchPatchDiff:
 
     def test_git_sha(self, tmp_path: Path):
         """When a repo_path is provided, the source is tried as a git SHA."""
-        import subprocess
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
@@ -51,7 +51,8 @@ class TestFetchPatchDiff:
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
 
         head = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True,
         ).strip()
         diff = fetch_patch_diff(head, repo_path=str(repo))
         assert "x.c" in diff
@@ -74,13 +75,15 @@ class TestFetchPatchDiff:
 
 class TestRetroHunterRuleGeneration:
     def test_generate_rule_parses_json(self):
-        llm = _mock_llm({
-            "rule_id": "retro-hunt-test",
-            "description": "unchecked memcpy length",
-            "languages": ["c", "cpp"],
-            "pattern": "memcpy($DST, $SRC, $LEN)",
-            "severity": "ERROR",
-        })
+        llm = _mock_llm(
+            {
+                "rule_id": "retro-hunt-test",
+                "description": "unchecked memcpy length",
+                "languages": ["c", "cpp"],
+                "pattern": "memcpy($DST, $SRC, $LEN)",
+                "severity": "ERROR",
+            }
+        )
         hunter = RetroHunter(llm=llm, sidecar=MagicMock(available=False))
         rule_info = hunter._generate_rule("CVE-2024-1234", "--- a/x.c\n+++ b/x.c\n")
         assert rule_info["rule_id"] == "retro-hunt-test"
@@ -107,13 +110,15 @@ class TestRetroHunterRuleGeneration:
 class TestSemgrepRuleFormatting:
     def test_minimal_rule_yaml(self):
         hunter = RetroHunter(llm=MagicMock())
-        yml = hunter._format_semgrep_rule({
-            "rule_id": "rid",
-            "description": "unchecked memcpy",
-            "pattern": "memcpy($DST, $SRC, $LEN)",
-            "severity": "ERROR",
-            "languages": ["c"],
-        })
+        yml = hunter._format_semgrep_rule(
+            {
+                "rule_id": "rid",
+                "description": "unchecked memcpy",
+                "pattern": "memcpy($DST, $SRC, $LEN)",
+                "severity": "ERROR",
+                "languages": ["c"],
+            }
+        )
         assert "rules:" in yml
         assert "id: rid" in yml
         assert "memcpy" in yml
@@ -121,13 +126,15 @@ class TestSemgrepRuleFormatting:
 
     def test_languages_string_becomes_list(self):
         hunter = RetroHunter(llm=MagicMock())
-        yml = hunter._format_semgrep_rule({
-            "rule_id": "rid",
-            "description": "x",
-            "pattern": "x",
-            "severity": "INFO",
-            "languages": "python",
-        })
+        yml = hunter._format_semgrep_rule(
+            {
+                "rule_id": "rid",
+                "description": "x",
+                "pattern": "x",
+                "severity": "INFO",
+                "languages": "python",
+            }
+        )
         assert "- python" in yml
 
 
@@ -138,18 +145,23 @@ class TestHuntEndToEnd:
     def test_hunt_produces_findings(self, tmp_path: Path):
         # Create a local patch file
         patch_file = tmp_path / "cve.patch"
-        patch_file.write_text("--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-memcpy(buf, in, len);\n+memcpy(buf, in, min(len, sizeof(buf)));\n")
+        patch_file.write_text(
+            "--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-memcpy(buf, in, len);\n+memcpy(buf, in, min(len, sizeof(buf)));\n"
+        )
 
-        llm = _mock_llm({
-            "rule_id": "retro-hunt-memcpy",
-            "description": "unchecked memcpy length",
-            "pattern": "memcpy($DST, $SRC, $LEN)",
-            "severity": "ERROR",
-            "languages": ["c"],
-        })
+        llm = _mock_llm(
+            {
+                "rule_id": "retro-hunt-memcpy",
+                "description": "unchecked memcpy length",
+                "pattern": "memcpy($DST, $SRC, $LEN)",
+                "severity": "ERROR",
+                "languages": ["c"],
+            }
+        )
 
         # Fake SemgrepSidecar that returns one hit
         from clearwing.sourcehunt.semgrep_sidecar import SemgrepFinding
+
         fake_sidecar = MagicMock()
         fake_sidecar.available = True
 
@@ -190,10 +202,15 @@ class TestHuntEndToEnd:
         patch_file = tmp_path / "cve.patch"
         patch_file.write_text("--- a/x.c\n+++ b/x.c\n")
 
-        llm = _mock_llm({
-            "rule_id": "r", "description": "x",
-            "pattern": "x", "severity": "WARNING", "languages": ["c"],
-        })
+        llm = _mock_llm(
+            {
+                "rule_id": "r",
+                "description": "x",
+                "pattern": "x",
+                "severity": "WARNING",
+                "languages": ["c"],
+            }
+        )
         fake_sidecar = MagicMock(available=False)
         fake_sidecar.run_scan = MagicMock(return_value=[])
 

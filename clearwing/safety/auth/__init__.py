@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from clearwing.safety.auth.config import (
+    APIAuth,
     AuthConfig,
     AuthConfigLoader,
-    FormLogin,
-    APIAuth,
     CookieAuth,
+    FormLogin,
     OAuthConfig,
 )
 

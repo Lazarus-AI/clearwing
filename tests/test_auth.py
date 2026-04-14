@@ -1,23 +1,21 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import yaml
 
 from clearwing.safety.auth import (
+    APIAuth,
     AuthConfig,
     AuthConfigLoader,
-    FormLogin,
-    APIAuth,
     CookieAuth,
+    FormLogin,
     OAuthConfig,
 )
-
 
 # ---------------------------------------------------------------------------
 # Dataclass defaults
 # ---------------------------------------------------------------------------
+
 
 class TestFormLoginDefaults:
     def test_defaults(self):
@@ -64,6 +62,7 @@ class TestOAuthConfigDefaults:
 # ---------------------------------------------------------------------------
 # AuthConfig.has_credentials
 # ---------------------------------------------------------------------------
+
 
 class TestAuthConfigHasCredentials:
     def test_form_with_credentials(self):

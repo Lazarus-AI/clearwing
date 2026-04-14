@@ -3,6 +3,7 @@
 Uses the taint_samples fixtures to exercise real tree-sitter parsing.
 Every test skips cleanly if tree-sitter grammars aren't installed.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,17 +11,13 @@ from pathlib import Path
 import pytest
 
 from clearwing.sourcehunt.taint import (
-    ALL_PATTERNS,
     C_SINKS,
     C_SOURCES,
     PYTHON_SINKS,
     PYTHON_SOURCES,
     TaintAnalysisResult,
     TaintAnalyzer,
-    TaintPath,
-    TaintPattern,
 )
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "vuln_samples" / "taint_samples"
 
@@ -269,5 +266,6 @@ class TestTaintIntegration:
         (tmp_path / "p.c").write_text(src)
         r1 = analyzer.analyze_repo(str(tmp_path))
         r2 = analyzer.analyze_repo(str(tmp_path))
-        assert [(p.file, p.source_line, p.sink_line) for p in r1.paths] == \
-               [(p.file, p.source_line, p.sink_line) for p in r2.paths]
+        assert [(p.file, p.source_line, p.sink_line) for p in r1.paths] == [
+            (p.file, p.source_line, p.sink_line) for p in r2.paths
+        ]

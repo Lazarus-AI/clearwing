@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 @dataclass
 class Port:
     """A discovered network port."""
+
     number: int
     protocol: str = "tcp"
     state: str = "open"
@@ -22,6 +23,7 @@ class Port:
 @dataclass
 class Service:
     """A detected network service."""
+
     name: str
     port: int
     protocol: str = "tcp"
@@ -32,6 +34,7 @@ class Service:
 @dataclass
 class Vulnerability:
     """A discovered vulnerability."""
+
     cve: str = ""
     description: str = ""
     cvss: float = 0.0
@@ -44,6 +47,7 @@ class Vulnerability:
 @dataclass
 class ExploitResult:
     """Result of an exploitation attempt."""
+
     vulnerability: str = ""
     success: bool = False
     output: str = ""
@@ -54,6 +58,7 @@ class ExploitResult:
 @dataclass
 class Credential:
     """A discovered credential."""
+
     username: str = ""
     password: str = ""
     service: str = ""

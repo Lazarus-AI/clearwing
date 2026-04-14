@@ -16,37 +16,42 @@ source-hunt pipeline builds its own tool list via
 does NOT pull from this aggregator.
 """
 
-from .scan.scanner_tools import scan_ports, detect_services, scan_vulnerabilities, detect_os
+from .data.knowledge_tools import query_knowledge_graph
+from .data.memory_tools import recall_target_history, search_knowledge, store_knowledge
+from .exploit.exploit_search import get_exploit_search_tools
 from .exploit.exploit_tools import (
-    exploit_vulnerability,
-    enumerate_privesc,
     crack_password,
+    enumerate_privesc,
+    exploit_vulnerability,
     metasploit_exploit,
     metasploit_list_sessions,
     metasploit_run_command,
 )
-from .ops.kali_docker_tool import kali_setup, kali_execute, kali_install_tool, kali_cleanup
-from .meta.reporting_tools import generate_report, save_report, query_scan_history, search_cves
-from .meta.utility_tools import validate_target, calculate_severity
-from .ops.dynamic_tool_creator import create_custom_tool, list_custom_tools, get_custom_tools
-from .data.memory_tools import recall_target_history, store_knowledge, search_knowledge
-from .ops.skill_tools import load_skills
-from .data.knowledge_tools import query_knowledge_graph
-from .ops.mcp_tools import get_mcp_tools
-from .exploit.exploit_search import get_exploit_search_tools
-from .recon.pivot_tools import get_pivot_tools
-from .meta.remediation_tools import get_remediation_tools
-from .meta.wargame_tools import get_wargame_tools
 from .exploit.payload_tools import get_payload_tools
 from .meta.ot_tools import get_ot_tools
+from .meta.remediation_tools import get_remediation_tools
+from .meta.reporting_tools import generate_report, query_scan_history, save_report, search_cves
 from .meta.sourcehunt_tools import get_sourcehunt_tools
-
+from .meta.utility_tools import calculate_severity, validate_target
+from .meta.wargame_tools import get_wargame_tools
+from .ops.dynamic_tool_creator import (
+    create_custom_tool,
+    get_custom_tools,  # re-exported for clearwing.agent.graph
+    list_custom_tools,
+)
+from .ops.kali_docker_tool import kali_cleanup, kali_execute, kali_install_tool, kali_setup
+from .ops.mcp_tools import get_mcp_tools
+from .ops.skill_tools import load_skills
+from .recon.pivot_tools import get_pivot_tools
+from .scan.scanner_tools import detect_os, detect_services, scan_ports, scan_vulnerabilities
 
 # --- Optional tool imports (graceful fallback) ---
+
 
 def _get_browser_tools() -> list:
     try:
         from .recon.browser_tools import get_browser_tools
+
         return get_browser_tools()
     except ImportError:
         return []
@@ -55,6 +60,7 @@ def _get_browser_tools() -> list:
 def _get_proxy_tools() -> list:
     try:
         from .recon.proxy_tools import get_proxy_tools
+
         return get_proxy_tools()
     except ImportError:
         return []
@@ -63,6 +69,7 @@ def _get_proxy_tools() -> list:
 def _get_analysis_tools() -> list:
     try:
         from .data.analysis_tools import analyze_source, clone_and_analyze, trace_taint_flows
+
         return [analyze_source, clone_and_analyze, trace_taint_flows]
     except ImportError:
         return []
@@ -72,21 +79,39 @@ def get_all_tools() -> list:
     """Return all built-in agent tools."""
     tools = [
         # Scanners
-        scan_ports, detect_services, scan_vulnerabilities, detect_os,
+        scan_ports,
+        detect_services,
+        scan_vulnerabilities,
+        detect_os,
         # Exploiters
-        exploit_vulnerability, enumerate_privesc, crack_password,
-        metasploit_exploit, metasploit_list_sessions, metasploit_run_command,
+        exploit_vulnerability,
+        enumerate_privesc,
+        crack_password,
+        metasploit_exploit,
+        metasploit_list_sessions,
+        metasploit_run_command,
         # Kali Docker
-        kali_setup, kali_execute, kali_install_tool, kali_cleanup,
+        kali_setup,
+        kali_execute,
+        kali_install_tool,
+        kali_cleanup,
         # Reporting
-        generate_report, save_report, query_scan_history, search_cves,
+        generate_report,
+        save_report,
+        query_scan_history,
+        search_cves,
         # Utilities
-        validate_target, calculate_severity,
+        validate_target,
+        calculate_severity,
         # Dynamic tool management
-        create_custom_tool, list_custom_tools,
+        create_custom_tool,
+        list_custom_tools,
         # Memory & knowledge
-        recall_target_history, store_knowledge, search_knowledge,
-        load_skills, query_knowledge_graph,
+        recall_target_history,
+        store_knowledge,
+        search_knowledge,
+        load_skills,
+        query_knowledge_graph,
     ]
 
     # Optional tools
@@ -103,3 +128,9 @@ def get_all_tools() -> list:
     tools.extend(get_sourcehunt_tools())
 
     return tools
+
+
+__all__ = [
+    "get_all_tools",
+    "get_custom_tools",
+]

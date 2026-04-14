@@ -7,6 +7,7 @@ CICDResult-shaped object. Verifies that:
     - its result flows through to TargetResult
     - existing behaviors (cost tracking, callbacks, cancellation) still work
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,13 +18,13 @@ import pytest
 from clearwing.runners.parallel.executor import (
     ParallelExecutor,
     ParallelScanConfig,
-    TargetResult,
 )
 
 
 @dataclass
 class _FakeResult:
     """Minimal CICDResult-shaped stub."""
+
     exit_code: int = 0
     target: str = ""
     findings: list = None
@@ -109,6 +110,7 @@ class TestCustomRunnerFactory:
 
     def test_factory_result_cost_tracking(self):
         """Costs from factory-produced runners flow through to TargetResult."""
+
         def factory(target, config):
             return _FakeRunner(target, config)
 
@@ -120,10 +122,11 @@ class TestCustomRunnerFactory:
         executor = ParallelExecutor(config)
         executor.run()
 
-        assert executor.total_cost == pytest.approx(0.20)   # 4 * 0.05
+        assert executor.total_cost == pytest.approx(0.20)  # 4 * 0.05
 
     def test_factory_respects_total_cost_limit(self):
         """total_cost_limit should still halt new runners after the limit."""
+
         def factory(target, config):
             return _FakeRunner(target, config)
 
@@ -131,7 +134,7 @@ class TestCustomRunnerFactory:
             targets=["a", "b", "c", "d", "e"],
             max_parallel=1,
             runner_factory=factory,
-            total_cost_limit=0.12,    # allows 2 runners at 0.05 each before tripping
+            total_cost_limit=0.12,  # allows 2 runners at 0.05 each before tripping
         )
         executor = ParallelExecutor(config)
         results = executor.run()
@@ -159,6 +162,7 @@ class TestCustomRunnerFactory:
 
     def test_factory_exception_is_captured_per_target(self):
         """A runner that raises becomes a TargetResult(status='error')."""
+
         class ExplodingRunner:
             def __init__(self, target, config):
                 self.target = target

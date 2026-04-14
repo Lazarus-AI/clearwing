@@ -25,6 +25,7 @@ The `capabilities` object is a frozen singleton computed once at
 import time. Every probe runs inside its own try/except ImportError
 so a missing one doesn't take the rest down.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,36 +36,42 @@ def _detect_installed() -> frozenset[str]:
 
     try:
         import clearwing.safety.guardrails  # noqa: F401
+
         installed.add("guardrails")
     except ImportError:
         pass
 
     try:
         import clearwing.data.memory  # noqa: F401
+
         installed.add("memory")
     except ImportError:
         pass
 
     try:
         import clearwing.observability.telemetry  # noqa: F401
+
         installed.add("telemetry")
     except ImportError:
         pass
 
     try:
         import clearwing.core.events  # noqa: F401
+
         installed.add("events")
     except ImportError:
         pass
 
     try:
         import clearwing.safety.audit  # noqa: F401
+
         installed.add("audit")
     except ImportError:
         pass
 
     try:
         import clearwing.data.knowledge  # noqa: F401
+
         installed.add("knowledge")
     except ImportError:
         pass
@@ -75,6 +82,7 @@ def _detect_installed() -> frozenset[str]:
 @dataclass(frozen=True)
 class Capabilities:
     """Frozen snapshot of subsystems importable in this process."""
+
     installed: frozenset[str]
 
     def has(self, name: str) -> bool:

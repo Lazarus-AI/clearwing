@@ -3,9 +3,10 @@
 Uses a hunter_factory stub that returns synthetic findings + a fake cost,
 so we can exercise the budget math without any LLM or sandbox calls.
 """
+
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,12 +14,11 @@ from clearwing.sourcehunt.pool import (
     HunterPool,
     HuntPoolConfig,
     TierBudget,
-    assign_tier,
 )
 
 
 def _ft(path: str, surface: int, influence: int) -> dict:
-    priority = surface * 0.5 + influence * 0.2 + 3 * 0.3   # reach=3
+    priority = surface * 0.5 + influence * 0.2 + 3 * 0.3  # reach=3
     return {
         "path": path,
         "absolute_path": f"/abs/{path}",
@@ -26,7 +26,7 @@ def _ft(path: str, surface: int, influence: int) -> dict:
         "influence": influence,
         "reachability": 3,
         "priority": priority,
-        "tier": "C",   # overwritten by HunterPool.__init__
+        "tier": "C",  # overwritten by HunterPool.__init__
         "tags": [],
         "language": "c",
         "loc": 100,
@@ -50,14 +50,16 @@ def _stub_hunter_factory(per_call_cost: float, finding_per_file: bool = True):
         ctx = MagicMock()
         # Stub finding
         if finding_per_file:
-            ctx.findings = [{
-                "id": f"f-{file_target['path']}",
-                "file": file_target["path"],
-                "line_number": 1,
-                "evidence_level": "suspicion",
-                "severity": "low",
-                "description": "stub",
-            }]
+            ctx.findings = [
+                {
+                    "id": f"f-{file_target['path']}",
+                    "file": file_target["path"],
+                    "line_number": 1,
+                    "evidence_level": "suspicion",
+                    "severity": "low",
+                    "description": "stub",
+                }
+            ]
         else:
             ctx.findings = []
         ctx.session_id = session_id
@@ -73,8 +75,7 @@ def _stub_hunter_factory(per_call_cost: float, finding_per_file: bool = True):
     return factory
 
 
-def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05),
-               per_call_cost=0.5, max_parallel=4):
+def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05), per_call_cost=0.5, max_parallel=4):
     config = HuntPoolConfig(
         files=files,
         repo_path="/tmp/repo",
@@ -83,7 +84,7 @@ def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05),
         max_parallel=max_parallel,
         budget_usd=budget,
         tier_budget=TierBudget(*tier_split),
-        cost_limit_per_file_a=10.0,   # disable per-file caps for these tests
+        cost_limit_per_file_a=10.0,  # disable per-file caps for these tests
         cost_limit_per_file_b=10.0,
         cost_limit_per_file_c=10.0,
     )
@@ -96,17 +97,17 @@ def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05),
 class TestTierAssignmentOnInit:
     def test_files_get_assigned_tiers(self):
         files = [
-            _ft("a_high.c", 5, 5),     # priority 4.4 → A
-            _ft("b_mid.c", 2, 2),       # priority 2.3 → B
-            _ft("c_low.c", 1, 1),       # priority 1.6 → C
-            _ft("ffmpeg.h", 1, 5),      # priority 2.4 → B (NOT C!)
+            _ft("a_high.c", 5, 5),  # priority 4.4 → A
+            _ft("b_mid.c", 2, 2),  # priority 2.3 → B
+            _ft("c_low.c", 1, 1),  # priority 1.6 → C
+            _ft("ffmpeg.h", 1, 5),  # priority 2.4 → B (NOT C!)
         ]
-        pool = _make_pool(files)
+        _make_pool(files)
         # Tiers were written in __init__
         assert files[0]["tier"] == "A"
         assert files[1]["tier"] == "B"
         assert files[2]["tier"] == "C"
-        assert files[3]["tier"] == "B"   # critical regression — must be B not C
+        assert files[3]["tier"] == "B"  # critical regression — must be B not C
 
 
 # --- Tier A spending --------------------------------------------------------
@@ -144,7 +145,7 @@ class TestRollover:
         # 1 Tier A file at $0.50 (budget $7) → leaves ~$6.5 unused
         # 4 Tier B files at $0.50 each → total cost $2 (budget $2.5 + $6.5 rollover)
         files = [
-            _ft("a.c", 5, 5),   # Tier A
+            _ft("a.c", 5, 5),  # Tier A
             _ft("b1.c", 2, 2),
             _ft("b2.c", 2, 2),
             _ft("b3.c", 2, 2),
@@ -195,10 +196,10 @@ class TestSkipTierC:
 class TestSpentPerTier:
     def test_three_tier_distribution(self):
         files = [
-            _ft("a.c", 5, 5),   # A
-            _ft("b.c", 2, 2),   # B
+            _ft("a.c", 5, 5),  # A
+            _ft("b.c", 2, 2),  # B
             _ft("ffmpeg.h", 1, 5),  # B (propagation)
-            _ft("c.c", 1, 1),   # C
+            _ft("c.c", 1, 1),  # C
         ]
         pool = _make_pool(files, budget=10.0, per_call_cost=0.5)
         pool.run()

@@ -4,24 +4,29 @@ Inspects a cloned repo and detects make/cmake/cargo/go/maven/npm/python.
 Returns a BuildRecipe that the HunterSandbox uses to write a Dockerfile that
 compiles the project with the requested sanitizers.
 """
+
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class BuildRecipe:
     """Per-language build recipe for the hunter sandbox image."""
-    system: str                  # "make" | "cmake" | "cargo" | "go" | "maven" | "npm" | "python" | "unknown"
-    primary_language: str        # "c" | "cpp" | "rust" | "go" | "java" | "node" | "python" | "unknown"
-    base_image: str              # docker base image
+
+    system: str  # "make" | "cmake" | "cargo" | "go" | "maven" | "npm" | "python" | "unknown"
+    primary_language: str  # "c" | "cpp" | "rust" | "go" | "java" | "node" | "python" | "unknown"
+    base_image: str  # docker base image
     apt_packages: list[str] = field(default_factory=list)
-    build_cmd: str = ""          # shell command to build the project
-    test_cmd: str = ""           # shell command to run tests
+    build_cmd: str = ""  # shell command to build the project
+    test_cmd: str = ""  # shell command to run tests
     sanitizer_flags: dict[str, str] = field(default_factory=dict)
-                                  # {"asan": "-fsanitize=address", ...}
+    # {"asan": "-fsanitize=address", ...}
     env: dict[str, str] = field(default_factory=dict)
 
     def env_for_sanitizers(self, sanitizers: list[str]) -> dict[str, str]:
@@ -41,13 +46,13 @@ class BuildRecipe:
 # nightly image for sanitizer support; python doesn't need a build but does
 # benefit from gcc for native extensions.
 DEFAULT_BASE_IMAGES = {
-    "c":      "gcc:13",
-    "cpp":    "gcc:13",
-    "rust":   "rust:1-slim",
-    "go":     "golang:1.22",
+    "c": "gcc:13",
+    "cpp": "gcc:13",
+    "rust": "rust:1-slim",
+    "go": "golang:1.22",
     "python": "python:3.12-slim",
-    "java":   "eclipse-temurin:21",
-    "node":   "node:20-slim",
+    "java": "eclipse-temurin:21",
+    "node": "node:20-slim",
     "unknown": "debian:12-slim",
 }
 
@@ -56,26 +61,27 @@ DEFAULT_BASE_IMAGES = {
 # from ASan/UBSan because MSan requires track-origins for useful reports
 # and cannot coexist with ASan in the same binary.
 _SANITIZER_COMPILE_FLAGS: dict[str, list[str]] = {
-    "asan":  ["-fsanitize=address"],
+    "asan": ["-fsanitize=address"],
     "ubsan": ["-fsanitize=undefined"],
-    "msan":  ["-fsanitize=memory", "-fsanitize-memory-track-origins=2",
-              "-fno-omit-frame-pointer"],
-    "tsan":  ["-fsanitize=thread"],
-    "lsan":  ["-fsanitize=leak"],
+    "msan": ["-fsanitize=memory", "-fsanitize-memory-track-origins=2", "-fno-omit-frame-pointer"],
+    "tsan": ["-fsanitize=thread"],
+    "lsan": ["-fsanitize=leak"],
 }
 
 # Per-sanitizer runtime env tuning. These go into ASAN_OPTIONS, MSAN_OPTIONS,
 # etc. so the container inherits sane defaults.
 _SANITIZER_RUNTIME_ENV: dict[str, dict[str, str]] = {
-    "asan":  {"ASAN_OPTIONS":
-              "abort_on_error=0:halt_on_error=0:detect_leaks=0:"
-              "allocator_may_return_null=1"},
+    "asan": {
+        "ASAN_OPTIONS": "abort_on_error=0:halt_on_error=0:detect_leaks=0:"
+        "allocator_may_return_null=1"
+    },
     "ubsan": {"UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=0"},
-    "msan":  {"MSAN_OPTIONS":
-              "abort_on_error=0:halt_on_error=0:print_stats=0:"
-              "exit_code=77:origin_history_size=16"},
-    "tsan":  {"TSAN_OPTIONS": "halt_on_error=0:second_deadlock_stack=1"},
-    "lsan":  {"LSAN_OPTIONS": "exitcode=23"},
+    "msan": {
+        "MSAN_OPTIONS": "abort_on_error=0:halt_on_error=0:print_stats=0:"
+        "exit_code=77:origin_history_size=16"
+    },
+    "tsan": {"TSAN_OPTIONS": "halt_on_error=0:second_deadlock_stack=1"},
+    "lsan": {"LSAN_OPTIONS": "exitcode=23"},
 }
 
 
@@ -101,7 +107,7 @@ def validate_sanitizer_combo(sanitizers: list[str]) -> None:
             )
 
 
-def compute_sanitizer_env(recipe: "BuildRecipe", sanitizers: list[str]) -> dict[str, str]:
+def compute_sanitizer_env(recipe: BuildRecipe, sanitizers: list[str]) -> dict[str, str]:
     """Return the env dict for a given sanitizer variant.
 
     Starts from the recipe's defaults and overrides CFLAGS / CXXFLAGS /
@@ -140,13 +146,15 @@ def compute_sanitizer_env(recipe: "BuildRecipe", sanitizers: list[str]) -> dict[
     return env
 
 
-import logging as _logging
-logger = _logging.getLogger(__name__)
-
 # Tools we want available in every hunter sandbox image: ripgrep for grep_source,
 # gdb/strace for debugging, coreutils' `timeout` for exec timeouts.
 COMMON_APT_PACKAGES = [
-    "ripgrep", "gdb", "strace", "ltrace", "coreutils", "ca-certificates",
+    "ripgrep",
+    "gdb",
+    "strace",
+    "ltrace",
+    "coreutils",
+    "ca-certificates",
     "build-essential",
 ]
 
@@ -308,12 +316,23 @@ class BuildSystemDetector:
     def _language_guess(cls, root: Path) -> BuildRecipe:
         """Fallback when no build system file is found: count source extensions."""
         counts: dict[str, int] = {}
-        for dirpath, dirnames, filenames in os.walk(root):
+        for _dirpath, dirnames, filenames in os.walk(root):
             # Skip vendor/build/cache dirs
             dirnames[:] = [
-                d for d in dirnames
-                if d not in {".git", "node_modules", "vendor", "dist", "build",
-                             "__pycache__", ".venv", "venv", "target"}
+                d
+                for d in dirnames
+                if d
+                not in {
+                    ".git",
+                    "node_modules",
+                    "vendor",
+                    "dist",
+                    "build",
+                    "__pycache__",
+                    ".venv",
+                    "venv",
+                    "target",
+                }
             ]
             for fname in filenames:
                 ext = Path(fname).suffix.lower()
@@ -323,9 +342,19 @@ class BuildSystemDetector:
             return cls._unknown()
 
         ext_to_lang = {
-            ".py": "python", ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp",
-            ".hpp": "cpp", ".rs": "rust", ".go": "go", ".java": "java",
-            ".js": "node", ".ts": "node", ".jsx": "node", ".tsx": "node",
+            ".py": "python",
+            ".c": "c",
+            ".h": "c",
+            ".cpp": "cpp",
+            ".cc": "cpp",
+            ".hpp": "cpp",
+            ".rs": "rust",
+            ".go": "go",
+            ".java": "java",
+            ".js": "node",
+            ".ts": "node",
+            ".jsx": "node",
+            ".tsx": "node",
         }
         lang_counts: dict[str, int] = {}
         for ext, count in counts.items():

@@ -11,7 +11,7 @@ def validate_target(ip_or_cidr: str) -> dict:
     Returns:
         Dict with keys: valid (bool), is_cidr (bool), ips (list of IP strings).
     """
-    from clearwing.core.helpers import validate_ip, cidr_to_ips
+    from clearwing.core.helpers import cidr_to_ips, validate_ip
 
     if "/" in ip_or_cidr:
         ips = cidr_to_ips(ip_or_cidr)

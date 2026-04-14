@@ -12,10 +12,10 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,8 @@ class OperatorConfig:
     # Model settings
     model: str = "claude-sonnet-4-6"
     operator_model: str = ""  # model for the operator LLM; defaults to self.model
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
+    base_url: str | None = None
+    api_key: str | None = None
 
     # Behaviour
     max_turns: int = 100  # max inner-agent turns before force-stop
@@ -42,9 +42,9 @@ class OperatorConfig:
     auto_approve_exploits: bool = False  # require user for exploit approval
 
     # Callbacks
-    on_message: Optional[Callable[[str, str], None]] = None  # (role, content)
-    on_escalate: Optional[Callable[[str], str]] = None  # question -> user answer
-    on_complete: Optional[Callable[["OperatorResult"], None]] = None
+    on_message: Callable[[str, str], None] | None = None  # (role, content)
+    on_escalate: Callable[[str], str] | None = None  # question -> user answer
+    on_complete: Callable[[OperatorResult], None] | None = None
 
 
 @dataclass
@@ -164,14 +164,16 @@ class OperatorAgent:
 
         deadline = start + self.config.timeout_minutes * 60
         input_msg = initial_input
-        send_initial = True
 
         try:
             while self._turns < self.config.max_turns:
                 # Check timeout
                 if time.time() > deadline:
                     return self._build_result(
-                        graph, config, start, "timeout",
+                        graph,
+                        config,
+                        start,
+                        "timeout",
                         error=f"Timed out after {self.config.timeout_minutes} minutes",
                     )
 
@@ -181,14 +183,16 @@ class OperatorAgent:
                     sv = state.values if hasattr(state, "values") else {}
                     if sv.get("total_cost_usd", 0) >= self.config.cost_limit:
                         return self._build_result(
-                            graph, config, start, "cost_limit",
+                            graph,
+                            config,
+                            start,
+                            "cost_limit",
                             error="Cost limit reached",
                         )
 
                 # Run one turn of the inner agent
                 self._turns += 1
                 agent_response = self._run_inner_turn(graph, config, input_msg)
-                send_initial = False
 
                 if not agent_response:
                     # Agent produced no output — might be done
@@ -204,7 +208,10 @@ class OperatorAgent:
                     if not handled:
                         # Needs user escalation for approval
                         return self._build_result(
-                            graph, config, start, "escalated",
+                            graph,
+                            config,
+                            start,
+                            "escalated",
                             escalation_question="Exploit approval required — "
                             "please review and re-run with auto_approve_exploits=True "
                             "if authorized.",
@@ -218,18 +225,19 @@ class OperatorAgent:
                     return self._build_result(graph, config, start, "completed")
 
                 if decision.startswith("ESCALATE:"):
-                    question = decision[len("ESCALATE:"):].strip()
+                    question = decision[len("ESCALATE:") :].strip()
                     # Try the callback first
                     if self.config.on_escalate:
                         answer = self.config.on_escalate(question)
                         if answer:
-                            input_msg = {
-                                "messages": [HumanMessage(content=answer)]
-                            }
+                            input_msg = {"messages": [HumanMessage(content=answer)]}
                             continue
 
                     return self._build_result(
-                        graph, config, start, "escalated",
+                        graph,
+                        config,
+                        start,
+                        "escalated",
                         escalation_question=question,
                     )
 
@@ -239,22 +247,21 @@ class OperatorAgent:
 
             # Exhausted max turns
             return self._build_result(
-                graph, config, start, "completed",
+                graph,
+                config,
+                start,
+                "completed",
                 error=f"Reached max turns ({self.config.max_turns})",
             )
 
         except KeyboardInterrupt:
-            return self._build_result(
-                graph, config, start, "error", error="Interrupted by user"
-            )
+            return self._build_result(graph, config, start, "error", error="Interrupted by user")
         except Exception as e:
-            return self._build_result(
-                graph, config, start, "error", error=str(e)
-            )
+            return self._build_result(graph, config, start, "error", error=str(e))
 
     def _format_goals(self) -> str:
         """Format goals into the initial instruction for the inner agent."""
-        goal_lines = "\n".join(f"  {i+1}. {g}" for i, g in enumerate(self.config.goals))
+        goal_lines = "\n".join(f"  {i + 1}. {g}" for i, g in enumerate(self.config.goals))
         return (
             f"TARGET: {self.config.target}\n\n"
             f"You are being operated autonomously. Complete the following goals:\n"
@@ -275,7 +282,8 @@ class OperatorAgent:
                         content = last.content
                         if isinstance(content, list):
                             text_parts = [
-                                c["text"] for c in content
+                                c["text"]
+                                for c in content
                                 if isinstance(c, dict) and c.get("type") == "text"
                             ]
                             content = "\n".join(text_parts)
@@ -329,7 +337,7 @@ class OperatorAgent:
     def _decide_next(self, operator_llm, agent_response: str) -> str:
         """Ask the operator LLM what instruction to give the inner agent next."""
         progress_text = "\n".join(self._progress[-20:]) if self._progress else "No progress yet."
-        goals_text = "\n".join(f"  {i+1}. {g}" for i, g in enumerate(self.config.goals))
+        goals_text = "\n".join(f"  {i + 1}. {g}" for i, g in enumerate(self.config.goals))
 
         system = _OPERATOR_SYSTEM_PROMPT.format(
             goals=goals_text,
@@ -337,28 +345,34 @@ class OperatorAgent:
             progress=progress_text,
         )
 
-        messages = [
+        [
             {"role": "system", "content": system},
-            {"role": "user", "content": (
-                f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
-                f"What should I tell the agent to do next? "
-                f"Reply with GOALS_COMPLETE if all goals are done, "
-                f"ESCALATE: <question> if you need to ask the real user, "
-                f"or give the next instruction."
-            )},
+            {
+                "role": "user",
+                "content": (
+                    f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
+                    f"What should I tell the agent to do next? "
+                    f"Reply with GOALS_COMPLETE if all goals are done, "
+                    f"ESCALATE: <question> if you need to ask the real user, "
+                    f"or give the next instruction."
+                ),
+            },
         ]
 
-        from langchain_core.messages import SystemMessage as SM, HumanMessage as HM
+        from langchain_core.messages import HumanMessage as HM
+        from langchain_core.messages import SystemMessage as SM
 
         lc_messages = [
             SM(content=system),
-            HM(content=(
-                f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
-                f"What should I tell the agent to do next? "
-                f"Reply with GOALS_COMPLETE if all goals are done, "
-                f"ESCALATE: <question> if you need to ask the real user, "
-                f"or give the next instruction."
-            )),
+            HM(
+                content=(
+                    f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
+                    f"What should I tell the agent to do next? "
+                    f"Reply with GOALS_COMPLETE if all goals are done, "
+                    f"ESCALATE: <question> if you need to ask the real user, "
+                    f"or give the next instruction."
+                )
+            ),
         ]
 
         try:
@@ -366,8 +380,7 @@ class OperatorAgent:
             content = response.content
             if isinstance(content, list):
                 content = "\n".join(
-                    c["text"] for c in content
-                    if isinstance(c, dict) and c.get("type") == "text"
+                    c["text"] for c in content if isinstance(c, dict) and c.get("type") == "text"
                 )
             return content.strip()
         except Exception as e:
@@ -375,8 +388,13 @@ class OperatorAgent:
             return "Continue with the next goal."
 
     def _build_result(
-        self, graph, config: dict, start: float, status: str,
-        error: str = "", escalation_question: str = "",
+        self,
+        graph,
+        config: dict,
+        start: float,
+        status: str,
+        error: str = "",
+        escalation_question: str = "",
     ) -> OperatorResult:
         """Build the final OperatorResult from the current state."""
         state = graph.get_state(config)
@@ -387,10 +405,14 @@ class OperatorAgent:
             target=self.config.target,
             status=status,
             turns=self._turns,
-            findings=sv.get("vulnerabilities", []) + [
-                {"description": f"Exploitable: {e.get('vulnerability', '?')}",
-                 "severity": "critical"}
-                for e in sv.get("exploit_results", []) if e.get("success")
+            findings=sv.get("vulnerabilities", [])
+            + [
+                {
+                    "description": f"Exploitable: {e.get('vulnerability', '?')}",
+                    "severity": "critical",
+                }
+                for e in sv.get("exploit_results", [])
+                if e.get("success")
             ],
             flags_found=sv.get("flags_found", []),
             cost_usd=sv.get("total_cost_usd", 0.0),

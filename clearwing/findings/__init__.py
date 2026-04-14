@@ -11,12 +11,12 @@ move to it incrementally.
 """
 
 from .types import (
+    SEVERITY_VALUES,
+    EvidenceLevel,
     Finding,
     Severity,
-    EvidenceLevel,
-    SEVERITY_VALUES,
-    from_cicd_dict,
     from_analysis_finding,
+    from_cicd_dict,
     to_cicd_dict,
 )
 

@@ -7,6 +7,7 @@ injected into hunter prompts as starting hypotheses and feed the per-file
 We deliberately don't add CodeQL, Bandit, eslint, etc. — one tool, one
 output format, one maintenance burden.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,11 @@ SEMGREP_TIMEOUT_SECONDS = 300
 @dataclass
 class SemgrepFinding:
     """One Semgrep hit normalized to a simple shape."""
-    file: str            # repo-relative path
+
+    file: str  # repo-relative path
     line: int
-    check_id: str        # e.g. "python.lang.security.audit.dangerous-exec"
-    severity: str        # ERROR | WARNING | INFO (we keep semgrep's naming)
+    check_id: str  # e.g. "python.lang.security.audit.dangerous-exec"
+    severity: str  # ERROR | WARNING | INFO (we keep semgrep's naming)
     message: str
     code_snippet: str = ""
     cwe: str = ""
@@ -46,7 +47,7 @@ class SemgrepSidecar:
     def __init__(
         self,
         config: str = DEFAULT_SEMGREP_CONFIG,
-        extra_args: Optional[list[str]] = None,
+        extra_args: list[str] | None = None,
         binary: str = "semgrep",
     ):
         self.config = config
@@ -68,15 +69,20 @@ class SemgrepSidecar:
             logger.debug("Semgrep binary not found; skipping")
             return []
 
-        cmd = [
-            self.binary,
-            "scan",
-            "--json",
-            "--config", self.config,
-            "--quiet",
-            "--no-git-ignore",     # also scan ignored files — v0.1 choice
-            "--skip-unknown-extensions",
-        ] + self.extra_args + [repo_path]
+        cmd = (
+            [
+                self.binary,
+                "scan",
+                "--json",
+                "--config",
+                self.config,
+                "--quiet",
+                "--no-git-ignore",  # also scan ignored files — v0.1 choice
+                "--skip-unknown-extensions",
+            ]
+            + self.extra_args
+            + [repo_path]
+        )
 
         try:
             proc = subprocess.run(
@@ -98,8 +104,7 @@ class SemgrepSidecar:
         # Semgrep exits with rc=1 when there are findings, rc=0 when clean,
         # rc=2+ on error. Don't treat rc=1 as a failure.
         if proc.returncode not in (0, 1):
-            logger.warning("Semgrep exited with code %d: %s",
-                           proc.returncode, proc.stderr[:500])
+            logger.warning("Semgrep exited with code %d: %s", proc.returncode, proc.stderr[:500])
             return []
 
         return self._parse_semgrep_json(proc.stdout, repo_path)
@@ -127,15 +132,17 @@ class SemgrepSidecar:
                 cwe = meta.get("cwe", "")
                 if isinstance(cwe, list):
                     cwe = cwe[0] if cwe else ""
-                out.append(SemgrepFinding(
-                    file=rel,
-                    line=line,
-                    check_id=r.get("check_id", ""),
-                    severity=(extra.get("severity") or "INFO").upper(),
-                    message=extra.get("message", ""),
-                    code_snippet=extra.get("lines", "")[:300],
-                    cwe=str(cwe),
-                ))
+                out.append(
+                    SemgrepFinding(
+                        file=rel,
+                        line=line,
+                        check_id=r.get("check_id", ""),
+                        severity=(extra.get("severity") or "INFO").upper(),
+                        message=extra.get("message", ""),
+                        code_snippet=extra.get("lines", "")[:300],
+                        cwe=str(cwe),
+                    )
+                )
             except Exception:
                 logger.debug("Failed to parse semgrep result entry", exc_info=True)
                 continue
@@ -152,5 +159,5 @@ def finding_to_dict(finding: SemgrepFinding) -> dict:
         "message": finding.message,
         "code_snippet": finding.code_snippet,
         "cwe": finding.cwe,
-        "description": finding.message,   # convenience key for prompt formatting
+        "description": finding.message,  # convenience key for prompt formatting
     }

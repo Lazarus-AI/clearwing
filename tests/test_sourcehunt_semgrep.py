@@ -2,21 +2,18 @@
 
 Uses subprocess.run mocking so these don't require semgrep to be installed.
 """
+
 from __future__ import annotations
 
 import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from clearwing.sourcehunt.semgrep_sidecar import (
-    DEFAULT_SEMGREP_CONFIG,
     SemgrepFinding,
     SemgrepSidecar,
     finding_to_dict,
 )
-
 
 # --- SemgrepFinding dataclass ----------------------------------------------
 
@@ -36,7 +33,7 @@ class TestSemgrepFinding:
         assert d["file"] == "app.py"
         assert d["line"] == 23
         assert d["severity"] == "ERROR"
-        assert d["description"] == "dangerous exec call"   # convenience key
+        assert d["description"] == "dangerous exec call"  # convenience key
 
 
 # --- Availability check -----------------------------------------------------
@@ -65,7 +62,7 @@ _FAKE_SEMGREP_OUTPUT = {
             "extra": {
                 "severity": "ERROR",
                 "message": "SQL injection via f-string",
-                "lines": "cursor.execute(f\"SELECT ... {title}\")",
+                "lines": 'cursor.execute(f"SELECT ... {title}")',
                 "metadata": {"cwe": "CWE-89"},
             },
         },
@@ -77,7 +74,7 @@ _FAKE_SEMGREP_OUTPUT = {
             "extra": {
                 "severity": "WARNING",
                 "message": "hardcoded secret",
-                "lines": "API_KEY = \"abc123\"",
+                "lines": 'API_KEY = "abc123"',
                 "metadata": {"cwe": ["CWE-798"]},
             },
         },
@@ -101,8 +98,10 @@ class TestRunScanMocked:
         assert findings == []
 
     def test_happy_path(self):
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", return_value=_fake_proc(json.dumps(_FAKE_SEMGREP_OUTPUT))):
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch("subprocess.run", return_value=_fake_proc(json.dumps(_FAKE_SEMGREP_OUTPUT))),
+        ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert len(findings) == 2
         assert findings[0].file == "app.py"
@@ -114,32 +113,46 @@ class TestRunScanMocked:
         assert findings[1].cwe == "CWE-798"
 
     def test_rc_zero_is_clean_not_error(self):
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", return_value=_fake_proc(json.dumps({"results": []}), returncode=0)):
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch(
+                "subprocess.run", return_value=_fake_proc(json.dumps({"results": []}), returncode=0)
+            ),
+        ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
 
     def test_rc_gt_one_returns_empty(self):
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", return_value=_fake_proc("", returncode=2)):
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch("subprocess.run", return_value=_fake_proc("", returncode=2)),
+        ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
 
     def test_timeout_returns_empty(self):
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("semgrep", 300)):
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("semgrep", 300)),
+        ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
 
     def test_invalid_json_returns_empty(self):
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", return_value=_fake_proc("not json at all")):
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch("subprocess.run", return_value=_fake_proc("not json at all")),
+        ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
 
     def test_cli_args_include_config(self):
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", return_value=_fake_proc(json.dumps({"results": []}), returncode=0)) as mock_run:
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch(
+                "subprocess.run", return_value=_fake_proc(json.dumps({"results": []}), returncode=0)
+            ) as mock_run,
+        ):
             SemgrepSidecar(config="p/python").run_scan("/abs/repo")
         cmd = mock_run.call_args[0][0]
         assert "--config" in cmd
@@ -194,8 +207,10 @@ class TestPreprocessorSemgrepIntegration:
                 },
             ],
         }
-        with patch("shutil.which", return_value="/usr/bin/semgrep"), \
-             patch("subprocess.run", return_value=_fake_proc(json.dumps(fake_output))):
+        with (
+            patch("shutil.which", return_value="/usr/bin/semgrep"),
+            patch("subprocess.run", return_value=_fake_proc(json.dumps(fake_output))),
+        ):
             pp = Preprocessor(
                 repo_url=str(tmp_path),
                 local_path=str(tmp_path),
@@ -216,28 +231,41 @@ class TestRankerSemgrepFloor:
         """A file with semgrep_hint > 0 gets surface floored to 3."""
         import json as _json
         from unittest.mock import MagicMock
+
         from clearwing.sourcehunt.ranker import Ranker
 
         llm = MagicMock()
         response = MagicMock()
-        response.content = _json.dumps([
-            {"path": "foo.py", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        response.content = _json.dumps(
+            [
+                {
+                    "path": "foo.py",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         llm.invoke.return_value = response
 
-        files = [{
-            "path": "foo.py",
-            "language": "python",
-            "loc": 30,
-            "tags": [],
-            "static_hint": 0,
-            "semgrep_hint": 3,           # semgrep flagged 3 issues
-            "imports_by": 0,
-            "transitive_callers": 0,
-            "defines_constants": False,
-            "surface": 0, "influence": 0, "reachability": 3,
-            "priority": 0.0, "tier": "C",
-        }]
+        files = [
+            {
+                "path": "foo.py",
+                "language": "python",
+                "loc": 30,
+                "tags": [],
+                "static_hint": 0,
+                "semgrep_hint": 3,  # semgrep flagged 3 issues
+                "imports_by": 0,
+                "transitive_callers": 0,
+                "defines_constants": False,
+                "surface": 0,
+                "influence": 0,
+                "reachability": 3,
+                "priority": 0.0,
+                "tier": "C",
+            }
+        ]
         Ranker(llm).rank(files)
         assert files[0]["surface"] == 3

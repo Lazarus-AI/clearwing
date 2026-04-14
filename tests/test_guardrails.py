@@ -5,10 +5,10 @@ import base64
 from clearwing.safety.guardrails.input_guardrails import InputGuardrail
 from clearwing.safety.guardrails.output_guardrails import OutputGuardrail
 from clearwing.safety.guardrails.patterns import (
-    GuardrailResult,
-    INJECTION_PATTERNS,
     DANGEROUS_COMMAND_PATTERNS,
+    INJECTION_PATTERNS,
     UNICODE_HOMOGRAPHS,
+    GuardrailResult,
     normalize_unicode,
 )
 

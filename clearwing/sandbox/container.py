@@ -5,11 +5,11 @@ against a cloned source tree. Distinct from kali_docker_tool — there are no
 approval gates, no apt-get install, no network access, and no host-volume
 write access to the source tree.
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExecResult:
     """Result from a single command executed inside a sandbox container."""
+
     exit_code: int
     stdout: str
     stderr: str
@@ -32,16 +33,17 @@ class SandboxConfig:
     Override per use case (the hunter sandbox, e.g., wants writable /scratch
     and an explicit working_dir of /workspace).
     """
+
     image: str
-    network_mode: str = "none"               # "none" | "bridge" | "host"
+    network_mode: str = "none"  # "none" | "bridge" | "host"
     mounts: list[tuple[str, str, str]] = field(default_factory=list)
-                                              # (host_path, container_path, "ro"|"rw")
+    # (host_path, container_path, "ro"|"rw")
     memory_mb: int = 2048
     cpu_shares: int = 1024
-    timeout_seconds: int = 300                # default per-exec timeout
+    timeout_seconds: int = 300  # default per-exec timeout
     env: dict[str, str] = field(default_factory=dict)
     working_dir: str = "/workspace"
-    name: Optional[str] = None
+    name: str | None = None
     auto_remove: bool = True
 
 
@@ -69,6 +71,7 @@ class SandboxContainer:
     def _get_client(self):
         if self._client is None:
             import docker  # local import — keeps the module importable without docker
+
             self._client = docker.from_env()
         return self._client
 
@@ -106,9 +109,9 @@ class SandboxContainer:
     def exec(
         self,
         command: list[str] | str,
-        timeout: Optional[int] = None,
-        env: Optional[dict[str, str]] = None,
-        workdir: Optional[str] = None,
+        timeout: int | None = None,
+        env: dict[str, str] | None = None,
+        workdir: str | None = None,
     ) -> ExecResult:
         """Run a command inside the container.
 
@@ -126,6 +129,7 @@ class SandboxContainer:
             raise RuntimeError("SandboxContainer.exec called before start()")
 
         import time
+
         start_time = time.monotonic()
         effective_timeout = timeout or self.config.timeout_seconds
 
@@ -210,7 +214,6 @@ class SandboxContainer:
             raise RuntimeError("SandboxContainer.read_file called before start()")
 
         import io
-        import os
         import tarfile
 
         stream, _stat = self._container.get_archive(container_path)
@@ -251,11 +254,11 @@ class SandboxContainer:
     # --- Properties ---------------------------------------------------------
 
     @property
-    def container_id(self) -> Optional[str]:
+    def container_id(self) -> str | None:
         return self._container.id if self._container else None
 
     @property
-    def short_id(self) -> Optional[str]:
+    def short_id(self) -> str | None:
         return self._container.short_id if self._container else None
 
     @property

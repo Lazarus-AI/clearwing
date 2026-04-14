@@ -1,5 +1,5 @@
-from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
 
 BLUE_AGENT_PROMPT = """You are Clearwing Blue Agent, a defensive security operator. Your goal is to detect and block the Red Agent's attacks.
 You have access to:
@@ -17,15 +17,16 @@ Your methodology:
 Work as a team with the user to secure the infrastructure.
 """
 
+
 class BlueAgent:
     def __init__(self, model_name: str = "claude-sonnet-4-6"):
         self.llm = ChatAnthropic(model=model_name)
-        
+
     def respond(self, state: dict) -> str:
         # Simplified interaction logic for the Blue Agent
         messages = [
             SystemMessage(content=BLUE_AGENT_PROMPT),
-            HumanMessage(content=f"Current infrastructure state: {state}")
+            HumanMessage(content=f"Current infrastructure state: {state}"),
         ]
         response = self.llm.invoke(messages)
         return response.content

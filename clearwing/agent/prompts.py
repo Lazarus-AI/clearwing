@@ -84,8 +84,7 @@ def build_system_prompt(state: dict) -> str:
     open_ports = state.get("open_ports", [])
     if open_ports:
         port_str = ", ".join(
-            f"{p['port']}/{p.get('protocol', 'tcp')} ({p.get('service', '?')})"
-            for p in open_ports
+            f"{p['port']}/{p.get('protocol', 'tcp')} ({p.get('service', '?')})" for p in open_ports
         )
         context_parts.append(f"Open ports: {port_str}")
 
@@ -99,10 +98,7 @@ def build_system_prompt(state: dict) -> str:
 
     vulns = state.get("vulnerabilities", [])
     if vulns:
-        vuln_str = ", ".join(
-            f"{v.get('cve', 'N/A')} (CVSS {v.get('cvss', '?')})"
-            for v in vulns
-        )
+        vuln_str = ", ".join(f"{v.get('cve', 'N/A')} (CVSS {v.get('cvss', '?')})" for v in vulns)
         context_parts.append(f"Vulnerabilities: {vuln_str}")
 
     exploit_results = state.get("exploit_results", [])

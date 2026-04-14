@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from clearwing.safety.scoring import CVSSVector, CVSSCalculator, VULN_PRESETS, DedupRecord, FindingDeduplicator
-
+from clearwing.safety.scoring import (
+    VULN_PRESETS,
+    CVSSCalculator,
+    CVSSVector,
+    DedupRecord,
+    FindingDeduplicator,
+)
 
 # ---------------------------------------------------------------------------
 # CVSSVector tests
 # ---------------------------------------------------------------------------
+
 
 class TestCVSSVector:
     def test_to_string_format(self):
@@ -67,6 +73,7 @@ class TestCVSSVector:
 # CVSSCalculator tests
 # ---------------------------------------------------------------------------
 
+
 class TestCVSSCalculator:
     @pytest.fixture
     def calc(self):
@@ -75,8 +82,14 @@ class TestCVSSCalculator:
     def test_rce_network_score_is_10(self, calc):
         """RCE network (AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H) should be 10.0."""
         vector = CVSSVector(
-            attack_vector="N", attack_complexity="L", privileges_required="N",
-            user_interaction="N", scope="C", confidentiality="H", integrity="H", availability="H",
+            attack_vector="N",
+            attack_complexity="L",
+            privileges_required="N",
+            user_interaction="N",
+            scope="C",
+            confidentiality="H",
+            integrity="H",
+            availability="H",
         )
         assert calc.calculate(vector) == 10.0
 
@@ -95,7 +108,9 @@ class TestCVSSCalculator:
     def test_zero_impact_returns_zero(self, calc):
         """C:N/I:N/A:N should yield 0.0."""
         vector = CVSSVector(
-            confidentiality="N", integrity="N", availability="N",
+            confidentiality="N",
+            integrity="N",
+            availability="N",
         )
         assert calc.calculate(vector) == 0.0
 
@@ -143,11 +158,19 @@ class TestCVSSCalculator:
 # VULN_PRESETS tests
 # ---------------------------------------------------------------------------
 
+
 class TestVulnPresets:
     def test_expected_keys(self):
         expected_keys = {
-            "rce_network", "rce_authenticated", "sqli", "xss_reflected",
-            "xss_stored", "ssrf", "path_traversal", "info_disclosure", "dos",
+            "rce_network",
+            "rce_authenticated",
+            "sqli",
+            "xss_reflected",
+            "xss_stored",
+            "ssrf",
+            "path_traversal",
+            "info_disclosure",
+            "dos",
         }
         assert expected_keys == set(VULN_PRESETS.keys())
 
@@ -159,6 +182,7 @@ class TestVulnPresets:
 # ---------------------------------------------------------------------------
 # DedupRecord dataclass tests
 # ---------------------------------------------------------------------------
+
 
 class TestFinding:
     def test_defaults(self):
@@ -179,6 +203,7 @@ class TestFinding:
 # FindingDeduplicator tests
 # ---------------------------------------------------------------------------
 
+
 class TestFindingDeduplicator:
     @pytest.fixture
     def dedup(self):
@@ -188,54 +213,107 @@ class TestFindingDeduplicator:
         assert dedup.deduplicate([]) == []
 
     def test_removes_exact_cve_duplicates(self, dedup):
-        f1 = DedupRecord(id="1", title="SQL Injection", description="d", severity="high",
-                     cve="CVE-2023-1234", target="10.0.0.1", port=80)
-        f2 = DedupRecord(id="2", title="SQLi variant", description="d", severity="high",
-                     cve="CVE-2023-1234", target="10.0.0.2", port=443)
+        f1 = DedupRecord(
+            id="1",
+            title="SQL Injection",
+            description="d",
+            severity="high",
+            cve="CVE-2023-1234",
+            target="10.0.0.1",
+            port=80,
+        )
+        f2 = DedupRecord(
+            id="2",
+            title="SQLi variant",
+            description="d",
+            severity="high",
+            cve="CVE-2023-1234",
+            target="10.0.0.2",
+            port=443,
+        )
         result = dedup.deduplicate([f1, f2])
         assert len(result) == 1
         assert result[0].id == "1"
         assert f2.duplicate_of == "1"
 
     def test_removes_signature_duplicates(self, dedup):
-        f1 = DedupRecord(id="1", title="SQL Injection", description="d", severity="high",
-                     target="10.0.0.1", port=80)
-        f2 = DedupRecord(id="2", title="SQL Injection", description="d2", severity="high",
-                     target="10.0.0.1", port=80)
+        f1 = DedupRecord(
+            id="1",
+            title="SQL Injection",
+            description="d",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
+        f2 = DedupRecord(
+            id="2",
+            title="SQL Injection",
+            description="d2",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
         result = dedup.deduplicate([f1, f2])
         assert len(result) == 1
         assert result[0].id == "1"
         assert f2.duplicate_of == "1"
 
     def test_removes_similar_titles_fuzzy(self, dedup):
-        f1 = DedupRecord(id="1", title="SQL Injection vulnerability in login",
-                     description="d", severity="high", target="10.0.0.1", port=80)
-        f2 = DedupRecord(id="2", title="SQL Injection vulnerability in login page",
-                     description="d2", severity="high", target="10.0.0.1", port=80)
+        f1 = DedupRecord(
+            id="1",
+            title="SQL Injection vulnerability in login",
+            description="d",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
+        f2 = DedupRecord(
+            id="2",
+            title="SQL Injection vulnerability in login page",
+            description="d2",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
         result = dedup.deduplicate([f1, f2])
         assert len(result) == 1
         assert f2.duplicate_of == "1"
 
     def test_keeps_different_findings(self, dedup):
-        f1 = DedupRecord(id="1", title="SQL Injection", description="d", severity="high",
-                     target="10.0.0.1", port=80)
-        f2 = DedupRecord(id="2", title="Cross-Site Scripting", description="d", severity="medium",
-                     target="10.0.0.1", port=443)
+        f1 = DedupRecord(
+            id="1",
+            title="SQL Injection",
+            description="d",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
+        f2 = DedupRecord(
+            id="2",
+            title="Cross-Site Scripting",
+            description="d",
+            severity="medium",
+            target="10.0.0.1",
+            port=443,
+        )
         result = dedup.deduplicate([f1, f2])
         assert len(result) == 2
 
     def test_sorts_by_severity(self, dedup):
         findings = [
-            DedupRecord(id="1", title="Info leak", description="d", severity="info",
-                    target="a", port=1),
-            DedupRecord(id="2", title="RCE", description="d", severity="critical",
-                    target="b", port=2),
-            DedupRecord(id="3", title="SQLi", description="d", severity="high",
-                    target="c", port=3),
-            DedupRecord(id="4", title="XSS", description="d", severity="medium",
-                    target="d", port=4),
-            DedupRecord(id="5", title="Weak cipher", description="d", severity="low",
-                    target="e", port=5),
+            DedupRecord(
+                id="1", title="Info leak", description="d", severity="info", target="a", port=1
+            ),
+            DedupRecord(
+                id="2", title="RCE", description="d", severity="critical", target="b", port=2
+            ),
+            DedupRecord(id="3", title="SQLi", description="d", severity="high", target="c", port=3),
+            DedupRecord(
+                id="4", title="XSS", description="d", severity="medium", target="d", port=4
+            ),
+            DedupRecord(
+                id="5", title="Weak cipher", description="d", severity="low", target="e", port=5
+            ),
         ]
         result = dedup.deduplicate(findings)
         severities = [f.severity for f in result]
@@ -243,14 +321,29 @@ class TestFindingDeduplicator:
 
     def test_merge_findings_combines_and_deduplicates(self, dedup):
         group1 = [
-            DedupRecord(id="1", title="SQL Injection", description="d", severity="high",
-                    cve="CVE-2023-1234", target="10.0.0.1", port=80),
+            DedupRecord(
+                id="1",
+                title="SQL Injection",
+                description="d",
+                severity="high",
+                cve="CVE-2023-1234",
+                target="10.0.0.1",
+                port=80,
+            ),
         ]
         group2 = [
-            DedupRecord(id="2", title="SQLi variant", description="d", severity="high",
-                    cve="CVE-2023-1234", target="10.0.0.2", port=443),
-            DedupRecord(id="3", title="XSS", description="d", severity="medium",
-                    target="10.0.0.1", port=80),
+            DedupRecord(
+                id="2",
+                title="SQLi variant",
+                description="d",
+                severity="high",
+                cve="CVE-2023-1234",
+                target="10.0.0.2",
+                port=443,
+            ),
+            DedupRecord(
+                id="3", title="XSS", description="d", severity="medium", target="10.0.0.1", port=80
+            ),
         ]
         result = dedup.merge_findings([group1, group2])
         assert len(result) == 2
@@ -259,15 +352,39 @@ class TestFindingDeduplicator:
         assert "3" in ids
 
     def test_is_similar_false_for_different_targets(self, dedup):
-        a = DedupRecord(id="1", title="SQL Injection vulnerability",
-                    description="d", severity="high", target="10.0.0.1", port=80)
-        b = DedupRecord(id="2", title="SQL Injection vulnerability",
-                    description="d", severity="high", target="10.0.0.2", port=80)
+        a = DedupRecord(
+            id="1",
+            title="SQL Injection vulnerability",
+            description="d",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
+        b = DedupRecord(
+            id="2",
+            title="SQL Injection vulnerability",
+            description="d",
+            severity="high",
+            target="10.0.0.2",
+            port=80,
+        )
         assert dedup._is_similar(a, b) is False
 
     def test_is_similar_false_for_different_ports(self, dedup):
-        a = DedupRecord(id="1", title="SQL Injection vulnerability",
-                    description="d", severity="high", target="10.0.0.1", port=80)
-        b = DedupRecord(id="2", title="SQL Injection vulnerability",
-                    description="d", severity="high", target="10.0.0.1", port=443)
+        a = DedupRecord(
+            id="1",
+            title="SQL Injection vulnerability",
+            description="d",
+            severity="high",
+            target="10.0.0.1",
+            port=80,
+        )
+        b = DedupRecord(
+            id="2",
+            title="SQL Injection vulnerability",
+            description="d",
+            severity="high",
+            target="10.0.0.1",
+            port=443,
+        )
         assert dedup._is_similar(a, b) is False

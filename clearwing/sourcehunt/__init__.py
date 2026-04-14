@@ -15,11 +15,11 @@ Public entry points: SourceHuntRunner (programmatic), `clearwing sourcehunt`
 from clearwing.findings.types import Finding
 
 from .state import (
+    EVIDENCE_LEVELS,
     EvidenceLevel,
     FileTag,
     FileTarget,
     SourceHuntState,
-    EVIDENCE_LEVELS,
     evidence_at_or_above,
     evidence_compare,
     filter_by_evidence,

@@ -12,6 +12,7 @@ v0.3 flow:
 
 Uses the existing SemgrepSidecar for rule execution.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,7 +23,6 @@ import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RetroHuntResult:
     """Output of one CVE retro-hunt pass."""
+
     cve_id: str
-    patch_source: str                # URL or path
+    patch_source: str  # URL or path
     diff_text: str = ""
     semgrep_rule: str = ""
     rule_description: str = ""
@@ -83,7 +84,7 @@ Return ONLY the JSON."""
 
 def fetch_patch_diff(
     source: str,
-    repo_path: Optional[str] = None,
+    repo_path: str | None = None,
 ) -> str:
     """Fetch a patch diff from a source identifier.
 
@@ -106,7 +107,10 @@ def fetch_patch_diff(
         try:
             proc = subprocess.run(
                 ["git", "-C", repo_path, "show", source],
-                capture_output=True, text=True, check=False, timeout=30,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
             )
             if proc.returncode == 0:
                 return proc.stdout
@@ -132,7 +136,7 @@ class RetroHunter:
     def __init__(
         self,
         llm: BaseChatModel,
-        sidecar: Optional[SemgrepSidecar] = None,
+        sidecar: SemgrepSidecar | None = None,
     ):
         self.llm = llm
         self.sidecar = sidecar or SemgrepSidecar()
@@ -142,7 +146,7 @@ class RetroHunter:
         cve_id: str,
         patch_source: str,
         target_repo_path: str,
-        repo_path_for_git_source: Optional[str] = None,
+        repo_path_for_git_source: str | None = None,
     ) -> RetroHuntResult:
         """Run one retro-hunt pass for a CVE and return the result."""
         result = RetroHuntResult(
@@ -156,7 +160,7 @@ class RetroHunter:
         except Exception as e:
             result.notes = f"could not fetch patch: {e}"
             return result
-        result.diff_text = diff_text[:16000]   # cap for prompt size
+        result.diff_text = diff_text[:16000]  # cap for prompt size
 
         # 2. Generate a Semgrep rule from the diff
         rule_info = self._generate_rule(cve_id, result.diff_text)
@@ -179,13 +183,15 @@ class RetroHunter:
 
     # --- Internal helpers --------------------------------------------------
 
-    def _generate_rule(self, cve_id: str, diff_text: str) -> Optional[dict]:
+    def _generate_rule(self, cve_id: str, diff_text: str) -> dict | None:
         user_msg = f"CVE: {cve_id}\n\nPatch diff:\n\n{diff_text}"
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=RULE_GEN_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=RULE_GEN_SYSTEM_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception:
             logger.debug("Retro-hunt rule-gen LLM call failed", exc_info=True)
             return None
@@ -230,8 +236,12 @@ class RetroHunter:
             return []
 
         import tempfile
+
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yml", delete=False, encoding="utf-8",
+            mode="w",
+            suffix=".yml",
+            delete=False,
+            encoding="utf-8",
         ) as tf:
             tf.write(rule_yaml)
             tf.flush()
@@ -277,7 +287,7 @@ class RetroHunter:
             finding_type="cve_variant",
             cwe=rule_info.get("cwe", ""),
             severity=mapped_severity,  # type: ignore[arg-type]
-            confidence="low",          # hunter must re-verify
+            confidence="low",  # hunter must re-verify
             description=(
                 f"Possible variant of {cve_id}: "
                 f"{rule_info.get('description', '')}. "

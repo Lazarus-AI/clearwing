@@ -1,3 +1,3 @@
 from .cli import CLI
 
-__all__ = ['CLI']
+__all__ = ["CLI"]

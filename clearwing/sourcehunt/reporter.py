@@ -3,13 +3,12 @@
 Reuses clearwing/runners/cicd/sarif.py::SARIFGenerator (now file-aware via R2)
 for SARIF output. Markdown and JSON are written directly.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
-from typing import Optional
 
 from clearwing.runners.cicd.sarif import SARIFGenerator
 
@@ -28,7 +27,7 @@ def write_sourcehunt_report(
     findings: list[Finding],
     verified_findings: list[Finding],
     spent_per_tier: dict,
-    formats: Optional[list[str]] = None,
+    formats: list[str] | None = None,
 ) -> dict[str, str]:
     """Write the requested formats. Returns {format: filesystem_path}."""
     formats = formats or ["sarif", "markdown", "json"]
@@ -67,27 +66,36 @@ def write_sourcehunt_report(
     if "json" in formats:
         json_path = session_dir / "findings.json"
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "session_id": session_id,
-                "repo_url": repo_url,
-                "spent_per_tier": spent_per_tier,
-                "findings": findings,
-                "verified_findings": verified_findings,
-            }, f, indent=2, default=_json_default)
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "repo_url": repo_url,
+                    "spent_per_tier": spent_per_tier,
+                    "findings": findings,
+                    "verified_findings": verified_findings,
+                },
+                f,
+                indent=2,
+                default=_json_default,
+            )
         paths["json"] = str(json_path)
 
     # Always write a manifest
     manifest_path = session_dir / "manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "session_id": session_id,
-            "repo_url": repo_url,
-            "finding_count": len(findings),
-            "verified_count": len(verified_findings),
-            "spent_per_tier": spent_per_tier,
-            "total_spent": sum(spent_per_tier.values()),
-            "outputs": paths,
-        }, f, indent=2)
+        json.dump(
+            {
+                "session_id": session_id,
+                "repo_url": repo_url,
+                "finding_count": len(findings),
+                "verified_count": len(verified_findings),
+                "spent_per_tier": spent_per_tier,
+                "total_spent": sum(spent_per_tier.values()),
+                "outputs": paths,
+            },
+            f,
+            indent=2,
+        )
     paths["manifest"] = str(manifest_path)
 
     return paths
@@ -103,15 +111,17 @@ def _to_sarif_findings(findings: list[Finding]) -> list[dict]:
     """
     out = []
     for f in findings:
-        out.append({
-            "description": f.get("description", ""),
-            "severity": f.get("severity_verified") or f.get("severity") or "info",
-            "cve": f.get("cwe"),     # use CWE as the rule_id
-            "details": _details_block(f),
-            "file": f.get("file"),
-            "line_number": f.get("line_number"),
-            "end_line": f.get("end_line"),
-        })
+        out.append(
+            {
+                "description": f.get("description", ""),
+                "severity": f.get("severity_verified") or f.get("severity") or "info",
+                "cve": f.get("cwe"),  # use CWE as the rule_id
+                "details": _details_block(f),
+                "file": f.get("file"),
+                "line_number": f.get("line_number"),
+                "end_line": f.get("end_line"),
+            }
+        )
     return out
 
 
@@ -142,10 +152,12 @@ def _render_markdown(
     lines.append("")
     lines.append(f"- **Repo:** {repo_url}")
     lines.append(f"- **Findings:** {len(findings)} ({len(verified_findings)} verified)")
-    lines.append(f"- **Spend by tier:** "
-                 f"A=${spent_per_tier.get('A', 0):.4f}, "
-                 f"B=${spent_per_tier.get('B', 0):.4f}, "
-                 f"C=${spent_per_tier.get('C', 0):.4f}")
+    lines.append(
+        f"- **Spend by tier:** "
+        f"A=${spent_per_tier.get('A', 0):.4f}, "
+        f"B=${spent_per_tier.get('B', 0):.4f}, "
+        f"C=${spent_per_tier.get('C', 0):.4f}"
+    )
     lines.append(f"- **Total spend:** ${sum(spent_per_tier.values()):.4f}")
     lines.append("")
 
@@ -172,8 +184,10 @@ def _render_markdown(
     )
     for i, f in enumerate(sorted_findings, 1):
         sev = (f.get("severity_verified") or f.get("severity") or "info").upper()
-        lines.append(f"### {i}. [{sev}] {f.get('finding_type', 'unknown')} "
-                     f"at `{f.get('file', '?')}:{f.get('line_number', '?')}`")
+        lines.append(
+            f"### {i}. [{sev}] {f.get('finding_type', 'unknown')} "
+            f"at `{f.get('file', '?')}:{f.get('line_number', '?')}`"
+        )
         lines.append("")
         lines.append(f"- **CWE:** {f.get('cwe', 'N/A')}")
         lines.append(f"- **Evidence:** {f.get('evidence_level', 'suspicion')}")

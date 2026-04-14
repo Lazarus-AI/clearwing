@@ -18,6 +18,7 @@ def analyze_source(path: str) -> str:
     """
     try:
         from clearwing.analysis import SourceAnalyzer
+
         analyzer = SourceAnalyzer(repo_path=path)
         result = analyzer.analyze()
         return result.summary()
@@ -38,6 +39,7 @@ def clone_and_analyze(git_url: str, branch: str = "main") -> str:
     """
     try:
         from clearwing.analysis import SourceAnalyzer
+
         with SourceAnalyzer() as analyzer:
             analyzer.clone(git_url, branch=branch)
             result = analyzer.analyze()
@@ -61,6 +63,7 @@ def trace_taint_flows(path: str) -> str:
     """
     try:
         from clearwing.analysis import TaintTracker
+
         tracker = TaintTracker()
         tracker.analyze_directory(path)
         return tracker.get_summary()

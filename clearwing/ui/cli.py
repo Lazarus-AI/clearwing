@@ -6,12 +6,10 @@ module under ``clearwing.ui.commands``.
 
 import argparse
 import logging
-from typing import Optional
 
 from rich.console import Console
 
-from ..core import CoreEngine, Config
-
+from ..core import Config, CoreEngine
 from .commands import ALL_COMMANDS
 
 logger = logging.getLogger(__name__)
@@ -25,7 +23,7 @@ class CLI:
         self.config = Config()
         self.engine = CoreEngine(self.config)
 
-    def run(self, args: Optional[list] = None) -> None:
+    def run(self, args: list | None = None) -> None:
         """Run the CLI."""
         parser = self._create_parser()
         parsed_args = parser.parse_args(args)
@@ -43,11 +41,11 @@ class CLI:
     def _create_parser(self) -> argparse.ArgumentParser:
         """Create argument parser with subcommands from command modules."""
         parser = argparse.ArgumentParser(
-            prog='clearwing',
-            description='Clearwing - Comprehensive Vulnerability Scanner and Exploiter'
+            prog="clearwing",
+            description="Clearwing - Comprehensive Vulnerability Scanner and Exploiter",
         )
 
-        subparsers = parser.add_subparsers(dest='command', help='Available commands')
+        subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
         for cmd_module in ALL_COMMANDS:
             cmd_module.add_parser(subparsers)

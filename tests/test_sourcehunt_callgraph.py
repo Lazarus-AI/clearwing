@@ -1,4 +1,5 @@
 """Tests for the tree-sitter callgraph builder and reachability propagation."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,7 +10,6 @@ from clearwing.sourcehunt.callgraph import (
     CallGraph,
     CallGraphBuilder,
 )
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -174,31 +174,43 @@ class TestPreprocessorCallgraphIntegration:
 class TestRankerUsesTransitiveCallers:
     def test_transitive_callers_floors_influence(self):
         """Ranker._apply_floors should use transitive_callers if set, else imports_by."""
-        from unittest.mock import MagicMock
         import json
+        from unittest.mock import MagicMock
 
         from clearwing.sourcehunt.ranker import Ranker
 
         llm = MagicMock()
         response = MagicMock()
-        response.content = json.dumps([
-            {"path": "header.h", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        response.content = json.dumps(
+            [
+                {
+                    "path": "header.h",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         llm.invoke.return_value = response
 
-        files = [{
-            "path": "header.h",
-            "language": "c",
-            "loc": 10,
-            "tags": [],
-            "static_hint": 0,
-            "imports_by": 0,           # v0.1 signal is zero
-            "transitive_callers": 25,  # v0.2 signal says 25 callers
-            "defines_constants": False,
-            "surface": 0, "influence": 0, "reachability": 3,
-            "priority": 0.0, "tier": "C",
-        }]
+        files = [
+            {
+                "path": "header.h",
+                "language": "c",
+                "loc": 10,
+                "tags": [],
+                "static_hint": 0,
+                "imports_by": 0,  # v0.1 signal is zero
+                "transitive_callers": 25,  # v0.2 signal says 25 callers
+                "defines_constants": False,
+                "surface": 0,
+                "influence": 0,
+                "reachability": 3,
+                "priority": 0.0,
+                "tier": "C",
+            }
+        ]
         Ranker(llm).rank(files)
         # Influence should be floored to 3 via transitive_callers > 10
         assert files[0]["influence"] == 3

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
 class RemediationAdvice:
     """Remediation advice for a single vulnerability."""
+
     vulnerability: str  # CVE ID or description
     severity: str  # critical, high, medium, low, info
     title: str
@@ -26,13 +26,15 @@ REMEDIATION_DB = {
         title="Use parameterized queries",
         description="SQL injection allows attackers to execute arbitrary SQL commands.",
         recommendation="Replace string concatenation with parameterized queries (prepared statements). Use an ORM where possible.",
-        code_fix='''# Before (vulnerable):
+        code_fix="""# Before (vulnerable):
 query = f"SELECT * FROM users WHERE id = {user_input}"
 
 # After (safe):
 query = "SELECT * FROM users WHERE id = %s"
-cursor.execute(query, (user_input,))''',
-        references=["https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"],
+cursor.execute(query, (user_input,))""",
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+        ],
         effort="medium",
         priority=10,
     ),
@@ -48,7 +50,9 @@ response = f"<p>Hello, {username}</p>"
 # After (safe):
 from html import escape
 response = f"<p>Hello, {escape(username)}</p>"''',
-        references=["https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"],
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"
+        ],
         effort="medium",
         priority=9,
     ),
@@ -58,7 +62,7 @@ response = f"<p>Hello, {escape(username)}</p>"''',
         title="Validate and restrict outbound requests",
         description="SSRF allows attackers to make the server perform requests to unintended locations.",
         recommendation="Validate URLs against an allowlist. Block requests to internal/private IPs. Use a URL parser to check the scheme and host.",
-        code_fix='''# Add URL validation:
+        code_fix="""# Add URL validation:
 from urllib.parse import urlparse
 import ipaddress
 
@@ -72,8 +76,10 @@ def is_safe_url(url: str) -> bool:
             return False
     except ValueError:
         pass  # hostname, not IP — check against allowlist
-    return True''',
-        references=["https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html"],
+    return True""",
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html"
+        ],
         effort="medium",
         priority=8,
     ),
@@ -83,13 +89,13 @@ def is_safe_url(url: str) -> bool:
         title="Sanitize file paths",
         description="Path traversal allows attackers to access files outside the intended directory.",
         recommendation="Use os.path.realpath() to resolve paths and verify they're within the allowed base directory. Never use user input directly in file paths.",
-        code_fix='''# Before (vulnerable):
+        code_fix="""# Before (vulnerable):
 filepath = os.path.join(base_dir, user_input)
 
 # After (safe):
 filepath = os.path.realpath(os.path.join(base_dir, user_input))
 if not filepath.startswith(os.path.realpath(base_dir)):
-    raise ValueError("Access denied")''',
+    raise ValueError("Access denied")""",
         references=["https://owasp.org/www-community/attacks/Path_Traversal"],
         effort="low",
         priority=8,
@@ -100,13 +106,15 @@ if not filepath.startswith(os.path.realpath(base_dir)):
         title="Avoid shell commands with user input",
         description="Command injection allows attackers to execute arbitrary OS commands.",
         recommendation="Use subprocess with shell=False and pass arguments as a list. Avoid os.system() and shell=True.",
-        code_fix='''# Before (vulnerable):
+        code_fix="""# Before (vulnerable):
 os.system(f"ping {user_input}")
 
 # After (safe):
 import subprocess
-subprocess.run(["ping", "-c", "1", user_input], shell=False, capture_output=True)''',
-        references=["https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html"],
+subprocess.run(["ping", "-c", "1", user_input], shell=False, capture_output=True)""",
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html"
+        ],
         effort="low",
         priority=10,
     ),
@@ -116,7 +124,9 @@ subprocess.run(["ping", "-c", "1", user_input], shell=False, capture_output=True
         title="Enforce strong password policies",
         description="Default or weak credentials allow unauthorized access.",
         recommendation="Change all default passwords. Enforce minimum password length (12+ chars), complexity, and rotation. Use MFA.",
-        references=["https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"],
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"
+        ],
         effort="low",
         priority=9,
     ),
@@ -135,11 +145,11 @@ subprocess.run(["ping", "-c", "1", user_input], shell=False, capture_output=True
         title="Add security headers",
         description="Missing security headers leave the application vulnerable to common attacks.",
         recommendation="Add headers: Content-Security-Policy, X-Content-Type-Options, X-Frame-Options, Strict-Transport-Security, X-XSS-Protection.",
-        config_fix='''# Nginx example:
+        config_fix="""# Nginx example:
 add_header Content-Security-Policy "default-src 'self'";
 add_header X-Content-Type-Options "nosniff";
 add_header X-Frame-Options "DENY";
-add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";''',
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";""",
         effort="low",
         priority=5,
     ),
@@ -158,15 +168,17 @@ add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";''',
         title="Disable external entity processing",
         description="XXE allows attackers to read files, perform SSRF, and cause DoS via XML parsing.",
         recommendation="Disable DTD processing and external entities in the XML parser. Use JSON instead of XML where possible.",
-        code_fix='''# Python (defusedxml):
+        code_fix="""# Python (defusedxml):
 import defusedxml.ElementTree as ET
 tree = ET.parse(xml_file)  # safe by default
 
 # Or configure standard library:
 from xml.etree.ElementTree import XMLParser
 parser = XMLParser()
-# Do NOT use: parser.entity = {}''',
-        references=["https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html"],
+# Do NOT use: parser.entity = {}""",
+        references=[
+            "https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html"
+        ],
         effort="low",
         priority=8,
     ),
@@ -179,7 +191,7 @@ class RemediationGenerator:
     def __init__(self):
         self._db = dict(REMEDIATION_DB)
 
-    def get_advice(self, vuln_type: str) -> Optional[RemediationAdvice]:
+    def get_advice(self, vuln_type: str) -> RemediationAdvice | None:
         """Look up remediation advice by vulnerability type."""
         # Try exact match first
         if vuln_type in self._db:
@@ -190,7 +202,7 @@ class RemediationGenerator:
             return self._db[lower]
         return None
 
-    def get_advice_for_cve(self, cve: str, description: str = "") -> Optional[RemediationAdvice]:
+    def get_advice_for_cve(self, cve: str, description: str = "") -> RemediationAdvice | None:
         """Try to match a CVE to known remediation advice based on description keywords."""
         desc_lower = description.lower()
         keyword_map = {

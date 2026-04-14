@@ -8,17 +8,16 @@ Covers:
     - sliding-window submission under budget pressure
     - tier="" stays in flat mode (backwards compat)
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from unittest.mock import MagicMock
 
 import pytest
 
 from clearwing.runners.parallel.executor import (
     ParallelExecutor,
     ParallelScanConfig,
-    TargetResult,
     TierBudget,
 )
 
@@ -89,7 +88,9 @@ class TestDispatch:
 
     def test_tier_budget_and_tier_fn_runs_tiered(self):
         items = [
-            _item("a.c", "A"), _item("b.c", "B"), _item("c.c", "C"),
+            _item("a.c", "A"),
+            _item("b.c", "B"),
+            _item("c.c", "C"),
         ]
         config = ParallelScanConfig(
             items=items,
@@ -140,8 +141,10 @@ class TestTierBudgetEnforcement:
         # $6.5 rolls over to B → B has $9. All 4 B items fit.
         items = [
             _item("a.c", "A"),
-            _item("b1.c", "B"), _item("b2.c", "B"),
-            _item("b3.c", "B"), _item("b4.c", "B"),
+            _item("b1.c", "B"),
+            _item("b2.c", "B"),
+            _item("b3.c", "B"),
+            _item("b4.c", "B"),
         ]
         config = ParallelScanConfig(
             items=items,
@@ -156,7 +159,7 @@ class TestTierBudgetEnforcement:
         executor.run()
         spent = executor.spent_per_tier
         assert spent["A"] == pytest.approx(0.5)
-        assert spent["B"] == pytest.approx(2.0)   # all 4 B items completed
+        assert spent["B"] == pytest.approx(2.0)  # all 4 B items completed
 
     def test_skip_tier_c(self):
         """tier_c_fraction=0 → no Tier C items run."""
@@ -167,14 +170,16 @@ class TestTierBudgetEnforcement:
             total_cost_limit=10.0,
             runner_factory=lambda i, c: _FixedCostRunner(i, c, cost=0.5),
             tier_budget=TierBudget(
-                tier_a_fraction=0.75, tier_b_fraction=0.25, tier_c_fraction=0.0,
+                tier_a_fraction=0.75,
+                tier_b_fraction=0.25,
+                tier_c_fraction=0.0,
             ),
             item_tier_fn=lambda f: f["tier"],
             item_key_fn=lambda f: f["path"],
         )
         executor = ParallelExecutor(config)
         results = executor.run()
-        assert results == []   # no C items ran
+        assert results == []  # no C items ran
         assert executor.spent_per_tier["C"] == 0.0
 
 
@@ -197,7 +202,7 @@ class TestTierStamping:
         results = executor.run()
         for r in results:
             assert r.tier in ("A", "B", "C")
-            assert r.tier != ""   # flat mode would leave it blank
+            assert r.tier != ""  # flat mode would leave it blank
 
     def test_flat_mode_leaves_tier_blank(self):
         config = ParallelScanConfig(

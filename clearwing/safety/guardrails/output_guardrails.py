@@ -9,10 +9,12 @@ from .patterns import (
 # Patterns whose indices in DANGEROUS_COMMAND_PATTERNS are considered
 # "warning" rather than "critical".  Suspicious chains (the last group)
 # are warnings; everything else is critical.
-_SUSPICIOUS_CHAIN_LABELS = frozenset([
-    "base64 decode piped to shell",
-    "curl/wget piped to shell",
-])
+_SUSPICIOUS_CHAIN_LABELS = frozenset(
+    [
+        "base64 decode piped to shell",
+        "curl/wget piped to shell",
+    ]
+)
 
 
 class OutputGuardrail:

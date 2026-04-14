@@ -8,7 +8,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
 
 import networkx as nx
 
@@ -16,6 +15,7 @@ import networkx as nx
 @dataclass
 class Entity:
     """A node in the knowledge graph."""
+
     id: str
     entity_type: str  # target, port, service, cve, exploit, component, credential
     properties: dict = field(default_factory=dict)
@@ -29,9 +29,12 @@ class Entity:
 @dataclass
 class Relationship:
     """An edge in the knowledge graph."""
+
     source_id: str
     target_id: str
-    rel_type: str  # HAS_PORT, RUNS_SERVICE, AFFECTED_BY, EXPLOITED_WITH, HAS_COMPONENT, HAS_CREDENTIAL
+    rel_type: (
+        str  # HAS_PORT, RUNS_SERVICE, AFFECTED_BY, EXPLOITED_WITH, HAS_COMPONENT, HAS_CREDENTIAL
+    )
     properties: dict = field(default_factory=dict)
 
 
@@ -45,18 +48,33 @@ class KnowledgeGraph:
     _lock = threading.Lock()
 
     ENTITY_TYPES = (
-        "target", "port", "service", "cve", "exploit", "component", "credential",
+        "target",
+        "port",
+        "service",
+        "cve",
+        "exploit",
+        "component",
+        "credential",
         # v0.3: source-hunt entities
-        "repo", "source_file", "source_finding",
+        "repo",
+        "source_file",
+        "source_finding",
     )
     RELATIONSHIP_TYPES = (
-        "HAS_PORT", "RUNS_SERVICE", "AFFECTED_BY", "EXPLOITED_WITH",
-        "HAS_COMPONENT", "HAS_CREDENTIAL",
+        "HAS_PORT",
+        "RUNS_SERVICE",
+        "AFFECTED_BY",
+        "EXPLOITED_WITH",
+        "HAS_COMPONENT",
+        "HAS_CREDENTIAL",
         # v0.3: source-hunt relationships
-        "HAS_FILE", "HAS_FINDING", "VARIANT_OF", "RELATED_TO_CVE",
+        "HAS_FILE",
+        "HAS_FINDING",
+        "VARIANT_OF",
+        "RELATED_TO_CVE",
     )
 
-    def __init__(self, persist_path: Optional[str] = None):
+    def __init__(self, persist_path: str | None = None):
         self._graph = nx.DiGraph()
         self._persist_path = Path(persist_path).expanduser() if persist_path else None
         if self._persist_path and self._persist_path.exists():
@@ -78,7 +96,7 @@ class KnowledgeGraph:
             )
         return entity
 
-    def get_entity(self, entity_id: str) -> Optional[Entity]:
+    def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID."""
         with self._lock:
             if entity_id not in self._graph:
@@ -97,21 +115,27 @@ class KnowledgeGraph:
             results = []
             for node_id, data in self._graph.nodes(data=True):
                 if data.get("entity_type") == entity_type:
-                    results.append(Entity(
-                        id=node_id,
-                        entity_type=entity_type,
-                        properties=data.get("properties", {}),
-                        created_at=data.get("created_at", ""),
-                    ))
+                    results.append(
+                        Entity(
+                            id=node_id,
+                            entity_type=entity_type,
+                            properties=data.get("properties", {}),
+                            created_at=data.get("created_at", ""),
+                        )
+                    )
             return results
 
     # ------------------------------------------------------------------
     # Relationship management
     # ------------------------------------------------------------------
 
-    def add_relationship(self, source_id: str, target_id: str, rel_type: str, **properties) -> Relationship:
+    def add_relationship(
+        self, source_id: str, target_id: str, rel_type: str, **properties
+    ) -> Relationship:
         """Add a directed relationship between two entities."""
-        rel = Relationship(source_id=source_id, target_id=target_id, rel_type=rel_type, properties=properties)
+        rel = Relationship(
+            source_id=source_id, target_id=target_id, rel_type=rel_type, properties=properties
+        )
         with self._lock:
             self._graph.add_edge(source_id, target_id, rel_type=rel_type, properties=properties)
         return rel
@@ -122,35 +146,41 @@ class KnowledgeGraph:
         with self._lock:
             if direction in ("out", "both"):
                 for _, target, data in self._graph.out_edges(entity_id, data=True):
-                    results.append(Relationship(
-                        source_id=entity_id,
-                        target_id=target,
-                        rel_type=data.get("rel_type", ""),
-                        properties=data.get("properties", {}),
-                    ))
+                    results.append(
+                        Relationship(
+                            source_id=entity_id,
+                            target_id=target,
+                            rel_type=data.get("rel_type", ""),
+                            properties=data.get("properties", {}),
+                        )
+                    )
             if direction in ("in", "both"):
                 for source, _, data in self._graph.in_edges(entity_id, data=True):
-                    results.append(Relationship(
-                        source_id=source,
-                        target_id=entity_id,
-                        rel_type=data.get("rel_type", ""),
-                        properties=data.get("properties", {}),
-                    ))
+                    results.append(
+                        Relationship(
+                            source_id=source,
+                            target_id=entity_id,
+                            rel_type=data.get("rel_type", ""),
+                            properties=data.get("properties", {}),
+                        )
+                    )
         return results
 
-    def get_neighbors(self, entity_id: str, rel_type: Optional[str] = None) -> list[Entity]:
+    def get_neighbors(self, entity_id: str, rel_type: str | None = None) -> list[Entity]:
         """Get neighboring entities, optionally filtered by relationship type."""
         with self._lock:
             neighbors = []
             for _, target, data in self._graph.out_edges(entity_id, data=True):
                 if rel_type is None or data.get("rel_type") == rel_type:
                     node_data = self._graph.nodes.get(target, {})
-                    neighbors.append(Entity(
-                        id=target,
-                        entity_type=node_data.get("entity_type", "unknown"),
-                        properties=node_data.get("properties", {}),
-                        created_at=node_data.get("created_at", ""),
-                    ))
+                    neighbors.append(
+                        Entity(
+                            id=target,
+                            entity_type=node_data.get("entity_type", "unknown"),
+                            properties=node_data.get("properties", {}),
+                            created_at=node_data.get("created_at", ""),
+                        )
+                    )
             return neighbors
 
     # ------------------------------------------------------------------
@@ -233,9 +263,13 @@ class KnowledgeGraph:
         self.add_relationship(service_id, cve, "AFFECTED_BY")
         return entity
 
-    def add_exploit_result(self, cve: str, exploit_name: str, success: bool = False, **kwargs) -> Entity:
+    def add_exploit_result(
+        self, cve: str, exploit_name: str, success: bool = False, **kwargs
+    ) -> Entity:
         exploit_id = f"exploit:{exploit_name}"
-        entity = self.add_entity("exploit", exploit_id, name=exploit_name, success=success, **kwargs)
+        entity = self.add_entity(
+            "exploit", exploit_id, name=exploit_name, success=success, **kwargs
+        )
         self.add_relationship(cve, exploit_id, "EXPLOITED_WITH")
         return entity
 
@@ -282,7 +316,8 @@ class KnowledgeGraph:
         # Auto-ensure the file entity exists
         if self.get_entity(file_id) is None:
             self.add_source_file(
-                repo_url, file_path,
+                repo_url,
+                file_path,
                 language=finding.get("language", ""),
             )
 
@@ -320,7 +355,7 @@ class KnowledgeGraph:
     # Persistence
     # ------------------------------------------------------------------
 
-    def save(self, path: Optional[str] = None):
+    def save(self, path: str | None = None):
         """Serialize the graph to a JSON file."""
         save_path = Path(path).expanduser() if path else self._persist_path
         if not save_path:

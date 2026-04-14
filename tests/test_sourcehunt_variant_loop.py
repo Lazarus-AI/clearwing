@@ -4,24 +4,21 @@ The variant loop compounds finding density within a single run by turning
 each verified finding into a search pattern and re-feeding matches as
 suspicion-level variant findings.
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from clearwing.sourcehunt.variant_loop import (
     VariantLoop,
     VariantLoopConfig,
     VariantLoopResult,
-    VariantMatch,
     VariantPattern,
     VariantPatternGenerator,
     VariantSearcher,
 )
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 
@@ -54,10 +51,12 @@ def _make_finding(**kwargs) -> dict:
 
 class TestVariantPatternGenerator:
     def test_basic_generation(self):
-        llm = _mock_llm({
-            "grep_regex": r"memcpy\s*\([^)]*len[^)]*\)",
-            "semantic_description": "memcpy with length variable",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": r"memcpy\s*\([^)]*len[^)]*\)",
+                "semantic_description": "memcpy with length variable",
+            }
+        )
         gen = VariantPatternGenerator(llm)
         pattern = gen.generate(_make_finding())
         assert pattern is not None
@@ -128,17 +127,19 @@ class TestVariantSearcher:
 
 class TestVariantLoop:
     def test_run_once_generates_seeds(self):
-        llm = _mock_llm({
-            "grep_regex": r"memcpy",
-            "semantic_description": "memcpy variant",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": r"memcpy",
+                "semantic_description": "memcpy variant",
+            }
+        )
         loop = VariantLoop(pattern_gen=VariantPatternGenerator(llm))
         verified = [_make_finding(file="src/codec_a.c", line_number=9)]
         result = loop.run_once(verified, str(FIXTURE_C_PROPAGATION))
 
         assert isinstance(result, VariantLoopResult)
         assert result.patterns_generated == 1
-        assert result.matches_found >= 2   # codec_b and codec_c
+        assert result.matches_found >= 2  # codec_b and codec_c
         assert result.iterations == 1
         for seed in result.seeds:
             assert seed.original_finding["id"] == "hunter-abc"
@@ -147,10 +148,12 @@ class TestVariantLoop:
 
     def test_run_once_respects_already_seen(self):
         """Locations in already_seen_locations should not generate seeds."""
-        llm = _mock_llm({
-            "grep_regex": r"memcpy",
-            "semantic_description": "memcpy variant",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": r"memcpy",
+                "semantic_description": "memcpy variant",
+            }
+        )
         loop = VariantLoop(pattern_gen=VariantPatternGenerator(llm))
 
         # Pre-claim codec_b.c lines 6-10
@@ -185,9 +188,10 @@ class TestVariantLoop:
         """If pattern generation fails for one finding, others still run."""
         llm = MagicMock()
         llm.invoke.side_effect = [
-            Exception("rate limited"),   # first finding fails
-            _mock_llm_response({"grep_regex": "memcpy",
-                                "semantic_description": "ok"}),  # second succeeds
+            Exception("rate limited"),  # first finding fails
+            _mock_llm_response(
+                {"grep_regex": "memcpy", "semantic_description": "ok"}
+            ),  # second succeeds
         ]
         loop = VariantLoop(pattern_gen=VariantPatternGenerator(llm))
         result = loop.run_once(
@@ -216,10 +220,12 @@ class TestMultiIterationDriver:
     def test_run_single_iteration_when_no_seeds_found(self):
         """If the first pass finds nothing, the loop terminates after 1 iteration."""
         # Regex doesn't match anything in the fixture
-        llm = _mock_llm({
-            "grep_regex": "xyzzy_never_matches",
-            "semantic_description": "nothing",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": "xyzzy_never_matches",
+                "semantic_description": "nothing",
+            }
+        )
         loop = VariantLoop(
             pattern_gen=VariantPatternGenerator(llm),
             config=VariantLoopConfig(max_iterations=5),
@@ -238,10 +244,12 @@ class TestMultiIterationDriver:
         """Second iteration produces no new seeds → loop stops at 2."""
         # Already-seen dict grows each iteration; once the regex exhausts
         # everything new, the next pass returns zero seeds.
-        llm = _mock_llm({
-            "grep_regex": "memcpy",
-            "semantic_description": "memcpy",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": "memcpy",
+                "semantic_description": "memcpy",
+            }
+        )
         loop = VariantLoop(
             pattern_gen=VariantPatternGenerator(llm),
             config=VariantLoopConfig(max_iterations=5),
@@ -253,17 +261,19 @@ class TestMultiIterationDriver:
         # First pass finds variants; second pass finds nothing (already_seen
         # now includes them). Stops at 2.
         assert result.iterations == 2
-        assert result.matches_found >= 2   # from the first pass
+        assert result.matches_found >= 2  # from the first pass
 
     def test_run_respects_max_iterations_cap(self):
         """max_iterations hard-cap the loop."""
         llm = MagicMock()
         # Return a pattern that always matches something
         response = MagicMock()
-        response.content = json.dumps({
-            "grep_regex": "memcpy",
-            "semantic_description": "memcpy",
-        })
+        response.content = json.dumps(
+            {
+                "grep_regex": "memcpy",
+                "semantic_description": "memcpy",
+            }
+        )
         llm.invoke.return_value = response
 
         loop = VariantLoop(
@@ -281,10 +291,12 @@ class TestMultiIterationDriver:
 
     def test_run_with_reverify_callback_compounds(self):
         """When reverify_callback returns new findings, the next pass uses them."""
-        llm = _mock_llm({
-            "grep_regex": "memcpy",
-            "semantic_description": "memcpy",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": "memcpy",
+                "semantic_description": "memcpy",
+            }
+        )
         loop = VariantLoop(
             pattern_gen=VariantPatternGenerator(llm),
             config=VariantLoopConfig(max_iterations=3),
@@ -297,13 +309,15 @@ class TestMultiIterationDriver:
             reverify_calls.append(len(seeds))
             # Return a new finding at a fresh file so the NEXT pass can look
             # for variants of the NEW finding rather than the original.
-            return [_make_finding(
-                id=f"reverified-{len(reverify_calls)}",
-                file="src/codec_b.c",
-                line_number=100 + len(reverify_calls),
-            )]
+            return [
+                _make_finding(
+                    id=f"reverified-{len(reverify_calls)}",
+                    file="src/codec_b.c",
+                    line_number=100 + len(reverify_calls),
+                )
+            ]
 
-        result = loop.run(
+        loop.run(
             [_make_finding(file="src/codec_a.c", line_number=9)],
             str(FIXTURE_C_PROPAGATION),
             reverify_callback=reverify,
@@ -313,17 +327,19 @@ class TestMultiIterationDriver:
 
     def test_run_reverify_callback_empty_result_stops_loop(self):
         """If reverify returns [], the next iteration has no input → stop."""
-        llm = _mock_llm({
-            "grep_regex": "memcpy",
-            "semantic_description": "memcpy",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": "memcpy",
+                "semantic_description": "memcpy",
+            }
+        )
         loop = VariantLoop(
             pattern_gen=VariantPatternGenerator(llm),
             config=VariantLoopConfig(max_iterations=5),
         )
 
         def reverify(seeds):
-            return []   # nothing survived re-verification
+            return []  # nothing survived re-verification
 
         result = loop.run(
             [_make_finding(file="src/codec_a.c", line_number=9)],
@@ -336,10 +352,12 @@ class TestMultiIterationDriver:
 
     def test_run_per_iteration_callback_fires(self):
         """per_iteration_callback should fire after each run_once pass."""
-        llm = _mock_llm({
-            "grep_regex": "memcpy",
-            "semantic_description": "x",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": "memcpy",
+                "semantic_description": "x",
+            }
+        )
         callback_calls = []
         config = VariantLoopConfig(
             max_iterations=2,
@@ -361,10 +379,12 @@ class TestMultiIterationDriver:
 
     def test_run_aggregates_seeds_across_iterations(self):
         """The returned VariantLoopResult sums seeds across passes."""
-        llm = _mock_llm({
-            "grep_regex": "memcpy",
-            "semantic_description": "x",
-        })
+        llm = _mock_llm(
+            {
+                "grep_regex": "memcpy",
+                "semantic_description": "x",
+            }
+        )
         loop = VariantLoop(
             pattern_gen=VariantPatternGenerator(llm),
             config=VariantLoopConfig(max_iterations=3),
@@ -380,6 +400,7 @@ class TestMultiIterationDriver:
 class TestRunnerVariantLoopIntegration:
     def test_runner_initializes_with_variant_loop_enabled(self, tmp_path):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),
@@ -391,6 +412,7 @@ class TestRunnerVariantLoopIntegration:
 
     def test_variant_loop_can_be_disabled(self, tmp_path):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),

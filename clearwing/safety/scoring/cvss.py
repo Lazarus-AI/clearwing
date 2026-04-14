@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class CVSSVector:
     """CVSS v3.1 Base Score vector."""
+
     # Attack Vector
     attack_vector: str = "N"  # N=Network, A=Adjacent, L=Local, P=Physical
     # Attack Complexity
@@ -70,9 +70,9 @@ class CVSSCalculator:
         """Calculate the CVSS v3.1 base score (0.0 - 10.0)."""
         # Impact Sub Score
         isc_base = 1 - (
-            (1 - _IMPACT_WEIGHTS[vector.confidentiality]) *
-            (1 - _IMPACT_WEIGHTS[vector.integrity]) *
-            (1 - _IMPACT_WEIGHTS[vector.availability])
+            (1 - _IMPACT_WEIGHTS[vector.confidentiality])
+            * (1 - _IMPACT_WEIGHTS[vector.integrity])
+            * (1 - _IMPACT_WEIGHTS[vector.availability])
         )
 
         if vector.scope == "U":
@@ -83,11 +83,11 @@ class CVSSCalculator:
         # Exploitability Sub Score
         pr_weights = _PR_WEIGHTS_CHANGED if vector.scope == "C" else _PR_WEIGHTS_UNCHANGED
         exploitability = (
-            8.22 *
-            _AV_WEIGHTS[vector.attack_vector] *
-            _AC_WEIGHTS[vector.attack_complexity] *
-            pr_weights[vector.privileges_required] *
-            _UI_WEIGHTS[vector.user_interaction]
+            8.22
+            * _AV_WEIGHTS[vector.attack_vector]
+            * _AC_WEIGHTS[vector.attack_complexity]
+            * pr_weights[vector.privileges_required]
+            * _UI_WEIGHTS[vector.user_interaction]
         )
 
         if impact <= 0:
@@ -123,22 +123,94 @@ class CVSSCalculator:
 
 # Common vulnerability type presets
 VULN_PRESETS = {
-    "rce_network": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                               user_interaction="N", scope="C", confidentiality="H", integrity="H", availability="H"),
-    "rce_authenticated": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="L",
-                                     user_interaction="N", scope="U", confidentiality="H", integrity="H", availability="H"),
-    "sqli": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                        user_interaction="N", scope="U", confidentiality="H", integrity="H", availability="N"),
-    "xss_reflected": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                                 user_interaction="R", scope="C", confidentiality="L", integrity="L", availability="N"),
-    "xss_stored": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="L",
-                              user_interaction="R", scope="C", confidentiality="L", integrity="L", availability="N"),
-    "ssrf": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                        user_interaction="N", scope="C", confidentiality="H", integrity="N", availability="N"),
-    "path_traversal": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                                  user_interaction="N", scope="U", confidentiality="H", integrity="N", availability="N"),
-    "info_disclosure": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                                   user_interaction="N", scope="U", confidentiality="L", integrity="N", availability="N"),
-    "dos": CVSSVector(attack_vector="N", attack_complexity="L", privileges_required="N",
-                       user_interaction="N", scope="U", confidentiality="N", integrity="N", availability="H"),
+    "rce_network": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="N",
+        scope="C",
+        confidentiality="H",
+        integrity="H",
+        availability="H",
+    ),
+    "rce_authenticated": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="L",
+        user_interaction="N",
+        scope="U",
+        confidentiality="H",
+        integrity="H",
+        availability="H",
+    ),
+    "sqli": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="N",
+        scope="U",
+        confidentiality="H",
+        integrity="H",
+        availability="N",
+    ),
+    "xss_reflected": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="R",
+        scope="C",
+        confidentiality="L",
+        integrity="L",
+        availability="N",
+    ),
+    "xss_stored": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="L",
+        user_interaction="R",
+        scope="C",
+        confidentiality="L",
+        integrity="L",
+        availability="N",
+    ),
+    "ssrf": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="N",
+        scope="C",
+        confidentiality="H",
+        integrity="N",
+        availability="N",
+    ),
+    "path_traversal": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="N",
+        scope="U",
+        confidentiality="H",
+        integrity="N",
+        availability="N",
+    ),
+    "info_disclosure": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="N",
+        scope="U",
+        confidentiality="L",
+        integrity="N",
+        availability="N",
+    ),
+    "dos": CVSSVector(
+        attack_vector="N",
+        attack_complexity="L",
+        privileges_required="N",
+        user_interaction="N",
+        scope="U",
+        confidentiality="N",
+        integrity="N",
+        availability="H",
+    ),
 }

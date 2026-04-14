@@ -5,24 +5,21 @@ compiles them in the sandbox, runs them, and seeds crashes into the hunter
 pipeline BEFORE the ReAct hunters start. These tests use mocked LLM and
 mocked sandbox so they run fast and don't need docker or gcc.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from clearwing.sandbox.container import ExecResult
 from clearwing.sourcehunt.harness_generator import (
     HarnessGenerator,
     HarnessGeneratorConfig,
     HarnessGeneratorResult,
-    SeededCrash,
     _guess_target_function,
     _parse_sanitizer_report,
     _strip_markdown_fences,
 )
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 
@@ -89,10 +86,14 @@ class _FakeSandbox:
 class TestEligibility:
     def test_non_parser_file_skipped(self):
         gen = HarnessGenerator(_mock_llm("int x;"), sandbox_factory=None)
-        ft = _ft("util.c", str(FIXTURE_C_PROPAGATION / "src/codec_a.c"),
-                 tags=["memory_unsafe"], surface=5)
+        ft = _ft(
+            "util.c",
+            str(FIXTURE_C_PROPAGATION / "src/codec_a.c"),
+            tags=["memory_unsafe"],
+            surface=5,
+        )
         eligible = gen._select_eligible([ft])
-        assert eligible == []   # no parser/fuzzable tag
+        assert eligible == []  # no parser/fuzzable tag
 
     def test_parser_tagged_file_eligible(self):
         gen = HarnessGenerator(_mock_llm(""), sandbox_factory=None)
@@ -222,10 +223,12 @@ int decode(const uint8_t *d, size_t n) {
             "}\n"
         )
         # Script: compile OK, run OK (exit 0)
-        fake = _FakeSandbox([
-            ExecResult(exit_code=0, stdout="", stderr="", duration_seconds=0.1),  # compile
-            ExecResult(exit_code=0, stdout="", stderr="", duration_seconds=5.0),  # run
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(exit_code=0, stdout="", stderr="", duration_seconds=0.1),  # compile
+                ExecResult(exit_code=0, stdout="", stderr="", duration_seconds=5.0),  # run
+            ]
+        )
         gen = HarnessGenerator(
             harness_llm,
             sandbox_factory=lambda: fake,
@@ -242,13 +245,17 @@ int decode(const uint8_t *d, size_t n) {
         """Harness run exits non-zero → crash report parsed."""
         src_file = tmp_path / "parser.c"
         src_file.write_text("int decode(const unsigned char *d, unsigned n) { return 0; }\n")
-        harness_llm = _mock_llm("int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }")
+        harness_llm = _mock_llm(
+            "int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }"
+        )
         # Script: compile OK, run crashes with ASan report
         crash_stdout = "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n#0 in decode\n"
-        fake = _FakeSandbox([
-            ExecResult(exit_code=0, stdout="", stderr="", duration_seconds=0.1),
-            ExecResult(exit_code=1, stdout=crash_stdout, stderr="", duration_seconds=2.0),
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(exit_code=0, stdout="", stderr="", duration_seconds=0.1),
+                ExecResult(exit_code=1, stdout=crash_stdout, stderr="", duration_seconds=2.0),
+            ]
+        )
         gen = HarnessGenerator(
             harness_llm,
             sandbox_factory=lambda: fake,
@@ -263,15 +270,19 @@ int decode(const uint8_t *d, size_t n) {
     def test_compile_failure_returns_none(self, tmp_path):
         src_file = tmp_path / "parser.c"
         src_file.write_text("int decode(unsigned char *d, int n) { return *d; }\n")
-        harness_llm = _mock_llm("int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }")
-        fake = _FakeSandbox([
-            # Compile fails
-            ExecResult(exit_code=1, stdout="syntax error", stderr="", duration_seconds=0.1),
-        ])
+        harness_llm = _mock_llm(
+            "int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }"
+        )
+        fake = _FakeSandbox(
+            [
+                # Compile fails
+                ExecResult(exit_code=1, stdout="syntax error", stderr="", duration_seconds=0.1),
+            ]
+        )
         gen = HarnessGenerator(harness_llm, sandbox_factory=lambda: fake)
         ft = _ft("parser.c", str(src_file), tags=["parser"], surface=5)
         crash = gen._fuzz_one(ft, str(tmp_path))
-        assert crash is None   # no crash to seed
+        assert crash is None  # no crash to seed
         assert fake.stopped is True
 
     def test_no_target_function_returns_none(self, tmp_path):
@@ -312,14 +323,18 @@ class TestRunTopLevel:
             # First call: clean run; second call: crashing run
             call_count["n"] += 1
             if call_count["n"] == 1:
-                return _FakeSandbox([
-                    ExecResult(0, "", "", 0.1),   # compile
-                    ExecResult(0, "", "", 2.0),   # run
-                ])
-            return _FakeSandbox([
-                ExecResult(0, "", "", 0.1),
-                ExecResult(1, "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n", "", 2.0),
-            ])
+                return _FakeSandbox(
+                    [
+                        ExecResult(0, "", "", 0.1),  # compile
+                        ExecResult(0, "", "", 2.0),  # run
+                    ]
+                )
+            return _FakeSandbox(
+                [
+                    ExecResult(0, "", "", 0.1),
+                    ExecResult(1, "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n", "", 2.0),
+                ]
+            )
 
         gen = HarnessGenerator(
             _mock_llm("int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }"),
@@ -345,6 +360,7 @@ class TestHuntPoolSeededCrashPlumbing:
     def test_pool_passes_seeded_crash_to_hunter(self):
         """HuntPoolConfig.seeded_crashes_by_file → build_hunter_agent seeded_crash."""
         from unittest.mock import MagicMock, patch
+
         from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
 
         ft = _ft("parser.c", "/abs/parser.c", tags=["parser"], surface=5)

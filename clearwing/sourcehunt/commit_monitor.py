@@ -15,17 +15,16 @@ On each detected commit:
 v0.3 polls with `git fetch` every `poll_interval_seconds`. A webhook
 integration can replace the poll loop in v1.0+.
 """
+
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable, Optional
 
-from .callgraph import CallGraph, CallGraphBuilder
+from .callgraph import CallGraphBuilder
 from .github_checks import (
     CheckRunOutcome,
     GitHubChecksConfig,
@@ -38,26 +37,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CommitMonitorConfig:
-    repo_path: str                      # absolute path to a git clone
+    repo_path: str  # absolute path to a git clone
     branch: str = "main"
-    poll_interval_seconds: int = 300    # default: 5 minutes
-    max_iterations: int = 0             # 0 = infinite (until cancelled)
+    poll_interval_seconds: int = 300  # default: 5 minutes
+    max_iterations: int = 0  # 0 = infinite (until cancelled)
     output_dir: str = "./sourcehunt-results/watch"
     depth: str = "standard"
     budget_usd: float = 5.0
-    on_finding: Optional[Callable] = None
-    runner_factory: Optional[Callable] = None   # test injection point
+    on_finding: Callable | None = None
+    runner_factory: Callable | None = None  # test injection point
     # v0.4 GitHub Checks integration
     enable_github_checks: bool = False
-    github_checks_publisher: Optional[GitHubChecksPublisher] = None
+    github_checks_publisher: GitHubChecksPublisher | None = None
     github_check_name: str = "Overwing Sourcehunt"
-    github_owner: Optional[str] = None
-    github_repo: Optional[str] = None
+    github_owner: str | None = None
+    github_repo: str | None = None
 
 
 @dataclass
 class CommitScanResult:
     """One pass of the commit monitor loop."""
+
     commit_sha: str
     parent_sha: str
     changed_files: list[str] = field(default_factory=list)
@@ -65,7 +65,7 @@ class CommitScanResult:
     findings: list[Finding] = field(default_factory=list)
     duration_seconds: float = 0.0
     notes: str = ""
-    check_run_outcome: Optional[CheckRunOutcome] = None   # v0.4
+    check_run_outcome: CheckRunOutcome | None = None  # v0.4
 
 
 class CommitMonitor:
@@ -74,10 +74,10 @@ class CommitMonitor:
     def __init__(self, config: CommitMonitorConfig):
         self.config = config
         self._cancelled = False
-        self._last_seen_sha: Optional[str] = None
+        self._last_seen_sha: str | None = None
         # v0.4: optional GitHub Checks publisher for posting results as
         # check runs on each scanned commit
-        self._checks_publisher: Optional[GitHubChecksPublisher] = None
+        self._checks_publisher: GitHubChecksPublisher | None = None
         if config.enable_github_checks:
             self._checks_publisher = config.github_checks_publisher or GitHubChecksPublisher(
                 GitHubChecksConfig(
@@ -153,8 +153,10 @@ class CommitMonitor:
                 if check_outcome.published:
                     logger.info(
                         "Published check run %s for %s: %s (%d annotations)",
-                        check_outcome.check_run_id, commit_sha[:8],
-                        check_outcome.conclusion, check_outcome.annotation_count,
+                        check_outcome.check_run_id,
+                        commit_sha[:8],
+                        check_outcome.conclusion,
+                        check_outcome.annotation_count,
                     )
                 else:
                     logger.warning("Check run publish skipped: %s", check_outcome.notes)
@@ -173,7 +175,7 @@ class CommitMonitor:
 
     # --- git helpers --------------------------------------------------------
 
-    def _poll_for_new_commit(self) -> Optional[str]:
+    def _poll_for_new_commit(self) -> str | None:
         """Fetch the branch and return the new HEAD SHA if it changed.
 
         Returns None if there's no new commit since the last poll.
@@ -183,7 +185,7 @@ class CommitMonitor:
         head = head.strip()
         if self._last_seen_sha is None:
             self._last_seen_sha = head
-            return head   # First poll — process the current HEAD
+            return head  # First poll — process the current HEAD
         if head == self._last_seen_sha:
             return None
         self._last_seen_sha = head
@@ -251,6 +253,7 @@ class CommitMonitor:
         else:
             from .pool import TierBudget
             from .runner import SourceHuntRunner
+
             runner = SourceHuntRunner(
                 repo_url=self.config.repo_path,
                 local_path=self.config.repo_path,

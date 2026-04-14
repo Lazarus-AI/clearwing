@@ -20,6 +20,7 @@ JSONL remains the portable persistence format — both vector backends read
 from it at load time, so a store written by one client is readable by any
 other.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,7 +33,6 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -56,12 +56,13 @@ def default_store_path() -> Path:
 @dataclass
 class Mechanism:
     """An abstract vulnerability pattern extracted from a verified finding."""
+
     id: str
-    summary: str              # one-sentence abstract mechanism
+    summary: str  # one-sentence abstract mechanism
     cwe: str
     language: str
-    tags: list[str]           # e.g. ["length_field", "widening", "memcpy"]
-    keywords: list[str]       # for cheap keyword-match recall
+    tags: list[str]  # e.g. ["length_field", "widening", "memcpy"]
+    keywords: list[str]  # for cheap keyword-match recall
     what_made_it_exploitable: str
     source_finding_id: str
     source_repo: str = ""
@@ -82,7 +83,7 @@ class Mechanism:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Mechanism":
+    def from_dict(cls, d: dict) -> Mechanism:
         return cls(
             id=d["id"],
             summary=d["summary"],
@@ -144,14 +145,16 @@ class MechanismExtractor:
         self,
         finding: Finding,
         source_repo: str = "",
-    ) -> Optional[Mechanism]:
+    ) -> Mechanism | None:
         """Extract a Mechanism from one verified finding. Returns None on failure."""
         user_msg = self._build_user_message(finding)
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=MECHANISM_EXTRACTION_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=MECHANISM_EXTRACTION_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception:
             logger.debug("Mechanism extraction LLM call failed", exc_info=True)
             return None
@@ -185,7 +188,7 @@ class MechanismExtractor:
         }
         return f"Finding:\n{json.dumps(view, indent=2)}\n"
 
-    def _parse_response(self, content: str) -> Optional[dict]:
+    def _parse_response(self, content: str) -> dict | None:
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None
@@ -199,7 +202,7 @@ class MechanismExtractor:
 # --- Store ------------------------------------------------------------------
 
 
-RecallBackend = str   # "keyword" | "tfidf" | "chromadb" | "auto"
+RecallBackend = str  # "keyword" | "tfidf" | "chromadb" | "auto"
 
 
 def _detect_best_backend() -> str:
@@ -211,6 +214,7 @@ def _detect_best_backend() -> str:
     """
     try:
         import chromadb  # noqa: F401
+
         return "chromadb"
     except ImportError:
         return "tfidf"
@@ -226,7 +230,7 @@ class MechanismStore:
 
     def __init__(
         self,
-        path: Optional[Path] = None,
+        path: Path | None = None,
         backend: RecallBackend = "auto",
     ):
         self.path = path or default_store_path()
@@ -253,7 +257,7 @@ class MechanismStore:
         if not self.path.exists():
             return []
         out: list[Mechanism] = []
-        with open(self.path, "r", encoding="utf-8") as f:
+        with open(self.path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -269,7 +273,7 @@ class MechanismStore:
         language: str,
         tags: list[str],
         top_n: int = 3,
-        query_text: Optional[str] = None,
+        query_text: str | None = None,
     ) -> list[Mechanism]:
         """Retrieve relevant mechanisms from the store.
 
@@ -331,7 +335,7 @@ class MechanismStore:
         language: str,
         tags: list[str],
         top_n: int,
-        query_text: Optional[str],
+        query_text: str | None,
     ) -> list[Mechanism]:
         """Pure-Python TF-IDF over the mechanism corpus.
 
@@ -351,7 +355,7 @@ class MechanismStore:
 
         # 2. Tokenize and compute TF per doc
         tokenized = [_tokenize(d) for d in docs]
-        tf_per_doc = [Counter(tokens) for tokens in tokenized]
+        [Counter(tokens) for tokens in tokenized]
 
         # 3. Compute document frequency
         df: dict[str, int] = Counter()
@@ -361,18 +365,14 @@ class MechanismStore:
 
         # 4. IDF
         n_docs = len(tokenized) or 1
-        idf: dict[str, float] = {
-            term: math.log((n_docs + 1) / (df[term] + 1)) + 1.0
-            for term in df
-        }
+        idf: dict[str, float] = {term: math.log((n_docs + 1) / (df[term] + 1)) + 1.0 for term in df}
 
         # 5. TF-IDF vectors (as sparse dicts)
         def vectorize(token_list: list[str]) -> dict[str, float]:
             tf = Counter(token_list)
             if not tf:
                 return {}
-            return {t: (count / len(token_list)) * idf.get(t, 0.0)
-                    for t, count in tf.items()}
+            return {t: (count / len(token_list)) * idf.get(t, 0.0) for t, count in tf.items()}
 
         doc_vecs = [vectorize(tokens) for tokens in tokenized]
 
@@ -392,7 +392,7 @@ class MechanismStore:
 
         # 7. Score by cosine similarity + language boost
         scored: list[tuple[float, Mechanism]] = []
-        for m, doc_vec in zip(mechanisms, doc_vecs):
+        for m, doc_vec in zip(mechanisms, doc_vecs, strict=False):
             score = _cosine_similarity(query_vec, doc_vec)
             if m.language and m.language == language:
                 score += 0.5
@@ -409,8 +409,8 @@ class MechanismStore:
         language: str,
         tags: list[str],
         top_n: int,
-        query_text: Optional[str],
-    ) -> Optional[list[Mechanism]]:
+        query_text: str | None,
+    ) -> list[Mechanism] | None:
         """chromadb-backed recall. Returns None on import / runtime error
         so the caller falls back to TF-IDF."""
         try:
@@ -433,8 +433,7 @@ class MechanismStore:
                 docs = [self._mechanism_to_doc(m) for m in mechanisms]
                 ids = [m.id for m in mechanisms]
                 metadatas = [
-                    {"language": m.language, "tags": ",".join(m.tags),
-                     "cwe": m.cwe}
+                    {"language": m.language, "tags": ",".join(m.tags), "cwe": m.cwe}
                     for m in mechanisms
                 ]
                 collection.add(
@@ -508,11 +507,18 @@ def format_mechanisms_for_prompt(mechanisms: list[Mechanism]) -> str:
 
 
 _LANG_EXT = {
-    ".c": "c", ".h": "c",
-    ".cpp": "cpp", ".hpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
     ".py": "python",
-    ".js": "javascript", ".ts": "typescript",
-    ".go": "go", ".rs": "rust", ".java": "java",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
 }
 
 
@@ -522,11 +528,39 @@ _LANG_EXT = {
 # Tokens we strip because they're too common to discriminate. Deliberately
 # short — security terminology is specific enough that a general-purpose
 # stopword list would hurt recall.
-_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
-    "has", "have", "in", "into", "is", "it", "its", "not", "of", "on",
-    "or", "that", "the", "this", "to", "was", "were", "will", "with",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "has",
+        "have",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "not",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "were",
+        "will",
+        "with",
+    }
+)
 
 
 def _tokenize(text: str) -> list[str]:

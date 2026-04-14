@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 from clearwing.agent.state import AgentState
 
@@ -34,7 +34,10 @@ class ReporterAgent:
     def build_graph(self):
         """Build and compile the reporter sub-graph."""
         from clearwing.agent.tools.meta.reporting_tools import (
-            generate_report, save_report, query_scan_history, search_cves,
+            generate_report,
+            query_scan_history,
+            save_report,
+            search_cves,
         )
 
         tools = [generate_report, save_report, query_scan_history, search_cves]

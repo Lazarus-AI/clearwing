@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional
 from langchain_core.tools import tool
 from langgraph.types import interrupt
-
 
 # Module-level browser state
 _browser_state = {
@@ -22,6 +20,7 @@ def _ensure_browser():
         return
 
     from playwright.sync_api import sync_playwright
+
     pw = sync_playwright().start()
     _browser_state["_pw"] = pw
     _browser_state["browser"] = pw.chromium.launch(headless=True)
@@ -31,7 +30,7 @@ def _ensure_browser():
     )
 
 
-def _get_page(tab_name: Optional[str] = None):
+def _get_page(tab_name: str | None = None):
     """Get the active page, or create one if none exists."""
     _ensure_browser()
     name = tab_name or _browser_state.get("active_tab") or "default"
@@ -202,12 +201,16 @@ def browser_set_cookie(name: str, value: str, domain: str, path: str = "/") -> d
     """
     try:
         _ensure_browser()
-        _browser_state["context"].add_cookies([{
-            "name": name,
-            "value": value,
-            "domain": domain,
-            "path": path,
-        }])
+        _browser_state["context"].add_cookies(
+            [
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": path,
+                }
+            ]
+        )
         return {"success": True, "name": name, "domain": domain}
     except Exception as e:
         return {"success": False, "name": name, "domain": domain, "error": str(e)}
@@ -265,12 +268,14 @@ def browser_list_tabs() -> list[dict]:
     tabs = []
     for name, page in _browser_state.get("tabs", {}).items():
         try:
-            tabs.append({
-                "name": name,
-                "url": page.url,
-                "title": page.title(),
-                "active": name == _browser_state.get("active_tab"),
-            })
+            tabs.append(
+                {
+                    "name": name,
+                    "url": page.url,
+                    "title": page.title(),
+                    "active": name == _browser_state.get("active_tab"),
+                }
+            )
         except Exception:
             tabs.append({"name": name, "url": "?", "title": "?", "active": False})
     return tabs
@@ -299,7 +304,7 @@ def browser_close(tab_name: str = None) -> dict:
         return {"closed": tab_name, "remaining_tabs": remaining}
     else:
         # Close everything
-        for name, page in _browser_state["tabs"].items():
+        for _name, page in _browser_state["tabs"].items():
             try:
                 page.close()
             except Exception:

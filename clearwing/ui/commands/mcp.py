@@ -2,7 +2,7 @@
 
 
 def add_parser(subparsers):
-    subparsers.add_parser('mcp', help='Start the MCP stdio server for external agents/IDEs')
+    subparsers.add_parser("mcp", help="Start the MCP stdio server for external agents/IDEs")
 
 
 def handle(cli, args):

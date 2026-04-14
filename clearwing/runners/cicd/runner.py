@@ -4,7 +4,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from .sarif import SARIFGenerator
@@ -97,13 +97,16 @@ class CICDRunner:
         self._validate_target()
 
         # 2. Create agent with session_id
-        from clearwing.agent import create_agent
         from langchain_core.messages import HumanMessage
+
+        from clearwing.agent import create_agent
 
         session_id = uuid.uuid4().hex[:8]
         graph = create_agent(
-            model_name=self.model, session_id=session_id,
-            base_url=self.base_url, api_key=self.api_key,
+            model_name=self.model,
+            session_id=session_id,
+            base_url=self.base_url,
+            api_key=self.api_key,
         )
         config = {"configurable": {"thread_id": f"cicd-{session_id}"}}
 
@@ -200,9 +203,7 @@ class CICDRunner:
         """Build the goal message based on scan depth."""
         base = self.DEPTH_GOALS.get(self.depth)
         if base is None:
-            raise ValueError(
-                f"Unknown depth '{self.depth}'. Must be one of: quick, standard, deep"
-            )
+            raise ValueError(f"Unknown depth '{self.depth}'. Must be one of: quick, standard, deep")
         return (
             f"TARGET: {self.target}\n\n"
             f"{base}\n\n"

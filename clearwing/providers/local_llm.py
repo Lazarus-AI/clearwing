@@ -1,7 +1,7 @@
 class LocalLLMManager:
     """Tactical Edge / Air-Gapped Autonomy.
-    
-    This class provides the configuration and lifecycle management to run 
+
+    This class provides the configuration and lifecycle management to run
     Clearwing using local, open-weights models (like Llama-3 or Mistral)
     via vLLM or Ollama for use in disconnected, tactical environments.
     """
@@ -9,14 +9,14 @@ class LocalLLMManager:
     @staticmethod
     def get_tactical_config() -> dict:
         """Returns the configuration block to pass to the LangGraph agent for local execution."""
-        # In a real environment, this would verify the local GPU state, 
+        # In a real environment, this would verify the local GPU state,
         # ensure Ollama/vLLM is running, and return the connection params.
         return {
             "model_name": "llama3:instruct",  # Local model name
             "base_url": "http://127.0.0.1:11434/v1",  # Local inference server
             "api_key": "tactical-edge-no-key",
             "is_local": True,
-            "environment": "air_gapped"
+            "environment": "air_gapped",
         }
 
     @staticmethod

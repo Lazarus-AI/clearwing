@@ -11,6 +11,7 @@ Critical assertions:
 - Chunking works for >chunk_size files
 - The FFmpeg-style file (surface=1, influence=5) doesn't get dropped
 """
+
 from __future__ import annotations
 
 import json
@@ -19,9 +20,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from clearwing.sourcehunt.ranker import (
+    RANKER_SYSTEM_PROMPT,
     Ranker,
     RankerConfig,
-    RANKER_SYSTEM_PROMPT,
 )
 
 
@@ -73,15 +74,17 @@ class TestRanker:
         llm.invoke.assert_not_called()
 
     def test_basic_rank_fills_in_scores(self):
-        llm = _mock_llm_returning([
-            {
-                "path": "foo.c",
-                "surface": 4,
-                "influence": 2,
-                "surface_rationale": "parses input",
-                "influence_rationale": "isolated",
-            }
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "foo.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "parses input",
+                    "influence_rationale": "isolated",
+                }
+            ]
+        )
         files = [_make_file("foo.c")]
         ranker = Ranker(llm)
         out = ranker.rank(files)
@@ -91,20 +94,34 @@ class TestRanker:
         assert out[0]["influence_rationale"] == "isolated"
 
     def test_priority_formula(self):
-        llm = _mock_llm_returning([
-            {"path": "x.c", "surface": 4, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "x.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("x.c")]
         Ranker(llm).rank(files)
         # surface=4 → 2.0, influence=2 → 0.4, reachability=3 → 0.9 → total 3.3
         assert files[0]["priority"] == pytest.approx(3.3)
 
     def test_reachability_defaults_to_three(self):
-        llm = _mock_llm_returning([
-            {"path": "y.c", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "y.c",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("y.c")]
         Ranker(llm).rank(files)
         assert files[0]["reachability"] == 3
@@ -115,10 +132,17 @@ class TestRanker:
 
 class TestFloors:
     def test_static_hint_promotes_surface(self):
-        llm = _mock_llm_returning([
-            {"path": "weak.c", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "weak.c",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("weak.c", static_hint=2)]
         Ranker(llm).rank(files)
         # surface=1 from LLM → floored to 3 by static_hint
@@ -126,38 +150,66 @@ class TestFloors:
 
     def test_static_hint_does_not_decrease_surface(self):
         """If LLM already returned 5, static_hint floor of 3 doesn't drop it."""
-        llm = _mock_llm_returning([
-            {"path": "strong.c", "surface": 5, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "strong.c",
+                    "surface": 5,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("strong.c", static_hint=3)]
         Ranker(llm).rank(files)
         assert files[0]["surface"] == 5
 
     def test_imports_by_promotes_influence(self):
-        llm = _mock_llm_returning([
-            {"path": "header.h", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "header.h",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("header.h", imports_by=20)]
         Ranker(llm).rank(files)
         # imports_by > 10 → influence floor of 3
         assert files[0]["influence"] == 3
 
     def test_defines_constants_promotes_influence(self):
-        llm = _mock_llm_returning([
-            {"path": "limits.h", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "limits.h",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("limits.h", defines_constants=True)]
         Ranker(llm).rank(files)
         assert files[0]["influence"] == 3
 
     def test_low_imports_by_does_not_floor(self):
-        llm = _mock_llm_returning([
-            {"path": "a.c", "surface": 1, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "a.c",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("a.c", imports_by=2)]
         Ranker(llm).rank(files)
         # imports_by=2 < threshold=10 → no floor
@@ -178,11 +230,18 @@ class TestChunking:
 
     def test_rank_makes_one_call_per_chunk(self):
         # Build 250 files; chunk_size=100 → 3 chunks → 3 LLM calls
-        llm = _mock_llm_returning([
-            {"path": f"f{i}.c", "surface": 2, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-            for i in range(250)
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": f"f{i}.c",
+                    "surface": 2,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+                for i in range(250)
+            ]
+        )
         files = [_make_file(f"f{i}.c") for i in range(250)]
         Ranker(llm, RankerConfig(chunk_size=100)).rank(files)
         assert llm.invoke.call_count == 3
@@ -194,11 +253,11 @@ class TestChunking:
 class TestResponseParsing:
     def test_parse_response_extracts_json_array(self):
         ranker = Ranker(MagicMock())
-        content = '''Here is my analysis:
+        content = """Here is my analysis:
 [
   {"path": "a.c", "surface": 3, "influence": 2, "surface_rationale": "x", "influence_rationale": "y"}
 ]
-Done.'''
+Done."""
         result = ranker._parse_response(content)
         assert "a.c" in result
         assert result["a.c"]["surface"] == 3
@@ -260,12 +319,24 @@ class TestPropagationCase:
 
     def test_constants_header_lands_high_priority(self):
         # LLM correctly identifies it as low surface, high influence
-        llm = _mock_llm_returning([
-            {"path": "codec_limits.h", "surface": 1, "influence": 5,
-             "surface_rationale": "just constants", "influence_rationale": "used in 50 memcpys"},
-            {"path": "main.c", "surface": 4, "influence": 2,
-             "surface_rationale": "main entry", "influence_rationale": "isolated"},
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "codec_limits.h",
+                    "surface": 1,
+                    "influence": 5,
+                    "surface_rationale": "just constants",
+                    "influence_rationale": "used in 50 memcpys",
+                },
+                {
+                    "path": "main.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "main entry",
+                    "influence_rationale": "isolated",
+                },
+            ]
+        )
         files = [
             _make_file("codec_limits.h", defines_constants=True, imports_by=50),
             _make_file("main.c"),
@@ -287,13 +358,24 @@ class TestPropagationCase:
     def test_pure_constants_file_with_high_imports_by_floors(self):
         """Even if the LLM whiffs (returns influence=1), the imports_by floor
         and defines_constants floor must keep it relevant."""
-        llm = _mock_llm_returning([
-            {"path": "limits.h", "surface": 1, "influence": 1,
-             "surface_rationale": "constants", "influence_rationale": "missed it"},
-        ])
-        files = [_make_file(
-            "limits.h", defines_constants=True, imports_by=30,
-        )]
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "limits.h",
+                    "surface": 1,
+                    "influence": 1,
+                    "surface_rationale": "constants",
+                    "influence_rationale": "missed it",
+                },
+            ]
+        )
+        files = [
+            _make_file(
+                "limits.h",
+                defines_constants=True,
+                imports_by=30,
+            )
+        ]
         Ranker(llm).rank(files)
         # Both floors apply → influence at least 3
         assert files[0]["influence"] == 3
@@ -307,10 +389,17 @@ class TestFuzzableRankBoost:
     ranker so fuzzable parsers outrank peers at the same base score."""
 
     def test_parser_tagged_high_surface_gets_boost(self):
-        llm = _mock_llm_returning([
-            {"path": "decode.c", "surface": 4, "influence": 2,
-             "surface_rationale": "parses input", "influence_rationale": "isolated"}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "decode.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "parses input",
+                    "influence_rationale": "isolated",
+                }
+            ]
+        )
         files = [_make_file("decode.c", tags=["parser"])]
         Ranker(llm).rank(files)
         # Base priority: 4*0.5 + 2*0.2 + 3*0.3 = 3.3
@@ -318,10 +407,17 @@ class TestFuzzableRankBoost:
         assert files[0]["priority"] == pytest.approx(3.8)
 
     def test_fuzzable_tagged_high_surface_gets_boost(self):
-        llm = _mock_llm_returning([
-            {"path": "harness.c", "surface": 5, "influence": 1,
-             "surface_rationale": "fuzz entry point", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "harness.c",
+                    "surface": 5,
+                    "influence": 1,
+                    "surface_rationale": "fuzz entry point",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("harness.c", tags=["fuzzable"])]
         Ranker(llm).rank(files)
         # Base: 5*0.5 + 1*0.2 + 3*0.3 = 3.6, + 0.5 = 4.1
@@ -329,10 +425,17 @@ class TestFuzzableRankBoost:
 
     def test_low_surface_no_boost_even_if_tagged(self):
         """surface < 4 disqualifies the boost."""
-        llm = _mock_llm_returning([
-            {"path": "lib.c", "surface": 3, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "lib.c",
+                    "surface": 3,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("lib.c", tags=["parser"])]
         Ranker(llm).rank(files)
         # Base: 3*0.5 + 2*0.2 + 3*0.3 = 2.8, no boost
@@ -340,10 +443,17 @@ class TestFuzzableRankBoost:
 
     def test_no_relevant_tag_no_boost(self):
         """Even with high surface, no parser/fuzzable tag → no boost."""
-        llm = _mock_llm_returning([
-            {"path": "auth.c", "surface": 5, "influence": 3,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "auth.c",
+                    "surface": 5,
+                    "influence": 3,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("auth.c", tags=["auth_boundary"])]
         Ranker(llm).rank(files)
         # Base: 5*0.5 + 3*0.2 + 3*0.3 = 4.0, no boost
@@ -351,11 +461,17 @@ class TestFuzzableRankBoost:
 
     def test_boost_is_audited_in_rationale(self):
         """The boost should leave a trace in surface_rationale for explainability."""
-        llm = _mock_llm_returning([
-            {"path": "parser.c", "surface": 4, "influence": 2,
-             "surface_rationale": "parses untrusted input",
-             "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "parser.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "parses untrusted input",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("parser.c", tags=["parser"])]
         Ranker(llm).rank(files)
         assert "+0.5" in files[0]["surface_rationale"]
@@ -364,12 +480,24 @@ class TestFuzzableRankBoost:
     def test_parser_fuzzable_outranks_non_parser_at_same_base(self):
         """The whole point of the boost: a parser file outranks a non-parser
         peer at the same surface/influence/reachability."""
-        llm = _mock_llm_returning([
-            {"path": "parser.c", "surface": 4, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""},
-            {"path": "util.c", "surface": 4, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""},
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "parser.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                },
+                {
+                    "path": "util.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                },
+            ]
+        )
         files = [
             _make_file("parser.c", tags=["parser"]),
             _make_file("util.c", tags=[]),
@@ -382,19 +510,33 @@ class TestFuzzableRankBoost:
 
     def test_boost_applied_only_once_per_file(self):
         """Running rank() twice on the same file shouldn't stack the boost."""
-        llm = _mock_llm_returning([
-            {"path": "decode.c", "surface": 4, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "decode.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("decode.c", tags=["parser"])]
         Ranker(llm).rank(files)
         first_priority = files[0]["priority"]
         # Re-run — boost is deterministic on the same inputs
         # but we need to re-mock the LLM
-        llm2 = _mock_llm_returning([
-            {"path": "decode.c", "surface": 4, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm2 = _mock_llm_returning(
+            [
+                {
+                    "path": "decode.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         Ranker(llm2).rank(files)
         # Priority should be the same (4*0.5 + 2*0.2 + 3*0.3 + 0.5 = 3.8)
         assert files[0]["priority"] == pytest.approx(first_priority)
@@ -407,10 +549,17 @@ class TestFuzzableRankBoost:
         the boost — the whole point of the back-propagation."""
         from clearwing.sourcehunt.pool import assign_tier
 
-        llm = _mock_llm_returning([
-            {"path": "parser.c", "surface": 4, "influence": 2,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "parser.c",
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("parser.c", tags=["parser"])]
         Ranker(llm).rank(files)
         # Base priority 3.3 → A (>= 3.0), after boost 3.8 → still A but stronger
@@ -421,10 +570,17 @@ class TestFuzzableRankBoost:
         With the fuzzable boost: 3.4 → A."""
         from clearwing.sourcehunt.pool import assign_tier
 
-        llm = _mock_llm_returning([
-            {"path": "decode.c", "surface": 4, "influence": 1,
-             "surface_rationale": "", "influence_rationale": ""}
-        ])
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "decode.c",
+                    "surface": 4,
+                    "influence": 1,
+                    "surface_rationale": "",
+                    "influence_rationale": "",
+                }
+            ]
+        )
         files = [_make_file("decode.c", tags=["parser"])]
         Ranker(llm).rank(files)
         # 4*0.5 + 1*0.2 + 3*0.3 + 0.5 = 2.0 + 0.2 + 0.9 + 0.5 = 3.6 → A

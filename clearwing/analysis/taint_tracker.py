@@ -3,12 +3,12 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
 class TaintFlow:
     """Represents a data flow from a tainted source to a dangerous sink."""
+
     source: str  # e.g. "request.args.get('id')"
     source_file: str
     source_line: int
@@ -22,21 +22,36 @@ class TaintFlow:
 
     def summary(self) -> str:
         flow = " -> ".join([self.source] + self.through + [self.sink])
-        return (f"[{self.severity.upper()}] {self.finding_type}: {flow}\n"
-                f"  Source: {self.source_file}:{self.source_line}\n"
-                f"  Sink: {self.sink_file}:{self.sink_line}")
+        return (
+            f"[{self.severity.upper()}] {self.finding_type}: {flow}\n"
+            f"  Source: {self.source_file}:{self.source_line}\n"
+            f"  Sink: {self.sink_file}:{self.sink_line}"
+        )
 
 
 # Known taint sources — functions/attributes that return user-controlled data
 TAINT_SOURCES = {
     # Flask/Django
-    "request.args", "request.form", "request.data", "request.json",
-    "request.headers", "request.cookies", "request.files",
-    "request.GET", "request.POST", "request.META",
+    "request.args",
+    "request.form",
+    "request.data",
+    "request.json",
+    "request.headers",
+    "request.cookies",
+    "request.files",
+    "request.GET",
+    "request.POST",
+    "request.META",
     # Generic
-    "input", "sys.argv", "os.environ.get",
+    "input",
+    "sys.argv",
+    "os.environ.get",
     # FastAPI
-    "Query", "Body", "Path", "Header", "Cookie",
+    "Query",
+    "Body",
+    "Path",
+    "Header",
+    "Cookie",
 }
 
 # Known sinks — functions where tainted data causes vulnerabilities
@@ -91,8 +106,10 @@ class TaintTracker:
         """Analyze all Python files in a directory."""
         flows = []
         for py_file in Path(dir_path).rglob("*.py"):
-            if any(skip in str(py_file) for skip in
-                   [".git", "node_modules", "__pycache__", ".venv", "venv"]):
+            if any(
+                skip in str(py_file)
+                for skip in [".git", "node_modules", "__pycache__", ".venv", "venv"]
+            ):
                 continue
             flows.extend(self.analyze_file(str(py_file)))
         return flows
@@ -141,25 +158,8 @@ class TaintTracker:
                         if taint_info:
                             source_desc, source_line = taint_info
                             finding_type, severity, cwe = TAINT_SINKS[sink_name]
-                            flows.append(TaintFlow(
-                                source=source_desc,
-                                source_file=file_path,
-                                source_line=source_line,
-                                sink=sink_name,
-                                sink_file=file_path,
-                                sink_line=node.lineno,
-                                finding_type=finding_type,
-                                severity=severity,
-                                cwe=cwe,
-                            ))
-                    # Also check keyword args
-                    for kw in node.keywords:
-                        if kw.value:
-                            taint_info = self._uses_tainted(kw.value, tainted)
-                            if taint_info:
-                                source_desc, source_line = taint_info
-                                finding_type, severity, cwe = TAINT_SINKS[sink_name]
-                                flows.append(TaintFlow(
+                            flows.append(
+                                TaintFlow(
                                     source=source_desc,
                                     source_file=file_path,
                                     source_line=source_line,
@@ -169,7 +169,28 @@ class TaintTracker:
                                     finding_type=finding_type,
                                     severity=severity,
                                     cwe=cwe,
-                                ))
+                                )
+                            )
+                    # Also check keyword args
+                    for kw in node.keywords:
+                        if kw.value:
+                            taint_info = self._uses_tainted(kw.value, tainted)
+                            if taint_info:
+                                source_desc, source_line = taint_info
+                                finding_type, severity, cwe = TAINT_SINKS[sink_name]
+                                flows.append(
+                                    TaintFlow(
+                                        source=source_desc,
+                                        source_file=file_path,
+                                        source_line=source_line,
+                                        sink=sink_name,
+                                        sink_file=file_path,
+                                        sink_line=node.lineno,
+                                        finding_type=finding_type,
+                                        severity=severity,
+                                        cwe=cwe,
+                                    )
+                                )
 
         return flows
 
@@ -205,7 +226,9 @@ class TaintTracker:
 
         return None
 
-    def _uses_tainted(self, node: ast.expr, tainted: dict[str, tuple[str, int]]) -> tuple[str, int] | None:
+    def _uses_tainted(
+        self, node: ast.expr, tainted: dict[str, tuple[str, int]]
+    ) -> tuple[str, int] | None:
         """Check if an expression uses any tainted variable."""
         if isinstance(node, ast.Name):
             return tainted.get(node.id)

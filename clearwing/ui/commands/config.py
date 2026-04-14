@@ -4,9 +4,11 @@ from rich.panel import Panel
 
 
 def add_parser(subparsers):
-    parser = subparsers.add_parser('config', help='Show or edit configuration')
-    parser.add_argument('--set', nargs=2, metavar=('KEY', 'VALUE'), help='Set a configuration value')
-    parser.add_argument('--save', help='Save configuration to file')
+    parser = subparsers.add_parser("config", help="Show or edit configuration")
+    parser.add_argument(
+        "--set", nargs=2, metavar=("KEY", "VALUE"), help="Set a configuration value"
+    )
+    parser.add_argument("--save", help="Save configuration to file")
     return parser
 
 
@@ -14,7 +16,7 @@ def handle(cli, args):
     """Show or edit configuration."""
     if args.set:
         key, value = args.set
-        keys = key.split('.')
+        keys = key.split(".")
         cli.config.set(*keys, value=value)
         cli.console.print(f"[green]Set {key} = {value}[/green]")
 

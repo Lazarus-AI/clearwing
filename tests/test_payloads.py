@@ -1,4 +1,5 @@
 """Tests for the payloads corpus and encoder modules."""
+
 from __future__ import annotations
 
 import base64
@@ -20,8 +21,8 @@ from clearwing.exploitation.payloads import (
     PayloadEncoder,
 )
 
-
 # --- Payload dataclass ---
+
 
 class TestPayloadDataclass:
     def test_defaults(self):
@@ -38,6 +39,7 @@ class TestPayloadDataclass:
 
 
 # --- Payload lists ---
+
 
 class TestPayloadLists:
     def test_all_payloads_non_empty(self):
@@ -72,9 +74,14 @@ class TestPayloadLists:
 
     def test_all_payloads_sum_matches(self):
         total = (
-            len(SQLI_PAYLOADS) + len(XSS_PAYLOADS) + len(SSRF_PAYLOADS) +
-            len(PATH_TRAVERSAL_PAYLOADS) + len(CMD_INJECTION_PAYLOADS) +
-            len(XXE_PAYLOADS) + len(AUTH_BYPASS_PAYLOADS) + len(HEADER_INJECTION_PAYLOADS)
+            len(SQLI_PAYLOADS)
+            + len(XSS_PAYLOADS)
+            + len(SSRF_PAYLOADS)
+            + len(PATH_TRAVERSAL_PAYLOADS)
+            + len(CMD_INJECTION_PAYLOADS)
+            + len(XXE_PAYLOADS)
+            + len(AUTH_BYPASS_PAYLOADS)
+            + len(HEADER_INJECTION_PAYLOADS)
         )
         assert len(ALL_PAYLOADS) == total
 
@@ -86,6 +93,7 @@ class TestPayloadLists:
 
 # --- PayloadCorpus ---
 
+
 class TestPayloadCorpus:
     @pytest.fixture
     def corpus(self):
@@ -94,10 +102,18 @@ class TestPayloadCorpus:
     def test_get_categories_returns_8(self, corpus):
         cats = corpus.get_categories()
         assert len(cats) == 8
-        expected = sorted([
-            "sqli", "xss", "ssrf", "path_traversal",
-            "cmd_injection", "xxe", "auth_bypass", "header_injection",
-        ])
+        expected = sorted(
+            [
+                "sqli",
+                "xss",
+                "ssrf",
+                "path_traversal",
+                "cmd_injection",
+                "xxe",
+                "auth_bypass",
+                "header_injection",
+            ]
+        )
         assert cats == expected
 
     def test_get_by_category_sqli(self, corpus):
@@ -159,6 +175,7 @@ class TestPayloadCorpus:
 
 
 # --- PayloadEncoder ---
+
 
 class TestPayloadEncoder:
     @pytest.fixture

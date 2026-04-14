@@ -7,14 +7,14 @@ import pytest
 
 from clearwing.providers.manager import (
     DEFAULT_ROUTES,
-    ModelRoute,
     PROVIDER_PRESETS,
+    ModelRoute,
     ProviderConfig,
     ProviderManager,
 )
 
-
 # --- ProviderConfig ---
+
 
 class TestProviderConfig:
     def test_required_fields(self):
@@ -31,8 +31,12 @@ class TestProviderConfig:
 
     def test_custom_values(self):
         cfg = ProviderConfig(
-            name="ollama", model="llama3", api_key="key123",
-            base_url="http://localhost:11434", max_tokens=2048, temperature=0.5,
+            name="ollama",
+            model="llama3",
+            api_key="key123",
+            base_url="http://localhost:11434",
+            max_tokens=2048,
+            temperature=0.5,
         )
         assert cfg.api_key == "key123"
         assert cfg.base_url == "http://localhost:11434"
@@ -41,6 +45,7 @@ class TestProviderConfig:
 
 
 # --- ModelRoute ---
+
 
 class TestModelRoute:
     def test_required_fields(self):
@@ -59,6 +64,7 @@ class TestModelRoute:
 
 
 # --- PROVIDER_PRESETS ---
+
 
 class TestProviderPresets:
     def test_has_expected_providers(self):
@@ -85,6 +91,7 @@ class TestProviderPresets:
 
 # --- DEFAULT_ROUTES ---
 
+
 class TestDefaultRoutes:
     def test_has_expected_tasks(self):
         task_names = {r.task for r in DEFAULT_ROUTES}
@@ -104,6 +111,7 @@ class TestDefaultRoutes:
 
 
 # --- ProviderManager ---
+
 
 class TestProviderManager:
     def test_default_routes_loaded(self):
@@ -139,24 +147,29 @@ class TestProviderManager:
         mgr = ProviderManager()
         llm = mgr.get_llm("default")
         from langchain_anthropic import ChatAnthropic
+
         assert isinstance(llm, ChatAnthropic)
 
     def test_get_llm_recon_returns_llm(self):
         mgr = ProviderManager()
         llm = mgr.get_llm("recon")
         from langchain_anthropic import ChatAnthropic
+
         assert isinstance(llm, ChatAnthropic)
 
     def test_get_llm_unknown_task_falls_back_to_default(self):
         mgr = ProviderManager()
         llm = mgr.get_llm("nonexistent_task")
         from langchain_anthropic import ChatAnthropic
+
         assert isinstance(llm, ChatAnthropic)
 
     def test_get_llm_no_route_raises(self):
-        mgr = ProviderManager(routes=[
-            ModelRoute(task="recon", provider="anthropic", model="claude-haiku-4-5-20251001"),
-        ])
+        mgr = ProviderManager(
+            routes=[
+                ModelRoute(task="recon", provider="anthropic", model="claude-haiku-4-5-20251001"),
+            ]
+        )
         with pytest.raises(ValueError, match="No route configured"):
             mgr.get_llm("nonexistent_task")
 
@@ -198,6 +211,7 @@ class TestProviderManager:
 
 
 # --- _create_llm error cases ---
+
 
 class TestCreateLlmErrors:
     def test_unknown_provider_raises_value_error(self):

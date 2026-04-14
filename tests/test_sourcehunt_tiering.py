@@ -3,6 +3,7 @@
 Critical assertion: the FFmpeg-style propagation file (surface=1, influence=5)
 must NEVER land in Tier C. It should land in Tier A or Tier B by priority.
 """
+
 from __future__ import annotations
 
 import pytest

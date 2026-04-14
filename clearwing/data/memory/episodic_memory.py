@@ -8,8 +8,6 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-
 
 # Valid event types
 EVENT_TYPES = (
@@ -125,8 +123,8 @@ class EpisodicMemory:
         target: str,
         event_type: str,
         content: str,
-        metadata: Optional[dict] = None,
-        session_id: Optional[str] = None,
+        metadata: dict | None = None,
+        session_id: str | None = None,
     ) -> Episode:
         """Insert a new episode and return it."""
         sid = session_id or self.session_id

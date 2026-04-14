@@ -64,9 +64,7 @@ class SkillLoader:
             If a requested skill cannot be found in any known directory.
         """
         if len(skill_names) > max_skills:
-            raise ValueError(
-                f"Requested {len(skill_names)} skills but max_skills is {max_skills}"
-            )
+            raise ValueError(f"Requested {len(skill_names)} skills but max_skills is {max_skills}")
 
         skill_map = {s.name: s for s in self.list_skills()}
         parts: list[str] = []
@@ -75,9 +73,7 @@ class SkillLoader:
             info = skill_map.get(name)
             if info is None:
                 available = ", ".join(sorted(skill_map.keys()))
-                raise ValueError(
-                    f"Skill '{name}' not found. Available skills: {available}"
-                )
+                raise ValueError(f"Skill '{name}' not found. Available skills: {available}")
             parts.append(info.path.read_text(encoding="utf-8"))
 
         return "\n\n".join(parts)
@@ -88,8 +84,7 @@ class SkillLoader:
         return [
             skill
             for skill in self.list_skills()
-            if query_lower in skill.name.lower()
-            or query_lower in skill.description.lower()
+            if query_lower in skill.name.lower() or query_lower in skill.description.lower()
         ]
 
     # ------------------------------------------------------------------

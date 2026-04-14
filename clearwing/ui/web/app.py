@@ -3,9 +3,8 @@
 import asyncio
 import json
 import logging
-import time
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -13,14 +12,13 @@ logger = logging.getLogger(__name__)
 def create_app():
     """Create and configure the FastAPI application."""
     try:
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+        from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse
-    except ImportError:
+    except ImportError as e:
         raise ImportError(
-            "FastAPI is required for the web UI. "
-            "Install with: pip install 'clearwing[web]'"
-        )
+            "FastAPI is required for the web UI. Install with: pip install 'clearwing[web]'"
+        ) from e
 
     app = FastAPI(
         title="Clearwing API",
@@ -52,6 +50,7 @@ def create_app():
         """List all known sessions."""
         try:
             from clearwing.data.memory import SessionStore
+
             store = SessionStore()
             sessions = store.list_sessions()
             return [
@@ -74,6 +73,7 @@ def create_app():
         """Get details for a specific session."""
         try:
             from clearwing.data.memory import SessionStore
+
             store = SessionStore()
             session = store.load(session_id)
             if not session:
@@ -92,14 +92,15 @@ def create_app():
                 "exploit_results": session.exploit_results,
                 "flags_found": session.flags_found,
             }
-        except ImportError:
-            raise HTTPException(status_code=500, detail="SessionStore not available")
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail="SessionStore not available") from e
 
     @app.get("/api/metrics")
     async def get_metrics():
         """Get current metrics in JSON format."""
         try:
             from clearwing.observability.telemetry import CostTracker
+
             tracker = CostTracker()
             summary = tracker.get_summary()
             return {
@@ -116,6 +117,7 @@ def create_app():
         """Get metrics in Prometheus exposition format."""
         try:
             from clearwing.observability import MetricsCollector
+
             collector = MetricsCollector()
             return JSONResponse(
                 content=collector.format_prometheus(),
@@ -224,17 +226,23 @@ def create_app():
         # Subscribe to EventBus and forward events to the WebSocket
         try:
             from clearwing.core.events import EventBus, EventType
+
             bus = EventBus()
 
             def on_event(event_type_name: str):
                 def handler(data):
                     try:
-                        message_queue.put_nowait({
-                            "type": event_type_name,
-                            "data": data if isinstance(data, (dict, list, str, int, float, bool, type(None))) else str(data),
-                        })
+                        message_queue.put_nowait(
+                            {
+                                "type": event_type_name,
+                                "data": data
+                                if isinstance(data, (dict, list, str, int, float, bool, type(None)))
+                                else str(data),
+                            }
+                        )
                     except Exception:
                         logger.debug("Failed to enqueue event", exc_info=True)
+
                 return handler
 
             handlers = {}
@@ -282,8 +290,9 @@ def create_app():
 
                 if msg_type == "start":
                     # Initialize agent
-                    from clearwing.agent import create_agent
                     from langchain_core.messages import HumanMessage
+
+                    from clearwing.agent import create_agent
 
                     model = data.get("model", "claude-sonnet-4-6")
                     target = data.get("target", "")
@@ -297,12 +306,14 @@ def create_app():
                     )
                     config = {"configurable": {"thread_id": f"ws-{session_id}"}}
 
-                    await websocket.send_json({
-                        "type": "started",
-                        "session_id": session_id,
-                        "target": target,
-                        "model": model,
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "started",
+                            "session_id": session_id,
+                            "target": target,
+                            "model": model,
+                        }
+                    )
 
                 elif msg_type == "message" and graph and config:
                     from langchain_core.messages import HumanMessage
@@ -313,7 +324,7 @@ def create_app():
                     # Run agent in thread pool to avoid blocking
                     loop = asyncio.get_event_loop()
 
-                    def run_agent():
+                    def run_agent(graph=graph, input_msg=input_msg, config=config):  # noqa: B023
                         last_content = ""
                         for event in graph.stream(input_msg, config, stream_mode="values"):
                             msgs = event.get("messages", [])
@@ -323,7 +334,8 @@ def create_app():
                                     c = last.content
                                     if isinstance(c, list):
                                         c = "\n".join(
-                                            p["text"] for p in c
+                                            p["text"]
+                                            for p in c
                                             if isinstance(p, dict) and p.get("type") == "text"
                                         )
                                     if c:
@@ -333,29 +345,39 @@ def create_app():
                     try:
                         result = await loop.run_in_executor(None, run_agent)
                         if result:
-                            await websocket.send_json({
-                                "type": "agent_message",
-                                "data": {"content": result},
-                            })
+                            await websocket.send_json(
+                                {
+                                    "type": "agent_message",
+                                    "data": {"content": result},
+                                }
+                            )
                     except Exception as e:
-                        await websocket.send_json({
-                            "type": "error",
-                            "data": {"message": str(e)},
-                        })
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "data": {"message": str(e)},
+                            }
+                        )
 
                 elif msg_type == "approve" and graph and config:
                     from langgraph.types import Command
+
                     approved = data.get("approved", False)
                     try:
                         loop = asyncio.get_event_loop()
                         await loop.run_in_executor(
-                            None, lambda: graph.invoke(Command(resume=approved), config)
+                            None,
+                            lambda g=graph, a=approved, c=config: g.invoke(  # noqa: B023
+                                Command(resume=a), c
+                            ),
                         )
                     except Exception as e:
-                        await websocket.send_json({
-                            "type": "error",
-                            "data": {"message": str(e)},
-                        })
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "data": {"message": str(e)},
+                            }
+                        )
 
         except WebSocketDisconnect:
             pass

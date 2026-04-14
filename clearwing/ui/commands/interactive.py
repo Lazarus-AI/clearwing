@@ -5,26 +5,35 @@ import os
 import socket
 
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm, Prompt
 
 logger = logging.getLogger(__name__)
 
 
 def add_parser(subparsers):
-    parser = subparsers.add_parser('interactive', help='Start interactive AI agent')
-    parser.add_argument('--model', default='claude-sonnet-4-6',
-                        help='LLM model name (default: claude-sonnet-4-6)')
-    parser.add_argument('--target', help='Initial target IP address')
-    parser.add_argument('--resume', metavar='SESSION_ID',
-                        help='Resume a previous session by ID')
-    parser.add_argument('--no-tui', action='store_true',
-                        help='Use legacy Rich-based loop instead of Textual TUI')
-    parser.add_argument('--cost-limit', type=float, metavar='DOLLARS',
-                        help='Stop agent when estimated cost exceeds this amount (USD)')
-    parser.add_argument('--base-url', metavar='URL',
-                        help='OpenAI-compatible API base URL (for vLLM, Ollama, MLX, OpenRouter, etc.)')
-    parser.add_argument('--api-key', metavar='KEY',
-                        help='API key for the endpoint (overrides env vars)')
+    parser = subparsers.add_parser("interactive", help="Start interactive AI agent")
+    parser.add_argument(
+        "--model", default="claude-sonnet-4-6", help="LLM model name (default: claude-sonnet-4-6)"
+    )
+    parser.add_argument("--target", help="Initial target IP address")
+    parser.add_argument("--resume", metavar="SESSION_ID", help="Resume a previous session by ID")
+    parser.add_argument(
+        "--no-tui", action="store_true", help="Use legacy Rich-based loop instead of Textual TUI"
+    )
+    parser.add_argument(
+        "--cost-limit",
+        type=float,
+        metavar="DOLLARS",
+        help="Stop agent when estimated cost exceeds this amount (USD)",
+    )
+    parser.add_argument(
+        "--base-url",
+        metavar="URL",
+        help="OpenAI-compatible API base URL (for vLLM, Ollama, MLX, OpenRouter, etc.)",
+    )
+    parser.add_argument(
+        "--api-key", metavar="KEY", help="API key for the endpoint (overrides env vars)"
+    )
     return parser
 
 
@@ -34,10 +43,11 @@ def handle(cli, args):
         return
 
     # Set up cost limit
-    cost_limit = getattr(args, 'cost_limit', None)
+    cost_limit = getattr(args, "cost_limit", None)
     if cost_limit:
         try:
             from ...observability.telemetry import CostTracker
+
             tracker = CostTracker()
             tracker.cost_limit = cost_limit
         except ImportError:
@@ -47,8 +57,9 @@ def handle(cli, args):
     session = None
     try:
         from ...data.memory import SessionStore
+
         store = SessionStore()
-        resume_id = getattr(args, 'resume', None)
+        resume_id = getattr(args, "resume", None)
         if resume_id:
             session = store.load(resume_id)
             if session:
@@ -64,7 +75,7 @@ def handle(cli, args):
         pass
 
     # Launch TUI or legacy mode
-    use_tui = not getattr(args, 'no_tui', False)
+    use_tui = not getattr(args, "no_tui", False)
     if use_tui:
         try:
             _run_tui(cli, args, session)
@@ -82,10 +93,12 @@ def _preflight_check(cli, args) -> bool:
     """Fast checks before agent starts."""
     errors = []
 
-    has_custom_endpoint = getattr(args, 'base_url', None)
+    has_custom_endpoint = getattr(args, "base_url", None)
     if not has_custom_endpoint and not os.environ.get("ANTHROPIC_API_KEY"):
-        errors.append("ANTHROPIC_API_KEY environment variable is not set. "
-                      "Or use --base-url for an OpenAI-compatible endpoint.")
+        errors.append(
+            "ANTHROPIC_API_KEY environment variable is not set. "
+            "Or use --base-url for an OpenAI-compatible endpoint."
+        )
 
     if args.target:
         try:
@@ -116,14 +129,15 @@ def _run_tui(cli, args, session=None):
         target=args.target,
         model=args.model,
         session_id=session_id,
-        base_url=getattr(args, 'base_url', None),
-        api_key=getattr(args, 'api_key', None),
+        base_url=getattr(args, "base_url", None),
+        api_key=getattr(args, "api_key", None),
     )
     app.run()
 
     if session:
         try:
             from ...data.memory import SessionStore
+
             session.status = "completed"
             SessionStore().save(session)
         except Exception:
@@ -132,23 +146,26 @@ def _run_tui(cli, args, session=None):
 
 def _run_interactive_legacy(cli, args, session=None):
     """Run the legacy Rich-based interactive agent loop."""
-    from ...agent import create_agent
-    from ...agent.tools.dynamic_tool_creator import get_custom_tools
-    from ...agent.tools.kali_docker_tool import kali_cleanup
     from langchain_core.messages import HumanMessage
     from langgraph.types import Command
 
-    cli.console.print(Panel.fit(
-        "[bold cyan]Clearwing Interactive Agent[/bold cyan]\n"
-        f"Model: {args.model}\n"
-        "Type 'quit' or 'exit' to end session."
-    ))
+    from ...agent import create_agent
+    from ...agent.tools.dynamic_tool_creator import get_custom_tools
+    from ...agent.tools.kali_docker_tool import kali_cleanup
+
+    cli.console.print(
+        Panel.fit(
+            "[bold cyan]Clearwing Interactive Agent[/bold cyan]\n"
+            f"Model: {args.model}\n"
+            "Type 'quit' or 'exit' to end session."
+        )
+    )
 
     thread_id = session.langgraph_thread_id if session else "interactive-session"
     graph = create_agent(
         model_name=args.model,
-        base_url=getattr(args, 'base_url', None),
-        api_key=getattr(args, 'api_key', None),
+        base_url=getattr(args, "base_url", None),
+        api_key=getattr(args, "api_key", None),
     )
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -203,15 +220,19 @@ def _run_interactive_legacy(cli, args, session=None):
                             content = last.content
                             if isinstance(content, list):
                                 text_parts = [
-                                    c["text"] for c in content
+                                    c["text"]
+                                    for c in content
                                     if isinstance(c, dict) and c.get("type") == "text"
                                 ]
                                 content = "\n".join(text_parts)
                             if content:
-                                cli.console.print(Panel(
-                                    content, title="[bold cyan]Agent[/bold cyan]",
-                                    border_style="cyan"
-                                ))
+                                cli.console.print(
+                                    Panel(
+                                        content,
+                                        title="[bold cyan]Agent[/bold cyan]",
+                                        border_style="cyan",
+                                    )
+                                )
 
                 # Check for interrupt
                 state = graph.get_state(config)
@@ -242,26 +263,30 @@ def _run_interactive_legacy(cli, args, session=None):
                     known_custom_tools = new_custom
                     custom_tools = get_custom_tools()
                     graph = create_agent(
-                        model_name=args.model, custom_tools=custom_tools,
-                        base_url=getattr(args, 'base_url', None),
-                        api_key=getattr(args, 'api_key', None),
+                        model_name=args.model,
+                        custom_tools=custom_tools,
+                        base_url=getattr(args, "base_url", None),
+                        api_key=getattr(args, "api_key", None),
                     )
-                    cli.console.print(
-                        "[dim]Graph recompiled with new custom tools.[/dim]"
-                    )
+                    cli.console.print("[dim]Graph recompiled with new custom tools.[/dim]")
 
             # Auto-save session
             if session:
                 try:
                     from ...data.memory import SessionStore
+
                     sv = current_state.values if hasattr(current_state, "values") else {}
                     session.open_ports = sv.get("open_ports", session.open_ports)
                     session.services = sv.get("services", session.services)
                     session.vulnerabilities = sv.get("vulnerabilities", session.vulnerabilities)
                     session.exploit_results = sv.get("exploit_results", session.exploit_results)
                     session.os_info = sv.get("os_info", session.os_info)
-                    session.kali_container_id = sv.get("kali_container_id", session.kali_container_id)
-                    session.custom_tool_names = sv.get("custom_tool_names", session.custom_tool_names)
+                    session.kali_container_id = sv.get(
+                        "kali_container_id", session.kali_container_id
+                    )
+                    session.custom_tool_names = sv.get(
+                        "custom_tool_names", session.custom_tool_names
+                    )
                     session.flags_found = sv.get("flags_found", session.flags_found)
                     session.cost_usd = sv.get("total_cost_usd", session.cost_usd)
                     session.token_count = sv.get("total_tokens", session.token_count)
@@ -291,8 +316,10 @@ def _run_interactive_legacy(cli, args, session=None):
     # Final session save
     if session:
         try:
-            from ...data.memory import SessionStore
             from datetime import datetime
+
+            from ...data.memory import SessionStore
+
             session.status = "completed"
             session.end_time = datetime.now()
             SessionStore().save(session)

@@ -1,7 +1,6 @@
 """Tests for the parallel agent execution system."""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from clearwing.runners.parallel import ParallelExecutor, ParallelScanConfig, TargetResult
 
@@ -37,7 +36,9 @@ class TestParallelScanConfig:
         assert config.on_target_complete is None
 
     def test_custom_values(self):
-        callback = lambda r: None
+        def callback(r):
+            return None
+
         config = ParallelScanConfig(
             targets=["10.0.0.1", "10.0.0.2", "10.0.0.3"],
             max_parallel=5,

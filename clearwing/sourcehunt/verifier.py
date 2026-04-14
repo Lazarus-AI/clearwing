@@ -12,14 +12,14 @@ Independence: the verifier never sees the hunter's reasoning messages. Only
 the finding dict and the file content. This is enforced at the orchestration
 level (the runner builds a fresh agent per finding).
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
-import uuid
-from dataclasses import dataclass, field
-from typing import Any, Optional, cast
+from dataclasses import dataclass
+from typing import cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -117,18 +117,19 @@ VERIFIER_SYSTEM_PROMPT_V02 = """You are an independent verifier. A hunter has re
 @dataclass
 class VerifierResult:
     """Output of a single verifier run."""
+
     finding_id: str
     is_real: bool
-    severity_verified: Optional[str]
+    severity_verified: str | None
     evidence_level: EvidenceLevel
     pro_argument: str
     counter_argument: str
     tie_breaker: str
-    duplicate_cve: Optional[str]
+    duplicate_cve: str | None
     raw_response: str = ""
     # v0.3 patch oracle fields
     patch_oracle_attempted: bool = False
-    patch_oracle_passed: Optional[bool] = None    # None = not attempted
+    patch_oracle_passed: bool | None = None  # None = not attempted
     patch_oracle_diff: str = ""
     patch_oracle_notes: str = ""
 
@@ -154,7 +155,7 @@ class Verifier:
         self,
         llm: BaseChatModel,
         adversarial: bool = False,
-        adversarial_threshold: Optional[EvidenceLevel] = "static_corroboration",
+        adversarial_threshold: EvidenceLevel | None = "static_corroboration",
     ):
         self.llm = llm
         self.adversarial = adversarial
@@ -204,10 +205,12 @@ class Verifier:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception as e:
             logger.warning("Verifier LLM call failed", exc_info=True)
             return VerifierResult(
@@ -324,10 +327,12 @@ class Verifier:
         """
         user_msg = self._build_patch_oracle_message(finding, file_content)
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=PATCH_ORACLE_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=PATCH_ORACLE_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception as e:
             logger.debug("Patch-oracle LLM call failed", exc_info=True)
             return False, "", f"llm error: {e}"
@@ -356,7 +361,7 @@ class Verifier:
             if not file_path:
                 return False, diff, "no file path in finding"
             # Write the patch file into /scratch for reference (apply is caller's job)
-            sandbox.write_file(f"/scratch/patch.diff", diff.encode("utf-8"))
+            sandbox.write_file("/scratch/patch.diff", diff.encode("utf-8"))
             try:
                 still_crashes = bool(rerun_poc(sandbox, finding))
             except Exception as e:
@@ -384,7 +389,7 @@ class Verifier:
             msg += f"\n\nCurrent file content (capped to 8 KB):\n{file_content[:8000]}"
         return msg
 
-    def _parse_patch_oracle_response(self, content: str) -> Optional[dict]:
+    def _parse_patch_oracle_response(self, content: str) -> dict | None:
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None
@@ -398,7 +403,7 @@ class Verifier:
 def apply_verifier_result(
     finding: Finding,
     result: VerifierResult,
-    session_id: Optional[str] = None,
+    session_id: str | None = None,
 ) -> Finding:
     """Merge a VerifierResult into a Finding (in-place + return).
 

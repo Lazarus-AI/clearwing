@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -16,6 +15,7 @@ from langchain_core.tools import tool
 @dataclass
 class ProxyRequest:
     """A captured HTTP request/response pair."""
+
     id: int
     timestamp: str
     method: str
@@ -36,10 +36,17 @@ class ProxyHistory:
         self._lock = threading.Lock()
         self._next_id = 1
 
-    def add(self, method: str, url: str, request_headers: dict = None,
-            request_body: str = "", status_code: int = 0,
-            response_headers: dict = None, response_body: str = "",
-            duration_ms: int = 0) -> ProxyRequest:
+    def add(
+        self,
+        method: str,
+        url: str,
+        request_headers: dict = None,
+        request_body: str = "",
+        status_code: int = 0,
+        response_headers: dict = None,
+        response_body: str = "",
+        duration_ms: int = 0,
+    ) -> ProxyRequest:
         """Record a request/response pair."""
         with self._lock:
             entry = ProxyRequest(
@@ -58,7 +65,7 @@ class ProxyHistory:
             self._next_id += 1
         return entry
 
-    def get(self, request_id: int) -> Optional[ProxyRequest]:
+    def get(self, request_id: int) -> ProxyRequest | None:
         """Get a specific entry by ID."""
         with self._lock:
             for e in self._entries:
@@ -66,8 +73,9 @@ class ProxyHistory:
                     return e
         return None
 
-    def get_all(self, method: str = None, url_contains: str = None,
-                status_code: int = None, limit: int = 50) -> list[ProxyRequest]:
+    def get_all(
+        self, method: str = None, url_contains: str = None, status_code: int = None, limit: int = 50
+    ) -> list[ProxyRequest]:
         """Get entries with optional filtering."""
         with self._lock:
             results = list(self._entries)
@@ -127,8 +135,8 @@ def proxy_request(
     Returns:
         Dict with keys: request_id, status_code, response_headers, response_body, duration_ms.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     req_headers = headers or {}
     start = time.time()
@@ -143,9 +151,11 @@ def proxy_request(
 
         # Handle redirects
         if not follow_redirects:
+
             class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self, *args, **kwargs):
                     return None
+
             opener = urllib.request.build_opener(NoRedirectHandler)
         else:
             opener = urllib.request.build_opener()
@@ -162,9 +172,12 @@ def proxy_request(
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
         entry = _proxy_history.add(
-            method=method.upper(), url=url,
-            request_headers=req_headers, request_body=body,
-            status_code=0, duration_ms=duration_ms,
+            method=method.upper(),
+            url=url,
+            request_headers=req_headers,
+            request_body=body,
+            status_code=0,
+            duration_ms=duration_ms,
         )
         return {
             "request_id": entry.id,
@@ -178,8 +191,10 @@ def proxy_request(
     duration_ms = int((time.time() - start) * 1000)
 
     entry = _proxy_history.add(
-        method=method.upper(), url=url,
-        request_headers=req_headers, request_body=body,
+        method=method.upper(),
+        url=url,
+        request_headers=req_headers,
+        request_body=body,
         status_code=status_code,
         response_headers=resp_headers,
         response_body=resp_body,
@@ -214,8 +229,10 @@ def proxy_get_history(
         List of request/response summary dicts.
     """
     entries = _proxy_history.get_all(
-        method=method, url_contains=url_contains,
-        status_code=status_code, limit=limit,
+        method=method,
+        url_contains=url_contains,
+        status_code=status_code,
+        limit=limit,
     )
     return [
         {
@@ -277,12 +294,14 @@ def proxy_replay(
     body = modify_body if modify_body is not None else original.request_body
     url = modify_url if modify_url is not None else original.url
 
-    return proxy_request.invoke({
-        "method": original.method,
-        "url": url,
-        "headers": headers,
-        "body": body,
-    })
+    return proxy_request.invoke(
+        {
+            "method": original.method,
+            "url": url,
+            "headers": headers,
+            "body": body,
+        }
+    )
 
 
 @tool

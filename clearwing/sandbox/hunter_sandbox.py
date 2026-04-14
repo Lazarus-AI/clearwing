@@ -8,13 +8,13 @@ Lifecycle:
        /workspace mounted read-only and /scratch as a tmpfs scratch dir.
     4. .cleanup() removes spawned containers and (optionally) the image.
 """
+
 from __future__ import annotations
 
 import hashlib
 import logging
 import os
 import tempfile
-from typing import Optional
 
 from .builders import (
     BuildRecipe,
@@ -45,11 +45,11 @@ class HunterSandbox:
     def __init__(
         self,
         repo_path: str,
-        languages: Optional[list[str]] = None,
-        sanitizers: Optional[list[str]] = None,     # primary combo
-        extra_variants: Optional[list[list[str]]] = None,  # e.g. [["msan"]]
-        extra_packages: Optional[list[str]] = None,
-        build_recipe: Optional[BuildRecipe] = None,
+        languages: list[str] | None = None,
+        sanitizers: list[str] | None = None,  # primary combo
+        extra_variants: list[list[str]] | None = None,  # e.g. [["msan"]]
+        extra_packages: list[str] | None = None,
+        build_recipe: BuildRecipe | None = None,
     ):
         self.repo_path = os.path.abspath(repo_path)
         self.languages = languages or []
@@ -65,7 +65,7 @@ class HunterSandbox:
         self.extra_packages = extra_packages or []
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
-        self._image_tag: Optional[str] = None   # primary variant tag
+        self._image_tag: str | None = None  # primary variant tag
         # Variant image map — {variant_key: image_tag}
         self._variant_images: dict[str, str] = {}
         self._spawned: list[SandboxContainer] = []
@@ -75,6 +75,7 @@ class HunterSandbox:
     def _get_client(self):
         if self._client is None:
             import docker
+
             self._client = docker.from_env()
         return self._client
 
@@ -94,7 +95,7 @@ class HunterSandbox:
         for variant in self.extra_variants:
             key = self._variant_key(variant)
             if key == primary_key:
-                continue   # already built
+                continue  # already built
             tag = self._build_variant_image(variant)
             self._variant_images[key] = tag
 
@@ -129,7 +130,8 @@ class HunterSandbox:
 
             logger.info(
                 "Building sourcehunt sandbox image %s (sanitizers=%s)",
-                tag, ",".join(sanitizers),
+                tag,
+                ",".join(sanitizers),
             )
             try:
                 client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True)
@@ -141,11 +143,11 @@ class HunterSandbox:
 
     def spawn(
         self,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         memory_mb: int = 2048,
         timeout_seconds: int = 300,
         scratch_mount: bool = True,
-        variant: Optional[list[str]] = None,
+        variant: list[str] | None = None,
     ) -> SandboxContainer:
         """Start a fresh container from one of the built variant images.
 
@@ -235,6 +237,7 @@ class HunterSandbox:
             if scratch:
                 try:
                     import shutil
+
                     shutil.rmtree(scratch, ignore_errors=True)
                 except Exception:
                     pass
@@ -258,7 +261,7 @@ class HunterSandbox:
 
     # --- Dockerfile rendering -----------------------------------------------
 
-    def _render_dockerfile(self, sanitizers: Optional[list[str]] = None) -> str:
+    def _render_dockerfile(self, sanitizers: list[str] | None = None) -> str:
         """Render the Dockerfile for a specific sanitizer variant.
 
         When `sanitizers` is None the primary combo is used — which is what
@@ -309,7 +312,7 @@ RUN mkdir -p /scratch
     def _compute_tag(
         self,
         dockerfile: str,
-        sanitizers: Optional[list[str]] = None,
+        sanitizers: list[str] | None = None,
     ) -> str:
         """Content-addressed image tag.
 
@@ -331,7 +334,7 @@ RUN mkdir -p /scratch
         return "+".join(sorted(sanitizers))
 
     @property
-    def image_tag(self) -> Optional[str]:
+    def image_tag(self) -> str | None:
         return self._image_tag
 
     @property

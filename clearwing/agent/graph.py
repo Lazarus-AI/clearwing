@@ -1,48 +1,43 @@
+import ast
 import asyncio
+import json
 import logging
 import re
-import json
-import ast
 from typing import Any
 
 import networkx as nx
-
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
-logger = logging.getLogger(__name__)
+# Subsystem imports (unconditional; Phase 4c). These used to be
+# try/except ImportError blocks that stored None on failure; now the
+# presence check routes through `clearwing.capabilities` which probes
+# each subsystem at clearwing import time.
+from clearwing.capabilities import capabilities
+from clearwing.core.events import EventBus, EventType
+from clearwing.data.knowledge import KnowledgeGraph
+from clearwing.data.memory import ContextSummarizer, EpisodicMemory
+from clearwing.observability.telemetry import CostTracker
+from clearwing.safety.audit import AuditLogger
+from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
 
-from .state import AgentState
 from .prompts import build_system_prompt
+from .state import AgentState
 from .tools import get_all_tools, get_custom_tools
 
-# --- Subsystem imports (unconditional; Phase 4c) ---
-#
-# These used to be try/except ImportError blocks that stored `None` on
-# failure. Phase 4c makes the imports unconditional and routes the
-# presence check through `clearwing.capabilities`, which probes each
-# subsystem at clearwing import time and exposes a `has("name")` API.
-# See `clearwing/capabilities.py`.
-
-from clearwing.capabilities import capabilities
-from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
-from clearwing.data.memory import EpisodicMemory, ContextSummarizer
-from clearwing.observability.telemetry import CostTracker
-from clearwing.core.events import EventBus, EventType
-from clearwing.safety.audit import AuditLogger
-from clearwing.data.knowledge import KnowledgeGraph
+logger = logging.getLogger(__name__)
 
 # --- Flag detection ---
 
 FLAG_PATTERNS = [
-    re.compile(r'flag\{[^}]+\}', re.IGNORECASE),
-    re.compile(r'FLAG\{[^}]+\}'),
-    re.compile(r'HTB\{[^}]+\}'),
-    re.compile(r'CTF\{[^}]+\}'),
-    re.compile(r'[A-Fa-f0-9]{32}'),
+    re.compile(r"flag\{[^}]+\}", re.IGNORECASE),
+    re.compile(r"FLAG\{[^}]+\}"),
+    re.compile(r"HTB\{[^}]+\}"),
+    re.compile(r"CTF\{[^}]+\}"),
+    re.compile(r"[A-Fa-f0-9]{32}"),
 ]
 
 
@@ -142,9 +137,14 @@ def _default_pentest_state_updater(tool_name: str, data: Any, state: dict) -> di
     return {}
 
 
-_DEFAULT_PENTEST_GUARDRAIL_TOOLS = frozenset({
-    "scan_ports", "detect_services", "scan_vulnerabilities", "detect_os",
-})
+_DEFAULT_PENTEST_GUARDRAIL_TOOLS = frozenset(
+    {
+        "scan_ports",
+        "detect_services",
+        "scan_vulnerabilities",
+        "detect_os",
+    }
+)
 
 _DEFAULT_OUTPUT_GUARDRAIL_TOOLS = frozenset({"kali_execute"})
 
@@ -211,16 +211,12 @@ def build_react_graph(
     if output_guardrail_tool_names is None:
         output_guardrail_tool_names = _DEFAULT_OUTPUT_GUARDRAIL_TOOLS
 
-    cost_tracker = (
-        CostTracker() if enable_cost_tracker and capabilities.has("telemetry") else None
-    )
+    cost_tracker = CostTracker() if enable_cost_tracker and capabilities.has("telemetry") else None
     episodic_memory = (
         EpisodicMemory() if enable_episodic_memory and capabilities.has("memory") else None
     )
     context_summarizer = (
-        ContextSummarizer()
-        if enable_context_summarizer and capabilities.has("memory")
-        else None
+        ContextSummarizer() if enable_context_summarizer and capabilities.has("memory") else None
     )
     event_bus = EventBus() if enable_event_bus and capabilities.has("events") else None
     input_guardrail = (
@@ -270,7 +266,9 @@ def build_react_graph(
                 output_tokens = usage.get("output_tokens", 0)
                 cost_tracker.record_llm_call(input_tokens, output_tokens, model_name)
                 state_updates["total_cost_usd"] = cost_tracker.total_cost_usd
-                state_updates["total_tokens"] = cost_tracker.input_tokens + cost_tracker.output_tokens
+                state_updates["total_tokens"] = (
+                    cost_tracker.input_tokens + cost_tracker.output_tokens
+                )
 
                 if audit_logger:
                     audit_logger.log_llm_call(
@@ -306,19 +304,20 @@ def build_react_graph(
             tool_args = tc.get("args", {})
 
             if event_bus:
-                event_bus.emit(EventType.TOOL_START, {
-                    "tool": tool_name,
-                    "args": tool_args,
-                })
+                event_bus.emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool": tool_name,
+                        "args": tool_args,
+                    },
+                )
 
             if output_guardrail and tool_name in output_guardrail_tool_names:
                 command = tool_args.get("command", "")
                 result = output_guardrail.check_command(command)
                 if not result.passed:
                     if event_bus:
-                        event_bus.emit_message(
-                            f"Guardrail blocked: {result.reason}", "warning"
-                        )
+                        event_bus.emit_message(f"Guardrail blocked: {result.reason}", "warning")
 
         result = base_tool_node.invoke(state)
 
@@ -333,9 +332,7 @@ def build_react_graph(
             if input_guardrail and tool_name in input_guardrail_tool_names:
                 gr = input_guardrail.check(content)
                 if not gr.passed and event_bus:
-                    event_bus.emit_message(
-                        f"Input guardrail warning: {gr.reason}", "warning"
-                    )
+                    event_bus.emit_message(f"Input guardrail warning: {gr.reason}", "warning")
 
             if episodic_memory:
                 target = state.get("target", "unknown")
@@ -360,7 +357,10 @@ def build_react_graph(
 
             if knowledge_graph and knowledge_graph_populator_fn:
                 graph_data = knowledge_graph_populator_fn(
-                    knowledge_graph, tool_name, content, state,
+                    knowledge_graph,
+                    tool_name,
+                    content,
+                    state,
                 )
                 if graph_data:
                     state_updates["graph_data"] = graph_data
@@ -375,11 +375,14 @@ def build_react_graph(
                 new_flags.extend(found_flags)
 
             if event_bus:
-                event_bus.emit(EventType.TOOL_RESULT, {
-                    "tool": tool_name,
-                    "content_length": len(content),
-                    "flags_found": len(found_flags),
-                })
+                event_bus.emit(
+                    EventType.TOOL_RESULT,
+                    {
+                        "tool": tool_name,
+                        "content_length": len(content),
+                        "flags_found": len(found_flags),
+                    },
+                )
 
         if new_flags:
             existing_flags = state.get("flags_found", [])
@@ -411,11 +414,11 @@ def _create_llm(model_name: str, base_url: str = None, api_key: str = None) -> B
     if base_url:
         try:
             from langchain_openai import ChatOpenAI
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
                 "langchain-openai is required for custom endpoints. "
                 "Install with: pip install langchain-openai"
-            )
+            ) from e
         kwargs: dict = {"model": model_name, "base_url": base_url}
         if api_key:
             kwargs["api_key"] = api_key
@@ -425,14 +428,20 @@ def _create_llm(model_name: str, base_url: str = None, api_key: str = None) -> B
         return ChatOpenAI(**kwargs)
 
     from langchain_anthropic import ChatAnthropic
+
     kwargs = {"model": model_name}
     if api_key:
         kwargs["api_key"] = api_key
     return ChatAnthropic(**kwargs)
 
 
-def create_agent(model_name: str = "claude-sonnet-4-6", custom_tools: list = None,
-                  session_id: str = None, base_url: str = None, api_key: str = None):
+def create_agent(
+    model_name: str = "claude-sonnet-4-6",
+    custom_tools: list = None,
+    session_id: str = None,
+    base_url: str = None,
+    api_key: str = None,
+):
     """Create and compile a LangGraph agent for the network-pentest workflow.
 
     Thin wrapper around build_react_graph() that supplies the pentest defaults:

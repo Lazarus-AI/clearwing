@@ -1,24 +1,27 @@
 """Tests for the observability module."""
 
-import time
 import threading
+import time
+
 import pytest
 
-from clearwing.observability.tracer import (
-    Tracer, Span, SpanExporter, ConsoleExporter, InMemoryExporter,
-)
-from clearwing.observability.metrics import MetricsCollector, MetricPoint
 from clearwing.observability.integration import ObservabilityIntegration
-
+from clearwing.observability.metrics import MetricPoint, MetricsCollector
+from clearwing.observability.tracer import (
+    ConsoleExporter,
+    InMemoryExporter,
+    Span,
+    Tracer,
+)
 
 # ---------------------------------------------------------------------------
 # Span tests
 # ---------------------------------------------------------------------------
 
+
 class TestSpan:
     def test_duration(self):
-        s = Span(trace_id="t1", span_id="s1", name="test",
-                 start_time=1.0, end_time=2.5)
+        s = Span(trace_id="t1", span_id="s1", name="test", start_time=1.0, end_time=2.5)
         assert s.duration_ms == 1500.0
 
     def test_duration_not_ended(self):
@@ -44,8 +47,7 @@ class TestSpan:
         assert s.attributes["error.message"] == "connection refused"
 
     def test_to_dict(self):
-        s = Span(trace_id="t1", span_id="s1", name="test",
-                 start_time=1.0, end_time=2.0)
+        s = Span(trace_id="t1", span_id="s1", name="test", start_time=1.0, end_time=2.0)
         d = s.to_dict()
         assert d["trace_id"] == "t1"
         assert d["span_id"] == "s1"
@@ -56,6 +58,7 @@ class TestSpan:
 # Exporter tests
 # ---------------------------------------------------------------------------
 
+
 class TestInMemoryExporter:
     def test_export(self):
         exp = InMemoryExporter()
@@ -65,10 +68,12 @@ class TestInMemoryExporter:
 
     def test_filter_by_name(self):
         exp = InMemoryExporter()
-        exp.export([
-            Span(trace_id="t1", span_id="s1", name="scan"),
-            Span(trace_id="t1", span_id="s2", name="exploit"),
-        ])
+        exp.export(
+            [
+                Span(trace_id="t1", span_id="s1", name="scan"),
+                Span(trace_id="t1", span_id="s2", name="exploit"),
+            ]
+        )
         assert len(exp.get_spans("scan")) == 1
         assert len(exp.get_spans("exploit")) == 1
 
@@ -82,14 +87,14 @@ class TestInMemoryExporter:
 class TestConsoleExporter:
     def test_export_no_error(self):
         exp = ConsoleExporter()
-        spans = [Span(trace_id="t1", span_id="s1", name="test",
-                      start_time=1.0, end_time=2.0)]
+        spans = [Span(trace_id="t1", span_id="s1", name="test", start_time=1.0, end_time=2.0)]
         exp.export(spans)  # should not raise
 
 
 # ---------------------------------------------------------------------------
 # Tracer tests
 # ---------------------------------------------------------------------------
+
 
 class TestTracer:
     def test_span_context_manager(self):
@@ -111,8 +116,8 @@ class TestTracer:
         tracer = Tracer(exporters=[exporter])
         tracer._batch_size = 100
 
-        with tracer.span("parent") as parent:
-            with tracer.span("child") as child:
+        with tracer.span("parent"):
+            with tracer.span("child"):
                 pass
 
         tracer.flush()
@@ -129,7 +134,7 @@ class TestTracer:
         tracer._batch_size = 1
 
         with pytest.raises(ValueError):
-            with tracer.span("failing") as s:
+            with tracer.span("failing"):
                 raise ValueError("boom")
 
         spans = exporter.get_spans()
@@ -209,6 +214,7 @@ class TestTracer:
 # ---------------------------------------------------------------------------
 # MetricsCollector tests
 # ---------------------------------------------------------------------------
+
 
 class TestMetricsCollector:
     def test_increment(self):
@@ -298,9 +304,11 @@ class TestMetricsCollector:
 
     def test_thread_safety(self):
         m = MetricsCollector()
+
         def worker():
             for _ in range(100):
                 m.increment("calls")
+
         threads = [threading.Thread(target=worker) for _ in range(5)]
         for t in threads:
             t.start()
@@ -313,6 +321,7 @@ class TestMetricsCollector:
 # MetricPoint tests
 # ---------------------------------------------------------------------------
 
+
 class TestMetricPoint:
     def test_fields(self):
         p = MetricPoint(name="calls", value=1.0, timestamp=time.time())
@@ -321,8 +330,11 @@ class TestMetricPoint:
 
     def test_with_labels(self):
         p = MetricPoint(
-            name="calls", value=1.0, timestamp=time.time(),
-            labels={"model": "sonnet"}, metric_type="counter",
+            name="calls",
+            value=1.0,
+            timestamp=time.time(),
+            labels={"model": "sonnet"},
+            metric_type="counter",
         )
         assert p.labels["model"] == "sonnet"
         assert p.metric_type == "counter"
@@ -331,6 +343,7 @@ class TestMetricPoint:
 # ---------------------------------------------------------------------------
 # Integration tests
 # ---------------------------------------------------------------------------
+
 
 class TestObservabilityIntegration:
     def test_init(self):
@@ -361,41 +374,45 @@ class TestObservabilityIntegration:
     def test_on_tool_start(self):
         obs = ObservabilityIntegration()
         obs._on_tool_start({"tool": "scan_ports"})
-        assert obs.metrics.get_counter(
-            "tool_calls_total", labels={"tool": "scan_ports"}
-        ) == 1.0
+        assert obs.metrics.get_counter("tool_calls_total", labels={"tool": "scan_ports"}) == 1.0
 
     def test_on_tool_result(self):
         obs = ObservabilityIntegration()
-        obs._on_tool_result({
-            "tool": "scan_ports",
-            "content_length": 500,
-            "flags_found": 0,
-        })
-        assert obs.metrics.get_gauge(
-            "tool_result_size_bytes", labels={"tool": "scan_ports"}
-        ) == 500.0
+        obs._on_tool_result(
+            {
+                "tool": "scan_ports",
+                "content_length": 500,
+                "flags_found": 0,
+            }
+        )
+        assert (
+            obs.metrics.get_gauge("tool_result_size_bytes", labels={"tool": "scan_ports"}) == 500.0
+        )
 
     def test_on_tool_result_with_flags(self):
         obs = ObservabilityIntegration()
-        obs._on_tool_result({
-            "tool": "kali_execute",
-            "content_length": 100,
-            "flags_found": 2,
-        })
+        obs._on_tool_result(
+            {
+                "tool": "kali_execute",
+                "content_length": 100,
+                "flags_found": 2,
+            }
+        )
         assert obs.metrics.get_counter("flags_found_total") == 2.0
 
     def test_on_cost_update(self):
         obs = ObservabilityIntegration()
-        obs._on_cost_update({
-            "model": "claude-sonnet-4-6",
-            "input_tokens": 1000,
-            "output_tokens": 500,
-            "total_cost_usd": 0.05,
-        })
-        assert obs.metrics.get_counter(
-            "llm_calls_total", labels={"model": "claude-sonnet-4-6"}
-        ) == 1.0
+        obs._on_cost_update(
+            {
+                "model": "claude-sonnet-4-6",
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "total_cost_usd": 0.05,
+            }
+        )
+        assert (
+            obs.metrics.get_counter("llm_calls_total", labels={"model": "claude-sonnet-4-6"}) == 1.0
+        )
         assert obs.metrics.get_counter("input_tokens_total") == 1000.0
         assert obs.metrics.get_gauge("total_cost_usd") == 0.05
 
@@ -407,9 +424,7 @@ class TestObservabilityIntegration:
     def test_on_message(self):
         obs = ObservabilityIntegration()
         obs._on_message({"content": "hello", "type": "info"})
-        assert obs.metrics.get_counter(
-            "messages_total", labels={"type": "info"}
-        ) == 1.0
+        assert obs.metrics.get_counter("messages_total", labels={"type": "info"}) == 1.0
 
     def test_on_error(self):
         obs = ObservabilityIntegration()

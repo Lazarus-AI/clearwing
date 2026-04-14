@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 from clearwing.agent.state import AgentState
 
@@ -29,15 +29,27 @@ class ReconAgent:
 
     def build_graph(self):
         """Build and compile the recon sub-graph."""
-        from clearwing.agent.tools.scan.scanner_tools import (
-            scan_ports, detect_services, scan_vulnerabilities, detect_os,
-        )
         from clearwing.agent.tools.ops.kali_docker_tool import (
-            kali_setup, kali_execute, kali_install_tool,
+            kali_execute,
+            kali_install_tool,
+            kali_setup,
+        )
+        from clearwing.agent.tools.scan.scanner_tools import (
+            detect_os,
+            detect_services,
+            scan_ports,
+            scan_vulnerabilities,
         )
 
-        tools = [scan_ports, detect_services, scan_vulnerabilities, detect_os,
-                 kali_setup, kali_execute, kali_install_tool]
+        tools = [
+            scan_ports,
+            detect_services,
+            scan_vulnerabilities,
+            detect_os,
+            kali_setup,
+            kali_execute,
+            kali_install_tool,
+        ]
 
         llm = ChatAnthropic(model=self.model_name)
         llm_with_tools = llm.bind_tools(tools)

@@ -2,17 +2,23 @@
 
 
 def add_parser(subparsers):
-    parser = subparsers.add_parser('report', help='Generate report from database')
-    parser.add_argument('target', help='Target IP address')
-    parser.add_argument('-o', '--output', help='Output file')
-    parser.add_argument('-f', '--format', choices=['text', 'json', 'html', 'markdown'],
-                        default='text', help='Report format')
+    parser = subparsers.add_parser("report", help="Generate report from database")
+    parser.add_argument("target", help="Target IP address")
+    parser.add_argument("-o", "--output", help="Output file")
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["text", "json", "html", "markdown"],
+        default="text",
+        help="Report format",
+    )
     return parser
 
 
 def handle(cli, args):
     """Show report from database."""
     from ...data.database import Database
+
     db = Database()
     target = db.get_target(args.target)
 

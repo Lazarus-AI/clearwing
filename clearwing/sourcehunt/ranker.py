@@ -10,13 +10,14 @@ It computes a composite priority and (via pool._assign_tier) the tier (A/B/C).
 Two-axis ranking exists from v0.1 (surface + influence). Reachability
 defaults to 3 in v0.1 — v0.2's tree-sitter callgraph fills it in for real.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -56,12 +57,12 @@ Return ONLY a JSON array, no other text:
 
 @dataclass
 class RankerConfig:
-    chunk_size: int = 150           # files per LLM call
+    chunk_size: int = 150  # files per LLM call
     include_static_hints: bool = True
     include_imports_by: bool = True
-    static_hint_surface_floor: int = 3   # files with static_hint > 0 → min surface 3
+    static_hint_surface_floor: int = 3  # files with static_hint > 0 → min surface 3
     imports_by_threshold_floor: int = 10  # imports_by > N → min influence 3
-    constants_influence_floor: int = 3    # defines_constants → min influence 3
+    constants_influence_floor: int = 3  # defines_constants → min influence 3
     # v0.4 fuzz-harness rank boost: files tagged parser or fuzzable with
     # surface >= 4 get a priority boost because the HarnessGenerator will
     # seed them with crashes that make hunter runs dramatically cheaper.
@@ -93,7 +94,7 @@ class Ranker:
     def __init__(
         self,
         llm: BaseChatModel,
-        config: Optional[RankerConfig] = None,
+        config: RankerConfig | None = None,
     ):
         self.llm = llm
         self.config = config or RankerConfig()
@@ -123,7 +124,7 @@ class Ranker:
 
     @staticmethod
     def _chunk(files: list[FileTarget], chunk_size: int) -> list[list[FileTarget]]:
-        return [files[i:i + chunk_size] for i in range(0, len(files), chunk_size)]
+        return [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
 
     # --- LLM call -----------------------------------------------------------
 
@@ -131,10 +132,12 @@ class Ranker:
         """Return {path: {surface, influence, surface_rationale, influence_rationale}}."""
         user_msg = self._build_user_message(chunk)
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=RANKER_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=RANKER_SYSTEM_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception:
             logger.warning("Ranker LLM call failed", exc_info=True)
             return {}

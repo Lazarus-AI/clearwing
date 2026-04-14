@@ -1,7 +1,7 @@
 """Guardrail patterns for prompt injection and dangerous command detection."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -23,11 +23,18 @@ INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"ignore\s+(all\s+)?prior\s+instructions", re.IGNORECASE),
     re.compile(r"ignore\s+(all\s+)?above\s+instructions", re.IGNORECASE),
     re.compile(r"ignore\s+everything\s+(above|before)", re.IGNORECASE),
-    re.compile(r"disregard\s+(all\s+)?(previous|prior|above|earlier)\s+instructions", re.IGNORECASE),
+    re.compile(
+        r"disregard\s+(all\s+)?(previous|prior|above|earlier)\s+instructions", re.IGNORECASE
+    ),
     re.compile(r"disregard\s+your\s+(instructions|programming|training|rules)", re.IGNORECASE),
-    re.compile(r"forget\s+your\s+(instructions|programming|training|rules|guidelines)", re.IGNORECASE),
+    re.compile(
+        r"forget\s+your\s+(instructions|programming|training|rules|guidelines)", re.IGNORECASE
+    ),
     re.compile(r"forget\s+(everything|all)\s+(you|that)", re.IGNORECASE),
-    re.compile(r"override\s+(your|all|the|previous)\s+(instructions|programming|rules|settings)", re.IGNORECASE),
+    re.compile(
+        r"override\s+(your|all|the|previous)\s+(instructions|programming|rules|settings)",
+        re.IGNORECASE,
+    ),
     re.compile(r"new\s+instructions\s*:", re.IGNORECASE),
     re.compile(r"updated\s+instructions\s*:", re.IGNORECASE),
     re.compile(r"revised\s+instructions\s*:", re.IGNORECASE),
@@ -38,23 +45,31 @@ INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"your\s+new\s+(role|purpose|instructions|directive)", re.IGNORECASE),
     re.compile(r"switch\s+to\s+(a\s+)?new\s+(role|mode|persona)", re.IGNORECASE),
     re.compile(r"enter\s+(a\s+)?(new|special|secret)\s+mode", re.IGNORECASE),
-
     # ---- Jailbreak patterns ----
     re.compile(r"\bDAN\b", re.IGNORECASE),
     re.compile(r"do\s+anything\s+now", re.IGNORECASE),
     re.compile(r"developer\s+mode\s+(enabled|activated|on)", re.IGNORECASE),
     re.compile(r"enable\s+developer\s+mode", re.IGNORECASE),
     re.compile(r"act\s+as\s+(a\s+)?(DAN|unrestricted|unfiltered|evil|malicious)", re.IGNORECASE),
-    re.compile(r"pretend\s+you\s+(are|have)\s+(no|without)\s+(restrictions|limits|filters|rules)", re.IGNORECASE),
+    re.compile(
+        r"pretend\s+you\s+(are|have)\s+(no|without)\s+(restrictions|limits|filters|rules)",
+        re.IGNORECASE,
+    ),
     re.compile(r"pretend\s+you\s+are\s+(a\s+)?(different|new|unrestricted)", re.IGNORECASE),
     re.compile(r"jailbreak", re.IGNORECASE),
-    re.compile(r"bypass\s+(your|all|the|any)\s+(restrictions|filters|safety|guardrails|rules)", re.IGNORECASE),
-    re.compile(r"remove\s+(your|all|the)\s+(restrictions|filters|safety|limitations)", re.IGNORECASE),
-    re.compile(r"without\s+(any\s+)?(restrictions|filters|safety|limitations|guardrails)", re.IGNORECASE),
+    re.compile(
+        r"bypass\s+(your|all|the|any)\s+(restrictions|filters|safety|guardrails|rules)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"remove\s+(your|all|the)\s+(restrictions|filters|safety|limitations)", re.IGNORECASE
+    ),
+    re.compile(
+        r"without\s+(any\s+)?(restrictions|filters|safety|limitations|guardrails)", re.IGNORECASE
+    ),
     re.compile(r"unrestricted\s+mode", re.IGNORECASE),
     re.compile(r"god\s*mode", re.IGNORECASE),
     re.compile(r"sudo\s+mode", re.IGNORECASE),
-
     # ---- Hidden instructions ----
     re.compile(r"NOTE\s+TO\s+SYSTEM", re.IGNORECASE),
     re.compile(r"ADMIN\s*:", re.IGNORECASE),
@@ -66,7 +81,6 @@ INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"BEGIN\s+(SYSTEM|HIDDEN|SECRET)\s+(PROMPT|INSTRUCTIONS?|MESSAGE)", re.IGNORECASE),
     re.compile(r"IMPORTANT\s*:\s*ignore", re.IGNORECASE),
     re.compile(r"CRITICAL\s*:\s*override", re.IGNORECASE),
-
     # ---- Delimiter injection ----
     re.compile(r"```system", re.IGNORECASE),
     re.compile(r"</s>", re.IGNORECASE),
@@ -79,7 +93,6 @@ INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"<\|system\|>", re.IGNORECASE),
     re.compile(r"<\|user\|>", re.IGNORECASE),
     re.compile(r"<\|assistant\|>", re.IGNORECASE),
-
     # ---- Encoding tricks ----
     re.compile(r"base64\s*decode\s*\(", re.IGNORECASE),
     re.compile(r"decode\s+this\s+(base64|hex|rot13)", re.IGNORECASE),
@@ -106,7 +119,6 @@ DANGEROUS_COMMAND_PATTERNS: list[re.Pattern] = [
     re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", re.IGNORECASE),  # fork bomb
     re.compile(r"chmod\s+-[a-z]*R[a-z]*\s+777\s+/", re.IGNORECASE),
     re.compile(r"chown\s+-[a-z]*R[a-z]*\s+.*\s+/\s*$", re.IGNORECASE),
-
     # ---- Exfiltration ----
     re.compile(r"cat\s+/etc/(shadow|passwd).*\|\s*(curl|wget|nc|netcat|ncat)", re.IGNORECASE),
     re.compile(r"/etc/(shadow|passwd).*\|\s*(curl|wget|nc|netcat|ncat)", re.IGNORECASE),
@@ -116,13 +128,11 @@ DANGEROUS_COMMAND_PATTERNS: list[re.Pattern] = [
     re.compile(r"mkfifo\s+.*\|\s*(bash|sh)", re.IGNORECASE),  # named-pipe reverse shell
     re.compile(r"python[23]?\s+-c\s+.*socket.*connect", re.IGNORECASE),  # python reverse shell
     re.compile(r"perl\s+-e\s+.*socket.*connect", re.IGNORECASE),  # perl reverse shell
-
     # ---- Resource exhaustion ----
     re.compile(r"while\s+(true|1|:)\s*;\s*do\s+.*;\s*done", re.IGNORECASE),
     re.compile(r"fork\s*\(\s*\)\s*while", re.IGNORECASE),
     re.compile(r"yes\s*\|", re.IGNORECASE),
     re.compile(r"/dev/zero.*>\s*/dev/sd", re.IGNORECASE),
-
     # ---- Suspicious chains ----
     re.compile(r"(echo|printf)\s+.*\|\s*base64\s+-[a-z]*d[a-z]*\s*\|\s*(bash|sh)", re.IGNORECASE),
     re.compile(r"base64\s+-[a-z]*d[a-z]*\s*\|\s*(bash|sh)", re.IGNORECASE),
@@ -151,7 +161,6 @@ UNICODE_HOMOGRAPHS: dict[str, str] = {
     "\u0432": "b",  # в -> b (visual similarity in some fonts)
     "\u043d": "h",  # н -> h (visual similarity in some fonts)
     "\u0442": "t",  # т -> t (visual similarity in some fonts)
-
     # Cyrillic uppercase
     "\u0410": "A",  # А -> A
     "\u0412": "B",  # В -> B
@@ -165,20 +174,19 @@ UNICODE_HOMOGRAPHS: dict[str, str] = {
     "\u0422": "T",  # Т -> T
     "\u0425": "X",  # Х -> X
     "\u0423": "Y",  # У -> Y
-
     # Other confusable characters
     "\u00a0": " ",  # non-breaking space -> space
     "\u2000": " ",  # en quad -> space
     "\u2001": " ",  # em quad -> space
     "\u2002": " ",  # en space -> space
     "\u2003": " ",  # em space -> space
-    "\u200b": "",   # zero-width space -> empty
-    "\u200c": "",   # zero-width non-joiner -> empty
-    "\u200d": "",   # zero-width joiner -> empty
-    "\ufeff": "",   # BOM / zero-width no-break space -> empty
-    "\u2060": "",   # word joiner -> empty
-    "\u2028": "\n", # line separator -> newline
-    "\u2029": "\n", # paragraph separator -> newline
+    "\u200b": "",  # zero-width space -> empty
+    "\u200c": "",  # zero-width non-joiner -> empty
+    "\u200d": "",  # zero-width joiner -> empty
+    "\ufeff": "",  # BOM / zero-width no-break space -> empty
+    "\u2060": "",  # word joiner -> empty
+    "\u2028": "\n",  # line separator -> newline
+    "\u2029": "\n",  # paragraph separator -> newline
     "\uff41": "a",  # fullwidth a
     "\uff45": "e",  # fullwidth e
     "\uff4f": "o",  # fullwidth o

@@ -4,6 +4,7 @@ Exercises the v0.1 path: clone (or local-path), enumerate, static pre-scan,
 file tagging, imports_by counting. Verifies v0.2 seams (callgraph,
 semgrep_findings, fuzz_corpora) are present and default to None/empty.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,7 +17,6 @@ from clearwing.sourcehunt.preprocessor import (
     _file_defines_constants,
     _tag_file,
 )
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -145,7 +145,7 @@ class TestPreprocessorRun:
             assert "defines_constants" in ft
             # v0.1 defaults
             assert ft["reachability"] == 3
-            assert ft["surface"] == 0   # ranker fills
+            assert ft["surface"] == 0  # ranker fills
             assert ft["influence"] == 0
             # v0.2 seams present with safe defaults
             assert ft["semgrep_hint"] == 0
@@ -191,7 +191,7 @@ class TestPreprocessorRun:
         assert result.file_count >= 1
         app = next(ft for ft in result.file_targets if ft["path"].endswith("app.py"))
         assert app["language"] == "python"
-        assert app["static_hint"] >= 1   # SourceAnalyzer regex catches the f-string
+        assert app["static_hint"] >= 1  # SourceAnalyzer regex catches the f-string
 
     def test_v02_seams_default_to_empty(self):
         pp = Preprocessor(
@@ -227,7 +227,7 @@ class TestPreprocessorRun:
         )
         result = pp.run()
         summary = result.language_summary
-        assert summary.get("c", 0) == 4   # codec_a/b/c.c plus codec_limits.h
+        assert summary.get("c", 0) == 4  # codec_a/b/c.c plus codec_limits.h
 
 
 class TestPreprocessorErrorPaths:

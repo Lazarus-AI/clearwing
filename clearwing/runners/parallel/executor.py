@@ -3,15 +3,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import (
     FIRST_COMPLETED,
     Future,
     ThreadPoolExecutor,
-    as_completed,
     wait,
 )
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TargetResult:
     """Result from scanning a single target (or item, for tiered runs)."""
+
     target: str
     status: str  # completed, error, timeout, cancelled
     session_id: str = ""
@@ -40,6 +41,7 @@ class TierBudget:
     v0.4: lives in the executor module so both network-pentest and
     source-hunt pools can share it without duplication.
     """
+
     tier_a_fraction: float = 0.70
     tier_b_fraction: float = 0.25
     tier_c_fraction: float = 0.05
@@ -47,9 +49,7 @@ class TierBudget:
     def __post_init__(self):
         total = self.tier_a_fraction + self.tier_b_fraction + self.tier_c_fraction
         if not (0.95 <= total <= 1.05):
-            raise ValueError(
-                f"TierBudget fractions must sum to ~1.0, got {total:.3f}"
-            )
+            raise ValueError(f"TierBudget fractions must sum to ~1.0, got {total:.3f}")
 
 
 @dataclass
@@ -66,29 +66,30 @@ class ParallelScanConfig:
     Tiered mode is enabled by setting `tier_budget` AND `item_tier_fn`.
     Otherwise the executor runs in flat mode (backwards compatible).
     """
+
     # Legacy network-pentest field. Still accepted — copied into `items`
     # at run time when `items` is not set explicitly.
     targets: list[str] = field(default_factory=list)
     # Generic item list — takes precedence over `targets` when set. Items
     # can be anything the runner_factory accepts (e.g. FileTarget dicts).
-    items: Optional[list[Any]] = None
+    items: list[Any] | None = None
     max_parallel: int = 3
     model: str = "claude-sonnet-4-6"
     depth: str = "standard"
     timeout_minutes: int = 30
-    cost_limit_per_target: float = 0.0   # 0 = no limit
-    total_cost_limit: float = 0.0        # 0 = no limit
-    on_target_complete: Optional[Callable] = None
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
+    cost_limit_per_target: float = 0.0  # 0 = no limit
+    total_cost_limit: float = 0.0  # 0 = no limit
+    on_target_complete: Callable | None = None
+    base_url: str | None = None
+    api_key: str | None = None
     # R3: injectable runner factory. Receives (item, config) and returns
     # an object with a `.run()` method that yields a CICDResult-shaped
     # result (exit_code, findings, cost_usd, tokens_used).
-    runner_factory: Optional[Callable] = None
+    runner_factory: Callable | None = None
     # v0.4 tiered execution
-    tier_budget: Optional[TierBudget] = None
-    item_tier_fn: Optional[Callable[[Any], str]] = None    # item → "A"|"B"|"C"
-    item_key_fn: Optional[Callable[[Any], str]] = None     # item → str (for logging)
+    tier_budget: TierBudget | None = None
+    item_tier_fn: Callable[[Any], str] | None = None  # item → "A"|"B"|"C"
+    item_key_fn: Callable[[Any], str] | None = None  # item → str (for logging)
     # Per-tier cost-per-item caps. Keys: "A"|"B"|"C". Missing tiers fall
     # back to cost_limit_per_target.
     item_cost_limits: dict[str, float] = field(default_factory=dict)
@@ -184,13 +185,16 @@ class ParallelExecutor:
                 except TimeoutError:
                     with self._lock:
                         self._results[key] = TargetResult(
-                            target=key, status="timeout",
+                            target=key,
+                            status="timeout",
                             error=f"Scan timed out after {self.config.timeout_minutes} minutes",
                         )
                 except Exception as e:
                     with self._lock:
                         self._results[key] = TargetResult(
-                            target=key, status="error", error=str(e),
+                            target=key,
+                            status="error",
+                            error=str(e),
                         )
 
         return list(self._results.values())
@@ -222,14 +226,18 @@ class ParallelExecutor:
         budget_c = total_budget * tb.tier_c_fraction
 
         spent_a = self._run_tier_phase(
-            by_tier["A"], "A", budget_a,
+            by_tier["A"],
+            "A",
+            budget_a,
             cost_per_item=self.config.item_cost_limits.get("A", 0.0),
         )
         # Roll over unused A budget into B
         budget_b += max(0.0, budget_a - spent_a)
 
         spent_b = self._run_tier_phase(
-            by_tier["B"], "B", budget_b,
+            by_tier["B"],
+            "B",
+            budget_b,
             cost_per_item=self.config.item_cost_limits.get("B", 0.0),
         )
         # Roll over unused B budget into C
@@ -238,7 +246,9 @@ class ParallelExecutor:
         # Skip Tier C entirely if its fraction is zero (or no items)
         if by_tier["C"] and tb.tier_c_fraction > 0:
             self._run_tier_phase(
-                by_tier["C"], "C", budget_c,
+                by_tier["C"],
+                "C",
+                budget_c,
                 cost_per_item=self.config.item_cost_limits.get("C", 0.0),
             )
 
@@ -306,8 +316,10 @@ class ParallelExecutor:
                         logger.warning("tier %s runner for %s failed: %s", tier, key, e)
                         with self._lock:
                             self._results[key] = TargetResult(
-                                target=key, status="error",
-                                error=str(e), tier=tier,
+                                target=key,
+                                status="error",
+                                error=str(e),
+                                tier=tier,
                             )
                         continue
                     # Stamp the tier onto the result
@@ -328,7 +340,7 @@ class ParallelExecutor:
     def _scan_item(
         self,
         item: Any,
-        cost_limit_override: Optional[float] = None,
+        cost_limit_override: float | None = None,
         tier_label: str = "",
     ) -> TargetResult:
         """Run one item through the configured runner factory.
@@ -343,7 +355,7 @@ class ParallelExecutor:
         self,
         item: Any,
         key: str,
-        cost_limit_override: Optional[float],
+        cost_limit_override: float | None,
         tier_label: str,
     ) -> TargetResult:
         """Run one item's runner and produce a TargetResult.
@@ -361,7 +373,8 @@ class ParallelExecutor:
             with self._lock:
                 if self._total_cost >= self.config.total_cost_limit:
                     return TargetResult(
-                        target=key, status="cancelled",
+                        target=key,
+                        status="cancelled",
                         error="Total cost limit reached",
                         tier=tier_label,
                     )
@@ -372,15 +385,12 @@ class ParallelExecutor:
             else:
                 # Legacy CICDRunner path — item must be a target string
                 from clearwing.runners.cicd.runner import CICDRunner
+
                 runner = CICDRunner(
                     target=str(item),
                     depth=self.config.depth,
                     model=self.config.model,
-                    cost_limit=(
-                        cost_limit_override
-                        or self.config.cost_limit_per_target
-                        or None
-                    ),
+                    cost_limit=(cost_limit_override or self.config.cost_limit_per_target or None),
                     timeout_minutes=self.config.timeout_minutes,
                     base_url=self.config.base_url,
                     api_key=self.config.api_key,
@@ -392,7 +402,7 @@ class ParallelExecutor:
             result = TargetResult(
                 target=key,
                 status="completed" if cicd_result.exit_code >= 0 else "error",
-                session_id=getattr(runner, '_session_id', ''),
+                session_id=getattr(runner, "_session_id", ""),
                 findings=cicd_result.findings,
                 duration_seconds=duration,
                 cost_usd=cicd_result.cost_usd,
@@ -466,7 +476,12 @@ class ParallelExecutor:
 
         for result in self._results.values():
             finding_count = len(result.findings)
-            status_icon = {"completed": "OK", "error": "ERR", "timeout": "T/O", "cancelled": "---"}.get(result.status, "?")
+            status_icon = {
+                "completed": "OK",
+                "error": "ERR",
+                "timeout": "T/O",
+                "cancelled": "---",
+            }.get(result.status, "?")
             lines.append(
                 f"  [{status_icon}] {result.target}: {result.status} "
                 f"({finding_count} findings, ${result.cost_usd:.4f}, {result.duration_seconds:.0f}s)"

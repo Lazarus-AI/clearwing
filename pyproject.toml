@@ -122,7 +122,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B", "E501"]
+# Tests legitimately import after pytest.importorskip() / sys.path munging.
+"tests/**" = ["B", "E402", "E501"]
 
 [tool.mypy]
 python_version = "3.10"

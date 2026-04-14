@@ -13,16 +13,19 @@ sourcehunt (tiered) execution. HunterPool's job is:
 The existing HunterPool API (run() → list[Finding], spent_per_tier,
 total_spent, cancel, assign_tier) is preserved.
 """
+
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional, cast
+from typing import Any, Literal, cast
 
 from clearwing.runners.parallel.executor import (
     ParallelExecutor,
     ParallelScanConfig,
-    TargetResult,
+)
+from clearwing.runners.parallel.executor import (
     TierBudget as _ExecutorTierBudget,
 )
 
@@ -68,14 +71,14 @@ def assign_tier(file_target: FileTarget) -> Literal["A", "B", "C"]:
 class HuntPoolConfig:
     files: list[FileTarget]
     repo_path: str
-    sandbox_factory: Optional[Callable] = None
-                                # Callable[[], SandboxContainer] — a fresh
-                                # container per hunter. None → host-fallback.
-    hunter_factory: Optional[Callable] = None
-                                # Callable[[FileTarget, sandbox, session_id], (graph, ctx)]
-                                # If None, the pool will import build_hunter_agent
-                                # at run time and require an llm in the config.
-    llm: Optional[object] = None  # Required if hunter_factory is None
+    sandbox_factory: Callable | None = None
+    # Callable[[], SandboxContainer] — a fresh
+    # container per hunter. None → host-fallback.
+    hunter_factory: Callable | None = None
+    # Callable[[FileTarget, sandbox, session_id], (graph, ctx)]
+    # If None, the pool will import build_hunter_agent
+    # at run time and require an llm in the config.
+    llm: object | None = None  # Required if hunter_factory is None
     max_parallel: int = 8
     budget_usd: float = 5.0
     tier_budget: TierBudget = field(default_factory=TierBudget)
@@ -83,7 +86,7 @@ class HuntPoolConfig:
     cost_limit_per_file_b: float = 0.15
     cost_limit_per_file_c: float = 0.04
     timeout_minutes_per_file: int = 15
-    on_finding: Optional[Callable] = None
+    on_finding: Callable | None = None
     session_id_prefix: str = "hunt"
     # v0.2 seeded-crash lookup: {repo_relative_file_path: {report, target_function, ...}}
     seeded_crashes_by_file: dict = field(default_factory=dict)
@@ -105,7 +108,7 @@ class _FileHunterRunner:
     def __init__(
         self,
         file_target: FileTarget,
-        hunter_pool: "HunterPool",
+        hunter_pool: HunterPool,
     ):
         self.file_target = file_target
         self._pool = hunter_pool
@@ -114,6 +117,7 @@ class _FileHunterRunner:
         findings, cost = self._pool._run_one_hunter(self.file_target, 0.0)
         # Build a CICDResult-shaped result for ParallelExecutor to consume
         from clearwing.runners.cicd.runner import CICDResult
+
         return CICDResult(
             exit_code=0,
             target=self.file_target.get("path", ""),
@@ -211,7 +215,6 @@ class HunterPool:
         cost_limit: float,
     ) -> tuple[list[Finding], float]:
         """Run a single hunter agent. Returns (findings, cost_usd)."""
-        from langchain_core.messages import HumanMessage
 
         # Spawn a fresh sandbox if a factory is provided
         sandbox = None
@@ -219,8 +222,7 @@ class HunterPool:
             try:
                 sandbox = self.config.sandbox_factory()
             except Exception as e:
-                logger.warning("sandbox_factory failed for %s: %s",
-                               file_target.get("path"), e)
+                logger.warning("sandbox_factory failed for %s: %s", file_target.get("path"), e)
 
         try:
             graph, ctx = self._build_hunter_for_file(file_target, sandbox)
@@ -232,8 +234,7 @@ class HunterPool:
                 for _event in graph.stream(initial_state, cfg, stream_mode="values"):
                     pass
             except Exception as e:
-                logger.warning("Hunter graph stream failed for %s: %s",
-                               file_target.get("path"), e)
+                logger.warning("Hunter graph stream failed for %s: %s", file_target.get("path"), e)
 
             # Pull cost from the final state if available
             try:
@@ -254,6 +255,7 @@ class HunterPool:
     def _build_hunter_for_file(self, file_target: FileTarget, sandbox):
         """Either invoke the user-supplied hunter_factory or import build_hunter_agent."""
         import uuid
+
         session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
 
         if self.config.hunter_factory is not None:
@@ -261,6 +263,7 @@ class HunterPool:
 
         # Default: use build_hunter_agent + the configured llm
         from .hunter import build_hunter_agent
+
         if self.config.llm is None:
             raise ValueError("HuntPoolConfig.llm is required when hunter_factory is None")
 
@@ -281,10 +284,13 @@ class HunterPool:
 
     def _initial_state(self, file_target: FileTarget, session_id: str) -> dict:
         from langchain_core.messages import HumanMessage
+
         return {
-            "messages": [HumanMessage(
-                content=f"Hunt for vulnerabilities in {file_target.get('path', 'unknown')}.",
-            )],
+            "messages": [
+                HumanMessage(
+                    content=f"Hunt for vulnerabilities in {file_target.get('path', 'unknown')}.",
+                )
+            ],
             "repo_url": "",
             "repo_path": self.config.repo_path,
             "branch": "",

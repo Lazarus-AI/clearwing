@@ -1,4 +1,5 @@
 """Tests for the durable workflow execution module."""
+
 from __future__ import annotations
 
 import json
@@ -6,17 +7,17 @@ import json
 import pytest
 
 from clearwing.runners.workflow import (
+    RetryPolicy,
+    StepStatus,
     WorkflowEngine,
     WorkflowState,
     WorkflowStep,
-    StepStatus,
-    RetryPolicy,
 )
-
 
 # ---------------------------------------------------------------------------
 # StepStatus
 # ---------------------------------------------------------------------------
+
 
 class TestStepStatus:
     """Verify StepStatus enum values."""
@@ -34,6 +35,7 @@ class TestStepStatus:
 # RetryPolicy
 # ---------------------------------------------------------------------------
 
+
 class TestRetryPolicy:
     """Verify RetryPolicy defaults and backoff calculation."""
 
@@ -47,9 +49,9 @@ class TestRetryPolicy:
 
     def test_get_delay_exponential_backoff(self):
         policy = RetryPolicy(backoff_seconds=1.0, backoff_multiplier=2.0)
-        assert policy.get_delay(0) == 1.0   # 1 * 2^0 = 1
-        assert policy.get_delay(1) == 2.0   # 1 * 2^1 = 2
-        assert policy.get_delay(2) == 4.0   # 1 * 2^2 = 4
+        assert policy.get_delay(0) == 1.0  # 1 * 2^0 = 1
+        assert policy.get_delay(1) == 2.0  # 1 * 2^1 = 2
+        assert policy.get_delay(2) == 4.0  # 1 * 2^2 = 4
 
     def test_get_delay_respects_max_backoff(self):
         policy = RetryPolicy(
@@ -65,6 +67,7 @@ class TestRetryPolicy:
 # ---------------------------------------------------------------------------
 # WorkflowStep
 # ---------------------------------------------------------------------------
+
 
 class TestWorkflowStep:
     """Verify WorkflowStep dataclass defaults."""
@@ -90,6 +93,7 @@ class TestWorkflowStep:
 # WorkflowState
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowState:
     """Verify WorkflowState defaults and auto-generated timestamps."""
 
@@ -110,6 +114,7 @@ class TestWorkflowState:
 # WorkflowEngine – initialisation
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowEngineInit:
     """Verify WorkflowEngine initialization creates state."""
 
@@ -126,6 +131,7 @@ class TestWorkflowEngineInit:
 # WorkflowEngine.add_step
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowEngineAddStep:
     """Verify add_step registers step and handler."""
 
@@ -133,8 +139,10 @@ class TestWorkflowEngineAddStep:
         monkeypatch.setattr(WorkflowEngine, "CHECKPOINT_DIR", tmp_path)
         engine = WorkflowEngine(workflow_id="test2", name="scan")
 
-        handler = lambda step, state: "ok"
-        step = engine.add_step("s1", "recon", handler=handler, description="do recon")
+        def handler(step, state):
+            return "ok"
+
+        engine.add_step("s1", "recon", handler=handler, description="do recon")
 
         assert len(engine.state.steps) == 1
         assert engine.state.steps[0].id == "s1"
@@ -146,6 +154,7 @@ class TestWorkflowEngineAddStep:
 # ---------------------------------------------------------------------------
 # WorkflowEngine.run – basic execution
 # ---------------------------------------------------------------------------
+
 
 class TestWorkflowEngineRun:
     """Verify workflow execution in order."""
@@ -180,6 +189,7 @@ class TestWorkflowEngineRun:
 # ---------------------------------------------------------------------------
 # WorkflowEngine.run – dependencies
 # ---------------------------------------------------------------------------
+
 
 class TestWorkflowEngineDependencies:
     """Verify step dependency handling."""
@@ -233,6 +243,7 @@ class TestWorkflowEngineDependencies:
 # WorkflowEngine.run – retry logic
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowEngineRetry:
     """Verify retry policies during step execution."""
 
@@ -281,14 +292,16 @@ class TestWorkflowEngineRetry:
 # WorkflowEngine – checkpoint and recovery
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowEngineCheckpoint:
     """Verify checkpoint persistence and recovery round-trip."""
 
     def test_checkpoint_and_recovery_round_trip(self, monkeypatch, tmp_path):
         monkeypatch.setattr(WorkflowEngine, "CHECKPOINT_DIR", tmp_path)
         policy = RetryPolicy(backoff_seconds=0)
-        engine = WorkflowEngine(workflow_id="ckpt1", name="scan", target="10.0.0.1",
-                                retry_policy=policy)
+        engine = WorkflowEngine(
+            workflow_id="ckpt1", name="scan", target="10.0.0.1", retry_policy=policy
+        )
 
         def success_handler(step, state):
             return "done"
@@ -371,6 +384,7 @@ class TestWorkflowEngineCheckpoint:
 # WorkflowEngine.get_progress
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowEngineProgress:
     """Verify get_progress returns correct counts."""
 
@@ -405,6 +419,7 @@ class TestWorkflowEngineProgress:
 # WorkflowEngine.list_workflows
 # ---------------------------------------------------------------------------
 
+
 class TestWorkflowEngineListWorkflows:
     """Verify list_workflows finds saved workflow checkpoints."""
 
@@ -433,6 +448,7 @@ class TestWorkflowEngineListWorkflows:
 # ---------------------------------------------------------------------------
 # WorkflowEngine – final status
 # ---------------------------------------------------------------------------
+
 
 class TestWorkflowEngineFinalStatus:
     """Verify completed and failed final workflow statuses."""

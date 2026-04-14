@@ -15,15 +15,16 @@ external service. A reviewer MUST read and approve every template before
 submission — the LLM hunters find things, but coordinating disclosure is a
 human responsibility.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional, cast
+from typing import Literal, cast
 
-from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
+from .state import EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ DEFAULT_MIN_EVIDENCE: EvidenceLevel = "root_cause_explained"
 @dataclass
 class DisclosureTemplate:
     """One submission-ready template for one finding."""
+
     finding_id: str
     format: Literal["mitre", "hackerone"]
     title: str
@@ -48,12 +50,13 @@ class DisclosureTemplate:
     severity: str
     cwe: str
     evidence_level: str
-    validated: bool          # True if auto_patch_validated or exploit_success
+    validated: bool  # True if auto_patch_validated or exploit_success
 
 
 @dataclass
 class DisclosureBundle:
     """All templates produced from one sourcehunt run."""
+
     templates: list[DisclosureTemplate] = field(default_factory=list)
     skipped: int = 0
     skipped_reasons: dict[str, int] = field(default_factory=dict)
@@ -88,7 +91,7 @@ class DisclosureGenerator:
     def generate_bundle(
         self,
         findings: list[Finding],
-        formats: Optional[list[str]] = None,
+        formats: list[str] | None = None,
     ) -> DisclosureBundle:
         """Return a DisclosureBundle containing one template per (finding, format).
 
@@ -104,9 +107,7 @@ class DisclosureGenerator:
             skip_reason = self._should_skip(f)
             if skip_reason:
                 bundle.skipped += 1
-                bundle.skipped_reasons[skip_reason] = (
-                    bundle.skipped_reasons.get(skip_reason, 0) + 1
-                )
+                bundle.skipped_reasons[skip_reason] = bundle.skipped_reasons.get(skip_reason, 0) + 1
                 continue
             for fmt in formats:
                 if fmt == "mitre":
@@ -117,7 +118,7 @@ class DisclosureGenerator:
 
     # --- Eligibility ---------------------------------------------------------
 
-    def _should_skip(self, finding: Finding) -> Optional[str]:
+    def _should_skip(self, finding: Finding) -> str | None:
         if not finding.get("verified", False):
             return "unverified"
         level = cast(EvidenceLevel, finding.get("evidence_level", "suspicion"))
@@ -182,7 +183,7 @@ class DisclosureGenerator:
             f"[Suggested description of the vulnerability]: {description}",
             f"[Discoverer]: {self.reporter_name} ({self.reporter_affiliation})",
             f"[Reference]: {self.repo_url}",
-            f"[Additional information]:",
+            "[Additional information]:",
             f"  - File: {file}:{line}",
             f"  - CWE: {cwe or 'N/A'}",
             f"  - Severity (CVSS-ish): {severity}",
@@ -206,8 +207,11 @@ class DisclosureGenerator:
         if patch:
             lines += [
                 "## Candidate patch"
-                + (" — VALIDATED (PoC no longer reproduces after apply)"
-                   if validated else " — UNVALIDATED (review carefully)"),
+                + (
+                    " — VALIDATED (PoC no longer reproduces after apply)"
+                    if validated
+                    else " — UNVALIDATED (review carefully)"
+                ),
                 "```diff",
                 patch[:3000],
                 "```",
@@ -272,9 +276,9 @@ class DisclosureGenerator:
             "",
             "## Steps to Reproduce",
             "1. Check out the target repository at the vulnerable commit:",
-            f"   ```",
+            "   ```",
             f"   git clone {self.repo_url}",
-            f"   ```",
+            "   ```",
             f"2. Open `{file}` and inspect the code around line {line}.",
         ]
         if poc:
@@ -350,11 +354,7 @@ class DisclosureGenerator:
         return f"{finding_type} in {self.project_name} — {file}"
 
     def _severity(self, finding: Finding) -> str:
-        return (
-            finding.get("severity_verified")
-            or finding.get("severity")
-            or "medium"
-        )
+        return finding.get("severity_verified") or finding.get("severity") or "medium"
 
     def _is_validated(self, finding: Finding) -> bool:
         return bool(
@@ -381,7 +381,7 @@ class DisclosureGenerator:
         return "Other"
 
     def _attack_vector(self, finding: Finding) -> str:
-        tags = " ".join(finding.get("file", "").split("/"))
+        " ".join(finding.get("file", "").split("/"))
         ft = (finding.get("finding_type") or "").lower()
         if "sql" in ft or "injection" in ft:
             return "Network/remote via input field"
@@ -448,13 +448,16 @@ def write_bundle(
     # Also write a manifest summarising skipped/included findings
     manifest_path = base / "manifest.json"
     manifest_path.write_text(
-        json.dumps({
-            "repo_url": bundle.repo_url,
-            "templates_generated": len(bundle.templates),
-            "skipped": bundle.skipped,
-            "skipped_reasons": bundle.skipped_reasons,
-            "files": paths,
-        }, indent=2),
+        json.dumps(
+            {
+                "repo_url": bundle.repo_url,
+                "templates_generated": len(bundle.templates),
+                "skipped": bundle.skipped,
+                "skipped_reasons": bundle.skipped_reasons,
+                "files": paths,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     paths["manifest"] = [str(manifest_path)]

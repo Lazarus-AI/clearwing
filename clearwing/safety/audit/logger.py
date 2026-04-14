@@ -4,24 +4,24 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Optional
 
 
 @dataclass
 class AuditEntry:
     """A single audit log entry."""
+
     timestamp: str
     session_id: str
     event_type: str  # tool_call, llm_call, approval, error, finding, command
     agent: str = "main"  # main, recon, exploit, reporter, planner
-    tool_name: Optional[str] = None
-    tool_args: Optional[dict] = None
-    tool_result: Optional[str] = None
-    duration_ms: Optional[int] = None
-    severity: Optional[str] = None  # for findings: critical, high, medium, low, info
+    tool_name: str | None = None
+    tool_args: dict | None = None
+    tool_result: str | None = None
+    duration_ms: int | None = None
+    severity: str | None = None  # for findings: critical, high, medium, low, info
     details: dict = field(default_factory=dict)
 
 
@@ -76,8 +76,9 @@ class AuditLogger:
     # Convenience methods
     # ------------------------------------------------------------------
 
-    def log_tool_call(self, tool_name: str, args: dict, result: str,
-                      duration_ms: int = 0, agent: str = "main") -> AuditEntry:
+    def log_tool_call(
+        self, tool_name: str, args: dict, result: str, duration_ms: int = 0, agent: str = "main"
+    ) -> AuditEntry:
         """Log a tool invocation."""
         return self.log(
             "tool_call",
@@ -88,8 +89,14 @@ class AuditLogger:
             duration_ms=duration_ms,
         )
 
-    def log_llm_call(self, model: str, input_tokens: int, output_tokens: int,
-                     cost_usd: float, agent: str = "main") -> AuditEntry:
+    def log_llm_call(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        agent: str = "main",
+    ) -> AuditEntry:
         """Log an LLM API call."""
         return self.log(
             "llm_call",
@@ -102,8 +109,9 @@ class AuditLogger:
             },
         )
 
-    def log_command(self, command: str, exit_code: int, output: str,
-                    agent: str = "main") -> AuditEntry:
+    def log_command(
+        self, command: str, exit_code: int, output: str, agent: str = "main"
+    ) -> AuditEntry:
         """Log a shell command execution."""
         return self.log(
             "command",
@@ -115,8 +123,14 @@ class AuditLogger:
             },
         )
 
-    def log_finding(self, description: str, severity: str = "info",
-                    cve: str = "", agent: str = "main", **details) -> AuditEntry:
+    def log_finding(
+        self,
+        description: str,
+        severity: str = "info",
+        cve: str = "",
+        agent: str = "main",
+        **details,
+    ) -> AuditEntry:
         """Log a vulnerability or finding."""
         return self.log(
             "finding",
@@ -125,8 +139,7 @@ class AuditLogger:
             details={"description": description, "cve": cve, **details},
         )
 
-    def log_approval(self, prompt: str, approved: bool,
-                     agent: str = "main") -> AuditEntry:
+    def log_approval(self, prompt: str, approved: bool, agent: str = "main") -> AuditEntry:
         """Log a human approval decision."""
         return self.log(
             "approval",

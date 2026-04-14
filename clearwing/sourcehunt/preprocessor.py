@@ -7,6 +7,7 @@ that default to no-ops.
 The output is a `PreprocessResult` containing a list of FileTarget entries
 ready for the Ranker.
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,15 +15,15 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
 
 from .callgraph import CallGraph, CallGraphBuilder
-from .semgrep_sidecar import SemgrepSidecar, finding_to_dict as _semgrep_finding_to_dict
+from .semgrep_sidecar import SemgrepSidecar
+from .semgrep_sidecar import finding_to_dict as _semgrep_finding_to_dict
 from .state import FileTag, FileTarget
-from .taint import TaintAnalysisResult, TaintAnalyzer, TaintPath
+from .taint import TaintAnalyzer, TaintPath
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PreprocessResult:
     """Output of the preprocessor — fed into the Ranker."""
+
     repo_path: str
     file_targets: list[FileTarget]
     static_findings: list[StaticFinding]
-    semgrep_findings: list[dict] = field(default_factory=list)   # v0.2
-    callgraph: Optional[CallGraph] = None                        # v0.2
-    fuzz_corpora: list[dict] = field(default_factory=list)       # v0.2
-    taint_paths: list[TaintPath] = field(default_factory=list)   # v0.4
+    semgrep_findings: list[dict] = field(default_factory=list)  # v0.2
+    callgraph: CallGraph | None = None  # v0.2
+    fuzz_corpora: list[dict] = field(default_factory=list)  # v0.2
+    taint_paths: list[TaintPath] = field(default_factory=list)  # v0.4
 
     @property
     def file_count(self) -> int:
@@ -186,7 +188,7 @@ def _count_imports_by(repo_path: str, file_path: str, language: str) -> int:
             try:
                 if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
                     continue
-                with open(other, "r", encoding="utf-8", errors="ignore") as f:
+                with open(other, encoding="utf-8", errors="ignore") as f:
                     head = f.read(64 * 1024)  # only scan the first 64 KB
                 if pattern.search(head):
                     count += 1
@@ -214,14 +216,14 @@ class Preprocessor:
         self,
         repo_url: str,
         branch: str = "main",
-        local_path: Optional[str] = None,
-        build_callgraph: bool = False,        # v0.2 seam
-        run_semgrep: bool = False,            # v0.2 seam
+        local_path: str | None = None,
+        build_callgraph: bool = False,  # v0.2 seam
+        run_semgrep: bool = False,  # v0.2 seam
         tag_files: bool = True,
         propagate_reachability: bool = False,  # v0.2 seam
-        ingest_fuzz_corpora: bool = False,    # v0.2 seam
-        run_taint: bool = False,              # v0.4: tree-sitter taint analysis
-        max_imports_by_files: int = 1000,     # cap the imports_by walk
+        ingest_fuzz_corpora: bool = False,  # v0.2 seam
+        run_taint: bool = False,  # v0.4: tree-sitter taint analysis
+        max_imports_by_files: int = 1000,  # cap the imports_by walk
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -233,7 +235,7 @@ class Preprocessor:
         self.ingest_fuzz_corpora = ingest_fuzz_corpora
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
-        self._analyzer: Optional[SourceAnalyzer] = None
+        self._analyzer: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
@@ -258,7 +260,7 @@ class Preprocessor:
                 continue
 
             try:
-                with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                with open(abs_path, encoding="utf-8", errors="ignore") as f:
                     content_sample = f.read(self._CONTENT_SAMPLE_BYTES)
                 loc = sum(1 for _ in content_sample.splitlines())
             except OSError:
@@ -280,11 +282,11 @@ class Preprocessor:
             target: FileTarget = {
                 "path": rel_path,
                 "absolute_path": abs_path,
-                "surface": 0,                  # ranker fills in
-                "influence": 0,                # ranker fills in
-                "reachability": 3,             # v0.1 default; v0.2 propagates
-                "priority": 0.0,               # ranker fills in
-                "tier": "C",                   # ranker fills in via _assign_tier
+                "surface": 0,  # ranker fills in
+                "influence": 0,  # ranker fills in
+                "reachability": 3,  # v0.1 default; v0.2 propagates
+                "priority": 0.0,  # ranker fills in
+                "tier": "C",  # ranker fills in via _assign_tier
                 "tags": tags,
                 "language": language,
                 "loc": loc,
@@ -292,18 +294,18 @@ class Preprocessor:
                 "influence_rationale": "",
                 "reachability_rationale": "",
                 "static_hint": per_file_hints.get(abs_path, 0),
-                "semgrep_hint": 0,             # v0.2 fills in
-                "taint_hits": 0,               # v0.4: taint analyzer fills in
+                "semgrep_hint": 0,  # v0.2 fills in
+                "taint_hits": 0,  # v0.4: taint analyzer fills in
                 "imports_by": imports_by,
-                "transitive_callers": 0,       # v0.2 fills in
+                "transitive_callers": 0,  # v0.2 fills in
                 "defines_constants": defines_constants,
                 "has_fuzz_entry_point": "fuzzable" in tags,
-                "fuzz_harness_path": None,     # v0.2 fills in
+                "fuzz_harness_path": None,  # v0.2 fills in
             }
             file_targets.append(target)
 
         # v0.2 seams
-        callgraph: Optional[CallGraph] = None
+        callgraph: CallGraph | None = None
         semgrep_findings: list[dict] = []
         fuzz_corpora: list[dict] = []
 
@@ -329,9 +331,7 @@ class Preprocessor:
                 sidecar = SemgrepSidecar()
                 if sidecar.available:
                     semgrep_findings_objs = sidecar.run_scan(repo_path)
-                    semgrep_findings = [
-                        _semgrep_finding_to_dict(f) for f in semgrep_findings_objs
-                    ]
+                    semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]
                     self._apply_semgrep_hints(file_targets, semgrep_findings)
                 else:
                     logger.info("Semgrep binary not found; sidecar skipped")

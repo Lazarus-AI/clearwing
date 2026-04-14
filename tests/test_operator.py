@@ -1,13 +1,12 @@
 """Tests for the Operator agent."""
 
-from unittest.mock import MagicMock, patch, PropertyMock
-import pytest
+from unittest.mock import MagicMock, patch
 
 from clearwing.agent.operator import (
+    _OPERATOR_SYSTEM_PROMPT,
     OperatorAgent,
     OperatorConfig,
     OperatorResult,
-    _OPERATOR_SYSTEM_PROMPT,
 )
 
 
@@ -210,6 +209,7 @@ class TestDecideNext:
 class TestBuildResult:
     def test_completed_result(self):
         import time
+
         cfg = OperatorConfig(goals=["scan"], target="10.0.0.1")
         op = OperatorAgent(cfg)
         op._turns = 5
@@ -234,6 +234,7 @@ class TestBuildResult:
 
     def test_escalated_result(self):
         import time
+
         cfg = OperatorConfig(goals=["scan"], target="10.0.0.1")
         op = OperatorAgent(cfg)
 
@@ -243,7 +244,10 @@ class TestBuildResult:
         mock_graph.get_state.return_value = mock_state
 
         result = op._build_result(
-            mock_graph, {}, time.time(), "escalated",
+            mock_graph,
+            {},
+            time.time(),
+            "escalated",
             escalation_question="Need credentials",
         )
         assert result.status == "escalated"
@@ -251,6 +255,7 @@ class TestBuildResult:
 
     def test_exploit_results_added_to_findings(self):
         import time
+
         cfg = OperatorConfig(goals=["exploit"], target="10.0.0.1")
         op = OperatorAgent(cfg)
 
@@ -278,7 +283,8 @@ class TestEmit:
     def test_calls_callback(self):
         calls = []
         cfg = OperatorConfig(
-            goals=["scan"], target="10.0.0.1",
+            goals=["scan"],
+            target="10.0.0.1",
             on_message=lambda role, content: calls.append((role, content)),
         )
         op = OperatorAgent(cfg)
@@ -296,7 +302,8 @@ class TestEmit:
             raise ValueError("boom")
 
         cfg = OperatorConfig(
-            goals=["scan"], target="10.0.0.1",
+            goals=["scan"],
+            target="10.0.0.1",
             on_message=bad_callback,
         )
         op = OperatorAgent(cfg)
@@ -306,7 +313,8 @@ class TestEmit:
 class TestHandleInterrupt:
     def test_auto_approve_scan(self):
         cfg = OperatorConfig(
-            goals=["scan"], target="10.0.0.1",
+            goals=["scan"],
+            target="10.0.0.1",
             auto_approve_scans=True,
         )
         op = OperatorAgent(cfg)
@@ -326,7 +334,8 @@ class TestHandleInterrupt:
 
     def test_exploit_not_auto_approved(self):
         cfg = OperatorConfig(
-            goals=["exploit"], target="10.0.0.1",
+            goals=["exploit"],
+            target="10.0.0.1",
             auto_approve_scans=True,
             auto_approve_exploits=False,
         )
@@ -347,7 +356,8 @@ class TestHandleInterrupt:
 
     def test_exploit_auto_approved_when_enabled(self):
         cfg = OperatorConfig(
-            goals=["exploit"], target="10.0.0.1",
+            goals=["exploit"],
+            target="10.0.0.1",
             auto_approve_exploits=True,
         )
         op = OperatorAgent(cfg)
@@ -451,10 +461,12 @@ class TestOperatorRun:
     @patch("clearwing.agent.graph._create_llm")
     @patch("clearwing.agent.create_agent")
     def test_escalate_with_callback(self, mock_create, mock_create_llm, mock_decide):
-        mock_graph = self._make_mock_graph([
-            "What credentials?",
-            "Logged in successfully.",
-        ])
+        mock_graph = self._make_mock_graph(
+            [
+                "What credentials?",
+                "Logged in successfully.",
+            ]
+        )
         mock_create.return_value = mock_graph
         mock_create_llm.return_value = MagicMock()
 
@@ -464,7 +476,8 @@ class TestOperatorRun:
         ]
 
         cfg = OperatorConfig(
-            goals=["scan"], target="10.0.0.1",
+            goals=["scan"],
+            target="10.0.0.1",
             on_escalate=lambda q: "password123",
         )
         op = OperatorAgent(cfg)
@@ -499,7 +512,8 @@ class TestOperatorRun:
 
         results = []
         cfg = OperatorConfig(
-            goals=["scan"], target="10.0.0.1",
+            goals=["scan"],
+            target="10.0.0.1",
             on_complete=lambda r: results.append(r),
         )
         op = OperatorAgent(cfg)
@@ -519,7 +533,8 @@ class TestOperatorRun:
 
         messages = []
         cfg = OperatorConfig(
-            goals=["scan"], target="10.0.0.1",
+            goals=["scan"],
+            target="10.0.0.1",
             on_message=lambda role, content: messages.append((role, content)),
         )
         op = OperatorAgent(cfg)

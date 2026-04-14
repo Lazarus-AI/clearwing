@@ -20,16 +20,15 @@ v0.2 safety: if no LLM is available, no sandbox is available, or compiling
 fails, the generator logs and moves on. It never blocks the pipeline —
 cold-start hunters remain the fallback.
 """
+
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -47,10 +46,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HarnessGeneratorConfig:
     """Budget and selection knobs for the harness generator."""
-    total_time_budget_seconds: int = 7200   # 2 hours across all harnesses
+
+    total_time_budget_seconds: int = 7200  # 2 hours across all harnesses
     per_harness_duration_seconds: int = 30  # per libFuzzer run
-    max_harnesses: int = 10                  # cap — don't fuzz everything
-    min_surface: int = 4                    # only fuzz surface>=4 files
+    max_harnesses: int = 10  # cap — don't fuzz everything
+    min_surface: int = 4  # only fuzz surface>=4 files
     required_tags: tuple = ("parser", "fuzzable")  # match ANY
     max_parallel: int = 2
     compile_timeout_seconds: int = 120
@@ -59,9 +59,10 @@ class HarnessGeneratorConfig:
 @dataclass
 class SeededCrash:
     """One crash produced by a harness. Flows into the hunter as seeded context."""
-    file: str                    # repo-relative path of the file being fuzzed
+
+    file: str  # repo-relative path of the file being fuzzed
     target_function: str
-    report: str                  # parsed ASan/UBSan report
+    report: str  # parsed ASan/UBSan report
     minimized_input: bytes = b""
     harness_source: str = ""
     crashed: bool = True
@@ -116,8 +117,8 @@ class HarnessGenerator:
     def __init__(
         self,
         llm: BaseChatModel,
-        sandbox_factory=None,             # Callable[[], SandboxContainer] | HunterSandbox
-        config: Optional[HarnessGeneratorConfig] = None,
+        sandbox_factory=None,  # Callable[[], SandboxContainer] | HunterSandbox
+        config: HarnessGeneratorConfig | None = None,
     ):
         self.llm = llm
         self.sandbox_factory = sandbox_factory
@@ -141,19 +142,17 @@ class HarnessGenerator:
             logger.info("HarnessGenerator: no eligible files")
             return result
 
-        logger.info("HarnessGenerator: fuzzing %d files (max=%d)",
-                    len(eligible), self.config.max_harnesses)
+        logger.info(
+            "HarnessGenerator: fuzzing %d files (max=%d)", len(eligible), self.config.max_harnesses
+        )
 
         # Cap at max_harnesses, preferring highest priority first
         eligible.sort(key=lambda f: -f.get("priority", 0.0))
-        eligible = eligible[:self.config.max_harnesses]
+        eligible = eligible[: self.config.max_harnesses]
 
         # Run in parallel, respecting total time budget
         with ThreadPoolExecutor(max_workers=self.config.max_parallel) as pool:
-            futures = {
-                pool.submit(self._fuzz_one, ft, repo_path): ft
-                for ft in eligible
-            }
+            futures = {pool.submit(self._fuzz_one, ft, repo_path): ft for ft in eligible}
             deadline = start + self.config.total_time_budget_seconds
             for future in as_completed(futures):
                 if time.monotonic() > deadline:
@@ -161,8 +160,11 @@ class HarnessGenerator:
                     break
                 ft = futures[future]
                 try:
-                    crash = future.result(timeout=self.config.compile_timeout_seconds
-                                         + self.config.per_harness_duration_seconds + 10)
+                    crash = future.result(
+                        timeout=self.config.compile_timeout_seconds
+                        + self.config.per_harness_duration_seconds
+                        + 10
+                    )
                 except Exception as e:
                     logger.debug("Harness for %s failed: %s", ft.get("path"), e)
                     continue
@@ -204,7 +206,7 @@ class HarnessGenerator:
         self,
         file_target: FileTarget,
         repo_path: str,
-    ) -> Optional[SeededCrash]:
+    ) -> SeededCrash | None:
         """Generate + compile + run a harness for one file."""
         sandbox = self._spawn_sandbox()
         if sandbox is None:
@@ -214,10 +216,11 @@ class HarnessGenerator:
         try:
             # 1. Read the file contents
             import os
+
             abs_path = file_target.get("absolute_path", "")
             if not abs_path or not os.path.exists(abs_path):
                 return None
-            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(abs_path, encoding="utf-8", errors="replace") as f:
                 file_source = f.read()[:8000]
 
             # 2. Pick a target function — the last non-static function def
@@ -237,8 +240,7 @@ class HarnessGenerator:
 
             # 4. Write the harness into /scratch and compile it with libFuzzer
             harness_filename = f"harness_{uuid.uuid4().hex[:6]}.c"
-            sandbox.write_file(f"/scratch/{harness_filename}",
-                              harness_source.encode("utf-8"))
+            sandbox.write_file(f"/scratch/{harness_filename}", harness_source.encode("utf-8"))
 
             binary_path = f"/scratch/fuzz_{uuid.uuid4().hex[:6]}"
             compile_cmd = (
@@ -252,15 +254,20 @@ class HarnessGenerator:
                 timeout=self.config.compile_timeout_seconds,
             )
             if compile_result.exit_code != 0:
-                logger.debug("Compile failed for %s: %s",
-                             file_target.get("path"),
-                             compile_result.stdout[:500])
+                logger.debug(
+                    "Compile failed for %s: %s",
+                    file_target.get("path"),
+                    compile_result.stdout[:500],
+                )
                 return None
 
             # 5. Run libFuzzer for the per-harness duration
             run_result = sandbox.exec(
-                ["sh", "-c",
-                 f"{binary_path} -max_total_time={self.config.per_harness_duration_seconds} 2>&1"],
+                [
+                    "sh",
+                    "-c",
+                    f"{binary_path} -max_total_time={self.config.per_harness_duration_seconds} 2>&1",
+                ],
                 timeout=self.config.per_harness_duration_seconds + 10,
             )
 
@@ -300,7 +307,7 @@ class HarnessGenerator:
         file_path: str,
         file_source: str,
         target_function: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Ask the LLM for a harness C source."""
         user_msg = (
             f"Target file: {file_path}\n"
@@ -308,10 +315,12 @@ class HarnessGenerator:
             f"File source (may be truncated):\n\n{file_source}\n"
         )
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=HARNESS_GEN_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=HARNESS_GEN_SYSTEM_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception:
             logger.debug("Harness-gen LLM call failed", exc_info=True)
             return None
@@ -328,7 +337,7 @@ _C_FUNCTION_DEF = re.compile(
 )
 
 
-def _guess_target_function(source: str) -> Optional[str]:
+def _guess_target_function(source: str) -> str | None:
     """Pick the last non-static function defined in a C source file.
 
     Heuristic — in practice the LLM will also pick a function in its harness.
@@ -365,5 +374,5 @@ def _parse_sanitizer_report(raw: str) -> str:
         if _SANITIZER_HEADER.search(line):
             start = i
             break
-    snippet = "\n".join(lines[start:start + 60])
+    snippet = "\n".join(lines[start : start + 60])
     return snippet[:6000]

@@ -1,11 +1,14 @@
 """Tests for Kali Docker tool (requires Docker daemon)."""
-import pytest
+
 import shutil
+
+import pytest
 
 docker_available = shutil.which("docker") is not None
 
 try:
     import docker as docker_lib
+
     client = docker_lib.from_env()
     client.ping()
     docker_running = True
@@ -13,8 +16,7 @@ except Exception:
     docker_running = False
 
 skip_no_docker = pytest.mark.skipif(
-    not (docker_available and docker_running),
-    reason="Docker daemon not available"
+    not (docker_available and docker_running), reason="Docker daemon not available"
 )
 
 
@@ -28,6 +30,7 @@ class TestKaliDocker:
         yield
         try:
             import docker as docker_lib
+
             client = docker_lib.from_env()
             try:
                 container = client.containers.get("clearwing-kali-test")
@@ -40,8 +43,8 @@ class TestKaliDocker:
 
     def test_container_lifecycle(self):
         """Test start, execute, cleanup using alpine."""
+
         import docker as docker_lib
-        from unittest.mock import patch
 
         client = docker_lib.from_env()
 

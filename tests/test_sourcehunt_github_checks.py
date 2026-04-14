@@ -10,16 +10,14 @@ Covers:
     - gh binary missing → no-op
     - CommitMonitor integration wiring
 """
+
 from __future__ import annotations
 
 import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from clearwing.sourcehunt.github_checks import (
-    MAX_ANNOTATIONS_PER_CALL,
     CheckRunOutcome,
     GitHubChecksConfig,
     GitHubChecksPublisher,
@@ -83,10 +81,13 @@ class TestDetectOwnerRepo:
         assert result == ("acme", "tool")
 
     def test_explicit_owner_repo_wins(self):
-        publisher = GitHubChecksPublisher(GitHubChecksConfig(
-            repo_path="/tmp/repo",
-            owner="override", repo="explicit",
-        ))
+        publisher = GitHubChecksPublisher(
+            GitHubChecksConfig(
+                repo_path="/tmp/repo",
+                owner="override",
+                repo="explicit",
+            )
+        )
         # No subprocess call needed when both are set
         with patch("subprocess.run") as mock_run:
             result = publisher.detect_owner_repo()
@@ -153,7 +154,7 @@ class TestAnnotationConstruction:
         assert a["path"] == "src/codec.c"
         assert a["start_line"] == 47
         assert a["end_line"] == 47
-        assert a["annotation_level"] == "failure"   # critical → failure
+        assert a["annotation_level"] == "failure"  # critical → failure
         assert "memcpy with unchecked length" in a["message"]
         assert "Evidence: crash_reproduced" in a["message"]
 
@@ -172,11 +173,13 @@ class TestAnnotationConstruction:
 
     def test_findings_without_file_are_skipped(self):
         publisher = GitHubChecksPublisher(GitHubChecksConfig(repo_path="/tmp"))
-        annotations = publisher._build_annotations([
-            _finding(file=None),
-            _finding(line_number=None),
-            _finding(),   # valid
-        ])
+        annotations = publisher._build_annotations(
+            [
+                _finding(file=None),
+                _finding(line_number=None),
+                _finding(),  # valid
+            ]
+        )
         assert len(annotations) == 1
 
     def test_end_line_defaults_to_start_line(self):
@@ -193,17 +196,21 @@ class TestAnnotationConstruction:
 
     def test_crash_evidence_in_raw_details(self):
         publisher = GitHubChecksPublisher(GitHubChecksConfig(repo_path="/tmp"))
-        ann = publisher._build_annotations([
-            _finding(crash_evidence="==1==ERROR: AddressSanitizer\nat 0xDEADBEEF"),
-        ])[0]
+        ann = publisher._build_annotations(
+            [
+                _finding(crash_evidence="==1==ERROR: AddressSanitizer\nat 0xDEADBEEF"),
+            ]
+        )[0]
         assert "raw_details" in ann
         assert "AddressSanitizer" in ann["raw_details"]
 
     def test_annotation_includes_counter_argument(self):
         publisher = GitHubChecksPublisher(GitHubChecksConfig(repo_path="/tmp"))
-        ann = publisher._build_annotations([
-            _finding(verifier_counter_argument="but the caller validates"),
-        ])[0]
+        ann = publisher._build_annotations(
+            [
+                _finding(verifier_counter_argument="but the caller validates"),
+            ]
+        )[0]
         assert "counter-argument" in ann["message"]
         assert "but the caller validates" in ann["message"]
 
@@ -285,10 +292,13 @@ class TestTitleConstruction:
 class TestPublishEndToEnd:
     def _setup(self, findings_list, gh_api_responses=None):
         """Return a publisher wired with mocked `gh api` calls."""
-        publisher = GitHubChecksPublisher(GitHubChecksConfig(
-            repo_path="/tmp/repo",
-            owner="acme", repo="tool",
-        ))
+        publisher = GitHubChecksPublisher(
+            GitHubChecksConfig(
+                repo_path="/tmp/repo",
+                owner="acme",
+                repo="tool",
+            )
+        )
 
         responses = gh_api_responses or [{"id": 12345}]
         call_history = []
@@ -311,8 +321,10 @@ class TestPublishEndToEnd:
 
     def test_publish_success(self):
         publisher, fake_run, calls = self._setup([_finding()])
-        with patch("shutil.which", return_value="/usr/bin/gh"), \
-             patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
             outcome = publisher.publish("deadbeefcafe", [_finding()])
         assert outcome.published is True
         assert outcome.conclusion == "failure"
@@ -331,8 +343,10 @@ class TestPublishEndToEnd:
     def test_publish_no_owner_repo(self):
         publisher = GitHubChecksPublisher(GitHubChecksConfig(repo_path="/tmp/repo"))
         fake_git_failure = MagicMock(returncode=1, stdout="", stderr="no origin")
-        with patch("shutil.which", return_value="/usr/bin/gh"), \
-             patch("subprocess.run", return_value=fake_git_failure):
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", return_value=fake_git_failure),
+        ):
             outcome = publisher.publish("sha", [_finding()])
         assert outcome.published is False
         assert "owner/repo" in outcome.notes
@@ -340,8 +354,10 @@ class TestPublishEndToEnd:
     def test_publish_clean_scan(self):
         """Zero findings → conclusion=success."""
         publisher, fake_run, _ = self._setup([])
-        with patch("shutil.which", return_value="/usr/bin/gh"), \
-             patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
             outcome = publisher.publish("sha", [])
         assert outcome.published is True
         assert outcome.conclusion == "success"
@@ -354,8 +370,10 @@ class TestPublishEndToEnd:
         # just need to return valid JSON.
         responses = [{"id": 99}] + [{"id": 99}] * 2
         publisher, fake_run, calls = self._setup(findings, responses)
-        with patch("shutil.which", return_value="/usr/bin/gh"), \
-             patch("subprocess.run", side_effect=fake_run):
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
             outcome = publisher.publish("sha", findings)
         assert outcome.published is True
         # 50 in the POST + 25 in a PATCH = 75
@@ -368,25 +386,34 @@ class TestPublishEndToEnd:
         assert "--method" in calls[1] and "PATCH" in calls[1]
 
     def test_publish_api_failure_returns_unpublished(self):
-        publisher = GitHubChecksPublisher(GitHubChecksConfig(
-            repo_path="/tmp/repo",
-            owner="acme", repo="tool",
-        ))
+        publisher = GitHubChecksPublisher(
+            GitHubChecksConfig(
+                repo_path="/tmp/repo",
+                owner="acme",
+                repo="tool",
+            )
+        )
         bad_proc = MagicMock(returncode=1, stdout="", stderr="API error")
-        with patch("shutil.which", return_value="/usr/bin/gh"), \
-             patch("subprocess.run", return_value=bad_proc):
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", return_value=bad_proc),
+        ):
             outcome = publisher.publish("sha", [_finding()])
         assert outcome.published is False
         assert "failed" in outcome.notes
 
     def test_publish_api_timeout(self):
-        publisher = GitHubChecksPublisher(GitHubChecksConfig(
-            repo_path="/tmp/repo",
-            owner="acme", repo="tool",
-        ))
-        with patch("shutil.which", return_value="/usr/bin/gh"), \
-             patch("subprocess.run",
-                   side_effect=subprocess.TimeoutExpired("gh", 60)):
+        publisher = GitHubChecksPublisher(
+            GitHubChecksConfig(
+                repo_path="/tmp/repo",
+                owner="acme",
+                repo="tool",
+            )
+        )
+        with (
+            patch("shutil.which", return_value="/usr/bin/gh"),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 60)),
+        ):
             outcome = publisher.publish("sha", [_finding()])
         assert outcome.published is False
 
@@ -412,13 +439,17 @@ class TestCommitMonitorIntegration:
         subprocess.run(["git", "-C", str(repo), "add", "main.c"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
         head = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True,
         ).strip()
 
         mock_publisher = MagicMock()
         mock_publisher.publish.return_value = CheckRunOutcome(
-            published=True, conclusion="neutral", check_run_id="42",
-            annotation_count=0, finding_count=0,
+            published=True,
+            conclusion="neutral",
+            check_run_id="42",
+            annotation_count=0,
+            finding_count=0,
         )
 
         def runner_factory(files):
@@ -427,12 +458,14 @@ class TestCommitMonitorIntegration:
             runner.run.return_value = result
             return runner
 
-        monitor = CommitMonitor(CommitMonitorConfig(
-            repo_path=str(repo),
-            enable_github_checks=True,
-            github_checks_publisher=mock_publisher,
-            runner_factory=runner_factory,
-        ))
+        monitor = CommitMonitor(
+            CommitMonitorConfig(
+                repo_path=str(repo),
+                enable_github_checks=True,
+                github_checks_publisher=mock_publisher,
+                runner_factory=runner_factory,
+            )
+        )
         result = monitor.scan_commit(head)
         # The publisher was called with the commit SHA
         mock_publisher.publish.assert_called_once()
@@ -457,16 +490,19 @@ class TestCommitMonitorIntegration:
         subprocess.run(["git", "-C", str(repo), "add", "main.c"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
         head = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True,
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True,
         ).strip()
 
-        monitor = CommitMonitor(CommitMonitorConfig(
-            repo_path=str(repo),
-            enable_github_checks=False,
-            runner_factory=lambda files: MagicMock(
-                run=MagicMock(return_value=MagicMock(findings=[])),
-            ),
-        ))
+        monitor = CommitMonitor(
+            CommitMonitorConfig(
+                repo_path=str(repo),
+                enable_github_checks=False,
+                runner_factory=lambda files: MagicMock(
+                    run=MagicMock(return_value=MagicMock(findings=[])),
+                ),
+            )
+        )
         result = monitor.scan_commit(head)
         assert result.check_run_outcome is None
 
@@ -477,9 +513,11 @@ class TestCommitMonitorIntegration:
             CommitMonitorConfig,
         )
 
-        monitor = CommitMonitor(CommitMonitorConfig(
-            repo_path=str(tmp_path),
-            enable_github_checks=True,
-        ))
+        monitor = CommitMonitor(
+            CommitMonitorConfig(
+                repo_path=str(tmp_path),
+                enable_github_checks=True,
+            )
+        )
         assert monitor._checks_publisher is not None
         assert monitor._checks_publisher.config.repo_path == str(tmp_path)

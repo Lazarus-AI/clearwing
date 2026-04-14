@@ -15,6 +15,7 @@ This complements the poll-based CommitMonitor. Production deployment:
 No Flask / FastAPI dependency — stdlib http.server is enough for this
 small footprint and makes packaging simpler.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,9 +23,9 @@ import hmac
 import json
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,22 +36,24 @@ logger = logging.getLogger(__name__)
 @dataclass
 class WebhookConfig:
     """Configuration for the webhook server."""
+
     host: str = "0.0.0.0"
     port: int = 8787
     path: str = "/webhook"
-    secret: str = ""                     # shared secret, HMAC-SHA256
+    secret: str = ""  # shared secret, HMAC-SHA256
     allowed_repos: list[str] = field(default_factory=list)
-                                          # e.g. ["owner/repo"]; empty = allow all
+    # e.g. ["owner/repo"]; empty = allow all
     allowed_branches: list[str] = field(default_factory=list)
-                                          # e.g. ["main"]; empty = allow all
+    # e.g. ["main"]; empty = allow all
     # Callback invoked in a worker thread when a push is accepted.
     # Signature: (repo_full_name: str, commit_sha: str, payload: dict) -> None
-    on_push: Optional[Callable] = None
+    on_push: Callable | None = None
 
 
 @dataclass
 class WebhookStats:
     """Running counters for observability — exposed via get_stats()."""
+
     received: int = 0
     signature_failures: int = 0
     unsupported_events: int = 0
@@ -77,7 +80,7 @@ def verify_signature(
         return False
     if not signature_header.startswith("sha256="):
         return False
-    expected_hex = signature_header[len("sha256="):]
+    expected_hex = signature_header[len("sha256=") :]
     mac = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256)
     computed_hex = mac.hexdigest()
     return hmac.compare_digest(expected_hex, computed_hex)
@@ -86,7 +89,7 @@ def verify_signature(
 # --- Payload parsing -------------------------------------------------------
 
 
-def parse_push_payload(payload: dict) -> Optional[dict]:
+def parse_push_payload(payload: dict) -> dict | None:
     """Extract (repo_full_name, head_sha, ref) from a GitHub push payload.
 
     GitHub's push event schema:
@@ -202,6 +205,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Dispatch the callback in a background thread so GitHub gets a
         # prompt 202 Accepted and doesn't hit its 10-second timeout.
         if config.on_push is not None:
+
             def _run():
                 try:
                     config.on_push(
@@ -257,7 +261,9 @@ def serve_forever(config: WebhookConfig) -> WebhookServer:
     server = WebhookServer(config)
     logger.info(
         "Webhook server listening on %s:%d%s",
-        config.host, config.port, config.path,
+        config.host,
+        config.port,
+        config.path,
     )
     try:
         server.serve_forever()
@@ -286,9 +292,12 @@ def commit_monitor_on_push_factory(monitor) -> Callable:
             on_push=commit_monitor_on_push_factory(monitor),
         ))
     """
+
     def on_push(full_name: str, commit_sha: str, payload: dict) -> None:
         logger.info(
-            "webhook dispatch: %s @ %s", full_name, commit_sha[:8],
+            "webhook dispatch: %s @ %s",
+            full_name,
+            commit_sha[:8],
         )
         try:
             monitor.scan_commit(commit_sha)

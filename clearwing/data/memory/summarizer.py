@@ -5,10 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 # Patterns that indicate a captured flag — these messages must never be dropped.
-_FLAG_PATTERNS = re.compile(r"(flag\{[^}]*\}|FLAG\{[^}]*\}|HTB\{[^}]*\}|CTF\{[^}]*\})", re.IGNORECASE)
+_FLAG_PATTERNS = re.compile(
+    r"(flag\{[^}]*\}|FLAG\{[^}]*\}|HTB\{[^}]*\}|CTF\{[^}]*\})", re.IGNORECASE
+)
 
 _SUMMARIZE_PROMPT = (
     "Summarize these penetration testing findings concisely, preserving: "

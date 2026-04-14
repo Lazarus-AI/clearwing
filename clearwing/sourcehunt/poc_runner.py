@@ -15,13 +15,13 @@ Design constraints:
       happens" (conservative — don't falsely validate a broken patch).
     - Bounded: every step has a timeout.
 """
+
 from __future__ import annotations
 
 import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 from clearwing.sandbox.container import SandboxContainer
 
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PocRunnerConfig:
     """Timeouts and sanitizer choices for patch replay."""
+
     apply_timeout_seconds: int = 30
     compile_timeout_seconds: int = 120
     run_timeout_seconds: int = 30
@@ -63,7 +64,7 @@ class PocRunner:
         self,
         sandbox: SandboxContainer,
         repo_path_in_sandbox: str = "/workspace",
-        config: Optional[PocRunnerConfig] = None,
+        config: PocRunnerConfig | None = None,
     ):
         self.sandbox = sandbox
         self.repo_root = repo_path_in_sandbox
@@ -91,7 +92,7 @@ class PocRunner:
             "applied": False,
             "compiled": False,
             "ran": False,
-            "still_crashes": True,     # conservative default
+            "still_crashes": True,  # conservative default
             "exit_code": -1,
             "stderr": "",
             "notes": "",
@@ -112,7 +113,9 @@ class PocRunner:
                 return report
 
         # 2. Rebuild the target file
-        compiled, binary_path, compile_err = self._recompile(file_rel, patched=bool(candidate_diff.strip()))
+        compiled, binary_path, compile_err = self._recompile(
+            file_rel, patched=bool(candidate_diff.strip())
+        )
         report["compiled"] = compiled
         if not compiled:
             report["notes"] = f"compile failed: {compile_err[:400]}"
@@ -129,7 +132,8 @@ class PocRunner:
 
         report["still_crashes"] = self._still_crashed(finding, exit_code, stderr)
         report["notes"] = (
-            "crash reproduced after patch" if report["still_crashes"]
+            "crash reproduced after patch"
+            if report["still_crashes"]
             else "PoC no longer crashes after patch"
         )
         return report
@@ -163,8 +167,9 @@ class PocRunner:
 
         # Try `patch` first — standard unified-diff apply
         patch_cmd = [
-            "sh", "-c",
-            f"cd /scratch/patched && patch -p1 --forward < /scratch/candidate.diff 2>&1",
+            "sh",
+            "-c",
+            "cd /scratch/patched && patch -p1 --forward < /scratch/candidate.diff 2>&1",
         ]
         result = self.sandbox.exec(patch_cmd, timeout=self.config.apply_timeout_seconds)
         if result.exit_code == 0:
@@ -194,15 +199,13 @@ class PocRunner:
         Returns (success, binary_path, stderr_on_failure).
         """
         san_flags = ",".join(self.config.sanitizers)
-        source_path = (
-            f"/scratch/patched/{file_rel}" if patched
-            else f"{self.repo_root}/{file_rel}"
-        )
+        source_path = f"/scratch/patched/{file_rel}" if patched else f"{self.repo_root}/{file_rel}"
         binary_path = f"/scratch/poc_{os.path.basename(file_rel)}.bin"
         # Build with ASan/UBSan, -g for stack traces, -O0 for accurate line
         # numbers. Include -I /workspace to pick up headers.
         compile_cmd = [
-            "sh", "-c",
+            "sh",
+            "-c",
             (
                 f"cc -fsanitize={san_flags} {self.config.extra_cflags} "
                 f"-I {self.repo_root} -I {self.repo_root}/include "
@@ -235,7 +238,8 @@ class PocRunner:
             # Pipe the PoC via shell heredoc — quoted to survive shell escaping
             escaped = stdin_block.replace("'", "'\\''")
             cmd = [
-                "sh", "-c",
+                "sh",
+                "-c",
                 f"printf '%s' '{escaped}' | {binary_path} 2>&1; echo __EXITCODE__$?",
             ]
         else:
@@ -249,7 +253,7 @@ class PocRunner:
         if m:
             try:
                 rc = int(m.group(1))
-                output = output[:m.start()].rstrip()
+                output = output[: m.start()].rstrip()
             except ValueError:
                 pass
         return True, rc, output
@@ -273,10 +277,17 @@ class PocRunner:
         original = (finding.get("crash_evidence") or "").lower()
         # Common sanitizer error kinds to compare
         kinds = [
-            "heap-buffer-overflow", "stack-buffer-overflow", "use-after-free",
-            "global-buffer-overflow", "stack-overflow", "double-free",
-            "invalid-free", "alloc-dealloc-mismatch", "signed-integer-overflow",
-            "runtime error", "null deref",
+            "heap-buffer-overflow",
+            "stack-buffer-overflow",
+            "use-after-free",
+            "global-buffer-overflow",
+            "stack-overflow",
+            "double-free",
+            "invalid-free",
+            "alloc-dealloc-mismatch",
+            "signed-integer-overflow",
+            "runtime error",
+            "null deref",
         ]
         original_kind = None
         for k in kinds:
@@ -301,7 +312,7 @@ class PocRunner:
 def build_rerun_poc_callback(
     sandbox: SandboxContainer,
     repo_path_in_sandbox: str = "/workspace",
-    config: Optional[PocRunnerConfig] = None,
+    config: PocRunnerConfig | None = None,
 ):
     """Return a callable `(sandbox, finding) -> still_crashes: bool` suitable
     for passing to Verifier.run_patch_oracle / AutoPatcher.attempt.

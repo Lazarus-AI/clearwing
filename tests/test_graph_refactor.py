@@ -8,27 +8,27 @@ These tests assert that:
    and state-updater callback — proving the seam for sourcehunt agents.
 4. The default pentest state-updater maps tool outputs to the expected fields.
 """
+
 from __future__ import annotations
 
+from typing import Annotated
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from typing import Annotated
-from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict
 
 from clearwing.agent.graph import (
+    _default_pentest_state_updater,
     build_react_graph,
     create_agent,
-    _default_pentest_state_updater,
 )
 from clearwing.agent.state import AgentState
 
 
 class CustomState(TypedDict):
     """Module-level TypedDict so Python 3.14 lazy annotations resolve correctly."""
+
     messages: Annotated[list[BaseMessage], add_messages]
     custom_field: str
 
@@ -83,6 +83,7 @@ class TestBuildReactGraphSignature:
 
     def test_signature_has_required_kwargs(self):
         import inspect
+
         sig = inspect.signature(build_react_graph)
         params = sig.parameters
         # Positional / required
@@ -100,6 +101,7 @@ class TestBuildReactGraphSignature:
 
     def test_state_schema_default_is_agent_state(self):
         import inspect
+
         sig = inspect.signature(build_react_graph)
         assert sig.parameters["state_schema"].default is AgentState
 

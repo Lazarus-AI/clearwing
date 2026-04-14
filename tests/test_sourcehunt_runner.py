@@ -9,6 +9,7 @@ local c_propagation fixture. Verifies:
 - spent_per_tier breakdown is recorded in the manifest
 - The `quick` depth path runs without any LLM hunters
 """
+
 from __future__ import annotations
 
 import json
@@ -18,8 +19,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from clearwing.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
-from clearwing.sourcehunt.pool import TierBudget
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -31,22 +30,35 @@ def _ranker_response(files: list[str]) -> str:
     for path in files:
         if "codec_limits.h" in path:
             # The propagation case: surface=1, influence=5
-            entries.append({
-                "path": path, "surface": 1, "influence": 5,
-                "surface_rationale": "just a constants header",
-                "influence_rationale": "MAX_FRAME_BYTES used in 3 memcpys",
-            })
+            entries.append(
+                {
+                    "path": path,
+                    "surface": 1,
+                    "influence": 5,
+                    "surface_rationale": "just a constants header",
+                    "influence_rationale": "MAX_FRAME_BYTES used in 3 memcpys",
+                }
+            )
         elif "codec_a.c" in path or "codec_b.c" in path or "codec_c.c" in path:
-            entries.append({
-                "path": path, "surface": 4, "influence": 2,
-                "surface_rationale": "memcpy on user input",
-                "influence_rationale": "called by main",
-            })
+            entries.append(
+                {
+                    "path": path,
+                    "surface": 4,
+                    "influence": 2,
+                    "surface_rationale": "memcpy on user input",
+                    "influence_rationale": "called by main",
+                }
+            )
         else:
-            entries.append({
-                "path": path, "surface": 2, "influence": 1,
-                "surface_rationale": "utility", "influence_rationale": "isolated",
-            })
+            entries.append(
+                {
+                    "path": path,
+                    "surface": 2,
+                    "influence": 1,
+                    "surface_rationale": "utility",
+                    "influence_rationale": "isolated",
+                }
+            )
     return json.dumps(entries)
 
 
@@ -73,15 +85,17 @@ def _make_hunter_llm() -> MagicMock:
 def _make_verifier_llm() -> MagicMock:
     llm = MagicMock()
     response = MagicMock()
-    response.content = json.dumps({
-        "is_real": True,
-        "severity": "high",
-        "evidence_level": "static_corroboration",
-        "pro_argument": "regex matched",
-        "counter_argument": "",
-        "tie_breaker": "static analysis hit",
-        "duplicate_cve": None,
-    })
+    response.content = json.dumps(
+        {
+            "is_real": True,
+            "severity": "high",
+            "evidence_level": "static_corroboration",
+            "pro_argument": "regex matched",
+            "counter_argument": "",
+            "tie_breaker": "static analysis hit",
+            "duplicate_cve": None,
+        }
+    )
     llm.invoke.return_value = response
     return llm
 
@@ -96,10 +110,14 @@ class TestQuickDepth:
             local_path=str(FIXTURE_C_PROPAGATION),
             depth="quick",
             output_dir=str(tmp_path),
-            ranker_llm=_make_ranker_llm([
-                "include/codec_limits.h", "src/codec_a.c",
-                "src/codec_b.c", "src/codec_c.c",
-            ]),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
             # No hunter/verifier/exploiter LLMs needed for quick
         )
         result = runner.run()
@@ -127,13 +145,17 @@ class TestStandardDepth:
             budget_usd=1.0,
             max_parallel=2,
             output_dir=str(tmp_path),
-            ranker_llm=_make_ranker_llm([
-                "include/codec_limits.h", "src/codec_a.c",
-                "src/codec_b.c", "src/codec_c.c",
-            ]),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
             hunter_llm=_make_hunter_llm(),
             verifier_llm=_make_verifier_llm(),
-            no_exploit=True,    # exploiter not needed for this test
+            no_exploit=True,  # exploiter not needed for this test
         )
         result = runner.run()
         assert isinstance(result, SourceHuntResult)
@@ -143,11 +165,15 @@ class TestStandardDepth:
             assert Path(path).exists(), f"{fmt} not written"
 
     def test_codec_limits_h_lands_in_tier_b_not_c(self, tmp_path):
-        ranker_llm = _make_ranker_llm([
-            "include/codec_limits.h", "src/codec_a.c",
-            "src/codec_b.c", "src/codec_c.c",
-        ])
-        runner = SourceHuntRunner(
+        ranker_llm = _make_ranker_llm(
+            [
+                "include/codec_limits.h",
+                "src/codec_a.c",
+                "src/codec_b.c",
+                "src/codec_c.c",
+            ]
+        )
+        SourceHuntRunner(
             repo_url=str(FIXTURE_C_PROPAGATION),
             local_path=str(FIXTURE_C_PROPAGATION),
             depth="standard",
@@ -160,9 +186,10 @@ class TestStandardDepth:
         )
         # Hook into the runner's preprocess + rank to inspect tiers without
         # running the full hunt
+        from clearwing.sourcehunt.pool import assign_tier
         from clearwing.sourcehunt.preprocessor import Preprocessor
         from clearwing.sourcehunt.ranker import Ranker
-        from clearwing.sourcehunt.pool import assign_tier
+
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),
             local_path=str(FIXTURE_C_PROPAGATION),
@@ -170,9 +197,7 @@ class TestStandardDepth:
         result = pp.run()
         Ranker(ranker_llm).rank(result.file_targets)
         # Find the header
-        header = next(
-            ft for ft in result.file_targets if ft["path"].endswith("codec_limits.h")
-        )
+        header = next(ft for ft in result.file_targets if ft["path"].endswith("codec_limits.h"))
         # surface=1 from LLM, but defines_constants=True floors influence to 3.
         # Wait — the ranker LLM returns influence=5. defines_constants floor
         # of 3 doesn't downgrade. Let me check the actual values.
@@ -189,10 +214,14 @@ class TestStandardDepth:
             depth="standard",
             budget_usd=1.0,
             output_dir=str(tmp_path),
-            ranker_llm=_make_ranker_llm([
-                "include/codec_limits.h", "src/codec_a.c",
-                "src/codec_b.c", "src/codec_c.c",
-            ]),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
             hunter_llm=_make_hunter_llm(),
             verifier_llm=_make_verifier_llm(),
             no_exploit=True,
@@ -222,10 +251,9 @@ class TestEvidenceLevels:
         result = runner.run()
         # The py_sqli fixture has an f-string SQL injection — SourceAnalyzer
         # catches it via regex
-        assert any(
-            f.get("evidence_level") == "static_corroboration"
-            for f in result.findings
-        ), f"no static_corroboration findings: {[f.get('evidence_level') for f in result.findings]}"
+        assert any(f.get("evidence_level") == "static_corroboration" for f in result.findings), (
+            f"no static_corroboration findings: {[f.get('evidence_level') for f in result.findings]}"
+        )
 
     def test_every_finding_has_evidence_level(self, tmp_path):
         runner = SourceHuntRunner(

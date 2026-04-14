@@ -1,6 +1,8 @@
 """Tests for the LangGraph agent."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
 
 
 class TestAgentState:
@@ -111,8 +113,9 @@ class TestGraphConstruction:
             mock_llm.assert_called_once_with(model="claude-sonnet-4-6")
 
     def test_create_agent_with_custom_tools(self):
-        from clearwing.agent.graph import create_agent
         from langchain_core.tools import tool
+
+        from clearwing.agent.graph import create_agent
 
         @tool
         def dummy_tool(x: str) -> str:
@@ -132,6 +135,7 @@ class TestGraphConstruction:
 
     def test_create_agent_with_custom_endpoint(self):
         import sys
+
         from clearwing.agent.graph import create_agent
 
         mock_openai_module = MagicMock()
@@ -167,12 +171,14 @@ class TestScannerToolWrapping:
         mock_class = MagicMock(return_value=mock_scanner)
 
         with patch("clearwing.scanning.PortScanner", mock_class):
-            await scan_ports.ainvoke({
-                "target": "192.168.1.1",
-                "ports": [22],
-                "scan_type": "connect",
-                "threads": 10,
-            })
+            await scan_ports.ainvoke(
+                {
+                    "target": "192.168.1.1",
+                    "ports": [22],
+                    "scan_type": "connect",
+                    "threads": 10,
+                }
+            )
             mock_scanner.scan.assert_called_once_with("192.168.1.1", [22], "connect", 10)
 
     @pytest.mark.asyncio
@@ -187,10 +193,12 @@ class TestScannerToolWrapping:
         mock_class = MagicMock(return_value=mock_scanner)
 
         with patch("clearwing.scanning.ServiceScanner", mock_class):
-            await detect_services.ainvoke({
-                "target": "192.168.1.1",
-                "open_ports": ports,
-            })
+            await detect_services.ainvoke(
+                {
+                    "target": "192.168.1.1",
+                    "open_ports": ports,
+                }
+            )
             mock_scanner.detect.assert_called_once_with("192.168.1.1", ports)
 
     @pytest.mark.asyncio

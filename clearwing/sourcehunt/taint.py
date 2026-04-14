@@ -24,14 +24,14 @@ The analyzer feeds `taint_paths` onto each FileTarget. The ranker uses
 this signal to promote files with confirmed source→sink paths — real
 attacker-reachability evidence as opposed to the lightweight heuristic.
 """
+
 from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +42,18 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TaintPattern:
     """One source or sink pattern for a specific language."""
-    language: str                # "c" | "python"
-    role: str                    # "source" | "sink"
-    name: str                    # function name (literal match)
-    cwe: str = ""                # CWE category the sink maps to
-    description: str = ""        # human-readable sink description
+
+    language: str  # "c" | "python"
+    role: str  # "source" | "sink"
+    name: str  # function name (literal match)
+    cwe: str = ""  # CWE category the sink maps to
+    description: str = ""  # human-readable sink description
     taints_return: bool = False  # source: the return value is tainted
     taints_args: list[int] = field(default_factory=list)
-                                 # source: which arg positions are out-parameters
+    # source: which arg positions are out-parameters
     sensitive_args: list[int] = field(default_factory=list)
-                                 # sink: which arg positions are the dangerous ones
-    severity: str = "medium"     # default severity for findings from this sink
+    # sink: which arg positions are the dangerous ones
+    severity: str = "medium"  # default severity for findings from this sink
 
 
 # --- Pattern database -------------------------------------------------------
@@ -83,57 +84,153 @@ C_SOURCES: tuple[TaintPattern, ...] = (
 # intra-procedural taint path.
 C_SINKS: tuple[TaintPattern, ...] = (
     # Unchecked memory copies
-    TaintPattern("c", "sink", "memcpy", cwe="CWE-787",
-                 description="memcpy length derived from untrusted input",
-                 sensitive_args=[1, 2], severity="high"),
-    TaintPattern("c", "sink", "memmove", cwe="CWE-787",
-                 description="memmove length from untrusted input",
-                 sensitive_args=[1, 2], severity="high"),
-    TaintPattern("c", "sink", "strcpy", cwe="CWE-120",
-                 description="strcpy source from untrusted input",
-                 sensitive_args=[1], severity="high"),
-    TaintPattern("c", "sink", "strncpy", cwe="CWE-120",
-                 description="strncpy source from untrusted input",
-                 sensitive_args=[1, 2], severity="medium"),
-    TaintPattern("c", "sink", "strcat", cwe="CWE-120",
-                 description="strcat source from untrusted input",
-                 sensitive_args=[1], severity="high"),
-    TaintPattern("c", "sink", "sprintf", cwe="CWE-134",
-                 description="sprintf format/arg from untrusted input",
-                 sensitive_args=[1, 2], severity="high"),
-    TaintPattern("c", "sink", "snprintf", cwe="CWE-134",
-                 description="snprintf format/arg from untrusted input",
-                 sensitive_args=[2, 3], severity="medium"),
+    TaintPattern(
+        "c",
+        "sink",
+        "memcpy",
+        cwe="CWE-787",
+        description="memcpy length derived from untrusted input",
+        sensitive_args=[1, 2],
+        severity="high",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "memmove",
+        cwe="CWE-787",
+        description="memmove length from untrusted input",
+        sensitive_args=[1, 2],
+        severity="high",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "strcpy",
+        cwe="CWE-120",
+        description="strcpy source from untrusted input",
+        sensitive_args=[1],
+        severity="high",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "strncpy",
+        cwe="CWE-120",
+        description="strncpy source from untrusted input",
+        sensitive_args=[1, 2],
+        severity="medium",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "strcat",
+        cwe="CWE-120",
+        description="strcat source from untrusted input",
+        sensitive_args=[1],
+        severity="high",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "sprintf",
+        cwe="CWE-134",
+        description="sprintf format/arg from untrusted input",
+        sensitive_args=[1, 2],
+        severity="high",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "snprintf",
+        cwe="CWE-134",
+        description="snprintf format/arg from untrusted input",
+        sensitive_args=[2, 3],
+        severity="medium",
+    ),
     # Command execution
-    TaintPattern("c", "sink", "system", cwe="CWE-78",
-                 description="system() command from untrusted input",
-                 sensitive_args=[0], severity="critical"),
-    TaintPattern("c", "sink", "popen", cwe="CWE-78",
-                 description="popen command from untrusted input",
-                 sensitive_args=[0], severity="critical"),
-    TaintPattern("c", "sink", "execl", cwe="CWE-78",
-                 description="execl path/arg from untrusted input",
-                 sensitive_args=[0, 1], severity="critical"),
-    TaintPattern("c", "sink", "execlp", cwe="CWE-78",
-                 description="execlp path/arg from untrusted input",
-                 sensitive_args=[0, 1], severity="critical"),
-    TaintPattern("c", "sink", "execve", cwe="CWE-78",
-                 description="execve path from untrusted input",
-                 sensitive_args=[0], severity="critical"),
+    TaintPattern(
+        "c",
+        "sink",
+        "system",
+        cwe="CWE-78",
+        description="system() command from untrusted input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "popen",
+        cwe="CWE-78",
+        description="popen command from untrusted input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "execl",
+        cwe="CWE-78",
+        description="execl path/arg from untrusted input",
+        sensitive_args=[0, 1],
+        severity="critical",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "execlp",
+        cwe="CWE-78",
+        description="execlp path/arg from untrusted input",
+        sensitive_args=[0, 1],
+        severity="critical",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "execve",
+        cwe="CWE-78",
+        description="execve path from untrusted input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
     # Allocation size
-    TaintPattern("c", "sink", "malloc", cwe="CWE-190",
-                 description="malloc size from untrusted input (integer overflow)",
-                 sensitive_args=[0], severity="medium"),
-    TaintPattern("c", "sink", "calloc", cwe="CWE-190",
-                 description="calloc count/size from untrusted input",
-                 sensitive_args=[0, 1], severity="medium"),
+    TaintPattern(
+        "c",
+        "sink",
+        "malloc",
+        cwe="CWE-190",
+        description="malloc size from untrusted input (integer overflow)",
+        sensitive_args=[0],
+        severity="medium",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "calloc",
+        cwe="CWE-190",
+        description="calloc count/size from untrusted input",
+        sensitive_args=[0, 1],
+        severity="medium",
+    ),
     # File ops
-    TaintPattern("c", "sink", "fopen", cwe="CWE-22",
-                 description="fopen path from untrusted input (path traversal)",
-                 sensitive_args=[0], severity="high"),
-    TaintPattern("c", "sink", "open", cwe="CWE-22",
-                 description="open path from untrusted input (path traversal)",
-                 sensitive_args=[0], severity="high"),
+    TaintPattern(
+        "c",
+        "sink",
+        "fopen",
+        cwe="CWE-22",
+        description="fopen path from untrusted input (path traversal)",
+        sensitive_args=[0],
+        severity="high",
+    ),
+    TaintPattern(
+        "c",
+        "sink",
+        "open",
+        cwe="CWE-22",
+        description="open path from untrusted input (path traversal)",
+        sensitive_args=[0],
+        severity="high",
+    ),
 )
 
 # Python sources
@@ -163,47 +260,119 @@ PYTHON_SOURCES: tuple[TaintPattern, ...] = (
 # Python sinks
 PYTHON_SINKS: tuple[TaintPattern, ...] = (
     # Command execution
-    TaintPattern("python", "sink", "system", cwe="CWE-78",
-                 description="os.system with user input",
-                 sensitive_args=[0], severity="critical"),
-    TaintPattern("python", "sink", "popen", cwe="CWE-78",
-                 description="os.popen with user input",
-                 sensitive_args=[0], severity="critical"),
-    TaintPattern("python", "sink", "run", cwe="CWE-78",
-                 description="subprocess.run with user input (check shell=True)",
-                 sensitive_args=[0], severity="high"),
-    TaintPattern("python", "sink", "Popen", cwe="CWE-78",
-                 description="subprocess.Popen with user input",
-                 sensitive_args=[0], severity="high"),
+    TaintPattern(
+        "python",
+        "sink",
+        "system",
+        cwe="CWE-78",
+        description="os.system with user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
+    TaintPattern(
+        "python",
+        "sink",
+        "popen",
+        cwe="CWE-78",
+        description="os.popen with user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
+    TaintPattern(
+        "python",
+        "sink",
+        "run",
+        cwe="CWE-78",
+        description="subprocess.run with user input (check shell=True)",
+        sensitive_args=[0],
+        severity="high",
+    ),
+    TaintPattern(
+        "python",
+        "sink",
+        "Popen",
+        cwe="CWE-78",
+        description="subprocess.Popen with user input",
+        sensitive_args=[0],
+        severity="high",
+    ),
     # Code exec
-    TaintPattern("python", "sink", "eval", cwe="CWE-95",
-                 description="eval with user input",
-                 sensitive_args=[0], severity="critical"),
-    TaintPattern("python", "sink", "exec", cwe="CWE-95",
-                 description="exec with user input",
-                 sensitive_args=[0], severity="critical"),
+    TaintPattern(
+        "python",
+        "sink",
+        "eval",
+        cwe="CWE-95",
+        description="eval with user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
+    TaintPattern(
+        "python",
+        "sink",
+        "exec",
+        cwe="CWE-95",
+        description="exec with user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
     # Database
-    TaintPattern("python", "sink", "execute", cwe="CWE-89",
-                 description="cursor.execute with user input — check parameterization",
-                 sensitive_args=[0], severity="high"),
-    TaintPattern("python", "sink", "executemany", cwe="CWE-89",
-                 description="cursor.executemany with user input",
-                 sensitive_args=[0], severity="high"),
+    TaintPattern(
+        "python",
+        "sink",
+        "execute",
+        cwe="CWE-89",
+        description="cursor.execute with user input — check parameterization",
+        sensitive_args=[0],
+        severity="high",
+    ),
+    TaintPattern(
+        "python",
+        "sink",
+        "executemany",
+        cwe="CWE-89",
+        description="cursor.executemany with user input",
+        sensitive_args=[0],
+        severity="high",
+    ),
     # Deserialization
-    TaintPattern("python", "sink", "loads", cwe="CWE-502",
-                 description="deserialization (pickle/yaml/marshal) of user input",
-                 sensitive_args=[0], severity="critical"),
-    TaintPattern("python", "sink", "load", cwe="CWE-502",
-                 description="yaml.load / marshal.load of user input",
-                 sensitive_args=[0], severity="critical"),
+    TaintPattern(
+        "python",
+        "sink",
+        "loads",
+        cwe="CWE-502",
+        description="deserialization (pickle/yaml/marshal) of user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
+    TaintPattern(
+        "python",
+        "sink",
+        "load",
+        cwe="CWE-502",
+        description="yaml.load / marshal.load of user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
     # Templates
-    TaintPattern("python", "sink", "render_template_string", cwe="CWE-1336",
-                 description="SSTI via render_template_string with user input",
-                 sensitive_args=[0], severity="critical"),
+    TaintPattern(
+        "python",
+        "sink",
+        "render_template_string",
+        cwe="CWE-1336",
+        description="SSTI via render_template_string with user input",
+        sensitive_args=[0],
+        severity="critical",
+    ),
     # File ops
-    TaintPattern("python", "sink", "open", cwe="CWE-22",
-                 description="open() with user-controlled path",
-                 sensitive_args=[0], severity="high"),
+    TaintPattern(
+        "python",
+        "sink",
+        "open",
+        cwe="CWE-22",
+        description="open() with user-controlled path",
+        sensitive_args=[0],
+        severity="high",
+    ),
 )
 
 
@@ -220,15 +389,16 @@ ALL_PATTERNS: dict[str, list[TaintPattern]] = {
 @dataclass
 class TaintPath:
     """One source→sink path found in a file."""
-    file: str                    # repo-relative
-    source_function: str         # e.g. "read", "request.args"
+
+    file: str  # repo-relative
+    source_function: str  # e.g. "read", "request.args"
     source_line: int
-    sink_function: str           # e.g. "memcpy", "os.system"
+    sink_function: str  # e.g. "memcpy", "os.system"
     sink_line: int
     sink_cwe: str
     sink_description: str
-    severity: str                # from the sink pattern
-    variable: str                # the identifier that carries taint
+    severity: str  # from the sink pattern
+    variable: str  # the identifier that carries taint
     # The containing function in source code (best-effort, for context)
     containing_function: str = ""
     language: str = ""
@@ -237,6 +407,7 @@ class TaintPath:
 @dataclass
 class TaintAnalysisResult:
     """Output of running taint analysis across a repo."""
+
     paths: list[TaintPath] = field(default_factory=list)
     files_analyzed: int = 0
     files_with_paths: int = 0
@@ -267,8 +438,18 @@ class TaintAnalyzer:
     MAX_FILE_SIZE = 500_000
 
     SKIP_DIRS = {
-        ".git", "node_modules", "__pycache__", ".venv", "venv", "vendor",
-        "dist", "build", ".tox", ".mypy_cache", "target", "third_party",
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "vendor",
+        "dist",
+        "build",
+        ".tox",
+        ".mypy_cache",
+        "target",
+        "third_party",
     }
 
     def __init__(self):
@@ -285,7 +466,7 @@ class TaintAnalyzer:
     def analyze_repo(
         self,
         repo_path: str,
-        files: Optional[list[str]] = None,
+        files: list[str] | None = None,
     ) -> TaintAnalysisResult:
         """Walk the repo, analyze each source file, aggregate paths.
 
@@ -295,6 +476,7 @@ class TaintAnalyzer:
                 If None, walk the tree.
         """
         import time
+
         start = time.monotonic()
         result = TaintAnalysisResult()
 
@@ -382,7 +564,9 @@ class TaintAnalyzer:
             # Collect tainted identifiers in this function's scope
             tainted: dict[str, tuple[str, int]] = {}  # ident → (source_fn, line)
 
-            for call, call_name, call_line in self._iter_call_expressions(func_node, lang, source_text):
+            for call, call_name, call_line in self._iter_call_expressions(
+                func_node, lang, source_text
+            ):
                 src_pat = self._match_source(call_name, sources)
                 if src_pat is None:
                     continue
@@ -393,7 +577,10 @@ class TaintAnalyzer:
                 # Mark out-param identifiers from call args as tainted
                 for arg_idx in src_pat.taints_args:
                     arg_ident = self._argument_identifier(
-                        call, arg_idx, lang, source_text,
+                        call,
+                        arg_idx,
+                        lang,
+                        source_text,
                     )
                     if arg_ident:
                         tainted[arg_ident] = (src_pat.name, call_line)
@@ -402,30 +589,37 @@ class TaintAnalyzer:
                 continue
 
             # Second pass: find sinks whose sensitive args are tainted
-            for call, call_name, call_line in self._iter_call_expressions(func_node, lang, source_text):
+            for call, call_name, call_line in self._iter_call_expressions(
+                func_node, lang, source_text
+            ):
                 sink_pat = self._match_sink(call_name, sinks)
                 if sink_pat is None:
                     continue
                 for arg_idx in sink_pat.sensitive_args:
                     arg_ident = self._argument_identifier(
-                        call, arg_idx, lang, source_text,
+                        call,
+                        arg_idx,
+                        lang,
+                        source_text,
                     )
                     if arg_ident and arg_ident in tainted:
                         src_fn, src_line = tainted[arg_ident]
-                        paths.append(TaintPath(
-                            file=rel_path,
-                            source_function=src_fn,
-                            source_line=src_line,
-                            sink_function=sink_pat.name,
-                            sink_line=call_line,
-                            sink_cwe=sink_pat.cwe,
-                            sink_description=sink_pat.description,
-                            severity=sink_pat.severity,
-                            variable=arg_ident,
-                            containing_function=func_name or "",
-                            language=lang,
-                        ))
-                        break    # one path per sink call is enough
+                        paths.append(
+                            TaintPath(
+                                file=rel_path,
+                                source_function=src_fn,
+                                source_line=src_line,
+                                sink_function=sink_pat.name,
+                                sink_line=call_line,
+                                sink_cwe=sink_pat.cwe,
+                                sink_description=sink_pat.description,
+                                severity=sink_pat.severity,
+                                variable=arg_ident,
+                                containing_function=func_name or "",
+                                language=lang,
+                            )
+                        )
+                        break  # one path per sink call is enough
         return paths
 
     # --- AST walkers --------------------------------------------------------
@@ -459,12 +653,12 @@ class TaintAnalyzer:
             node = stack.pop()
             if node.type in call_types:
                 name = self._callee_name(node, lang, source_text)
-                line = node.start_point[0] + 1    # tree-sitter rows are 0-indexed
+                line = node.start_point[0] + 1  # tree-sitter rows are 0-indexed
                 if name:
                     yield node, name, line
             stack.extend(list(node.children))
 
-    def _callee_name(self, call_node: Any, lang: str, source_text: bytes | str) -> Optional[str]:
+    def _callee_name(self, call_node: Any, lang: str, source_text: bytes | str) -> str | None:
         """Extract the callee name from a call_expression / call node.
 
         Returns the FULL dotted callee path as it appears in source, so the
@@ -485,8 +679,10 @@ class TaintAnalyzer:
             func_field = call_node.child_by_field_name("function")
         except Exception:
             pass
-        target = func_field if func_field is not None else (
-            call_node.children[0] if call_node.children else None
+        target = (
+            func_field
+            if func_field is not None
+            else (call_node.children[0] if call_node.children else None)
         )
         if target is None:
             return None
@@ -501,7 +697,7 @@ class TaintAnalyzer:
         self,
         call_name: str,
         sources: dict[str, TaintPattern],
-    ) -> Optional[TaintPattern]:
+    ) -> TaintPattern | None:
         """Find a source pattern that matches a (possibly dotted) callee.
 
         Match order:
@@ -536,7 +732,7 @@ class TaintAnalyzer:
         self,
         call_name: str,
         sinks: dict[str, TaintPattern],
-    ) -> Optional[TaintPattern]:
+    ) -> TaintPattern | None:
         """Same matching rules as _match_source — literal, then last segment."""
         if call_name in sinks:
             return sinks[call_name]
@@ -557,7 +753,7 @@ class TaintAnalyzer:
         call_node: Any,
         lang: str,
         source_text: bytes | str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """For `x = foo()`, return `"x"`. None if the call isn't an rvalue.
 
         Walks up several parent levels because tree-sitter nests call
@@ -565,8 +761,8 @@ class TaintAnalyzer:
         before reaching the assignment node.
         """
         target_types = {
-            "c":      {"init_declarator", "assignment_expression"},
-            "cpp":    {"init_declarator", "assignment_expression"},
+            "c": {"init_declarator", "assignment_expression"},
+            "cpp": {"init_declarator", "assignment_expression"},
             "python": {"assignment"},
         }.get(lang, set())
         if not target_types:
@@ -610,7 +806,7 @@ class TaintAnalyzer:
         arg_index: int,
         lang: str,
         source_text: bytes | str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Return the identifier name of the arg at `arg_index`, if it's a
         plain identifier (not a complex expression).
 
@@ -649,11 +845,11 @@ class TaintAnalyzer:
         # For attribute chains like `self.buf`, take the rightmost identifier
         return self._rightmost_identifier_text(target_arg, source_text)
 
-    def _rightmost_identifier_text(self, node: Any, source_text: bytes | str) -> Optional[str]:
+    def _rightmost_identifier_text(self, node: Any, source_text: bytes | str) -> str | None:
         """Walk a node subtree and return the rightmost identifier token."""
         if node is None:
             return None
-        result: Optional[str] = None
+        result: str | None = None
         stack = [node]
         while stack:
             n = stack.pop(0)
@@ -667,7 +863,7 @@ class TaintAnalyzer:
             stack[0:0] = list(n.children)
         return result
 
-    def _function_name(self, func_node: Any, lang: str, source_text: bytes | str) -> Optional[str]:
+    def _function_name(self, func_node: Any, lang: str, source_text: bytes | str) -> str | None:
         """Extract the name of the function being defined."""
         try:
             name_field = func_node.child_by_field_name("name")
@@ -685,7 +881,7 @@ class TaintAnalyzer:
 
     # --- Helpers -----------------------------------------------------------
 
-    def _language_for(self, abs_path: str) -> Optional[str]:
+    def _language_for(self, abs_path: str) -> str | None:
         ext = Path(abs_path).suffix.lower()
         if ext in (".c", ".h"):
             return "c" if "c" in self._languages else None
@@ -698,6 +894,7 @@ class TaintAnalyzer:
     def _get_parser(self, lang: str):
         if lang not in self._parsers:
             from tree_sitter import Parser
+
             self._parsers[lang] = Parser(self._languages[lang])
         return self._parsers[lang]
 
@@ -712,14 +909,14 @@ class TaintAnalyzer:
 
 
 _FUNCTION_DEF_TYPES: dict[str, set[str]] = {
-    "c":      {"function_definition"},
-    "cpp":    {"function_definition"},
+    "c": {"function_definition"},
+    "cpp": {"function_definition"},
     "python": {"function_definition", "async_function_definition"},
 }
 
 _CALL_EXPR_TYPES: dict[str, set[str]] = {
-    "c":      {"call_expression"},
-    "cpp":    {"call_expression"},
+    "c": {"call_expression"},
+    "cpp": {"call_expression"},
     "python": {"call"},
 }
 
@@ -736,10 +933,11 @@ def _node_text(node: Any, source: Any) -> str:
     """
     try:
         if isinstance(source, (bytes, bytearray)):
-            return bytes(source[node.start_byte:node.end_byte]).decode(
-                "utf-8", errors="replace",
+            return bytes(source[node.start_byte : node.end_byte]).decode(
+                "utf-8",
+                errors="replace",
             )
-        return str(source[node.start_byte:node.end_byte])
+        return str(source[node.start_byte : node.end_byte])
     except Exception:
         return ""
 

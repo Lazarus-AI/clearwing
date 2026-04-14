@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 from langchain_core.language_models import BaseChatModel
 
@@ -9,6 +8,7 @@ from langchain_core.language_models import BaseChatModel
 @dataclass
 class ProviderConfig:
     """Configuration for a single LLM provider."""
+
     name: str  # anthropic, openai, google, ollama, bedrock
     model: str  # model identifier
     api_key: str = ""  # empty = use env var
@@ -20,6 +20,7 @@ class ProviderConfig:
 @dataclass
 class ModelRoute:
     """Maps a task type to a specific provider/model."""
+
     task: str  # recon, exploit, report, planning, default
     provider: str
     model: str
@@ -51,19 +52,61 @@ PROVIDER_PRESETS = {
 }
 
 DEFAULT_ROUTES = [
-    ModelRoute(task="recon", provider="anthropic", model="claude-haiku-4-5-20251001", reason="Fast, cheap for scanning"),
-    ModelRoute(task="exploit", provider="anthropic", model="claude-sonnet-4-6", reason="Strong reasoning for exploitation"),
-    ModelRoute(task="report", provider="anthropic", model="claude-haiku-4-5-20251001", reason="Report generation doesn't need top model"),
-    ModelRoute(task="planning", provider="anthropic", model="claude-sonnet-4-6", reason="Good planning capabilities"),
-    ModelRoute(task="default", provider="anthropic", model="claude-sonnet-4-6", reason="Default model"),
+    ModelRoute(
+        task="recon",
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        reason="Fast, cheap for scanning",
+    ),
+    ModelRoute(
+        task="exploit",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Strong reasoning for exploitation",
+    ),
+    ModelRoute(
+        task="report",
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        reason="Report generation doesn't need top model",
+    ),
+    ModelRoute(
+        task="planning",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Good planning capabilities",
+    ),
+    ModelRoute(
+        task="default", provider="anthropic", model="claude-sonnet-4-6", reason="Default model"
+    ),
     # Sourcehunt routes — see plan §Provider routing.
     # Hunter and verifier are deliberately different tiers from the same provider:
     # independence comes from tier, not provider, so users with only ANTHROPIC_API_KEY
     # get sensible defaults without needing a second account. YAML config can upgrade.
-    ModelRoute(task="ranker", provider="anthropic", model="claude-haiku-4-5-20251001", reason="File ranking is simple classification"),
-    ModelRoute(task="hunter", provider="anthropic", model="claude-opus-4-6", reason="Core vuln-finding reasoning"),
-    ModelRoute(task="verifier", provider="anthropic", model="claude-sonnet-4-6", reason="Independent verification — different tier from hunter"),
-    ModelRoute(task="sourcehunt_exploit", provider="anthropic", model="claude-opus-4-6", reason="Exploit generation is hardest reasoning"),
+    ModelRoute(
+        task="ranker",
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        reason="File ranking is simple classification",
+    ),
+    ModelRoute(
+        task="hunter",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        reason="Core vuln-finding reasoning",
+    ),
+    ModelRoute(
+        task="verifier",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Independent verification — different tier from hunter",
+    ),
+    ModelRoute(
+        task="sourcehunt_exploit",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        reason="Exploit generation is hardest reasoning",
+    ),
 ]
 
 
@@ -80,7 +123,7 @@ class ProviderManager:
                 self._configs[c.name] = c
 
         # Set up routes
-        for route in (routes or DEFAULT_ROUTES):
+        for route in routes or DEFAULT_ROUTES:
             self._routes[route.task] = route
 
     def get_llm(self, task: str = "default") -> BaseChatModel:
@@ -102,6 +145,7 @@ class ProviderManager:
 
         if provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
+
             kwargs = {"model": model}
             if config and config.api_key:
                 kwargs["api_key"] = config.api_key
@@ -112,8 +156,8 @@ class ProviderManager:
         elif provider == "openai":
             try:
                 from langchain_openai import ChatOpenAI
-            except ImportError:
-                raise ImportError("Install langchain-openai: pip install langchain-openai")
+            except ImportError as e:
+                raise ImportError("Install langchain-openai: pip install langchain-openai") from e
             kwargs = {"model": model}
             if config and config.api_key:
                 kwargs["api_key"] = config.api_key
@@ -124,8 +168,10 @@ class ProviderManager:
         elif provider == "google":
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
-            except ImportError:
-                raise ImportError("Install langchain-google-genai: pip install langchain-google-genai")
+            except ImportError as e:
+                raise ImportError(
+                    "Install langchain-google-genai: pip install langchain-google-genai"
+                ) from e
             kwargs = {"model": model}
             if config and config.api_key:
                 kwargs["google_api_key"] = config.api_key
@@ -134,11 +180,14 @@ class ProviderManager:
         elif provider == "ollama":
             try:
                 from langchain_ollama import ChatOllama
-            except ImportError:
-                raise ImportError("Install langchain-ollama: pip install langchain-ollama")
+            except ImportError as e:
+                raise ImportError("Install langchain-ollama: pip install langchain-ollama") from e
             kwargs = {"model": model}
-            base_url = (config.base_url if config and config.base_url
-                       else preset.get("default_base_url", "http://localhost:11434"))
+            base_url = (
+                config.base_url
+                if config and config.base_url
+                else preset.get("default_base_url", "http://localhost:11434")
+            )
             kwargs["base_url"] = base_url
             return ChatOllama(**kwargs)
 

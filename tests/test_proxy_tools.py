@@ -7,12 +7,11 @@ import pytest
 
 from clearwing.agent.tools.recon.proxy_tools import (
     ProxyHistory,
-    ProxyRequest,
+    _proxy_history,
     get_proxy_tools,
     proxy_clear_history,
     proxy_get_history,
     proxy_get_request,
-    _proxy_history,
 )
 
 
@@ -26,12 +25,15 @@ def clear_proxy():
 
 # --- ProxyHistory ---
 
+
 class TestProxyHistory:
     def test_add_entry(self):
         history = ProxyHistory()
         entry = history.add(
-            method="GET", url="http://example.com",
-            status_code=200, response_body="OK",
+            method="GET",
+            url="http://example.com",
+            status_code=200,
+            response_body="OK",
         )
         assert entry.id == 1
         assert entry.method == "GET"
@@ -127,6 +129,7 @@ class TestProxyHistory:
 
 # --- Proxy tool functions ---
 
+
 class TestProxyTools:
     def test_get_proxy_tools_count(self):
         tools = get_proxy_tools()
@@ -136,8 +139,12 @@ class TestProxyTools:
         tools = get_proxy_tools()
         names = [t.name for t in tools]
         expected = [
-            "proxy_request", "proxy_get_history", "proxy_get_request",
-            "proxy_replay", "proxy_clear_history", "proxy_export_history",
+            "proxy_request",
+            "proxy_get_history",
+            "proxy_get_request",
+            "proxy_replay",
+            "proxy_clear_history",
+            "proxy_export_history",
         ]
         assert names == expected
 

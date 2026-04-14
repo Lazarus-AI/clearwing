@@ -1,9 +1,10 @@
 """Tests for the CI/CD non-interactive runner, result dataclass, and SARIF generator."""
+
 from __future__ import annotations
 
 import pytest
 
-from clearwing.runners.cicd import CICDRunner, CICDResult, SARIFGenerator
+from clearwing.runners.cicd import CICDResult, CICDRunner, SARIFGenerator
 
 
 class TestCICDResult:
@@ -123,7 +124,10 @@ class TestSARIFGenerator:
         assert result["level"] == "error"
         assert result["message"]["text"] == "Cross-Site Scripting"
         assert len(result["locations"]) == 1
-        assert result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "http://example.com"
+        assert (
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            == "http://example.com"
+        )
 
     def test_severity_mapping_critical(self):
         findings = [{"description": "RCE", "severity": "critical", "cve": None, "details": ""}]
@@ -166,8 +170,18 @@ class TestSARIFGenerator:
 
     def test_multiple_findings_same_cve(self):
         findings = [
-            {"description": "First instance", "severity": "high", "cve": "CVE-2024-0001", "details": ""},
-            {"description": "Second instance", "severity": "high", "cve": "CVE-2024-0001", "details": ""},
+            {
+                "description": "First instance",
+                "severity": "high",
+                "cve": "CVE-2024-0001",
+                "details": "",
+            },
+            {
+                "description": "Second instance",
+                "severity": "high",
+                "cve": "CVE-2024-0001",
+                "details": "",
+            },
         ]
         sarif = self.generator.generate(findings, "target")
         # Two results but only one rule (deduplicated)

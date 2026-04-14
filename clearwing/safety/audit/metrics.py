@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
 
 
 @dataclass
@@ -12,8 +11,8 @@ class SessionMetrics:
     """Aggregated metrics for a penetration testing session."""
 
     session_id: str
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
     total_duration_seconds: float = 0.0
 
     # Counts
@@ -99,9 +98,7 @@ class SessionMetrics:
                     metrics.approvals_denied += 1
 
         if metrics.start_time and metrics.end_time:
-            metrics.total_duration_seconds = (
-                metrics.end_time - metrics.start_time
-            ).total_seconds()
+            metrics.total_duration_seconds = (metrics.end_time - metrics.start_time).total_seconds()
 
         return metrics
 

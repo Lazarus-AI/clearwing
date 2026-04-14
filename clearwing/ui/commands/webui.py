@@ -2,10 +2,10 @@
 
 
 def add_parser(subparsers):
-    parser = subparsers.add_parser('webui', help='Start the web UI server')
-    parser.add_argument('--host', default='127.0.0.1', help='Host to bind (default: 127.0.0.1)')
-    parser.add_argument('--port', type=int, default=8899, help='Port to bind (default: 8899)')
-    parser.add_argument('--reload', action='store_true', help='Enable auto-reload for development')
+    parser = subparsers.add_parser("webui", help="Start the web UI server")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8899, help="Port to bind (default: 8899)")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
     return parser
 
 
@@ -21,6 +21,7 @@ def handle(cli, args):
         return
 
     from ..web import create_app
+
     app = create_app()
 
     cli.console.print(

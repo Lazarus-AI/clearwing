@@ -8,11 +8,10 @@ Uses a FakeSandbox so the tests don't touch docker. Covers:
     - sanitizer_variant dispatch
     - missing-sandbox error path
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
-
-import pytest
 
 from clearwing.agent.tools.hunt.hunter_tools import (
     HunterContext,
@@ -107,10 +106,12 @@ class TestFuzzHarnessNoSandbox:
         ctx = HunterContext(repo_path="/tmp")
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
-        result = fuzz.invoke({
-            "target_function": "decode",
-            "duration_seconds": 10,
-        })
+        result = fuzz.invoke(
+            {
+                "target_function": "decode",
+                "duration_seconds": 10,
+            }
+        )
         assert result["status"] == "no_sandbox"
 
 
@@ -129,17 +130,21 @@ class TestFuzzHarnessMissingInput:
 class TestFuzzHarnessTemplateMode:
     def test_clean_run_returns_zero_crashes(self):
         # Scripted exec results: [compile, run]
-        fake = _FakeSandbox([
-            ExecResult(0, "", "", 1.0),         # compile
-            ExecResult(0, "Done 1000 runs", "", 2.0),  # run — no crashes
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(0, "", "", 1.0),  # compile
+                ExecResult(0, "Done 1000 runs", "", 2.0),  # run — no crashes
+            ]
+        )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
-        result = fuzz.invoke({
-            "target_function": "decode_frame",
-            "duration_seconds": 5,
-        })
+        result = fuzz.invoke(
+            {
+                "target_function": "decode_frame",
+                "duration_seconds": 5,
+            }
+        )
         assert result["status"] == "completed"
         assert result["crashes_found"] == 0
         assert result["crash_evidence"] == ""
@@ -151,27 +156,35 @@ class TestFuzzHarnessTemplateMode:
         assert b"LLVMFuzzerTestOneInput" in content
 
     def test_crashing_run_captures_sanitizer_report(self):
-        fake = _FakeSandbox([
-            ExecResult(0, "", "", 1.0),    # compile
-            # libFuzzer exits 77 on crash per our command args
-            ExecResult(77, "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n#0 0x4000", "", 3.0),
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(0, "", "", 1.0),  # compile
+                # libFuzzer exits 77 on crash per our command args
+                ExecResult(
+                    77, "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n#0 0x4000", "", 3.0
+                ),
+            ]
+        )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
-        result = fuzz.invoke({
-            "target_function": "decode",
-            "duration_seconds": 10,
-        })
+        result = fuzz.invoke(
+            {
+                "target_function": "decode",
+                "duration_seconds": 10,
+            }
+        )
         assert result["status"] == "completed"
         assert result["crashes_found"] == 1
         assert "heap-buffer-overflow" in result["crash_evidence"]
         assert "AddressSanitizer" in result["crash_evidence"]
 
     def test_compile_failure_returns_early(self):
-        fake = _FakeSandbox([
-            ExecResult(1, "undefined reference", "", 0.5),   # compile failed
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(1, "undefined reference", "", 0.5),  # compile failed
+            ]
+        )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
@@ -195,18 +208,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) {
     return 0;
 }
 """
-        fake = _FakeSandbox([
-            ExecResult(0, "", "", 1.0),
-            ExecResult(0, "", "", 1.0),
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(0, "", "", 1.0),
+                ExecResult(0, "", "", 1.0),
+            ]
+        )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
-        result = fuzz.invoke({
-            "target_function": "ignored",
-            "harness_source": custom,
-            "duration_seconds": 5,
-        })
+        result = fuzz.invoke(
+            {
+                "target_function": "ignored",
+                "harness_source": custom,
+                "duration_seconds": 5,
+            }
+        )
         assert result["status"] == "completed"
         assert result["harness_source_kind"] == "hunter_supplied"
         # The written harness is the hunter's source, not the template
@@ -219,17 +236,21 @@ int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) {
 #include <stdint.h>
 int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }
 """
-        fake = _FakeSandbox([
-            ExecResult(0, "", "", 1.0),
-            ExecResult(0, "", "", 1.0),
-        ])
+        fake = _FakeSandbox(
+            [
+                ExecResult(0, "", "", 1.0),
+                ExecResult(0, "", "", 1.0),
+            ]
+        )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
-        fuzz.invoke({
-            "target_function": "",   # hunter-supplied — doesn't need it
-            "harness_source": custom_with_include,
-        })
+        fuzz.invoke(
+            {
+                "target_function": "",  # hunter-supplied — doesn't need it
+                "harness_source": custom_with_include,
+            }
+        )
         _, written = fake.writes[0]
         assert b"project_header.h" in written
 
@@ -239,11 +260,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }
 
 class TestFuzzHarnessVariantDispatch:
     def test_msan_variant_routes_through_manager(self):
-        primary = _FakeSandbox([])   # must not be called
-        msan_sandbox = _FakeSandbox([
-            ExecResult(0, "", "", 1.0),
-            ExecResult(0, "", "", 1.0),
-        ])
+        primary = _FakeSandbox([])  # must not be called
+        msan_sandbox = _FakeSandbox(
+            [
+                ExecResult(0, "", "", 1.0),
+                ExecResult(0, "", "", 1.0),
+            ]
+        )
         manager = MagicMock()
         manager.spawn.return_value = msan_sandbox
 
@@ -254,11 +277,13 @@ class TestFuzzHarnessVariantDispatch:
         )
         tools = build_hunter_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
-        result = fuzz.invoke({
-            "target_function": "decode",
-            "sanitizer_variant": "msan",
-            "duration_seconds": 5,
-        })
+        result = fuzz.invoke(
+            {
+                "target_function": "decode",
+                "sanitizer_variant": "msan",
+                "duration_seconds": 5,
+            }
+        )
         assert result["status"] == "completed"
         assert result["variant"] == "msan"
         # MSan sandbox received the writes and exec calls

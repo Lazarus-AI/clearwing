@@ -1,6 +1,5 @@
 """Tests for the memory subsystem: SessionStore, EpisodicMemory, SemanticMemory, ContextSummarizer."""
 
-import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -8,15 +7,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from clearwing.data.memory.episodic_memory import Episode, EpisodicMemory
+from clearwing.data.memory.semantic_memory import Knowledge, SemanticMemory
 from clearwing.data.memory.session_store import SessionInfo, SessionStore
-from clearwing.data.memory.episodic_memory import EpisodicMemory, Episode
-from clearwing.data.memory.semantic_memory import SemanticMemory, Knowledge
 from clearwing.data.memory.summarizer import ContextSummarizer
-
 
 # =========================================================================
 # SessionStore
 # =========================================================================
+
 
 class TestSessionInfo:
     def test_creation(self):
@@ -76,7 +75,7 @@ class TestSessionStore:
         assert sessions[0].target == "10.0.0.1"
 
     def test_get_latest(self):
-        s1 = self.store.create("10.0.0.1", "claude-sonnet-4-6")
+        self.store.create("10.0.0.1", "claude-sonnet-4-6")
         s2 = self.store.create("10.0.0.1", "claude-sonnet-4-6")
         latest = self.store.get_latest()
         assert latest is not None
@@ -108,6 +107,7 @@ class TestSessionStore:
 # =========================================================================
 # EpisodicMemory
 # =========================================================================
+
 
 class TestEpisodicMemory:
     def setup_method(self):
@@ -151,8 +151,7 @@ class TestEpisodicMemory:
 
     def test_metadata_stored(self):
         self.mem.record(
-            "10.0.0.1", "port_found", "Port 22",
-            metadata={"protocol": "tcp", "service": "ssh"}
+            "10.0.0.1", "port_found", "Port 22", metadata={"protocol": "tcp", "service": "ssh"}
         )
         episodes = self.mem.recall("10.0.0.1")
         assert episodes[0].metadata["service"] == "ssh"
@@ -175,6 +174,7 @@ class TestEpisodicMemory:
 # =========================================================================
 # SemanticMemory
 # =========================================================================
+
 
 class TestSemanticMemory:
     def setup_method(self):
@@ -209,8 +209,7 @@ class TestSemanticMemory:
             assert r.category == "tool_usage_patterns"
 
     def test_metadata_stored(self):
-        self.mem.store("target_profiles", "Target runs Apache",
-                       metadata={"target": "10.0.0.1"})
+        self.mem.store("target_profiles", "Target runs Apache", metadata={"target": "10.0.0.1"})
         results = self.mem.search("Apache")
         assert len(results) >= 1
         assert results[0].metadata.get("target") == "10.0.0.1"
@@ -229,30 +228,34 @@ class TestSemanticMemory:
 # ContextSummarizer
 # =========================================================================
 
+
 class TestContextSummarizer:
     def setup_method(self):
         self.summarizer = ContextSummarizer()
 
     def test_should_summarize_false_when_short(self):
         from langchain_core.messages import HumanMessage
+
         messages = [HumanMessage(content="hello")]
         assert self.summarizer.should_summarize(messages) is False
 
     def test_should_summarize_true_when_long(self):
         from langchain_core.messages import HumanMessage
+
         # 120000 tokens * 4 chars = 480000 chars needed to exceed 80% of 150000
         big_msg = HumanMessage(content="x" * 500000)
         assert self.summarizer.should_summarize([big_msg]) is True
 
     def test_should_summarize_custom_threshold(self):
         from langchain_core.messages import HumanMessage
+
         msg = HumanMessage(content="x" * 1000)
         # 1000 chars / 4 = 250 tokens. 80% of 200 = 160. 250 > 160 → True
         assert self.summarizer.should_summarize([msg], max_tokens=200) is True
 
     @pytest.mark.asyncio
     async def test_summarize_preserves_flags(self):
-        from langchain_core.messages import HumanMessage, AIMessage
+        from langchain_core.messages import AIMessage, HumanMessage
 
         messages = []
         for i in range(10):
@@ -278,7 +281,7 @@ class TestContextSummarizer:
 
     @pytest.mark.asyncio
     async def test_summarize_keeps_recent_messages(self):
-        from langchain_core.messages import HumanMessage, AIMessage
+        from langchain_core.messages import HumanMessage
 
         messages = [HumanMessage(content=f"Msg {i}") for i in range(10)]
 

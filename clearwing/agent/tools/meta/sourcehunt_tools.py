@@ -4,10 +4,10 @@ Lets the existing network-pentest interactive agent invoke the source-hunt
 pipeline against a git URL or local path that it has access to. Matches the
 wargame/remediation tool pattern.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from langchain_core.tools import tool
 
@@ -53,7 +53,8 @@ def hunt_source_code(
 
     # Decide whether the input is a local path or a remote URL
     import os
-    local_path: Optional[str] = None
+
+    local_path: str | None = None
     if os.path.isdir(repo_url_or_path):
         local_path = repo_url_or_path
 

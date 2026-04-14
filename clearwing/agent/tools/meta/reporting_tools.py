@@ -1,4 +1,3 @@
-from typing import Optional
 from langchain_core.tools import tool
 
 
@@ -14,8 +13,8 @@ def generate_report(format: str, scan_data: dict) -> str:
     Returns:
         Formatted report string.
     """
-    from clearwing.reporting import ReportGenerator
     from clearwing.core.engine import ScanResult
+    from clearwing.reporting import ReportGenerator
 
     result = ScanResult(target=scan_data.get("target", "unknown"))
     result.open_ports = scan_data.get("open_ports", [])
@@ -41,8 +40,8 @@ def save_report(filepath: str, format: str, scan_data: dict) -> str:
     Returns:
         Confirmation message with file path.
     """
-    from clearwing.reporting import ReportGenerator
     from clearwing.core.engine import ScanResult
+    from clearwing.reporting import ReportGenerator
 
     result = ScanResult(target=scan_data.get("target", "unknown"))
     result.open_ports = scan_data.get("open_ports", [])
@@ -57,7 +56,7 @@ def save_report(filepath: str, format: str, scan_data: dict) -> str:
 
 
 @tool
-def query_scan_history(target: Optional[str] = None) -> list[dict]:
+def query_scan_history(target: str | None = None) -> list[dict]:
     """Query scan history from the database.
 
     Args:

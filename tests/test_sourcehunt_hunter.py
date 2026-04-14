@@ -9,6 +9,7 @@ These tests verify:
 - seeded_crash and semgrep_hints parameters are accepted
 - Hunter tools work in test mode (host file I/O fallback) with no sandbox
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,22 +19,17 @@ import pytest
 
 from clearwing.agent.tools.hunt.hunter_tools import (
     HunterContext,
-    _grep_python_fallback,
     _normalize_path,
     _parse_rg_output,
     _parse_sanitizer_report,
     build_hunter_tools,
-    build_propagation_auditor_tools,
 )
 from clearwing.sourcehunt.hunter import (
-    GENERAL_HUNTER_PROMPT,
-    PROPAGATION_AUDIT_PROMPT,
     _build_hunter_prompt,
     _build_propagation_prompt,
     _choose_specialist,
     build_hunter_agent,
 )
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 
@@ -216,7 +212,7 @@ class TestPromptBuilders:
         prompt = _build_propagation_prompt(ft)
         assert "PROPAGATION RISK" in prompt
         assert "codec_limits.h" in prompt
-        assert "50" in prompt   # imports_by
+        assert "50" in prompt  # imports_by
         # Must enumerate the 5 specific question categories
         assert "BUFFER SIZE ADEQUACY" in prompt
         assert "SENTINEL" in prompt
@@ -301,9 +297,15 @@ class TestBuildHunterAgent:
         bind_args = llm.bind_tools.call_args[0][0]
         tool_names = {t.name for t in bind_args}
         assert tool_names == {
-            "read_source_file", "list_source_tree", "grep_source", "find_callers",
-            "compile_file", "run_with_sanitizer", "write_test_case",
-            "fuzz_harness", "record_finding",
+            "read_source_file",
+            "list_source_tree",
+            "grep_source",
+            "find_callers",
+            "compile_file",
+            "run_with_sanitizer",
+            "write_test_case",
+            "fuzz_harness",
+            "record_finding",
         }
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
@@ -351,7 +353,10 @@ class TestBuildHunterAgent:
         bind_args = llm.bind_tools.call_args[0][0]
         tool_names = {t.name for t in bind_args}
         assert tool_names == {
-            "read_source_file", "list_source_tree", "grep_source", "find_callers",
+            "read_source_file",
+            "list_source_tree",
+            "grep_source",
+            "find_callers",
             "record_finding",
         }
         assert "compile_file" not in tool_names
@@ -425,7 +430,7 @@ class TestHunterToolsHostFallback:
         grep = next(t for t in tools if t.name == "grep_source")
         matches = grep.invoke({"pattern": "MAX_FRAME_BYTES", "path": "."})
         assert isinstance(matches, list)
-        assert len(matches) >= 4   # 1 in header + 3 in codec files
+        assert len(matches) >= 4  # 1 in header + 3 in codec files
         # Each match has the right shape
         for m in matches:
             assert "file" in m
@@ -489,16 +494,18 @@ class TestRecordFinding:
         )
         tools = build_hunter_tools(ctx)
         record = next(t for t in tools if t.name == "record_finding")
-        msg = record.invoke({
-            "file": "src/codec_a.c",
-            "line_number": 9,
-            "finding_type": "memory_safety",
-            "severity": "critical",
-            "cwe": "CWE-787",
-            "description": "memcpy with unchecked length",
-            "code_snippet": "memcpy(frame, input, input_len);",
-            "evidence_level": "static_corroboration",
-        })
+        msg = record.invoke(
+            {
+                "file": "src/codec_a.c",
+                "line_number": 9,
+                "finding_type": "memory_safety",
+                "severity": "critical",
+                "cwe": "CWE-787",
+                "description": "memcpy with unchecked length",
+                "code_snippet": "memcpy(frame, input, input_len);",
+                "evidence_level": "static_corroboration",
+            }
+        )
         assert "Finding recorded" in msg
         assert len(ctx.findings) == 1
         f = ctx.findings[0]
@@ -519,10 +526,16 @@ class TestRecordFinding:
         )
         tools = build_hunter_tools(ctx)
         record = next(t for t in tools if t.name == "record_finding")
-        record.invoke({
-            "file": "x.c", "line_number": 1, "finding_type": "uaf",
-            "severity": "high", "cwe": "CWE-416", "description": "y",
-        })
+        record.invoke(
+            {
+                "file": "x.c",
+                "line_number": 1,
+                "finding_type": "uaf",
+                "severity": "high",
+                "cwe": "CWE-416",
+                "description": "y",
+            }
+        )
         assert ctx.findings[0]["seeded_from_crash"] is True
         assert ctx.findings[0]["discovered_by"] == "hunter:memory_safety"
 
@@ -553,10 +566,7 @@ class TestSanitizerParser:
 
 class TestRgOutputParser:
     def test_basic_rg_output(self):
-        stdout = (
-            "/workspace/foo.c:42:    int x = 1;\n"
-            "/workspace/bar.c:7:#define X 2\n"
-        )
+        stdout = "/workspace/foo.c:42:    int x = 1;\n/workspace/bar.c:7:#define X 2\n"
         matches = _parse_rg_output(stdout)
         assert len(matches) == 2
         assert matches[0]["file"] == "foo.c"

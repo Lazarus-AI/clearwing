@@ -6,14 +6,15 @@ import asyncio
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Header, Footer
+from textual.widgets import Footer, Header
+
+from clearwing.core.events import EventBus, EventType
 
 from .components.activity_feed import ActivityFeed
-from .components.status_bar import StatusBar
 from .components.input_bar import InputBar
+from .components.status_bar import StatusBar
 from .screens.help_screen import HelpScreen
 from .screens.quit_screen import QuitScreen
-from clearwing.core.events import EventBus, EventType
 
 
 class ClearwingApp(App):
@@ -45,8 +46,9 @@ class ClearwingApp(App):
         Binding("f1", "show_help", "Help"),
     ]
 
-    def __init__(self, target=None, model="claude-sonnet-4-6", session_id=None,
-                 base_url=None, api_key=None):
+    def __init__(
+        self, target=None, model="claude-sonnet-4-6", session_id=None, base_url=None, api_key=None
+    ):
         super().__init__()
         self.target = target
         self.model = model
@@ -151,9 +153,7 @@ class ClearwingApp(App):
         bar.update_pause(self.paused)
         feed = self.query_one(ActivityFeed)
         if self.paused:
-            feed.add_message(
-                "Agent PAUSED. Type instructions or Ctrl+P to resume.", "warning"
-            )
+            feed.add_message("Agent PAUSED. Type instructions or Ctrl+P to resume.", "warning")
         else:
             feed.add_message("Agent RESUMED.", "info")
 

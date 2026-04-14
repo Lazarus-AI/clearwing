@@ -1,11 +1,9 @@
 """Tests for the specialist agent modules (planner, recon, exploit, reporter)."""
 
-import pytest
-
-from clearwing.agent.specialists.planner_agent import PlannerAgent, Plan, Subtask
-
+from clearwing.agent.specialists.planner_agent import Plan, PlannerAgent, Subtask
 
 # --- Subtask ---
+
 
 class TestSubtask:
     def test_defaults(self):
@@ -14,14 +12,20 @@ class TestSubtask:
         assert st.result is None
 
     def test_fields(self):
-        st = Subtask(id=2, description="Exploit RCE", agent="exploit",
-                     status="completed", result="Shell obtained")
+        st = Subtask(
+            id=2,
+            description="Exploit RCE",
+            agent="exploit",
+            status="completed",
+            result="Shell obtained",
+        )
         assert st.id == 2
         assert st.agent == "exploit"
         assert st.status == "completed"
 
 
 # --- Plan ---
+
 
 class TestPlan:
     def _make_plan(self):
@@ -83,6 +87,7 @@ class TestPlan:
 
 # --- PlannerAgent._parse_subtasks ---
 
+
 class TestParseSubtasks:
     def test_valid_json(self):
         content = '[{"description": "Scan ports", "agent": "recon"}, {"description": "Write report", "agent": "reporter"}]'
@@ -101,6 +106,7 @@ class TestParseSubtasks:
     def test_max_15_subtasks(self):
         items = [{"description": f"Task {i}", "agent": "recon"} for i in range(20)]
         import json
+
         content = json.dumps(items)
         subtasks = PlannerAgent._parse_subtasks(content)
         assert len(subtasks) == 15
@@ -125,6 +131,7 @@ class TestParseSubtasks:
 
 # --- Agent classes exist and have expected interface ---
 
+
 class TestAgentInterfaces:
     def test_planner_agent_init(self):
         agent = PlannerAgent(model_name="claude-sonnet-4-6")
@@ -132,15 +139,18 @@ class TestAgentInterfaces:
 
     def test_recon_agent_init(self):
         from clearwing.agent.specialists import ReconAgent
+
         agent = ReconAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"
 
     def test_exploit_agent_init(self):
         from clearwing.agent.specialists import ExploitAgent
+
         agent = ExploitAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"
 
     def test_reporter_agent_init(self):
         from clearwing.agent.specialists import ReporterAgent
+
         agent = ReporterAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"

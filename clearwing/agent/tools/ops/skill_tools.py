@@ -15,6 +15,7 @@ def load_skills(skill_names: list[str]) -> str:
     """
     try:
         from clearwing.core.skills import SkillLoader
+
         loader = SkillLoader()
         return loader.load(*skill_names)
     except Exception as e:

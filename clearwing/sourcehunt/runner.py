@@ -6,6 +6,7 @@ hunting instead of network targets.
 Pipeline:
     preprocess → sandbox build → rank → tiered hunt → verify → exploit → report
 """
+
 from __future__ import annotations
 
 import logging
@@ -13,30 +14,29 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .disclosure import (
     DisclosureGenerator,
+)
+from .disclosure import (
     write_bundle as write_disclosure_bundle,
 )
 from .exploiter import Exploiter, apply_exploiter_result
-from .patcher import AutoPatcher, PatchAttempt, apply_patch_attempt
-from .poc_runner import PocRunner, build_rerun_poc_callback
 from .harness_generator import HarnessGenerator, HarnessGeneratorConfig, SeededCrash
 from .mechanism_memory import (
     MechanismExtractor,
     MechanismStore,
     format_mechanisms_for_prompt,
 )
+from .patcher import AutoPatcher, apply_patch_attempt
+from .poc_runner import build_rerun_poc_callback
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
-from .state import EvidenceLevel, Finding, evidence_at_or_above, filter_by_evidence
+from .state import EvidenceLevel, Finding, filter_by_evidence
 from .variant_loop import (
     VariantLoop,
-    VariantLoopConfig,
     VariantPatternGenerator,
-    VariantSearcher,
 )
 from .verifier import Verifier, apply_verifier_result
 
@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SourceHuntResult:
     """Result of a complete sourcehunt run."""
-    exit_code: int                          # 0=clean, 1=medium, 2=critical/high
+
+    exit_code: int  # 0=clean, 1=medium, 2=critical/high
     repo_url: str
     repo_path: str
     findings: list[Finding]
@@ -64,14 +65,16 @@ class SourceHuntResult:
     @property
     def critical_count(self) -> int:
         return sum(
-            1 for f in self.verified_findings
+            1
+            for f in self.verified_findings
             if (f.get("severity_verified") or f.get("severity")) == "critical"
         )
 
     @property
     def high_count(self) -> int:
         return sum(
-            1 for f in self.verified_findings
+            1
+            for f in self.verified_findings
             if (f.get("severity_verified") or f.get("severity")) == "high"
         )
 
@@ -83,37 +86,37 @@ class SourceHuntRunner:
         self,
         repo_url: str,
         branch: str = "main",
-        local_path: Optional[str] = None,
-        depth: str = "standard",                # quick | standard | deep
+        local_path: str | None = None,
+        depth: str = "standard",  # quick | standard | deep
         budget_usd: float = 5.0,
         max_parallel: int = 8,
-        tier_budget: Optional[TierBudget] = None,
+        tier_budget: TierBudget | None = None,
         output_dir: str = "./sourcehunt-results",
-        output_formats: Optional[list[str]] = None,
+        output_formats: list[str] | None = None,
         no_verify: bool = False,
         no_exploit: bool = False,
-        adversarial_verifier: bool = True,      # v0.2: on by default
-        adversarial_threshold: Optional[EvidenceLevel] = "static_corroboration",  # v0.4: budget gate
-        enable_mechanism_memory: bool = True,   # v0.3: cross-run mechanism store
-        mechanism_store_path=None,              # override default store location
-        enable_patch_oracle: bool = True,       # v0.3: patch oracle truth test
-        enable_variant_loop: bool = True,       # v0.3: compound finding density
-        enable_auto_patch: bool = False,        # v0.3: opt-in auto-patch mode
-        auto_pr: bool = False,                  # v0.3: open a draft PR via gh
-        enable_knowledge_graph: bool = True,    # v0.3: populate source-hunt KG
-        knowledge_graph=None,                   # inject a KG instance for tests
-        export_disclosures: bool = False,       # v0.4: write MITRE/HackerOne templates
+        adversarial_verifier: bool = True,  # v0.2: on by default
+        adversarial_threshold: EvidenceLevel | None = "static_corroboration",  # v0.4: budget gate
+        enable_mechanism_memory: bool = True,  # v0.3: cross-run mechanism store
+        mechanism_store_path=None,  # override default store location
+        enable_patch_oracle: bool = True,  # v0.3: patch oracle truth test
+        enable_variant_loop: bool = True,  # v0.3: compound finding density
+        enable_auto_patch: bool = False,  # v0.3: opt-in auto-patch mode
+        auto_pr: bool = False,  # v0.3: open a draft PR via gh
+        enable_knowledge_graph: bool = True,  # v0.3: populate source-hunt KG
+        knowledge_graph=None,  # inject a KG instance for tests
+        export_disclosures: bool = False,  # v0.4: write MITRE/HackerOne templates
         disclosure_reporter_name: str = "(your name)",
         disclosure_reporter_affiliation: str = "(your affiliation)",
         disclosure_reporter_email: str = "(your email)",
-        model_override: Optional[str] = None,
-        provider_manager=None,                  # optional ProviderManager
-        ranker_llm=None,                        # injectable for tests
+        model_override: str | None = None,
+        provider_manager=None,  # optional ProviderManager
+        ranker_llm=None,  # injectable for tests
         hunter_llm=None,
         verifier_llm=None,
         exploiter_llm=None,
-        sandbox_factory=None,                   # callable[[], SandboxContainer]
-        parent_session_id: Optional[str] = None,
+        sandbox_factory=None,  # callable[[], SandboxContainer]
+        parent_session_id: str | None = None,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -129,7 +132,9 @@ class SourceHuntRunner:
         self.adversarial_verifier = adversarial_verifier
         self.adversarial_threshold = adversarial_threshold
         self.enable_mechanism_memory = enable_mechanism_memory
-        self._mechanism_store = MechanismStore(path=mechanism_store_path) if enable_mechanism_memory else None
+        self._mechanism_store = (
+            MechanismStore(path=mechanism_store_path) if enable_mechanism_memory else None
+        )
         self.enable_patch_oracle = enable_patch_oracle
         self.enable_variant_loop = enable_variant_loop
         self.enable_auto_patch = enable_auto_patch
@@ -204,7 +209,8 @@ class SourceHuntRunner:
                     seeded_crashes = hg_result.seeded_crashes
                     logger.info(
                         "Harness generator produced %d crashes from %d harnesses",
-                        len(seeded_crashes), hg_result.harnesses_generated,
+                        len(seeded_crashes),
+                        hg_result.harnesses_generated,
                     )
                 except Exception:
                     logger.warning("Harness generator failed", exc_info=True)
@@ -239,29 +245,33 @@ class SourceHuntRunner:
         all_findings: list[Finding] = []
         files_hunted = 0
         if hunter_llm is not None and files:
-            pool = HunterPool(HuntPoolConfig(
-                files=files,
-                repo_path=repo_path,
-                sandbox_factory=self.sandbox_factory,
-                hunter_factory=None,
-                llm=hunter_llm,
-                max_parallel=self.max_parallel,
-                budget_usd=self.budget_usd,
-                tier_budget=self.tier_budget,
-                session_id_prefix=self._session_id,
-                seeded_crashes_by_file=seeded_by_file,
-                semgrep_hints_by_file=semgrep_hints_by_file,
-            ))
+            pool = HunterPool(
+                HuntPoolConfig(
+                    files=files,
+                    repo_path=repo_path,
+                    sandbox_factory=self.sandbox_factory,
+                    hunter_factory=None,
+                    llm=hunter_llm,
+                    max_parallel=self.max_parallel,
+                    budget_usd=self.budget_usd,
+                    tier_budget=self.tier_budget,
+                    session_id_prefix=self._session_id,
+                    seeded_crashes_by_file=seeded_by_file,
+                    semgrep_hints_by_file=semgrep_hints_by_file,
+                )
+            )
             try:
                 all_findings = pool.run()
             except Exception:
                 logger.warning("HunterPool run failed", exc_info=True)
             spent_per_tier = pool.spent_per_tier
-            files_hunted = sum([
-                p.get("tier") in ("A", "B", "C")
-                for p in files
-                if p.get("tier") != "C" or self.tier_budget.tier_c_fraction > 0
-            ])
+            files_hunted = sum(
+                [
+                    p.get("tier") in ("A", "B", "C")
+                    for p in files
+                    if p.get("tier") != "C" or self.tier_budget.tier_c_fraction > 0
+                ]
+            )
         else:
             spent_per_tier = {"A": 0.0, "B": 0.0, "C": 0.0}
 
@@ -364,8 +374,7 @@ class SourceHuntRunner:
                     )
                     # Track locations we've already reported to avoid dupes
                     already_seen = {
-                        (f.get("file", ""), f.get("line_number", 0))
-                        for f in all_findings
+                        (f.get("file", ""), f.get("line_number", 0)) for f in all_findings
                     }
                     # v0.4: drive the multi-iteration fixpoint loop rather
                     # than the single-pass run_once. Each iteration feeds
@@ -375,7 +384,7 @@ class SourceHuntRunner:
                         verified_findings=verified,
                         repo_path=repo_path,
                         already_seen_locations=already_seen,
-                        reverify_callback=None,   # reuse the original seeds across passes
+                        reverify_callback=None,  # reuse the original seeds across passes
                     )
                     # Turn VariantSeed entries into Finding records.
                     # Each variant inherits its parent's CWE and severity
@@ -392,8 +401,7 @@ class SourceHuntRunner:
                             severity=parent.effective_severity or "medium",
                             confidence="low",
                             description=(
-                                f"Variant of {parent.id}: "
-                                f"{seed.match.pattern.semantic_description}"
+                                f"Variant of {parent.id}: {seed.match.pattern.semantic_description}"
                             ),
                             code_snippet=seed.match.matched_text,
                             evidence_level="suspicion",
@@ -486,10 +494,9 @@ class SourceHuntRunner:
                 logger.warning("Knowledge graph population failed", exc_info=True)
 
         # 5.85. v0.4: Coordinated-disclosure templates (opt-in).
-        disclosure_paths: dict[str, list[str]] = {}
         if self.export_disclosures and verified:
             try:
-                disclosure_paths = self._export_disclosure_bundle(verified)
+                self._export_disclosure_bundle(verified)
             except Exception:
                 logger.warning("Disclosure export failed", exc_info=True)
 
@@ -513,7 +520,7 @@ class SourceHuntRunner:
             duration_seconds=round(duration, 2),
             cost_usd=sum(spent_per_tier.values()),
             spent_per_tier=spent_per_tier,
-            tokens_used=0,    # filled by cost tracker if attached
+            tokens_used=0,  # filled by cost tracker if attached
             output_paths=output_paths,
             session_id=self._session_id,
         )
@@ -543,7 +550,8 @@ class SourceHuntRunner:
             logger.info(
                 "Disclosure export: no findings passed the eligibility gate "
                 "(skipped=%d, reasons=%s)",
-                bundle.skipped, bundle.skipped_reasons,
+                bundle.skipped,
+                bundle.skipped_reasons,
             )
             return {}
         return write_disclosure_bundle(bundle, self.output_dir, self._session_id)
@@ -558,6 +566,7 @@ class SourceHuntRunner:
         if kg is None:
             try:
                 from clearwing.data.knowledge import KnowledgeGraph
+
                 kg = KnowledgeGraph(persist_path="~/.clearwing/knowledge_graph.json")
             except Exception:
                 logger.debug("Could not import KnowledgeGraph", exc_info=True)
@@ -600,7 +609,7 @@ class SourceHuntRunner:
         title = (
             attempt.commit_message
             or f"fix: {finding.get('finding_type', 'vulnerability')} "
-               f"in {finding.get('file', 'unknown')}"
+            f"in {finding.get('file', 'unknown')}"
         )
         body = (
             f"## Auto-generated patch from clearwing sourcehunt\n\n"
@@ -626,12 +635,13 @@ class SourceHuntRunner:
     def _load_file_content(self, repo_path: str, finding: Finding) -> str:
         """Read the file referenced by a finding. Used by the patch oracle."""
         import os
+
         rel = finding.get("file", "")
         if not rel:
             return ""
         abs_path = os.path.join(repo_path, rel)
         try:
-            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(abs_path, encoding="utf-8", errors="replace") as f:
                 return f.read()
         except OSError:
             return ""
@@ -671,11 +681,13 @@ class SourceHuntRunner:
         # Format as a single synthetic "hint" that flows through the
         # existing semgrep_hints channel into hunter prompts.
         formatted = format_mechanisms_for_prompt(recalled)
-        return [{
-            "line": 0,
-            "description": formatted,
-            "source": "mechanism_memory",
-        }]
+        return [
+            {
+                "line": 0,
+                "description": formatted,
+                "source": "mechanism_memory",
+            }
+        ]
 
     def _preprocess(self) -> PreprocessResult:
         # v0.2: enable callgraph + reachability + Semgrep by default at
@@ -689,7 +701,7 @@ class SourceHuntRunner:
             build_callgraph=(self.depth != "quick"),
             propagate_reachability=(self.depth != "quick"),
             run_semgrep=(self.depth != "quick"),
-            run_taint=(self.depth != "quick"),   # v0.4: taint analysis
+            run_taint=(self.depth != "quick"),  # v0.4: taint analysis
         )
         return pp.run()
 
@@ -743,25 +755,26 @@ class SourceHuntRunner:
         """
         out = list(existing)
         for sf in preprocess_result.static_findings:
-            out.append(Finding(
-                id=f"static-{uuid.uuid4().hex[:8]}",
-                file=os.path.relpath(sf.file_path, preprocess_result.repo_path),
-                line_number=sf.line_number,
-                finding_type=sf.finding_type,
-                cwe=sf.cwe,
-                severity=sf.severity,  # type: ignore[arg-type]
-                confidence=sf.confidence,  # type: ignore[arg-type]
-                description=sf.description,
-                code_snippet=sf.code_snippet,
-                evidence_level="static_corroboration",
-                discovered_by="source_analyzer",
-            ))
+            out.append(
+                Finding(
+                    id=f"static-{uuid.uuid4().hex[:8]}",
+                    file=os.path.relpath(sf.file_path, preprocess_result.repo_path),
+                    line_number=sf.line_number,
+                    finding_type=sf.finding_type,
+                    cwe=sf.cwe,
+                    severity=sf.severity,  # type: ignore[arg-type]
+                    confidence=sf.confidence,  # type: ignore[arg-type]
+                    description=sf.description,
+                    code_snippet=sf.code_snippet,
+                    evidence_level="static_corroboration",
+                    discovered_by="source_analyzer",
+                )
+            )
         return out
 
     def _exit_code(self, findings: list[Finding]) -> int:
         severities = {
-            (f.get("severity_verified") or f.get("severity") or "info").lower()
-            for f in findings
+            (f.get("severity_verified") or f.get("severity") or "info").lower() for f in findings
         }
         if severities & {"critical", "high"}:
             return 2
@@ -799,6 +812,7 @@ class SourceHuntRunner:
         # Try the default ProviderManager
         try:
             from clearwing.providers.manager import ProviderManager
+
             pm = ProviderManager()
             return pm.get_llm(task)
         except Exception:
@@ -808,6 +822,7 @@ class SourceHuntRunner:
         """Build a single LLM from a model string. Used by --model override."""
         try:
             from langchain_anthropic import ChatAnthropic
+
             # Spread kwargs to match graph.py's construction pattern and
             # to bypass mypy's strict call-arg check on langchain's Chat*
             # classes (which declare many required-but-factory-defaulted

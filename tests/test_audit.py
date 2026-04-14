@@ -1,7 +1,6 @@
 """Tests for the Audit Logger and Session Metrics modules."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -17,6 +16,7 @@ def logger(tmp_path, monkeypatch):
 
 
 # --- AuditLogger ---
+
 
 class TestAuditLogger:
     def test_init_creates_directory(self, logger):
@@ -161,6 +161,7 @@ class TestAuditLogger:
 
 # --- SessionMetrics ---
 
+
 class TestSessionMetrics:
     def _make_entries(self):
         """Create a list of AuditEntry objects for testing."""
@@ -169,8 +170,12 @@ class TestSessionMetrics:
                 timestamp="2025-01-01T10:00:00+00:00",
                 session_id="test",
                 event_type="llm_call",
-                details={"model": "claude-sonnet-4-6", "input_tokens": 1000,
-                         "output_tokens": 200, "cost_usd": 0.006},
+                details={
+                    "model": "claude-sonnet-4-6",
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cost_usd": 0.006,
+                },
             ),
             AuditEntry(
                 timestamp="2025-01-01T10:00:05+00:00",

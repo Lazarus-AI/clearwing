@@ -3,6 +3,7 @@
 The core contract: round-trip conversion from any legacy shape → Finding →
 back to the same shape preserves every field that shape cares about.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -14,7 +15,6 @@ from clearwing.findings import (
     to_cicd_dict,
 )
 from clearwing.findings.types import _coerce_severity
-
 
 # --- Finding dataclass ------------------------------------------------------
 
@@ -113,7 +113,7 @@ class TestCicdDictRoundtrip:
         }
         f = from_cicd_dict(d, target="app.example.com")
         assert f.cve == "CVE-2021-44790"
-        assert f.cwe == "CVE-2021-44790"   # CWE falls back to CVE for CICD
+        assert f.cwe == "CVE-2021-44790"  # CWE falls back to CVE for CICD
         assert f.severity == "critical"
 
     def test_cicd_to_dict_roundtrip(self):
@@ -157,13 +157,14 @@ class TestFromAnalysisFinding:
     def test_from_dataclass_instance(self):
         """The SourceAnalyzer dataclass should convert cleanly."""
         from clearwing.analysis.source_analyzer import AnalyzerFinding as AnalysisFinding
+
         af = AnalysisFinding(
             file_path="app.py",
             line_number=23,
             finding_type="sql_injection",
             severity="critical",
             description="f-string SQL",
-            code_snippet="cursor.execute(f\"...\")",
+            code_snippet='cursor.execute(f"...")',
             cwe="CWE-89",
             confidence="high",
         )
@@ -219,8 +220,11 @@ class TestCrossShapeConversions:
         """A source-hunt Finding casts cleanly into the CICDRunner dict shape
         so the file-aware SARIF generator can render it."""
         f = Finding(
-            id="x", file="src/codec.c", line_number=47,
-            severity="critical", description="bug",
+            id="x",
+            file="src/codec.c",
+            line_number=47,
+            severity="critical",
+            description="bug",
             cwe="CWE-787",
             evidence_level="root_cause_explained",
             verified=True,

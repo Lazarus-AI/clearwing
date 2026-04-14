@@ -1,7 +1,7 @@
 import platform
+
 from langchain_core.tools import tool
 from langgraph.types import interrupt
-
 
 CONTAINER_NAME = "clearwing-kali"
 

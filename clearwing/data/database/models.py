@@ -1,26 +1,26 @@
 import sqlite3
-from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 class Database:
     """SQLite database for storing scan results and configurations."""
-    
-    def __init__(self, db_path: str = 'clearwing.db'):
+
+    def __init__(self, db_path: str = "clearwing.db"):
         self.db_path = db_path
         self._init_db()
-    
+
     def _init_db(self) -> None:
         """Initialize database schema."""
         path = Path(self.db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
+
             # Targets table
-            cursor.execute('''
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS targets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ip_address TEXT UNIQUE NOT NULL,
@@ -28,10 +28,10 @@ class Database:
                     os TEXT,
                     last_scan TIMESTAMP
                 )
-            ''')
-            
+            """)
+
             # Ports table
-            cursor.execute('''
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS ports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     target_id INTEGER NOT NULL,
@@ -42,10 +42,10 @@ class Database:
                     version TEXT,
                     FOREIGN KEY (target_id) REFERENCES targets(id)
                 )
-            ''')
-            
+            """)
+
             # Vulnerabilities table
-            cursor.execute('''
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS vulnerabilities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     port_id INTEGER NOT NULL,
@@ -55,10 +55,10 @@ class Database:
                     exploit_available BOOLEAN,
                     FOREIGN KEY (port_id) REFERENCES ports(id)
                 )
-            ''')
-            
+            """)
+
             # Exploits table
-            cursor.execute('''
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS exploits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vuln_id INTEGER NOT NULL,
@@ -68,78 +68,100 @@ class Database:
                     timestamp TIMESTAMP,
                     FOREIGN KEY (vuln_id) REFERENCES vulnerabilities(id)
                 )
-            ''')
-            
+            """)
+
             conn.commit()
-    
+
     def save_scan_result(self, scan_result: Any) -> int:
         """
         Save scan results to database.
-        
+
         Args:
             scan_result: ScanResult object from CoreEngine
-        
+
         Returns:
             Target ID in database
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
+
             # Insert or update target
-            cursor.execute('''
+            cursor.execute(
+                """
                 INSERT OR REPLACE INTO targets (ip_address, os, last_scan)
                 VALUES (?, ?, ?)
-            ''', (scan_result.target, scan_result.os_info, datetime.now()))
-            
+            """,
+                (scan_result.target, scan_result.os_info, datetime.now()),
+            )
+
             target_id = cursor.lastrowid
-            
+
             # Insert ports
             for port in scan_result.open_ports:
-                cursor.execute('''
+                cursor.execute(
+                    """
                     INSERT INTO ports (target_id, port, protocol, state, service)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (target_id, port['port'], port['protocol'], port['state'], port['service']))
-                
+                """,
+                    (target_id, port["port"], port["protocol"], port["state"], port["service"]),
+                )
+
                 port_id = cursor.lastrowid
-                
+
                 # Insert vulnerabilities for this port
-                port_vulns = [v for v in scan_result.vulnerabilities if v.get('port') == port['port']]
+                port_vulns = [
+                    v for v in scan_result.vulnerabilities if v.get("port") == port["port"]
+                ]
                 for vuln in port_vulns:
-                    cursor.execute('''
+                    cursor.execute(
+                        """
                         INSERT INTO vulnerabilities (port_id, cve_id, cvss_score, description)
                         VALUES (?, ?, ?, ?)
-                    ''', (port_id, vuln.get('cve'), vuln.get('cvss'), vuln.get('description')))
-                    
+                    """,
+                        (port_id, vuln.get("cve"), vuln.get("cvss"), vuln.get("description")),
+                    )
+
                     vuln_id = cursor.lastrowid
-                    
+
                     # Insert exploits for this vulnerability
-                    vuln_exploits = [e for e in scan_result.exploits if e.get('cve') == vuln.get('cve')]
+                    vuln_exploits = [
+                        e for e in scan_result.exploits if e.get("cve") == vuln.get("cve")
+                    ]
                     for exploit in vuln_exploits:
-                        cursor.execute('''
+                        cursor.execute(
+                            """
                             INSERT INTO exploits (vuln_id, name, success, output, timestamp)
                             VALUES (?, ?, ?, ?, ?)
-                        ''', (vuln_id, exploit.get('exploit_name'), exploit.get('success'),
-                              exploit.get('message', ''), datetime.now()))
-            
+                        """,
+                            (
+                                vuln_id,
+                                exploit.get("exploit_name"),
+                                exploit.get("success"),
+                                exploit.get("message", ""),
+                                datetime.now(),
+                            ),
+                        )
+
             conn.commit()
             return target_id
-    
-    def get_target(self, ip_address: str) -> Optional[Dict[str, Any]]:
+
+    def get_target(self, ip_address: str) -> dict[str, Any] | None:
         """Get target information by IP address."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM targets WHERE ip_address = ?', (ip_address,))
+            cursor.execute("SELECT * FROM targets WHERE ip_address = ?", (ip_address,))
             row = cursor.fetchone()
             return dict(row) if row else None
-    
-    def get_target_history(self, ip_address: str) -> List[Dict[str, Any]]:
+
+    def get_target_history(self, ip_address: str) -> list[dict[str, Any]]:
         """Get scan history for a target."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
-            cursor.execute('''
+
+            cursor.execute(
+                """
                 SELECT t.*, p.port, p.service, p.state, v.cve_id, v.cvss_score, e.name as exploit_name, e.success
                 FROM targets t
                 LEFT JOIN ports p ON t.id = p.target_id
@@ -147,35 +169,40 @@ class Database:
                 LEFT JOIN exploits e ON v.id = e.vuln_id
                 WHERE t.ip_address = ?
                 ORDER BY t.last_scan DESC
-            ''', (ip_address,))
-            
+            """,
+                (ip_address,),
+            )
+
             return [dict(row) for row in cursor.fetchall()]
-    
-    def get_all_targets(self) -> List[Dict[str, Any]]:
+
+    def get_all_targets(self) -> list[dict[str, Any]]:
         """Get all targets in database."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM targets ORDER BY last_scan DESC')
+            cursor.execute("SELECT * FROM targets ORDER BY last_scan DESC")
             return [dict(row) for row in cursor.fetchall()]
-    
+
     def delete_target(self, ip_address: str) -> None:
         """Delete a target and all associated data."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM targets WHERE ip_address = ?', (ip_address,))
+            cursor.execute("DELETE FROM targets WHERE ip_address = ?", (ip_address,))
             conn.commit()
-    
-    def search_vulnerabilities(self, cve_pattern: str = '%') -> List[Dict[str, Any]]:
+
+    def search_vulnerabilities(self, cve_pattern: str = "%") -> list[dict[str, Any]]:
         """Search vulnerabilities by CVE pattern."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT v.*, p.port, p.service, t.ip_address
                 FROM vulnerabilities v
                 JOIN ports p ON v.port_id = p.id
                 JOIN targets t ON p.target_id = t.id
                 WHERE v.cve_id LIKE ?
-            ''', (cve_pattern,))
+            """,
+                (cve_pattern,),
+            )
             return [dict(row) for row in cursor.fetchall()]

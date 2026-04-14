@@ -8,9 +8,9 @@ Covers:
     - HunterContext.get_sandbox_for_variant caches variant containers
     - compile_file / run_with_sanitizer accept sanitizer_variant
 """
+
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,15 +22,14 @@ from clearwing.agent.tools.hunt.hunter_tools import (
     build_hunter_tools,
 )
 from clearwing.sandbox.builders import (
+    INCOMPATIBLE_SANITIZER_PAIRS,
     BuildRecipe,
     BuildSystemDetector,
-    INCOMPATIBLE_SANITIZER_PAIRS,
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
 from clearwing.sandbox.container import ExecResult
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
-
 
 # --- validate_sanitizer_combo ----------------------------------------------
 
@@ -250,7 +249,7 @@ class TestHunterSandboxSpawnVariant:
         sb.build_image()
         primary_tag = sb._variant_images["asan+ubsan"]
 
-        sb.spawn(scratch_mount=False)   # default variant
+        sb.spawn(scratch_mount=False)  # default variant
         kwargs = mock_docker.containers.run.call_args.kwargs
         assert kwargs["image"] == primary_tag
         # Env reflects ASan+UBSan
@@ -283,7 +282,7 @@ class TestHunterSandboxSpawnVariant:
         mock_container = MagicMock(id="cid", short_id="cid")
         mock_docker.containers.run.return_value = mock_container
 
-        sb = HunterSandbox(repo_path=str(temp_c_repo))   # no extra_variants
+        sb = HunterSandbox(repo_path=str(temp_c_repo))  # no extra_variants
         sb.build_image()
 
         # Ask for MSan — should trigger an on-demand build
@@ -395,7 +394,7 @@ class TestHunterContextVariantCaching:
             sandbox_manager=manager,
         )
         result = ctx.get_sandbox_for_variant(["msan"])
-        assert result is primary   # failed spawn → fall back to primary
+        assert result is primary  # failed spawn → fall back to primary
 
     def test_cleanup_variants_stops_cached(self):
         primary = MagicMock(name="primary")
@@ -430,10 +429,12 @@ class TestCompileFileVariantDispatch:
         )
         tools = build_hunter_tools(ctx)
         compile_tool = next(t for t in tools if t.name == "compile_file")
-        result = compile_tool.invoke({
-            "file_path": "src/foo.c",
-            "sanitizer_variant": "msan",
-        })
+        result = compile_tool.invoke(
+            {
+                "file_path": "src/foo.c",
+                "sanitizer_variant": "msan",
+            }
+        )
         # The MSan sandbox was used for compile, not the primary
         msan_sandbox.exec.assert_called_once()
         primary.exec.assert_not_called()
@@ -469,10 +470,12 @@ class TestRunWithSanitizerVariantDispatch:
         )
         tools = build_hunter_tools(ctx)
         run_tool = next(t for t in tools if t.name == "run_with_sanitizer")
-        result = run_tool.invoke({
-            "binary": "/scratch/x.bin",
-            "sanitizer_variant": "msan",
-        })
+        result = run_tool.invoke(
+            {
+                "binary": "/scratch/x.bin",
+                "sanitizer_variant": "msan",
+            }
+        )
         msan_sandbox.exec.assert_called_once()
         primary.exec.assert_not_called()
         assert result["variant"] == "msan"
@@ -491,9 +494,11 @@ class TestRunWithSanitizerVariantDispatch:
         )
         tools = build_hunter_tools(ctx)
         run_tool = next(t for t in tools if t.name == "run_with_sanitizer")
-        run_tool.invoke({
-            "binary": "/scratch/x.bin",
-            "sanitizer_variant": "asan,ubsan",
-        })
+        run_tool.invoke(
+            {
+                "binary": "/scratch/x.bin",
+                "sanitizer_variant": "asan,ubsan",
+            }
+        )
         primary.exec.assert_called_once()
         manager.spawn.assert_not_called()

@@ -15,6 +15,7 @@ def recall_target_history(target: str) -> str:
     """
     try:
         from clearwing.data.memory import EpisodicMemory
+
         memory = EpisodicMemory()
         episodes = memory.recall(target, limit=30)
         if not episodes:
@@ -40,6 +41,7 @@ def store_knowledge(category: str, content: str) -> str:
     """
     try:
         from clearwing.data.memory import SemanticMemory
+
         memory = SemanticMemory()
         memory.store(category, content)
         return f"Knowledge stored in category '{category}'."
@@ -60,6 +62,7 @@ def search_knowledge(query: str, category: str = None) -> str:
     """
     try:
         from clearwing.data.memory import SemanticMemory
+
         memory = SemanticMemory()
         results = memory.search(query, category=category, top_k=5)
         if not results:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from clearwing.providers.manager import (
     DEFAULT_ROUTES,
-    ModelRoute,
     PROVIDER_PRESETS,
+    ModelRoute,
     ProviderConfig,
     ProviderManager,
 )

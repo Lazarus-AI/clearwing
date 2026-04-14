@@ -13,9 +13,16 @@ def _reset_bus():
 class TestEventType:
     def test_all_event_types_exist(self):
         expected = {
-            "STATE_CHANGED", "MESSAGE", "TOOL_START", "TOOL_RESULT",
-            "FLAG_FOUND", "APPROVAL_NEEDED", "COST_UPDATE", "ERROR",
-            "USER_INPUT", "USER_COMMAND",
+            "STATE_CHANGED",
+            "MESSAGE",
+            "TOOL_START",
+            "TOOL_RESULT",
+            "FLAG_FOUND",
+            "APPROVAL_NEEDED",
+            "COST_UPDATE",
+            "ERROR",
+            "USER_INPUT",
+            "USER_COMMAND",
         }
         actual = {e.name for e in EventType}
         assert expected == actual
@@ -48,7 +55,10 @@ class TestEventBus:
     def test_unsubscribe(self):
         bus = EventBus()
         received = []
-        handler = lambda data: received.append(data)
+
+        def handler(data):
+            return received.append(data)
+
         bus.subscribe(EventType.MESSAGE, handler)
         bus.unsubscribe(EventType.MESSAGE, handler)
         bus.emit(EventType.MESSAGE, "should not arrive")
@@ -77,7 +87,10 @@ class TestEventBus:
     def test_no_duplicate_subscriptions(self):
         bus = EventBus()
         received = []
-        handler = lambda data: received.append(data)
+
+        def handler(data):
+            return received.append(data)
+
         bus.subscribe(EventType.MESSAGE, handler)
         bus.subscribe(EventType.MESSAGE, handler)
         bus.emit(EventType.MESSAGE, "once")
@@ -128,7 +141,9 @@ class TestEventBus:
         results = []
 
         def worker(i):
-            handler = lambda data: results.append((i, data))
+            def handler(data):
+                return results.append((i, data))
+
             bus.subscribe(EventType.MESSAGE, handler)
             bus.emit(EventType.MESSAGE, i)
 

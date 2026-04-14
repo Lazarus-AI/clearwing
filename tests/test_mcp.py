@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from clearwing.mcp.server import MCPServer
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_fake_tool(name: str, description: str, schema: dict | None = None):
     """Create a minimal mock that behaves like a langchain @tool."""

@@ -1,3 +1,3 @@
 from .models import Database
 
-__all__ = ['Database']
+__all__ = ["Database"]

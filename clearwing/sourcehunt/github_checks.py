@@ -18,16 +18,15 @@ update endpoint.
 Repo owner/name are auto-detected from `git remote get-url origin`. Auth is
 handled by the `gh` CLI, which respects `GITHUB_TOKEN` and `gh auth login`.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 from .state import Finding
 
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # GitHub's hard limits — we cap below them so a valid request always fits
 MAX_ANNOTATIONS_PER_CALL = 50
-MAX_ANNOTATION_MESSAGE_BYTES = 60_000    # under GH's 64KB for headroom
+MAX_ANNOTATION_MESSAGE_BYTES = 60_000  # under GH's 64KB for headroom
 MAX_SUMMARY_BYTES = 60_000
 
 
@@ -68,23 +67,25 @@ _ANNOTATION_LEVEL = {
 @dataclass
 class GitHubChecksConfig:
     """Configuration for the GitHubChecksPublisher."""
-    repo_path: str                          # local git clone — used to detect owner/repo
-    owner: Optional[str] = None             # override auto-detection
-    repo: Optional[str] = None              # override auto-detection
+
+    repo_path: str  # local git clone — used to detect owner/repo
+    owner: str | None = None  # override auto-detection
+    repo: str | None = None  # override auto-detection
     check_name: str = "Overwing Sourcehunt"
     gh_binary: str = "gh"
-    details_url: Optional[str] = None       # optional URL to the full report
+    details_url: str | None = None  # optional URL to the full report
 
 
 @dataclass
 class CheckRunOutcome:
     """What happened when we tried to publish a check run."""
+
     published: bool
     conclusion: str = ""
     finding_count: int = 0
     annotation_count: int = 0
     notes: str = ""
-    check_run_id: Optional[str] = None
+    check_run_id: str | None = None
 
 
 # --- Publisher --------------------------------------------------------------
@@ -105,7 +106,7 @@ class GitHubChecksPublisher:
         """True if the gh CLI is installed."""
         return shutil.which(self.config.gh_binary) is not None
 
-    def detect_owner_repo(self) -> Optional[tuple[str, str]]:
+    def detect_owner_repo(self) -> tuple[str, str] | None:
         """Parse owner/repo from `git remote get-url origin`.
 
         Supports both HTTPS and SSH remote URLs. Returns None on failure.
@@ -115,7 +116,10 @@ class GitHubChecksPublisher:
         try:
             proc = subprocess.run(
                 ["git", "-C", self.config.repo_path, "remote", "get-url", "origin"],
-                capture_output=True, text=True, check=False, timeout=10,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
             )
             if proc.returncode != 0:
                 logger.debug("git remote lookup failed: %s", proc.stderr.strip())
@@ -163,7 +167,7 @@ class GitHubChecksPublisher:
         # First API call: create the check run with up to MAX annotations
         first_batch = all_annotations[:MAX_ANNOTATIONS_PER_CALL]
         rest_batches = [
-            all_annotations[i:i + MAX_ANNOTATIONS_PER_CALL]
+            all_annotations[i : i + MAX_ANNOTATIONS_PER_CALL]
             for i in range(MAX_ANNOTATIONS_PER_CALL, len(all_annotations), MAX_ANNOTATIONS_PER_CALL)
         ]
 
@@ -269,22 +273,28 @@ class GitHubChecksPublisher:
 
         lines += ["", "### Evidence levels"]
         for level in (
-            "patch_validated", "exploit_demonstrated", "root_cause_explained",
-            "crash_reproduced", "static_corroboration", "suspicion",
+            "patch_validated",
+            "exploit_demonstrated",
+            "root_cause_explained",
+            "crash_reproduced",
+            "static_corroboration",
+            "suspicion",
         ):
             if evidence_counts.get(level, 0) > 0:
                 lines.append(f"- `{level}`: {evidence_counts[level]}")
 
         lines += ["", "### Discovered by"]
         for source, count in sorted(
-            discovered_by_counts.items(), key=lambda kv: -kv[1],
+            discovered_by_counts.items(),
+            key=lambda kv: -kv[1],
         ):
             lines.append(f"- `{source}`: {count}")
 
         summary = "\n".join(lines)
         if len(summary.encode("utf-8")) > MAX_SUMMARY_BYTES:
             summary = summary.encode("utf-8")[:MAX_SUMMARY_BYTES].decode(
-                "utf-8", errors="ignore",
+                "utf-8",
+                errors="ignore",
             )
         return summary
 
@@ -295,7 +305,7 @@ class GitHubChecksPublisher:
             path = f.get("file")
             line = f.get("line_number")
             if not path or not line:
-                continue   # annotations require a file path and line number
+                continue  # annotations require a file path and line number
             severity = (f.get("severity_verified") or f.get("severity") or "info").lower()
             level = _ANNOTATION_LEVEL.get(severity, "notice")
 
@@ -358,7 +368,8 @@ class GitHubChecksPublisher:
         message = "\n".join(parts)
         if len(message.encode("utf-8")) > MAX_ANNOTATION_MESSAGE_BYTES:
             message = message.encode("utf-8")[:MAX_ANNOTATION_MESSAGE_BYTES].decode(
-                "utf-8", errors="ignore",
+                "utf-8",
+                errors="ignore",
             )
         return message
 
@@ -366,7 +377,7 @@ class GitHubChecksPublisher:
     # Subprocess helpers
     # ------------------------------------------------------------------
 
-    def _gh_api_post(self, endpoint: str, payload: dict) -> Optional[dict]:
+    def _gh_api_post(self, endpoint: str, payload: dict) -> dict | None:
         """POST to the gh api endpoint. Returns the parsed JSON response."""
         return self._gh_api_call(
             endpoint=endpoint,
@@ -374,7 +385,7 @@ class GitHubChecksPublisher:
             payload=payload,
         )
 
-    def _gh_api_patch(self, endpoint: str, payload: dict) -> Optional[dict]:
+    def _gh_api_patch(self, endpoint: str, payload: dict) -> dict | None:
         return self._gh_api_call(
             endpoint=endpoint,
             method="PATCH",
@@ -386,15 +397,18 @@ class GitHubChecksPublisher:
         endpoint: str,
         method: str,
         payload: dict,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Invoke `gh api` with a JSON payload piped to stdin.
 
         `gh api --input -` reads the body from stdin as JSON.
         """
         cmd = [
-            self.config.gh_binary, "api",
-            "--method", method,
-            "--input", "-",
+            self.config.gh_binary,
+            "api",
+            "--method",
+            method,
+            "--input",
+            "-",
             endpoint,
         ]
         try:
@@ -416,7 +430,10 @@ class GitHubChecksPublisher:
         if proc.returncode != 0:
             logger.warning(
                 "gh api %s %s exited %d: %s",
-                method, endpoint, proc.returncode, proc.stderr[:500],
+                method,
+                endpoint,
+                proc.returncode,
+                proc.stderr[:500],
             )
             return None
 
@@ -431,7 +448,7 @@ class GitHubChecksPublisher:
 # --- Helpers ---------------------------------------------------------------
 
 
-def parse_owner_repo(url: str) -> Optional[tuple[str, str]]:
+def parse_owner_repo(url: str) -> tuple[str, str] | None:
     """Extract (owner, repo) from a git remote URL.
 
     Supports:

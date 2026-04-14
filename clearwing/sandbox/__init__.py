@@ -6,8 +6,8 @@ primitives here are isolation-focused: no network, read-only mounts, resource
 limits, and sanitizer-instrumented build images.
 """
 
-from .container import ExecResult, SandboxConfig, SandboxContainer
 from .builders import BuildRecipe, BuildSystemDetector
+from .container import ExecResult, SandboxConfig, SandboxContainer
 from .hunter_sandbox import HunterSandbox
 
 __all__ = [

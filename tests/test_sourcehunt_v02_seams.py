@@ -5,12 +5,11 @@ and parameters without erroring. v0.1 code paths ignore them, but the
 schema must accept them so future phases land as feature additions, not
 refactors.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from clearwing.findings.types import Finding
 from clearwing.sourcehunt.preprocessor import Preprocessor
@@ -19,7 +18,6 @@ from clearwing.sourcehunt.state import (
     FileTarget,
     SourceHuntState,
 )
-
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 
@@ -132,6 +130,7 @@ class TestSourceFindingSchema:
 class TestSourceHuntStateSchema:
     def test_state_has_v02_v03_seams(self):
         from langchain_core.messages import HumanMessage
+
         state: SourceHuntState = {
             "messages": [HumanMessage(content="hunt")],
             "repo_url": "x",
@@ -205,7 +204,10 @@ class TestHunterAcceptsV02Seams:
             "loc": 50,
             "tags": [],
             "tier": "B",
-            "surface": 3, "influence": 2, "reachability": 3, "priority": 2.5,
+            "surface": 3,
+            "influence": 2,
+            "reachability": 3,
+            "priority": 2.5,
         }
         graph, ctx = build_hunter_agent(
             file_target=ft,

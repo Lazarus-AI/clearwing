@@ -13,14 +13,16 @@ This creates compounding finding density inside ONE run — one verified bug
 becomes a search vector for its siblings. Distinct from the cross-run
 MechanismStore, which carries patterns ACROSS runs.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -36,14 +38,16 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VariantPattern:
     """The three-artifact pattern generated from a verified finding."""
+
     grep_regex: str
     semantic_description: str
-    ast_pattern: str = ""       # reserved for v1.0+ tree-sitter match
+    ast_pattern: str = ""  # reserved for v1.0+ tree-sitter match
 
 
 @dataclass
 class VariantMatch:
     """One candidate variant: a file+line location that matched the pattern."""
+
     file: str
     line_number: int
     matched_text: str
@@ -54,6 +58,7 @@ class VariantMatch:
 @dataclass
 class VariantSeed:
     """Shape the runner hands to the hunter pool as pre-seeded context."""
+
     original_finding: Finding
     match: VariantMatch
     message: str
@@ -102,13 +107,15 @@ class VariantPatternGenerator:
     def __init__(self, llm: BaseChatModel):
         self.llm = llm
 
-    def generate(self, finding: Finding) -> Optional[VariantPattern]:
+    def generate(self, finding: Finding) -> VariantPattern | None:
         user_msg = self._build_user_message(finding)
         try:
-            response = self.llm.invoke([
-                SystemMessage(content=PATTERN_GEN_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg),
-            ])
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=PATTERN_GEN_SYSTEM_PROMPT),
+                    HumanMessage(content=user_msg),
+                ]
+            )
         except Exception:
             logger.debug("Variant pattern LLM call failed", exc_info=True)
             return None
@@ -132,7 +139,7 @@ class VariantPatternGenerator:
         }
         return f"Verified finding:\n{json.dumps(view, indent=2)}"
 
-    def _parse_response(self, content: str) -> Optional[dict]:
+    def _parse_response(self, content: str) -> dict | None:
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None
@@ -155,8 +162,18 @@ class VariantSearcher:
     """
 
     SKIP_DIRS = {
-        ".git", "node_modules", "__pycache__", ".venv", "venv", "vendor",
-        "dist", "build", ".tox", ".mypy_cache", ".pytest_cache", "target",
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "vendor",
+        "dist",
+        "build",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        "target",
     }
     MAX_FILE_SIZE = 1_000_000
     MAX_MATCHES_PER_PATTERN = 50
@@ -166,7 +183,7 @@ class VariantSearcher:
         repo_path: str,
         pattern: VariantPattern,
         source_finding: Finding,
-        exclude_paths: Optional[set] = None,
+        exclude_paths: set | None = None,
     ) -> list[VariantMatch]:
         """Return a list of VariantMatch hits, excluding the source finding's
         own file.line (don't re-flag the bug that spawned the pattern).
@@ -194,18 +211,20 @@ class VariantSearcher:
                 try:
                     if os.path.getsize(full_path) > self.MAX_FILE_SIZE:
                         continue
-                    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    with open(full_path, encoding="utf-8", errors="replace") as f:
                         for i, line in enumerate(f, 1):
                             if rel == source_file and i == source_line:
                                 continue  # skip the source finding's own line
                             if rx.search(line):
-                                matches.append(VariantMatch(
-                                    file=rel,
-                                    line_number=i,
-                                    matched_text=line.rstrip(),
-                                    source_finding_id=source_finding.get("id", ""),
-                                    pattern=pattern,
-                                ))
+                                matches.append(
+                                    VariantMatch(
+                                        file=rel,
+                                        line_number=i,
+                                        matched_text=line.rstrip(),
+                                        source_finding_id=source_finding.get("id", ""),
+                                        pattern=pattern,
+                                    )
+                                )
                                 if len(matches) >= self.MAX_MATCHES_PER_PATTERN:
                                     return matches
                 except OSError:
@@ -227,11 +246,12 @@ class VariantLoopConfig:
 
     Default: up to 3 iterations, 5 variants per finding per pass.
     """
-    max_iterations: int = 3              # at most 3 loop passes
-    max_variants_per_finding: int = 5    # cap hunt-back queue per finding per pass
+
+    max_iterations: int = 3  # at most 3 loop passes
+    max_variants_per_finding: int = 5  # cap hunt-back queue per finding per pass
     enable_llm_pattern_gen: bool = True  # turn off for offline / cheap mode
     # v0.4 fixpoint driver:
-    per_iteration_callback: Optional[Callable[["VariantLoopResult"], None]] = None
+    per_iteration_callback: Callable[[VariantLoopResult], None] | None = None
     stop_on_empty_iteration: bool = True  # terminate when a pass yields zero seeds
 
 
@@ -257,8 +277,8 @@ class VariantLoop:
     def __init__(
         self,
         pattern_gen: VariantPatternGenerator,
-        searcher: Optional[VariantSearcher] = None,
-        config: Optional[VariantLoopConfig] = None,
+        searcher: VariantSearcher | None = None,
+        config: VariantLoopConfig | None = None,
     ):
         self.pattern_gen = pattern_gen
         self.searcher = searcher or VariantSearcher()
@@ -268,8 +288,8 @@ class VariantLoop:
         self,
         verified_findings: list[Finding],
         repo_path: str,
-        already_seen_locations: Optional[set] = None,
-        reverify_callback: Optional[Callable[[list[Any]], list[Finding]]] = None,
+        already_seen_locations: set | None = None,
+        reverify_callback: Callable[[list[Any]], list[Finding]] | None = None,
     ) -> VariantLoopResult:
         """Drive the variant loop until fixpoint or budget exhausted.
 
@@ -361,7 +381,7 @@ class VariantLoop:
         self,
         verified_findings: list[Finding],
         repo_path: str,
-        already_seen_locations: Optional[set] = None,
+        already_seen_locations: set | None = None,
     ) -> VariantLoopResult:
         """Single pass of the variant loop.
 
@@ -384,17 +404,19 @@ class VariantLoop:
 
             matches = self.searcher.search(repo_path, pattern, finding)
             # Cap matches per finding
-            matches = matches[:self.config.max_variants_per_finding]
+            matches = matches[: self.config.max_variants_per_finding]
             for m in matches:
                 key = (m.file, m.line_number)
                 if key in seen:
                     continue
                 seen.add(key)
-                result.seeds.append(VariantSeed(
-                    original_finding=finding,
-                    match=m,
-                    message=self._build_seed_message(finding, m),
-                ))
+                result.seeds.append(
+                    VariantSeed(
+                        original_finding=finding,
+                        match=m,
+                        message=self._build_seed_message(finding, m),
+                    )
+                )
                 result.matches_found += 1
         result.iterations = 1
         return result

@@ -1,20 +1,21 @@
-from typing import Annotated, Optional
-from typing_extensions import TypedDict
-from langgraph.graph.message import add_messages
+from typing import Annotated
+
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict
 
 
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    target: Optional[str]
+    target: str | None
     open_ports: list[dict]
     services: list[dict]
     vulnerabilities: list[dict]
     exploit_results: list[dict]
-    os_info: Optional[str]
-    kali_container_id: Optional[str]
+    os_info: str | None
+    kali_container_id: str | None
     custom_tool_names: list[str]
-    session_id: Optional[str]
+    session_id: str | None
     flags_found: list[dict]
     loaded_skills: list[str]
     paused: bool

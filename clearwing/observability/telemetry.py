@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 try:
     from clearwing.core.events import EventBus, EventType
@@ -39,7 +38,7 @@ class CostTracker:
     Thread-safe via an internal lock.
     """
 
-    _instance: Optional[CostTracker] = None
+    _instance: CostTracker | None = None
     _lock_cls = threading.Lock  # used only for singleton creation
 
     PRICING: dict[str, dict[str, float]] = {
@@ -65,16 +64,14 @@ class CostTracker:
         self.total_cost_usd: float = 0.0
         self.tool_calls: int = 0
         self.by_tool: dict[str, ToolUsage] = {}
-        self.cost_limit: Optional[float] = None
+        self.cost_limit: float | None = None
         self._initialized = True
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def record_llm_call(
-        self, input_tokens: int, output_tokens: int, model: str
-    ) -> None:
+    def record_llm_call(self, input_tokens: int, output_tokens: int, model: str) -> None:
         """Record token usage for a single LLM call and update the running cost.
 
         If *model* is not present in the pricing table the default Sonnet

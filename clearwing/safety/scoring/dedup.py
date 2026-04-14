@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
 import re
+from dataclasses import dataclass
 
 
 @dataclass
 class DedupRecord:
     """A normalized vulnerability finding."""
+
     id: str
     title: str
     description: str
@@ -20,7 +20,7 @@ class DedupRecord:
     service: str = ""
     evidence: str = ""
     remediation: str = ""
-    duplicate_of: Optional[str] = None  # id of the original if this is a dupe
+    duplicate_of: str | None = None  # id of the original if this is a dupe
     confidence: float = 1.0  # 0.0 - 1.0
 
 
@@ -73,7 +73,7 @@ class FindingDeduplicator:
 
     def _signature(self, finding: DedupRecord) -> str:
         """Create a dedup signature from normalized fields."""
-        title_norm = re.sub(r'[^a-z0-9]', '', finding.title.lower())
+        title_norm = re.sub(r"[^a-z0-9]", "", finding.title.lower())
         return f"{title_norm}:{finding.target}:{finding.port}"
 
     def _is_similar(self, a: DedupRecord, b: DedupRecord) -> bool:
@@ -85,8 +85,8 @@ class FindingDeduplicator:
             return False
 
         # Normalize titles and check overlap
-        a_words = set(re.sub(r'[^a-z0-9\s]', '', a.title.lower()).split())
-        b_words = set(re.sub(r'[^a-z0-9\s]', '', b.title.lower()).split())
+        a_words = set(re.sub(r"[^a-z0-9\s]", "", a.title.lower()).split())
+        b_words = set(re.sub(r"[^a-z0-9\s]", "", b.title.lower()).split())
 
         if not a_words or not b_words:
             return False

@@ -13,6 +13,7 @@ The callgraph powers two signals:
 
 Supported languages: c, cpp, python, javascript, go, rust.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,7 +21,6 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -79,21 +79,21 @@ _LANG_EXT_MAP = {
 # These sets are empirically chosen from grammar inspection.
 
 _FUNCTION_DEF_NODE_TYPES = {
-    "c":          {"function_definition"},
-    "cpp":        {"function_definition"},
-    "python":     {"function_definition", "async_function_definition"},
+    "c": {"function_definition"},
+    "cpp": {"function_definition"},
+    "python": {"function_definition", "async_function_definition"},
     "javascript": {"function_declaration", "method_definition", "arrow_function"},
-    "go":         {"function_declaration", "method_declaration"},
-    "rust":       {"function_item"},
+    "go": {"function_declaration", "method_declaration"},
+    "rust": {"function_item"},
 }
 
 _FUNCTION_CALL_NODE_TYPES = {
-    "c":          {"call_expression"},
-    "cpp":        {"call_expression"},
-    "python":     {"call"},
+    "c": {"call_expression"},
+    "cpp": {"call_expression"},
+    "python": {"call"},
     "javascript": {"call_expression"},
-    "go":         {"call_expression"},
-    "rust":       {"call_expression", "macro_invocation"},
+    "go": {"call_expression"},
+    "rust": {"call_expression", "macro_invocation"},
 }
 
 # Within a function_definition node, the name is reached via different paths
@@ -112,6 +112,7 @@ class CallGraph:
     - `defined_in[name]` = set of files that define a function of that name
       (multiple files can shadow the same name, especially in C/C++)
     """
+
     functions: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     calls_out: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     defined_in: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
@@ -190,7 +191,7 @@ class CallGraphBuilder:
         """True if tree-sitter and at least one grammar are loaded."""
         return bool(self._languages)
 
-    def build(self, repo_path: str, files: Optional[list[str]] = None) -> CallGraph:
+    def build(self, repo_path: str, files: list[str] | None = None) -> CallGraph:
         """Parse all source files in the repo and return a CallGraph.
 
         Args:
@@ -226,13 +227,24 @@ class CallGraphBuilder:
     def _get_parser(self, lang_name: str):
         if lang_name not in self._parsers:
             from tree_sitter import Parser
+
             self._parsers[lang_name] = Parser(self._languages[lang_name])
         return self._parsers[lang_name]
 
     def _walk_repo(self, repo_path: str):
         skip_dirs = {
-            ".git", "node_modules", "__pycache__", ".venv", "venv", "vendor",
-            "dist", "build", ".tox", ".mypy_cache", ".pytest_cache", "target",
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            "venv",
+            "vendor",
+            "dist",
+            "build",
+            ".tox",
+            ".mypy_cache",
+            ".pytest_cache",
+            "target",
         }
         for dirpath, dirnames, filenames in os.walk(repo_path):
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
@@ -252,7 +264,7 @@ class CallGraphBuilder:
                 source = f.read()
         except OSError:
             return
-        if len(source) > 2_000_000:   # skip huge files
+        if len(source) > 2_000_000:  # skip huge files
             return
 
         parser = self._get_parser(lang_name)
@@ -281,7 +293,7 @@ class CallGraphBuilder:
             # DFS
             stack.extend(node.children)
 
-    def _extract_definition_name(self, node, lang_name: str, source: bytes) -> Optional[str]:
+    def _extract_definition_name(self, node, lang_name: str, source: bytes) -> str | None:
         """Find the name identifier for a function-definition node.
 
         Walks `child_by_field_name('name')` when available, else searches for
@@ -303,7 +315,7 @@ class CallGraphBuilder:
         # Fallback: the first identifier anywhere in the signature
         return self._first_identifier(node, source)
 
-    def _extract_call_name(self, node, lang_name: str, source: bytes) -> Optional[str]:
+    def _extract_call_name(self, node, lang_name: str, source: bytes) -> str | None:
         """Find the callee name for a call-expression node.
 
         For `foo(x)` the name is `foo`.
@@ -323,7 +335,7 @@ class CallGraphBuilder:
         ident = self._rightmost_identifier(sub, source)
         return ident
 
-    def _first_identifier(self, node, source: bytes) -> Optional[str]:
+    def _first_identifier(self, node, source: bytes) -> str | None:
         """Return the first identifier token found in node's subtree."""
         if node is None:
             return None
@@ -332,26 +344,26 @@ class CallGraphBuilder:
             n = stack.pop(0)
             if n.type in ("identifier", "field_identifier", "type_identifier"):
                 try:
-                    return source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+                    return source[n.start_byte : n.end_byte].decode("utf-8", errors="replace")
                 except Exception:
                     return None
             stack[0:0] = list(n.children)
         return None
 
-    def _rightmost_identifier(self, node, source: bytes) -> Optional[str]:
+    def _rightmost_identifier(self, node, source: bytes) -> str | None:
         """Return the rightmost identifier token in node's subtree.
 
         Used for call sites: `a.b.c()` → `c`.
         """
         if node is None:
             return None
-        result: Optional[str] = None
+        result: str | None = None
         stack = [node]
         while stack:
             n = stack.pop(0)
             if n.type in ("identifier", "field_identifier", "type_identifier"):
                 try:
-                    result = source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+                    result = source[n.start_byte : n.end_byte].decode("utf-8", errors="replace")
                 except Exception:
                     pass
             stack[0:0] = list(n.children)

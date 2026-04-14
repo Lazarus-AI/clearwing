@@ -1,8 +1,5 @@
 """Tests for browser tools module (unit tests, no real browser)."""
 
-import pytest
-from unittest.mock import patch, MagicMock
-
 from clearwing.agent.tools.recon.browser_tools import (
     _browser_state,
     get_browser_tools,
@@ -19,10 +16,17 @@ class TestGetBrowserTools:
         tools = get_browser_tools()
         names = [t.name for t in tools]
         expected = [
-            "browser_navigate", "browser_get_content", "browser_get_html",
-            "browser_fill", "browser_click", "browser_get_cookies",
-            "browser_set_cookie", "browser_execute_js", "browser_screenshot",
-            "browser_list_tabs", "browser_close",
+            "browser_navigate",
+            "browser_get_content",
+            "browser_get_html",
+            "browser_fill",
+            "browser_click",
+            "browser_get_cookies",
+            "browser_set_cookie",
+            "browser_execute_js",
+            "browser_screenshot",
+            "browser_list_tabs",
+            "browser_close",
         ]
         assert names == expected
 
@@ -38,6 +42,7 @@ class TestBrowserState:
 class TestBrowserListTabs:
     def test_empty_tabs(self):
         from clearwing.agent.tools.recon.browser_tools import browser_list_tabs
+
         result = browser_list_tabs.invoke({})
         assert result == []
 
@@ -45,12 +50,14 @@ class TestBrowserListTabs:
 class TestBrowserClose:
     def test_close_nonexistent_tab(self):
         from clearwing.agent.tools.recon.browser_tools import browser_close
+
         result = browser_close.invoke({"tab_name": "nonexistent"})
         assert result["closed"] == "nonexistent"
         assert result["remaining_tabs"] == []
 
     def test_close_all_when_empty(self):
         from clearwing.agent.tools.recon.browser_tools import browser_close
+
         result = browser_close.invoke({})
         assert result["closed"] == "all"
         assert result["remaining_tabs"] == []

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from clearwing.core.skills.loader import SkillLoader, SkillInfo
+from clearwing.core.skills.loader import SkillInfo, SkillLoader
 
 
 class TestSkillInfo:
@@ -24,9 +24,16 @@ class TestSkillLoader:
         assert len(skills) >= 10
         names = {s.name for s in skills}
         expected = {
-            "sql_injection", "xss", "ssrf", "idor", "xxe",
-            "auth_bypass", "privesc_linux", "privesc_windows",
-            "command_injection", "file_upload",
+            "sql_injection",
+            "xss",
+            "ssrf",
+            "idor",
+            "xxe",
+            "auth_bypass",
+            "privesc_linux",
+            "privesc_windows",
+            "command_injection",
+            "file_upload",
         }
         assert expected.issubset(names), f"Missing skills: {expected - names}"
 
@@ -84,7 +91,9 @@ class TestSkillLoaderCustomDir:
     def test_custom_skills_loaded(self):
         tmpdir = tempfile.mkdtemp()
         custom_path = Path(tmpdir) / "custom_skill.md"
-        custom_path.write_text("# Custom Skill\n\nA custom test skill for testing.\n\n## Details\n\nMore info here.\n")
+        custom_path.write_text(
+            "# Custom Skill\n\nA custom test skill for testing.\n\n## Details\n\nMore info here.\n"
+        )
 
         loader = SkillLoader()
         original_custom = loader.CUSTOM_DIR

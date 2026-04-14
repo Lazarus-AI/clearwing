@@ -1,8 +1,6 @@
 """Tests for the Knowledge Graph module."""
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -29,6 +27,7 @@ def populated_kg(kg):
 
 
 # --- Entity CRUD ---
+
 
 class TestEntityManagement:
     def test_add_and_get_entity(self, kg):
@@ -62,6 +61,7 @@ class TestEntityManagement:
 
 
 # --- Relationship CRUD ---
+
 
 class TestRelationshipManagement:
     def test_add_and_get_relationship(self, kg):
@@ -104,6 +104,7 @@ class TestRelationshipManagement:
 
 # --- Convenience methods ---
 
+
 class TestConvenienceMethods:
     def test_add_target(self, kg):
         entity = kg.add_target("10.0.0.1", hostname="victim")
@@ -138,6 +139,7 @@ class TestConvenienceMethods:
 
 # --- Query interface ---
 
+
 class TestQuery:
     def test_stats(self, populated_kg):
         result = populated_kg.query("stats")
@@ -166,6 +168,7 @@ class TestQuery:
 
 
 # --- Persistence ---
+
 
 class TestPersistence:
     def test_save_and_load(self, tmp_path):

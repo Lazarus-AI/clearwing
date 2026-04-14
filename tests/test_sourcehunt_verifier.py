@@ -8,12 +8,11 @@ Critical assertions:
 - evidence_level is set to crash_reproduced or root_cause_explained on success
 - apply_verifier_result merges the verdict into the Finding
 """
+
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
-
-import pytest
 
 from clearwing.sourcehunt.verifier import (
     VERIFIER_SYSTEM_PROMPT_V01,
@@ -90,13 +89,18 @@ class TestAdversarialBudgetGate:
 
     def test_suspicion_falls_back_to_v01(self):
         """A suspicion-level finding gets the cheap non-adversarial prompt."""
-        llm = _mock_llm_returning_json({
-            "is_real": False, "severity": "low",
-            "evidence_level": "suspicion",
-            "pro_argument": "p", "counter_argument": "",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
-        v = Verifier(llm, adversarial=True)   # default threshold = static_corroboration
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": False,
+                "severity": "low",
+                "evidence_level": "suspicion",
+                "pro_argument": "p",
+                "counter_argument": "",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
+        v = Verifier(llm, adversarial=True)  # default threshold = static_corroboration
         v.verify(_make_finding(evidence_level="suspicion"))
         system_msg = llm.invoke.call_args[0][0][0]
         # Below the gate → V01 (no STEEL-MAN wording)
@@ -104,24 +108,34 @@ class TestAdversarialBudgetGate:
 
     def test_static_corroboration_uses_v02(self):
         """Exactly at the threshold → adversarial prompt."""
-        llm = _mock_llm_returning_json({
-            "is_real": True, "severity": "high",
-            "evidence_level": "root_cause_explained",
-            "pro_argument": "p", "counter_argument": "c",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "root_cause_explained",
+                "pro_argument": "p",
+                "counter_argument": "c",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=True)
         v.verify(_make_finding(evidence_level="static_corroboration"))
         system_msg = llm.invoke.call_args[0][0][0]
         assert "STEEL-MAN" in system_msg.content
 
     def test_crash_reproduced_uses_v02(self):
-        llm = _mock_llm_returning_json({
-            "is_real": True, "severity": "critical",
-            "evidence_level": "root_cause_explained",
-            "pro_argument": "p", "counter_argument": "c",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "critical",
+                "evidence_level": "root_cause_explained",
+                "pro_argument": "p",
+                "counter_argument": "c",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=True)
         v.verify(_make_finding(evidence_level="crash_reproduced"))
         system_msg = llm.invoke.call_args[0][0][0]
@@ -130,12 +144,17 @@ class TestAdversarialBudgetGate:
     def test_custom_threshold_crash_reproduced(self):
         """A caller can set a stricter threshold — e.g. only spend adversarial
         budget when there's an actual sanitizer crash."""
-        llm = _mock_llm_returning_json({
-            "is_real": False, "severity": "low",
-            "evidence_level": "static_corroboration",
-            "pro_argument": "p", "counter_argument": "",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": False,
+                "severity": "low",
+                "evidence_level": "static_corroboration",
+                "pro_argument": "p",
+                "counter_argument": "",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=True, adversarial_threshold="crash_reproduced")
         v.verify(_make_finding(evidence_level="static_corroboration"))
         system_msg = llm.invoke.call_args[0][0][0]
@@ -144,12 +163,17 @@ class TestAdversarialBudgetGate:
 
     def test_threshold_none_disables_gate(self):
         """adversarial_threshold=None → adversarial runs on every finding."""
-        llm = _mock_llm_returning_json({
-            "is_real": False, "severity": "low",
-            "evidence_level": "suspicion",
-            "pro_argument": "p", "counter_argument": "x",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": False,
+                "severity": "low",
+                "evidence_level": "suspicion",
+                "pro_argument": "p",
+                "counter_argument": "x",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=True, adversarial_threshold=None)
         v.verify(_make_finding(evidence_level="suspicion"))
         system_msg = llm.invoke.call_args[0][0][0]
@@ -157,12 +181,17 @@ class TestAdversarialBudgetGate:
 
     def test_gate_does_nothing_when_adversarial_off(self):
         """adversarial=False → V01 for every finding regardless of level."""
-        llm = _mock_llm_returning_json({
-            "is_real": True, "severity": "high",
-            "evidence_level": "patch_validated",
-            "pro_argument": "p", "counter_argument": "",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "patch_validated",
+                "pro_argument": "p",
+                "counter_argument": "",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=False)
         v.verify(_make_finding(evidence_level="patch_validated"))
         system_msg = llm.invoke.call_args[0][0][0]
@@ -170,14 +199,19 @@ class TestAdversarialBudgetGate:
 
     def test_missing_evidence_level_falls_back_below_gate(self):
         """A finding without an evidence_level field → suspicion → below gate."""
-        llm = _mock_llm_returning_json({
-            "is_real": False, "severity": "low",
-            "evidence_level": "suspicion",
-            "pro_argument": "", "counter_argument": "",
-            "tie_breaker": "", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": False,
+                "severity": "low",
+                "evidence_level": "suspicion",
+                "pro_argument": "",
+                "counter_argument": "",
+                "tie_breaker": "",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=True)
-        finding = {"id": "f", "file": "x.c"}   # no evidence_level
+        finding = {"id": "f", "file": "x.c"}  # no evidence_level
         v.verify(finding)
         system_msg = llm.invoke.call_args[0][0][0]
         assert "STEEL-MAN" not in system_msg.content
@@ -187,12 +221,17 @@ class TestAdversarialBudgetGate:
         llm = MagicMock()
         # Response doesn't matter — we only care about which prompt was used
         resp = MagicMock()
-        resp.content = json.dumps({
-            "is_real": True, "severity": "high",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "p", "counter_argument": "c",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        resp.content = json.dumps(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "crash_reproduced",
+                "pro_argument": "p",
+                "counter_argument": "c",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         llm.invoke.return_value = resp
 
         v = Verifier(llm, adversarial=True)
@@ -206,21 +245,26 @@ class TestAdversarialBudgetGate:
 
         assert llm.invoke.call_count == 3
         prompts = [call[0][0][0].content for call in llm.invoke.call_args_list]
-        assert "STEEL-MAN" not in prompts[0]   # suspicion
-        assert "STEEL-MAN" in prompts[1]       # static_corroboration
-        assert "STEEL-MAN" in prompts[2]       # crash_reproduced
+        assert "STEEL-MAN" not in prompts[0]  # suspicion
+        assert "STEEL-MAN" in prompts[1]  # static_corroboration
+        assert "STEEL-MAN" in prompts[2]  # crash_reproduced
 
 
 class TestIndependentContext:
     """The verifier must NOT see hunter reasoning messages — only the finding."""
 
     def test_user_message_does_not_contain_hunter_reasoning(self):
-        llm = _mock_llm_returning_json({
-            "is_real": True, "severity": "critical",
-            "evidence_level": "root_cause_explained",
-            "pro_argument": "yes", "counter_argument": "no",
-            "tie_breaker": "x", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "critical",
+                "evidence_level": "root_cause_explained",
+                "pro_argument": "yes",
+                "counter_argument": "no",
+                "tie_breaker": "x",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm)
         finding = _make_finding()
         v.verify(finding, file_content="int main() {}\n")
@@ -237,12 +281,17 @@ class TestIndependentContext:
         assert "src/codec_a.c" in human_msg
 
     def test_user_message_includes_file_content_when_provided(self):
-        llm = _mock_llm_returning_json({
-            "is_real": True, "severity": "high",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "p", "counter_argument": "",
-            "tie_breaker": "t", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "crash_reproduced",
+                "pro_argument": "p",
+                "counter_argument": "",
+                "tie_breaker": "t",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm)
         finding = _make_finding()
         v.verify(finding, file_content="#include <string.h>\nvoid bug() {}\n")
@@ -250,12 +299,17 @@ class TestIndependentContext:
         assert "<string.h>" in human_msg
 
     def test_file_content_is_capped(self):
-        llm = _mock_llm_returning_json({
-            "is_real": False, "severity": None,
-            "evidence_level": "suspicion",
-            "pro_argument": "", "counter_argument": "",
-            "tie_breaker": "", "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": False,
+                "severity": None,
+                "evidence_level": "suspicion",
+                "pro_argument": "",
+                "counter_argument": "",
+                "tie_breaker": "",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm)
         finding = _make_finding()
         huge = "x" * 50000
@@ -270,15 +324,17 @@ class TestIndependentContext:
 
 class TestResponseParsing:
     def test_basic_json_response(self):
-        llm = _mock_llm_returning_json({
-            "is_real": True,
-            "severity": "high",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "memcpy length is unchecked",
-            "counter_argument": "",
-            "tie_breaker": "ASan crash on input >64",
-            "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "crash_reproduced",
+                "pro_argument": "memcpy length is unchecked",
+                "counter_argument": "",
+                "tie_breaker": "ASan crash on input >64",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm)
         result = v.verify(_make_finding())
         assert isinstance(result, VerifierResult)
@@ -289,15 +345,17 @@ class TestResponseParsing:
         assert result.counter_argument == ""
 
     def test_v02_response_with_counter_argument(self):
-        llm = _mock_llm_returning_json({
-            "is_real": False,
-            "severity": "low",
-            "evidence_level": "static_corroboration",
-            "pro_argument": "looks like memcpy bug",
-            "counter_argument": "but caller validates length",
-            "tie_breaker": "validation in callers/main.c:42",
-            "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": False,
+                "severity": "low",
+                "evidence_level": "static_corroboration",
+                "pro_argument": "looks like memcpy bug",
+                "counter_argument": "but caller validates length",
+                "tie_breaker": "validation in callers/main.c:42",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm, adversarial=True)
         result = v.verify(_make_finding())
         assert result.is_real is False
@@ -306,26 +364,34 @@ class TestResponseParsing:
         assert "validation in callers/main.c:42" in result.tie_breaker
 
     def test_invalid_severity_clamped(self):
-        llm = _mock_llm_returning_json({
-            "is_real": True,
-            "severity": "apocalyptic",  # not a valid level
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "x", "counter_argument": "", "tie_breaker": "",
-            "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "apocalyptic",  # not a valid level
+                "evidence_level": "crash_reproduced",
+                "pro_argument": "x",
+                "counter_argument": "",
+                "tie_breaker": "",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm)
         result = v.verify(_make_finding())
         # Verifier coerces invalid severity to None (caller decides what to do)
         assert result.severity_verified is None
 
     def test_invalid_evidence_level_falls_back_to_suspicion(self):
-        llm = _mock_llm_returning_json({
-            "is_real": True,
-            "severity": "high",
-            "evidence_level": "made_up_level",
-            "pro_argument": "x", "counter_argument": "", "tie_breaker": "",
-            "duplicate_cve": None,
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "made_up_level",
+                "pro_argument": "x",
+                "counter_argument": "",
+                "tie_breaker": "",
+                "duplicate_cve": None,
+            }
+        )
         v = Verifier(llm)
         result = v.verify(_make_finding())
         assert result.evidence_level == "suspicion"
@@ -359,11 +425,13 @@ class TestPatchOracle:
     """v0.3: the patch oracle is a truth test — write a fix, re-run the PoC."""
 
     def test_llm_only_high_confidence_passes(self):
-        llm = _mock_llm_returning_json({
-            "diff": "-memcpy(buf, input, len);\n+memcpy(buf, input, min(len, sizeof(buf)));",
-            "fix_description": "cap memcpy length at buffer size",
-            "confidence": "high",
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "diff": "-memcpy(buf, input, len);\n+memcpy(buf, input, min(len, sizeof(buf)));",
+                "fix_description": "cap memcpy length at buffer size",
+                "confidence": "high",
+            }
+        )
         v = Verifier(llm)
         passed, diff, notes = v.run_patch_oracle(
             _make_finding(),
@@ -376,11 +444,13 @@ class TestPatchOracle:
         assert "confidence=high" in notes
 
     def test_llm_only_medium_confidence_does_not_pass(self):
-        llm = _mock_llm_returning_json({
-            "diff": "# maybe add a guard",
-            "fix_description": "not sure",
-            "confidence": "medium",
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "diff": "# maybe add a guard",
+                "fix_description": "not sure",
+                "confidence": "medium",
+            }
+        )
         v = Verifier(llm)
         passed, diff, notes = v.run_patch_oracle(
             _make_finding(),
@@ -405,11 +475,13 @@ class TestPatchOracle:
 
     def test_sandbox_path_crash_survives(self):
         """When rerun_poc says 'still crashes', the oracle returns False."""
-        llm = _mock_llm_returning_json({
-            "diff": "# patch",
-            "fix_description": "attempted fix",
-            "confidence": "high",
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "diff": "# patch",
+                "fix_description": "attempted fix",
+                "confidence": "high",
+            }
+        )
         v = Verifier(llm)
         fake_sandbox = MagicMock()
         fake_sandbox.write_file = MagicMock()
@@ -417,18 +489,20 @@ class TestPatchOracle:
             _make_finding(),
             file_content="x",
             sandbox=fake_sandbox,
-            rerun_poc=lambda sb, f: True,   # still crashes
+            rerun_poc=lambda sb, f: True,  # still crashes
         )
         assert passed is False
         assert "crash survived" in notes
 
     def test_sandbox_path_crash_gone(self):
         """When rerun_poc says 'crash gone', the oracle returns True."""
-        llm = _mock_llm_returning_json({
-            "diff": "# patch",
-            "fix_description": "correct fix",
-            "confidence": "medium",   # even medium confidence passes if crash is gone
-        })
+        llm = _mock_llm_returning_json(
+            {
+                "diff": "# patch",
+                "fix_description": "correct fix",
+                "confidence": "medium",  # even medium confidence passes if crash is gone
+            }
+        )
         v = Verifier(llm)
         fake_sandbox = MagicMock()
         fake_sandbox.write_file = MagicMock()
@@ -448,9 +522,13 @@ class TestApplyPatchOracleResult:
     def test_passed_oracle_bumps_evidence_level(self):
         finding = _make_finding(evidence_level="static_corroboration")
         result = VerifierResult(
-            finding_id="x", is_real=True, severity_verified="high",
+            finding_id="x",
+            is_real=True,
+            severity_verified="high",
             evidence_level="crash_reproduced",
-            pro_argument="", counter_argument="", tie_breaker="",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
             patch_oracle_attempted=True,
             patch_oracle_passed=True,
@@ -465,9 +543,13 @@ class TestApplyPatchOracleResult:
     def test_failed_oracle_does_not_downgrade(self):
         finding = _make_finding(evidence_level="crash_reproduced")
         result = VerifierResult(
-            finding_id="x", is_real=True, severity_verified="high",
+            finding_id="x",
+            is_real=True,
+            severity_verified="high",
             evidence_level="crash_reproduced",
-            pro_argument="", counter_argument="", tie_breaker="",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
             patch_oracle_attempted=True,
             patch_oracle_passed=False,
@@ -482,9 +564,13 @@ class TestApplyPatchOracleResult:
     def test_oracle_not_attempted_leaves_field_none(self):
         finding = _make_finding()
         result = VerifierResult(
-            finding_id="x", is_real=True, severity_verified="high",
+            finding_id="x",
+            is_real=True,
+            severity_verified="high",
             evidence_level="crash_reproduced",
-            pro_argument="", counter_argument="", tie_breaker="",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
             # patch_oracle_attempted=False (default)
         )
@@ -519,9 +605,13 @@ class TestApplyVerifierResult:
         # crash_reproduced (lower), keep root_cause_explained
         finding = _make_finding(evidence_level="root_cause_explained")
         result = VerifierResult(
-            finding_id="x", is_real=True, severity_verified="high",
+            finding_id="x",
+            is_real=True,
+            severity_verified="high",
             evidence_level="crash_reproduced",
-            pro_argument="", counter_argument="", tie_breaker="",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
         )
         apply_verifier_result(finding, result)
@@ -531,9 +621,13 @@ class TestApplyVerifierResult:
     def test_evidence_level_bumps_when_verifier_stronger(self):
         finding = _make_finding(evidence_level="static_corroboration")
         result = VerifierResult(
-            finding_id="x", is_real=True, severity_verified="high",
+            finding_id="x",
+            is_real=True,
+            severity_verified="high",
             evidence_level="crash_reproduced",
-            pro_argument="", counter_argument="", tie_breaker="",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
         )
         apply_verifier_result(finding, result)
@@ -542,9 +636,13 @@ class TestApplyVerifierResult:
     def test_not_real_clears_severity_verified(self):
         finding = _make_finding()
         result = VerifierResult(
-            finding_id="x", is_real=False, severity_verified=None,
+            finding_id="x",
+            is_real=False,
+            severity_verified=None,
             evidence_level="suspicion",
-            pro_argument="", counter_argument="", tie_breaker="",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
         )
         apply_verifier_result(finding, result)

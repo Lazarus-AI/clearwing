@@ -10,6 +10,7 @@ Tool subsets:
     build_propagation_auditor_tools(ctx) — narrower set for Tier C auditors
                                            (no compile/run; just read/grep)
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,12 +18,11 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 from langchain_core.tools import tool
 
 from clearwing.sandbox.container import SandboxContainer
-from clearwing.sourcehunt.state import EvidenceLevel, Finding
+from clearwing.sourcehunt.state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -30,25 +30,26 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HunterContext:
     """Per-hunter mutable context. Closured into every tool for state access."""
-    repo_path: str                               # absolute host path
-    sandbox: Optional[SandboxContainer] = None   # primary sandbox; set by hunt loop
+
+    repo_path: str  # absolute host path
+    sandbox: SandboxContainer | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
-    file_path: Optional[str] = None              # the file this hunter is scoped to
-    session_id: Optional[str] = None
-    specialist: str = "general"                  # "general" | "memory_safety" | "logic_auth" | "propagation"
-    seeded_crash: Optional[dict] = None          # v0.2: from harness generator
+    file_path: str | None = None  # the file this hunter is scoped to
+    session_id: str | None = None
+    specialist: str = "general"  # "general" | "memory_safety" | "logic_auth" | "propagation"
+    seeded_crash: dict | None = None  # v0.2: from harness generator
     # v0.4 MSan variant support: a HunterSandbox manager so tools can
     # spawn alternative-sanitizer containers (e.g. MSan) on demand.
     # Variant containers are cached in `variant_sandboxes` and torn down
     # at hunter cleanup time.
-    sandbox_manager: Optional[object] = None     # HunterSandbox (avoiding circular import)
+    sandbox_manager: object | None = None  # HunterSandbox (avoiding circular import)
     variant_sandboxes: dict = field(default_factory=dict)  # {variant_key: SandboxContainer}
     default_sanitizers: tuple = ("asan", "ubsan")
 
     def get_sandbox_for_variant(
         self,
-        sanitizer_variant: Optional[list[str]] = None,
-    ) -> Optional[SandboxContainer]:
+        sanitizer_variant: list[str] | None = None,
+    ) -> SandboxContainer | None:
         """Return the SandboxContainer for the requested sanitizer variant.
 
         - variant=None or matches default → returns self.sandbox (fast path)
@@ -225,7 +226,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {{
 """
 
 
-def _parse_variant_arg(sanitizer_variant: str) -> Optional[list[str]]:
+def _parse_variant_arg(sanitizer_variant: str) -> list[str] | None:
     """Translate the `sanitizer_variant` tool arg into a sanitizer list.
 
     Accepts:
@@ -236,11 +237,7 @@ def _parse_variant_arg(sanitizer_variant: str) -> Optional[list[str]]:
     """
     if not sanitizer_variant:
         return None
-    parts = [
-        p.strip().lower()
-        for p in sanitizer_variant.replace("+", ",").split(",")
-        if p.strip()
-    ]
+    parts = [p.strip().lower() for p in sanitizer_variant.replace("+", ",").split(",") if p.strip()]
     return parts or None
 
 
@@ -269,7 +266,7 @@ def build_hunter_tools(ctx: HunterContext) -> list:
             return f"Error: {e}"
         host_path = os.path.join(ctx.repo_path, rel)
         try:
-            with open(host_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(host_path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
         except OSError as e:
             return f"Error reading {rel}: {e}"
@@ -394,7 +391,8 @@ def build_hunter_tools(ctx: HunterContext) -> list:
         basename = os.path.splitext(os.path.basename(rel))[0]
         out_path = f"/scratch/{basename}-{uuid.uuid4().hex[:6]}.bin"
         cmd = [
-            "sh", "-c",
+            "sh",
+            "-c",
             f"gcc -fsanitize={san_flags} -g -O0 -fno-omit-frame-pointer "
             f"{extra_flags} -o {out_path} {_container_path(rel)} 2>&1",
         ]
@@ -554,7 +552,8 @@ def build_hunter_tools(ctx: HunterContext) -> list:
         # point `-I /workspace` so the harness can #include project headers.
         binary_path = f"/scratch/fuzz_{uuid.uuid4().hex[:6]}.bin"
         compile_cmd = [
-            "sh", "-c",
+            "sh",
+            "-c",
             (
                 "gcc -fsanitize=address,undefined,fuzzer "
                 "-g -O1 -fno-omit-frame-pointer "
@@ -576,7 +575,8 @@ def build_hunter_tools(ctx: HunterContext) -> list:
         # wall-clock; -error_exitcode=77 + -timeout=25 give libFuzzer a
         # chance to gracefully report before we kill it.
         run_cmd = [
-            "sh", "-c",
+            "sh",
+            "-c",
             (
                 f"{binary_path} "
                 f"-max_total_time={duration_seconds} "
@@ -586,7 +586,8 @@ def build_hunter_tools(ctx: HunterContext) -> list:
             ),
         ]
         run_result = target_sandbox.exec(
-            run_cmd, timeout=duration_seconds + 30,
+            run_cmd,
+            timeout=duration_seconds + 30,
         )
         output = run_result.stdout + run_result.stderr
         crash_evidence = _parse_sanitizer_report(output) if run_result.exit_code != 0 else ""
@@ -687,8 +688,7 @@ def build_propagation_auditor_tools(ctx: HunterContext) -> list:
     """
     full = build_hunter_tools(ctx)
     # Names of the tools we want to keep
-    keep = {"read_source_file", "list_source_tree", "grep_source",
-            "find_callers", "record_finding"}
+    keep = {"read_source_file", "list_source_tree", "grep_source", "find_callers", "record_finding"}
     return [t for t in full if t.name in keep]
 
 
@@ -723,7 +723,7 @@ def _parse_sanitizer_report(stderr: str) -> str:
         if _SANITIZER_HEADER.search(line):
             start = i
             break
-    snippet = "\n".join(lines[start:start + 60])
+    snippet = "\n".join(lines[start : start + 60])
     # If we never found a header, just return the first 60 lines
     if "ERROR" not in snippet:
         snippet = "\n".join(lines[:60])
@@ -743,11 +743,13 @@ def _parse_rg_output(stdout: str) -> list[dict]:
             ln = int(line_num)
         except ValueError:
             continue
-        matches.append({
-            "file": path.replace("/workspace/", "", 1),
-            "line_number": ln,
-            "matched_text": text.rstrip(),
-        })
+        matches.append(
+            {
+                "file": path.replace("/workspace/", "", 1),
+                "line_number": ln,
+                "matched_text": text.rstrip(),
+            }
+        )
         if len(matches) >= 100:
             break
     return matches
@@ -776,14 +778,16 @@ def _grep_python_fallback(
                     continue
             full = os.path.join(dirpath, fname)
             try:
-                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                with open(full, encoding="utf-8", errors="ignore") as f:
                     for i, line in enumerate(f, 1):
                         if regex.search(line):
-                            matches.append({
-                                "file": os.path.relpath(full, repo_path),
-                                "line_number": i,
-                                "matched_text": line.rstrip(),
-                            })
+                            matches.append(
+                                {
+                                    "file": os.path.relpath(full, repo_path),
+                                    "line_number": i,
+                                    "matched_text": line.rstrip(),
+                                }
+                            )
                             if len(matches) >= 100:
                                 return matches
             except OSError:

@@ -4,7 +4,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Any
 
 import yaml
 
@@ -14,6 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FormLogin:
     """Form-based login configuration."""
+
     url: str
     username_field: str = "username"
     password_field: str = "password"
@@ -27,6 +27,7 @@ class FormLogin:
 @dataclass
 class APIAuth:
     """API authentication configuration."""
+
     auth_type: str  # bearer, api_key, basic
     token: str = ""
     header_name: str = "Authorization"
@@ -39,12 +40,14 @@ class APIAuth:
 @dataclass
 class CookieAuth:
     """Cookie-based authentication."""
+
     cookies: dict = field(default_factory=dict)  # name -> value
 
 
 @dataclass
 class OAuthConfig:
     """OAuth/SSO configuration."""
+
     auth_url: str = ""
     token_url: str = ""
     client_id: str = ""
@@ -56,12 +59,13 @@ class OAuthConfig:
 @dataclass
 class AuthConfig:
     """Complete authentication configuration for a target."""
+
     target: str
     auth_type: str  # form, api, cookie, oauth, none
-    form: Optional[FormLogin] = None
-    api: Optional[APIAuth] = None
-    cookie: Optional[CookieAuth] = None
-    oauth: Optional[OAuthConfig] = None
+    form: FormLogin | None = None
+    api: APIAuth | None = None
+    cookie: CookieAuth | None = None
+    oauth: OAuthConfig | None = None
     login_flow: str = ""  # natural language description of login flow
     session_persistence: bool = True
 
@@ -95,7 +99,7 @@ class AuthConfigLoader:
         raw = yaml.safe_load(p.read_text(encoding="utf-8"))
         return self._parse(raw)
 
-    def load_for_target(self, target: str) -> Optional[AuthConfig]:
+    def load_for_target(self, target: str) -> AuthConfig | None:
         """Try to find an auth config for the given target."""
         # Check CONFIG_DIR for matching files
         for config_file in self.CONFIG_DIR.glob("*.yml"):

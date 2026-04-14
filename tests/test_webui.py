@@ -1,7 +1,7 @@
 """Tests for the web UI module."""
 
-import json
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 # Import guard - tests skip if fastapi not installed
@@ -18,6 +18,7 @@ def app():
 @pytest.fixture
 def client(app):
     from fastapi.testclient import TestClient
+
     return TestClient(app)
 
 
@@ -112,10 +113,13 @@ class TestOperateEndpoints:
         assert resp.status_code == 400
 
     def test_start_operator(self, client):
-        resp = client.post("/api/operate", json={
-            "target": "10.0.0.1",
-            "goals": ["Scan ports"],
-        })
+        resp = client.post(
+            "/api/operate",
+            json={
+                "target": "10.0.0.1",
+                "goals": ["Scan ports"],
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "session_id" in data
@@ -127,10 +131,13 @@ class TestOperateEndpoints:
 
     def test_get_operator_status(self, client):
         # Start a session first
-        resp = client.post("/api/operate", json={
-            "target": "10.0.0.1",
-            "goals": ["Scan"],
-        })
+        resp = client.post(
+            "/api/operate",
+            json={
+                "target": "10.0.0.1",
+                "goals": ["Scan"],
+            },
+        )
         sid = resp.json()["session_id"]
 
         resp = client.get(f"/api/operate/{sid}")
@@ -140,7 +147,7 @@ class TestOperateEndpoints:
 
 class TestWebSocketEndpoint:
     def test_websocket_connect(self, client):
-        with client.websocket_connect("/ws/agent") as ws:
+        with client.websocket_connect("/ws/agent"):
             # Just connect and disconnect
             pass
 
@@ -152,14 +159,13 @@ class TestWebSocketEndpoint:
 
 class TestCreateApp:
     def test_app_has_routes(self, app):
-        routes = [r.path for r in app.routes if hasattr(r, 'path')]
+        routes = [r.path for r in app.routes if hasattr(r, "path")]
         assert "/api/health" in routes
         assert "/api/sessions" in routes
         assert "/api/metrics" in routes
         assert "/ws/agent" in routes
 
     def test_cors_enabled(self, app):
-        from starlette.middleware.cors import CORSMiddleware
-        middleware_classes = [type(m) for m in app.user_middleware]
+        [type(m) for m in app.user_middleware]
         # Just verify the app was created without error
         assert app is not None

@@ -5,7 +5,8 @@ from __future__ import annotations
 import enum
 import logging
 import threading
-from typing import Any, Callable, Dict, List
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class EventBus:
                 # Double-checked locking
                 if cls._instance is None:
                     instance = super().__new__(cls)
-                    instance._handlers: Dict[EventType, List[Callable]] = {
+                    instance._handlers: dict[EventType, list[Callable]] = {
                         et: [] for et in EventType
                     }
                     instance._lock = threading.Lock()
@@ -85,9 +86,7 @@ class EventBus:
             try:
                 handler(data)
             except Exception:
-                logger.exception(
-                    "Handler %r failed for event %s", handler, event_type.value
-                )
+                logger.exception("Handler %r failed for event %s", handler, event_type.value)
 
     # ------------------------------------------------------------------
     # Convenience helpers

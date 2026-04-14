@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import threading
-from dataclasses import dataclass, field, asdict
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Callable, Any
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class StepStatus(str, Enum):
 @dataclass
 class RetryPolicy:
     """Configurable retry policy for workflow steps."""
+
     max_retries: int = 3
     backoff_seconds: float = 1.0
     backoff_multiplier: float = 2.0
@@ -33,23 +34,24 @@ class RetryPolicy:
 
     def get_delay(self, attempt: int) -> float:
         """Calculate backoff delay for a given attempt number."""
-        delay = self.backoff_seconds * (self.backoff_multiplier ** attempt)
+        delay = self.backoff_seconds * (self.backoff_multiplier**attempt)
         return min(delay, self.max_backoff_seconds)
 
 
 @dataclass
 class WorkflowStep:
     """A single step in a workflow."""
+
     id: str
     name: str
     description: str = ""
     status: StepStatus = StepStatus.PENDING
-    result: Optional[str] = None
-    error: Optional[str] = None
+    result: str | None = None
+    error: str | None = None
     attempts: int = 0
     max_retries: int = 3
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
+    started_at: str | None = None
+    completed_at: str | None = None
     duration_seconds: float = 0.0
     dependencies: list[str] = field(default_factory=list)  # step IDs that must complete first
     metadata: dict = field(default_factory=dict)
@@ -58,6 +60,7 @@ class WorkflowStep:
 @dataclass
 class WorkflowState:
     """Persistent state of a workflow execution."""
+
     workflow_id: str
     name: str
     target: str = ""
@@ -86,8 +89,13 @@ class WorkflowEngine:
 
     CHECKPOINT_DIR = Path("~/.clearwing/workflows").expanduser()
 
-    def __init__(self, workflow_id: str = None, name: str = "pentest",
-                 target: str = "", retry_policy: RetryPolicy = None):
+    def __init__(
+        self,
+        workflow_id: str = None,
+        name: str = "pentest",
+        target: str = "",
+        retry_policy: RetryPolicy = None,
+    ):
         self._retry_policy = retry_policy or RetryPolicy()
         self._lock = threading.Lock()
         self._step_handlers: dict[str, Callable] = {}
@@ -97,12 +105,17 @@ class WorkflowEngine:
             self._state = self._load_checkpoint(workflow_id)
             if self._state is None:
                 self._state = WorkflowState(
-                    workflow_id=workflow_id, name=name, target=target,
+                    workflow_id=workflow_id,
+                    name=name,
+                    target=target,
                 )
         else:
             import uuid
+
             self._state = WorkflowState(
-                workflow_id=uuid.uuid4().hex[:12], name=name, target=target,
+                workflow_id=uuid.uuid4().hex[:12],
+                name=name,
+                target=target,
             )
 
         self.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -115,9 +128,15 @@ class WorkflowEngine:
     def workflow_id(self) -> str:
         return self._state.workflow_id
 
-    def add_step(self, step_id: str, name: str, handler: Callable = None,
-                 description: str = "", dependencies: list[str] = None,
-                 max_retries: int = None) -> WorkflowStep:
+    def add_step(
+        self,
+        step_id: str,
+        name: str,
+        handler: Callable = None,
+        description: str = "",
+        dependencies: list[str] = None,
+        max_retries: int = None,
+    ) -> WorkflowStep:
         """Add a step to the workflow."""
         step = WorkflowStep(
             id=step_id,
@@ -148,8 +167,7 @@ class WorkflowEngine:
 
         # Determine final status
         all_done = all(
-            s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED)
-            for s in self._state.steps
+            s.status in (StepStatus.COMPLETED, StepStatus.SKIPPED) for s in self._state.steps
         )
         self._state.status = "completed" if all_done else "failed"
         self._checkpoint()
@@ -197,14 +215,12 @@ class WorkflowEngine:
                 continue
             # Check all dependencies are completed
             deps_met = all(
-                self._get_step(dep_id) and
-                self._get_step(dep_id).status == StepStatus.COMPLETED
+                self._get_step(dep_id) and self._get_step(dep_id).status == StepStatus.COMPLETED
                 for dep_id in step.dependencies
             )
             # Check no dependency has failed
             deps_failed = any(
-                self._get_step(dep_id) and
-                self._get_step(dep_id).status == StepStatus.FAILED
+                self._get_step(dep_id) and self._get_step(dep_id).status == StepStatus.FAILED
                 for dep_id in step.dependencies
             )
             if deps_failed:
@@ -215,7 +231,7 @@ class WorkflowEngine:
                 runnable.append(step)
         return runnable
 
-    def _get_step(self, step_id: str) -> Optional[WorkflowStep]:
+    def _get_step(self, step_id: str) -> WorkflowStep | None:
         for step in self._state.steps:
             if step.id == step_id:
                 return step
@@ -263,7 +279,7 @@ class WorkflowEngine:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    def _load_checkpoint(self, workflow_id: str) -> Optional[WorkflowState]:
+    def _load_checkpoint(self, workflow_id: str) -> WorkflowState | None:
         """Load workflow state from a checkpoint file."""
         path = self.CHECKPOINT_DIR / f"{workflow_id}.json"
         if not path.exists():
@@ -272,21 +288,23 @@ class WorkflowEngine:
         data = json.loads(path.read_text(encoding="utf-8"))
         steps = []
         for sd in data.get("steps", []):
-            steps.append(WorkflowStep(
-                id=sd["id"],
-                name=sd["name"],
-                description=sd.get("description", ""),
-                status=StepStatus(sd.get("status", "pending")),
-                result=sd.get("result"),
-                error=sd.get("error"),
-                attempts=sd.get("attempts", 0),
-                max_retries=sd.get("max_retries", 3),
-                started_at=sd.get("started_at"),
-                completed_at=sd.get("completed_at"),
-                duration_seconds=sd.get("duration_seconds", 0.0),
-                dependencies=sd.get("dependencies", []),
-                metadata=sd.get("metadata", {}),
-            ))
+            steps.append(
+                WorkflowStep(
+                    id=sd["id"],
+                    name=sd["name"],
+                    description=sd.get("description", ""),
+                    status=StepStatus(sd.get("status", "pending")),
+                    result=sd.get("result"),
+                    error=sd.get("error"),
+                    attempts=sd.get("attempts", 0),
+                    max_retries=sd.get("max_retries", 3),
+                    started_at=sd.get("started_at"),
+                    completed_at=sd.get("completed_at"),
+                    duration_seconds=sd.get("duration_seconds", 0.0),
+                    dependencies=sd.get("dependencies", []),
+                    metadata=sd.get("metadata", {}),
+                )
+            )
 
         state = WorkflowState(
             workflow_id=data["workflow_id"],
@@ -331,14 +349,16 @@ class WorkflowEngine:
         for path in sorted(cls.CHECKPOINT_DIR.glob("*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                results.append({
-                    "workflow_id": data["workflow_id"],
-                    "name": data.get("name", ""),
-                    "target": data.get("target", ""),
-                    "status": data.get("status", ""),
-                    "created_at": data.get("created_at", ""),
-                    "step_count": len(data.get("steps", [])),
-                })
+                results.append(
+                    {
+                        "workflow_id": data["workflow_id"],
+                        "name": data.get("name", ""),
+                        "target": data.get("target", ""),
+                        "status": data.get("status", ""),
+                        "created_at": data.get("created_at", ""),
+                        "step_count": len(data.get("steps", [])),
+                    }
+                )
             except Exception:
                 logger.debug("Failed to read workflow file %s", path, exc_info=True)
                 continue

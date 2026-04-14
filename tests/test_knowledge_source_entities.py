@@ -1,9 +1,8 @@
 """Tests for the v0.3 knowledge-graph source entities."""
+
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from clearwing.data.knowledge import KnowledgeGraph
 
@@ -119,10 +118,7 @@ class TestAddSourceFinding:
         assert cve_entity.entity_type == "cve"
         # RELATED_TO_CVE edge
         rels = kg.get_relationships("retro-1", direction="out")
-        assert any(
-            r.rel_type == "RELATED_TO_CVE" and r.target_id == "CVE-2024-9999"
-            for r in rels
-        )
+        assert any(r.rel_type == "RELATED_TO_CVE" and r.target_id == "CVE-2024-9999" for r in rels)
 
 
 class TestRunnerKgIntegration:
@@ -149,6 +145,7 @@ class TestRunnerKgIntegration:
 
     def test_runner_can_disable_kg(self, tmp_path: Path):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),

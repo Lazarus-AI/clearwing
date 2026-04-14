@@ -5,10 +5,10 @@ tool set, system prompt, and SourceHuntState schema. v0.1 ships with a single
 GeneralHunter; v0.2 adds memory_safety and logic_auth specialists with
 different prompts but the same graph structure.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
@@ -489,8 +489,8 @@ _SPECIALIST_PROMPTS = {
 def _build_hunter_prompt(
     file_target: FileTarget,
     project_name: str,
-    seeded_crash: Optional[dict],
-    semgrep_hints: Optional[list[dict]],
+    seeded_crash: dict | None,
+    semgrep_hints: list[dict] | None,
     specialist: str = "general",
 ) -> str:
     """Render the specialist prompt for this file."""
@@ -507,12 +507,11 @@ def _build_hunter_prompt(
     if semgrep_hints:
         hint_lines = []
         for h in semgrep_hints[:5]:
-            hint_lines.append(
-                f"  - line {h.get('line', '?')}: {h.get('description', '')}"
-            )
+            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — use as starting points):\n"
-            + "\n".join(hint_lines) + "\n"
+            + "\n".join(hint_lines)
+            + "\n"
         )
 
     template = _SPECIALIST_PROMPTS.get(specialist, GENERAL_HUNTER_PROMPT)
@@ -542,16 +541,16 @@ def _build_propagation_prompt(file_target: FileTarget) -> str:
 def build_hunter_agent(
     file_target: FileTarget,
     repo_path: str,
-    sandbox: Optional[SandboxContainer],
+    sandbox: SandboxContainer | None,
     llm: BaseChatModel,
     session_id: str,
     project_name: str = "target",
-    specialist: Optional[str] = None,
-    seeded_crash: Optional[dict] = None,
-    semgrep_hints: Optional[list[dict]] = None,
-    variant_seed: Optional[dict] = None,
-    sandbox_manager=None,                              # v0.4: HunterSandbox manager for variants
-    default_sanitizers: tuple = ("asan", "ubsan"),     # v0.4: primary sanitizer combo
+    specialist: str | None = None,
+    seeded_crash: dict | None = None,
+    semgrep_hints: list[dict] | None = None,
+    variant_seed: dict | None = None,
+    sandbox_manager=None,  # v0.4: HunterSandbox manager for variants
+    default_sanitizers: tuple = ("asan", "ubsan"),  # v0.4: primary sanitizer combo
 ) -> tuple[CompiledStateGraph, HunterContext]:
     """Build a per-file ReAct hunter agent.
 

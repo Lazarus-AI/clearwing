@@ -7,12 +7,12 @@ extended with optional network fields for CICDRunner compatibility.
 Conversion functions are pure — they never mutate their inputs. Round-trip
 through `from_*` + `to_*` preserves every field present in the source shape.
 """
+
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field, asdict
-from typing import Any, Literal, Optional
-
+from dataclasses import asdict, dataclass, field
+from typing import Any, Literal
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
 
@@ -60,61 +60,61 @@ class Finding:
     cwe: str = ""
 
     # Source location
-    file: Optional[str] = None
-    line_number: Optional[int] = None
-    end_line: Optional[int] = None
+    file: str | None = None
+    line_number: int | None = None
+    end_line: int | None = None
     code_snippet: str = ""
 
     # Network location (for CICDRunner-style findings)
-    target: Optional[str] = None
-    port: Optional[int] = None
-    protocol: Optional[str] = None
-    service: Optional[str] = None
+    target: str | None = None
+    port: int | None = None
+    protocol: str | None = None
+    service: str | None = None
 
     # Severity & confidence
     severity: Severity = "info"
-    severity_verified: Optional[Severity] = None
+    severity_verified: Severity | None = None
     confidence: Literal["high", "medium", "low"] = "medium"
 
     # Hunter output
     description: str = ""
-    crash_evidence: Optional[str] = None
-    poc: Optional[str] = None
+    crash_evidence: str | None = None
+    poc: str | None = None
     discovered_by: str = "unknown"
 
     # Evidence ladder
     evidence_level: EvidenceLevel = "suspicion"
 
     # Relationships
-    related_finding_id: Optional[str] = None
-    related_cve: Optional[str] = None
+    related_finding_id: str | None = None
+    related_cve: str | None = None
     seeded_from_crash: bool = False
 
     # Verifier (v0.2 adversarial)
     verified: bool = False
-    verifier_pro_argument: Optional[str] = None
-    verifier_counter_argument: Optional[str] = None
-    verifier_tie_breaker: Optional[str] = None
+    verifier_pro_argument: str | None = None
+    verifier_counter_argument: str | None = None
+    verifier_tie_breaker: str | None = None
 
     # Patch oracle (v0.3)
-    patch_oracle_passed: Optional[bool] = None
+    patch_oracle_passed: bool | None = None
 
     # Exploit triage
-    exploit: Optional[str] = None
-    exploit_success: Optional[bool] = None
+    exploit: str | None = None
+    exploit_success: bool | None = None
 
     # Auto-patch (v0.3)
-    auto_patch: Optional[str] = None
-    auto_patch_validated: Optional[bool] = None
+    auto_patch: str | None = None
+    auto_patch_validated: bool | None = None
 
     # Session tracking
     hunter_session_id: str = ""
-    verifier_session_id: Optional[str] = None
+    verifier_session_id: str | None = None
 
     # Legacy network-finding fields (CICDRunner)
-    cve: Optional[str] = None           # CVE identifier for network findings
-    cvss: Optional[float] = None        # CVSS score
-    details: str = ""                   # legacy details blob
+    cve: str | None = None  # CVE identifier for network findings
+    cvss: float | None = None  # CVSS score
+    details: str = ""  # legacy details blob
 
     # Extensible payload — v0.2/v0.3 seams, retro-hunt fields, etc.
     extra: dict[str, Any] = field(default_factory=dict)
@@ -146,8 +146,12 @@ class Finding:
     def is_strong_evidence(self) -> bool:
         """True if evidence_level is crash_reproduced or higher."""
         order = (
-            "suspicion", "static_corroboration", "crash_reproduced",
-            "root_cause_explained", "exploit_demonstrated", "patch_validated",
+            "suspicion",
+            "static_corroboration",
+            "crash_reproduced",
+            "root_cause_explained",
+            "exploit_demonstrated",
+            "patch_validated",
         )
         try:
             return order.index(self.evidence_level) >= order.index("crash_reproduced")
@@ -175,10 +179,7 @@ class Finding:
             self.extra[key] = value
 
     def __contains__(self, key: object) -> bool:
-        return (
-            isinstance(key, str)
-            and (key in self.__dataclass_fields__ or key in self.extra)
-        )
+        return isinstance(key, str) and (key in self.__dataclass_fields__ or key in self.extra)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Mimic dict.get() semantics against Finding attributes.
@@ -197,7 +198,7 @@ class Finding:
 # --- Converters: from legacy shapes → Finding ------------------------------
 
 
-def from_cicd_dict(d: dict, *, target: Optional[str] = None) -> Finding:
+def from_cicd_dict(d: dict, *, target: str | None = None) -> Finding:
     """Build a Finding from a CICDRunner finding dict.
 
     CICD findings have shape `{description, severity, cve, details}` plus the
@@ -210,7 +211,7 @@ def from_cicd_dict(d: dict, *, target: Optional[str] = None) -> Finding:
         severity=_coerce_severity(d.get("severity", "info")),
         cve=d.get("cve"),
         details=d.get("details", ""),
-        cwe=d.get("cve") or "",      # CWE often shares rule ID with CVE
+        cwe=d.get("cve") or "",  # CWE often shares rule ID with CVE
         target=target or d.get("target"),
         port=d.get("port"),
         protocol=d.get("protocol"),
@@ -287,10 +288,15 @@ def _coerce_severity(value: Any) -> Severity:
         return "info"
     s = str(value).lower().strip()
     if s in SEVERITY_VALUES:
-        return s   # type: ignore[return-value]
+        return s  # type: ignore[return-value]
     # Common variants
     mapping = {
-        "err": "high", "error": "high", "warn": "medium", "warning": "medium",
-        "note": "low", "none": "info", "unknown": "info",
+        "err": "high",
+        "error": "high",
+        "warn": "medium",
+        "warning": "medium",
+        "note": "low",
+        "none": "info",
+        "unknown": "info",
     }
-    return mapping.get(s, "info")   # type: ignore[return-value]
+    return mapping.get(s, "info")  # type: ignore[return-value]

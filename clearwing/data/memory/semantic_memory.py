@@ -8,8 +8,6 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-
 
 # Knowledge categories
 CATEGORIES = (
@@ -155,7 +153,7 @@ class SemanticMemory:
         self,
         category: str,
         content: str,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> Knowledge:
         """Persist a piece of knowledge, optionally with an embedding vector."""
         ts = datetime.now(tz=timezone.utc).isoformat()
@@ -184,7 +182,7 @@ class SemanticMemory:
     def search(
         self,
         query: str,
-        category: Optional[str] = None,
+        category: str | None = None,
         top_k: int = 5,
     ) -> list[Knowledge]:
         """Search knowledge — vector similarity first, FTS5 fallback."""
@@ -202,7 +200,7 @@ class SemanticMemory:
     def _vector_search(
         self,
         query: str,
-        category: Optional[str],
+        category: str | None,
         top_k: int,
     ) -> list[Knowledge] | None:
         """Cosine-similarity search. Returns None if embeddings are unavailable."""
@@ -243,7 +241,7 @@ class SemanticMemory:
         for row in rows:
             stored_vec = self._bytes_to_vector(row[3])
             # Cosine similarity
-            denom = (np.linalg.norm(query_vec) * np.linalg.norm(stored_vec))
+            denom = np.linalg.norm(query_vec) * np.linalg.norm(stored_vec)
             if denom == 0:
                 sim = 0.0
             else:
@@ -256,7 +254,7 @@ class SemanticMemory:
     def _fts_search(
         self,
         query: str,
-        category: Optional[str],
+        category: str | None,
         top_k: int,
     ) -> list[Knowledge]:
         """FTS5 keyword search fallback."""

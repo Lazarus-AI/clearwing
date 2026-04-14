@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 import uuid
-import threading
-import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Span:
     """A single trace span representing an operation."""
+
     trace_id: str
     span_id: str
     name: str
-    parent_span_id: Optional[str] = None
+    parent_span_id: str | None = None
     start_time: float = 0.0
     end_time: float = 0.0
     status: str = "ok"  # ok, error
@@ -36,11 +37,13 @@ class Span:
         self.attributes[key] = value
 
     def add_event(self, name: str, attributes: dict = None) -> None:
-        self.events.append({
-            "name": name,
-            "timestamp": time.time(),
-            "attributes": attributes or {},
-        })
+        self.events.append(
+            {
+                "name": name,
+                "timestamp": time.time(),
+                "attributes": attributes or {},
+            }
+        )
 
     def set_error(self, error: str) -> None:
         self.status = "error"
@@ -78,8 +81,11 @@ class ConsoleExporter(SpanExporter):
         for span in spans:
             logger.info(
                 "SPAN [%s] %s (%.1fms) status=%s attrs=%s",
-                span.span_id[:8], span.name, span.duration_ms,
-                span.status, span.attributes,
+                span.span_id[:8],
+                span.name,
+                span.duration_ms,
+                span.status,
+                span.attributes,
             )
 
 
@@ -204,7 +210,7 @@ class Tracer:
                 pass
 
     @property
-    def active_span(self) -> Optional[Span]:
+    def active_span(self) -> Span | None:
         """Get the currently active span for this thread."""
         return self._active_spans.get(threading.get_ident())
 

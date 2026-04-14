@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from clearwing.core.events import EventBus, EventType
+from clearwing.core.events import EventBus
 
 # Flag detection patterns
 FLAG_PATTERNS = [

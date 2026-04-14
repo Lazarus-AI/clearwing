@@ -1,16 +1,12 @@
 """Tests for the v0.4 coordinated-disclosure helper."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
-
 from clearwing.sourcehunt.disclosure import (
-    DEFAULT_MIN_EVIDENCE,
-    DisclosureBundle,
     DisclosureGenerator,
-    DisclosureTemplate,
     write_bundle,
 )
 
@@ -70,20 +66,24 @@ class TestEligibility:
 
     def test_exploit_demonstrated_eligible(self):
         gen = DisclosureGenerator(project_name="x")
-        bundle = gen.generate_bundle([
-            _finding(evidence_level="exploit_demonstrated"),
-        ])
+        bundle = gen.generate_bundle(
+            [
+                _finding(evidence_level="exploit_demonstrated"),
+            ]
+        )
         assert len(bundle.templates) == 2
 
     def test_patch_validated_eligible(self):
         gen = DisclosureGenerator(project_name="x")
-        bundle = gen.generate_bundle([
-            _finding(
-                evidence_level="patch_validated",
-                auto_patch="# diff",
-                auto_patch_validated=True,
-            ),
-        ])
+        bundle = gen.generate_bundle(
+            [
+                _finding(
+                    evidence_level="patch_validated",
+                    auto_patch="# diff",
+                    auto_patch_validated=True,
+                ),
+            ]
+        )
         assert len(bundle.templates) == 2
         # Validated templates should reflect that
         assert all(t.validated for t in bundle.templates)
@@ -140,13 +140,16 @@ class TestMitreTemplate:
 
     def test_mitre_includes_validated_patch(self):
         gen = DisclosureGenerator(project_name="x")
-        bundle = gen.generate_bundle([
-            _finding(
-                auto_patch="-bad\n+good",
-                auto_patch_validated=True,
-                evidence_level="patch_validated",
-            ),
-        ], formats=["mitre"])
+        bundle = gen.generate_bundle(
+            [
+                _finding(
+                    auto_patch="-bad\n+good",
+                    auto_patch_validated=True,
+                    evidence_level="patch_validated",
+                ),
+            ],
+            formats=["mitre"],
+        )
         body = bundle.templates[0].body
         assert "Candidate patch" in body
         assert "VALIDATED" in body
@@ -262,15 +265,15 @@ class TestWriteBundle:
 
     def test_skipped_reasons_in_manifest(self, tmp_path: Path):
         gen = DisclosureGenerator(project_name="x")
-        bundle = gen.generate_bundle([
-            _finding(verified=False),
-            _finding(evidence_level="suspicion"),
-            _finding(),   # eligible
-        ])
-        write_bundle(bundle, str(tmp_path), "s1")
-        manifest = json.loads(
-            (tmp_path / "s1" / "disclosures" / "manifest.json").read_text()
+        bundle = gen.generate_bundle(
+            [
+                _finding(verified=False),
+                _finding(evidence_level="suspicion"),
+                _finding(),  # eligible
+            ]
         )
+        write_bundle(bundle, str(tmp_path), "s1")
+        manifest = json.loads((tmp_path / "s1" / "disclosures" / "manifest.json").read_text())
         assert manifest["skipped"] == 2
         assert "unverified" in manifest["skipped_reasons"]
 
@@ -282,6 +285,7 @@ class TestRunnerDisclosureIntegration:
     def test_disclosures_opt_in(self, tmp_path: Path):
         """Disclosures should NOT be exported when the flag is off."""
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         fixture = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
         runner = SourceHuntRunner(
             repo_url=str(fixture),
@@ -297,6 +301,7 @@ class TestRunnerDisclosureIntegration:
     def test_disclosures_runner_flag(self):
         """The runner stores the flag and reporter fields."""
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         runner = SourceHuntRunner(
             repo_url="x",
             local_path="/tmp",

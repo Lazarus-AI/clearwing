@@ -1,17 +1,16 @@
 """Unit tests for HunterSandbox and BuildSystemDetector with docker mocked."""
+
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from clearwing.sandbox.builders import (
-    BuildRecipe,
-    BuildSystemDetector,
     DEFAULT_BASE_IMAGES,
+    BuildSystemDetector,
 )
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
@@ -170,7 +169,9 @@ class TestHunterSandboxBuildImage:
         sb2 = HunterSandbox(repo_path=str(temp_repo), sanitizers=["asan"])
         sb3 = HunterSandbox(repo_path=str(temp_repo), sanitizers=["asan", "ubsan"])
         # Same config → same tag
-        assert sb1._compute_tag(sb1._render_dockerfile()) == sb2._compute_tag(sb2._render_dockerfile())
+        assert sb1._compute_tag(sb1._render_dockerfile()) == sb2._compute_tag(
+            sb2._render_dockerfile()
+        )
         # Different sanitizers → different tag
         tag_a = sb1._compute_tag(sb1._render_dockerfile())
         tag_c = sb3._compute_tag(sb3._render_dockerfile())
@@ -213,15 +214,12 @@ class TestHunterSandboxSpawn:
 
         sb = HunterSandbox(repo_path=str(temp_repo))
         sb.build_image()
-        spawned = sb.spawn(scratch_mount=True)
+        sb.spawn(scratch_mount=True)
 
         kwargs = mock_docker.containers.run.call_args.kwargs
         volumes = kwargs["volumes"]
         # Find the rw mount (the scratch dir)
-        rw_mounts = [
-            (host, info) for host, info in volumes.items()
-            if info["mode"] == "rw"
-        ]
+        rw_mounts = [(host, info) for host, info in volumes.items() if info["mode"] == "rw"]
         assert len(rw_mounts) == 1
         assert rw_mounts[0][1]["bind"] == "/scratch"
 
