@@ -5,7 +5,7 @@ import base64
 
 import pytest
 
-from vulnexploit.payloads import (
+from vulnexploit.exploitation.payloads import (
     ALL_PAYLOADS,
     AUTH_BYPASS_PAYLOADS,
     CMD_INJECTION_PAYLOADS,

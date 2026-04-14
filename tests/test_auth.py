@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from vulnexploit.auth import (
+from vulnexploit.safety.auth import (
     AuthConfig,
     AuthConfigLoader,
     FormLogin,

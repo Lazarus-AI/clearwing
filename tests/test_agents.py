@@ -2,7 +2,7 @@
 
 import pytest
 
-from vulnexploit.agents.planner_agent import PlannerAgent, Plan, Subtask
+from vulnexploit.agent.specialists.planner_agent import PlannerAgent, Plan, Subtask
 
 
 # --- Subtask ---
@@ -131,16 +131,16 @@ class TestAgentInterfaces:
         assert agent.llm is not None
 
     def test_recon_agent_init(self):
-        from vulnexploit.agents import ReconAgent
+        from vulnexploit.agent.specialists import ReconAgent
         agent = ReconAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"
 
     def test_exploit_agent_init(self):
-        from vulnexploit.agents import ExploitAgent
+        from vulnexploit.agent.specialists import ExploitAgent
         agent = ExploitAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"
 
     def test_reporter_agent_init(self):
-        from vulnexploit.agents import ReporterAgent
+        from vulnexploit.agent.specialists import ReporterAgent
         agent = ReporterAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"

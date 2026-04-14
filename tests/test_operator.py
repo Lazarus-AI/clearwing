@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
-from vulnexploit.operator.agent import (
+from vulnexploit.agent.operator import (
     OperatorAgent,
     OperatorConfig,
     OperatorResult,
@@ -412,7 +412,7 @@ class TestOperatorRun:
 
         return mock_graph
 
-    @patch("vulnexploit.operator.agent.OperatorAgent._decide_next")
+    @patch("vulnexploit.agent.operator.OperatorAgent._decide_next")
     @patch("vulnexploit.agent.graph._create_llm")
     @patch("vulnexploit.agent.create_agent")
     def test_completes_when_goals_met(self, mock_create, mock_create_llm, mock_decide):
@@ -430,7 +430,7 @@ class TestOperatorRun:
         assert result.status == "completed"
         assert result.turns == 2
 
-    @patch("vulnexploit.operator.agent.OperatorAgent._decide_next")
+    @patch("vulnexploit.agent.operator.OperatorAgent._decide_next")
     @patch("vulnexploit.agent.graph._create_llm")
     @patch("vulnexploit.agent.create_agent")
     def test_escalates_on_unknown_question(self, mock_create, mock_create_llm, mock_decide):
@@ -447,7 +447,7 @@ class TestOperatorRun:
         assert result.status == "escalated"
         assert "SSH credentials" in result.escalation_question
 
-    @patch("vulnexploit.operator.agent.OperatorAgent._decide_next")
+    @patch("vulnexploit.agent.operator.OperatorAgent._decide_next")
     @patch("vulnexploit.agent.graph._create_llm")
     @patch("vulnexploit.agent.create_agent")
     def test_escalate_with_callback(self, mock_create, mock_create_llm, mock_decide):
@@ -472,7 +472,7 @@ class TestOperatorRun:
 
         assert result.status == "completed"
 
-    @patch("vulnexploit.operator.agent.OperatorAgent._decide_next")
+    @patch("vulnexploit.agent.operator.OperatorAgent._decide_next")
     @patch("vulnexploit.agent.graph._create_llm")
     @patch("vulnexploit.agent.create_agent")
     def test_max_turns_stops(self, mock_create, mock_create_llm, mock_decide):
@@ -488,7 +488,7 @@ class TestOperatorRun:
         assert result.turns == 3
         assert "max turns" in result.error.lower()
 
-    @patch("vulnexploit.operator.agent.OperatorAgent._decide_next")
+    @patch("vulnexploit.agent.operator.OperatorAgent._decide_next")
     @patch("vulnexploit.agent.graph._create_llm")
     @patch("vulnexploit.agent.create_agent")
     def test_on_complete_callback(self, mock_create, mock_create_llm, mock_decide):
@@ -508,7 +508,7 @@ class TestOperatorRun:
         assert len(results) == 1
         assert results[0].status == "completed"
 
-    @patch("vulnexploit.operator.agent.OperatorAgent._decide_next")
+    @patch("vulnexploit.agent.operator.OperatorAgent._decide_next")
     @patch("vulnexploit.agent.graph._create_llm")
     @patch("vulnexploit.agent.create_agent")
     def test_on_message_callback(self, mock_create, mock_create_llm, mock_decide):

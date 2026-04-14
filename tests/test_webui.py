@@ -7,7 +7,7 @@ import pytest
 # Import guard - tests skip if fastapi not installed
 fastapi = pytest.importorskip("fastapi")
 
-from vulnexploit.webui.app import create_app
+from vulnexploit.ui.web.app import create_app
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from vulnexploit.scanners import PortScanner, ServiceScanner, VulnerabilityScanner, OSScanner
+from vulnexploit.scanning import PortScanner, ServiceScanner, VulnerabilityScanner, OSScanner
 
 
 class TestPortScanner:

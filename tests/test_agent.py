@@ -156,10 +156,6 @@ class TestGraphConstruction:
 
 
 class TestScannerToolWrapping:
-    # NOTE: scanner_tools imports from vulnexploit.scanning (the canonical
-    # module), not the deprecated vulnexploit.scanners shim. Patching the
-    # real import path at `vulnexploit.scanning.*` is what matters.
-
     @pytest.mark.asyncio
     async def test_scan_ports_wraps_scanner(self):
         from vulnexploit.agent.tools.scanner_tools import scan_ports

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from vulnexploit.workflow import (
+from vulnexploit.runners.workflow import (
     WorkflowEngine,
     WorkflowState,
     WorkflowStep,

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from vulnexploit.cicd import CICDRunner, CICDResult, SARIFGenerator
+from vulnexploit.runners.cicd import CICDRunner, CICDResult, SARIFGenerator
 
 
 class TestCICDResult:
