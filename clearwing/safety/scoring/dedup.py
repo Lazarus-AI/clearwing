@@ -6,7 +6,7 @@ import re
 
 
 @dataclass
-class Finding:
+class DedupRecord:
     """A normalized vulnerability finding."""
     id: str
     title: str
@@ -27,7 +27,7 @@ class Finding:
 class FindingDeduplicator:
     """Deduplicates vulnerability findings using multiple strategies."""
 
-    def deduplicate(self, findings: list[Finding]) -> list[Finding]:
+    def deduplicate(self, findings: list[DedupRecord]) -> list[DedupRecord]:
         """Remove duplicate findings, marking duplicates with duplicate_of field.
 
         Returns only unique findings, sorted by severity (critical first).
@@ -35,7 +35,7 @@ class FindingDeduplicator:
         if not findings:
             return []
 
-        unique: list[Finding] = []
+        unique: list[DedupRecord] = []
         seen_cves: dict[str, str] = {}  # cve -> finding id
         seen_signatures: dict[str, str] = {}  # signature -> finding id
 
@@ -71,12 +71,12 @@ class FindingDeduplicator:
 
         return unique
 
-    def _signature(self, finding: Finding) -> str:
+    def _signature(self, finding: DedupRecord) -> str:
         """Create a dedup signature from normalized fields."""
         title_norm = re.sub(r'[^a-z0-9]', '', finding.title.lower())
         return f"{title_norm}:{finding.target}:{finding.port}"
 
-    def _is_similar(self, a: Finding, b: Finding) -> bool:
+    def _is_similar(self, a: DedupRecord, b: DedupRecord) -> bool:
         """Check if two findings are similar enough to be duplicates."""
         # Same target and port, similar title
         if a.target != b.target:
@@ -97,7 +97,7 @@ class FindingDeduplicator:
         # Jaccard similarity > 0.6
         return (overlap / total) > 0.6 if total > 0 else False
 
-    def merge_findings(self, groups: list[list[Finding]]) -> list[Finding]:
+    def merge_findings(self, groups: list[list[DedupRecord]]) -> list[DedupRecord]:
         """Merge multiple finding lists (from different scan phases) and deduplicate."""
         all_findings = []
         for group in groups:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from clearwing.analysis.source_analyzer import SourceAnalyzer, AnalysisResult, Finding
+from clearwing.analysis.source_analyzer import SourceAnalyzer, AnalysisResult, AnalyzerFinding
 from clearwing.analysis.taint_tracker import TaintTracker, TaintFlow, TAINT_SOURCES, TAINT_SINKS
 
 
@@ -17,7 +17,7 @@ from clearwing.analysis.taint_tracker import TaintTracker, TaintFlow, TAINT_SOUR
 
 class TestFinding:
     def test_finding_fields(self):
-        f = Finding(
+        f = AnalyzerFinding(
             file_path="app.py", line_number=10, finding_type="sql_injection",
             severity="critical", description="SQL injection", cwe="CWE-89",
         )
@@ -29,10 +29,10 @@ class TestFinding:
 class TestAnalysisResult:
     def test_severity_counts(self):
         r = AnalysisResult(repo_path="/tmp/repo", findings=[
-            Finding("a.py", 1, "sql_injection", "critical", "desc"),
-            Finding("a.py", 2, "xss", "high", "desc"),
-            Finding("a.py", 3, "xss", "high", "desc"),
-            Finding("a.py", 4, "misc", "low", "desc"),
+            AnalyzerFinding("a.py", 1, "sql_injection", "critical", "desc"),
+            AnalyzerFinding("a.py", 2, "xss", "high", "desc"),
+            AnalyzerFinding("a.py", 3, "xss", "high", "desc"),
+            AnalyzerFinding("a.py", 4, "misc", "low", "desc"),
         ])
         assert r.critical_count == 1
         assert r.high_count == 2
@@ -40,7 +40,7 @@ class TestAnalysisResult:
     def test_summary_output(self):
         r = AnalysisResult(
             repo_path="/tmp/repo",
-            findings=[Finding("a.py", 1, "xss", "high", "XSS found")],
+            findings=[AnalyzerFinding("a.py", 1, "xss", "high", "XSS found")],
             files_analyzed=5,
             total_lines=200,
             languages=["python"],

@@ -11,7 +11,7 @@ from typing import Optional
 
 
 @dataclass
-class Finding:
+class AnalyzerFinding:
     """A source code vulnerability finding."""
     file_path: str
     line_number: int
@@ -28,7 +28,7 @@ class Finding:
 class AnalysisResult:
     """Result of analyzing a repository."""
     repo_path: str
-    findings: list[Finding] = field(default_factory=list)
+    findings: list[AnalyzerFinding] = field(default_factory=list)
     files_analyzed: int = 0
     total_lines: int = 0
     languages: list[str] = field(default_factory=list)
@@ -323,7 +323,7 @@ class SourceAnalyzer:
                     continue
                 yield full_path
 
-    def _scan_patterns(self, file_path: str, content: str, language: str) -> list[Finding]:
+    def _scan_patterns(self, file_path: str, content: str, language: str) -> list[AnalyzerFinding]:
         """Scan file content against vulnerability patterns for the given language."""
         findings = []
         patterns = self.VULNERABILITY_PATTERNS.get(language, [])
@@ -337,7 +337,7 @@ class SourceAnalyzer:
                     end = min(len(all_lines), line_num + 1)
                     snippet = "\n".join(all_lines[start:end])
 
-                    findings.append(Finding(
+                    findings.append(AnalyzerFinding(
                         file_path=file_path,
                         line_number=line_num,
                         finding_type=finding_type,
@@ -350,7 +350,7 @@ class SourceAnalyzer:
 
         return findings
 
-    def _analyze_python_ast(self, file_path: str, content: str) -> list[Finding]:
+    def _analyze_python_ast(self, file_path: str, content: str) -> list[AnalyzerFinding]:
         """Use Python AST for deeper vulnerability detection."""
         findings = []
         try:
@@ -366,7 +366,7 @@ class SourceAnalyzer:
                 # Check for SQL injection via string formatting in execute()
                 if func_name and func_name.endswith("execute"):
                     if node.args and isinstance(node.args[0], ast.JoinedStr):
-                        findings.append(Finding(
+                        findings.append(AnalyzerFinding(
                             file_path=file_path,
                             line_number=node.lineno,
                             finding_type="sql_injection",
@@ -377,7 +377,7 @@ class SourceAnalyzer:
                         ))
                     elif node.args and isinstance(node.args[0], ast.BinOp):
                         if isinstance(node.args[0].op, (ast.Mod, ast.Add)):
-                            findings.append(Finding(
+                            findings.append(AnalyzerFinding(
                                 file_path=file_path,
                                 line_number=node.lineno,
                                 finding_type="sql_injection",
@@ -398,7 +398,7 @@ class SourceAnalyzer:
                 test_str = ast.dump(node.test)
                 if any(kw in test_str.lower() for kw in
                        ["admin", "auth", "permission", "role", "access"]):
-                    findings.append(Finding(
+                    findings.append(AnalyzerFinding(
                         file_path=file_path,
                         line_number=node.lineno,
                         finding_type="assert_auth",
@@ -419,13 +419,13 @@ class SourceAnalyzer:
             return node.func.attr
         return None
 
-    def _deduplicate(self, findings: list[Finding]) -> list[Finding]:
+    def _deduplicate(self, findings: list[AnalyzerFinding]) -> list[AnalyzerFinding]:
         """Remove duplicate findings at the same location with the same type.
 
         When duplicates exist, keeps the finding with the highest confidence.
         """
         confidence_rank = {"high": 0, "medium": 1, "low": 2}
-        best: dict[tuple, Finding] = {}
+        best: dict[tuple, AnalyzerFinding] = {}
         for f in findings:
             key = (f.file_path, f.line_number, f.finding_type)
             if key not in best:

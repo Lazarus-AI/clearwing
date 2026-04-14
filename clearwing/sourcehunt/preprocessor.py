@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from clearwing.analysis import SourceAnalyzer
-from clearwing.analysis.source_analyzer import Finding as StaticFinding
+from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
 
 from .callgraph import CallGraph, CallGraphBuilder
 from .semgrep_sidecar import SemgrepSidecar, finding_to_dict as _semgrep_finding_to_dict
