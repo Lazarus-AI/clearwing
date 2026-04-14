@@ -19,6 +19,8 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
+from clearwing.findings.types import Finding
+
 
 # --- Evidence ladder ---------------------------------------------------------
 
@@ -121,51 +123,13 @@ class FileTarget(TypedDict, total=False):
 
 
 # --- SourceFinding -----------------------------------------------------------
+#
+# Phase-3 transitional alias: `SourceFinding` is the unified `Finding`
+# dataclass. The legacy `TypedDict` is deleted in Phase 3d once every call
+# site has migrated from dict-style construction (`{"id": ..., "file": ...}`)
+# to dataclass construction (`Finding(id=..., file=...)`).
 
-class SourceFinding(TypedDict, total=False):
-    """A vulnerability finding from the source-hunt pipeline.
-
-    Schema is the superset of all phases: v0.1 fills in the basics, v0.2
-    populates adversarial verifier slots, v0.3 fills patch_oracle and
-    auto_patch fields.
-    """
-    id: str
-    file: str
-    line_number: int
-    end_line: Optional[int]
-    finding_type: str          # sql_injection, memory_safety, propagation_buffer_size
-    cwe: str
-    severity: Literal["critical", "high", "medium", "low", "info"]
-    confidence: Literal["high", "medium", "low"]
-    description: str
-    code_snippet: str
-    crash_evidence: Optional[str]      # parsed ASan/UBSan/MSan report
-    poc: Optional[str]                 # input that triggers the bug
-    evidence_level: EvidenceLevel      # gates downstream budget
-    discovered_by: str                 # "hunter:memory_safety" | "harness_generator"
-                                       # | "variant_loop" | "semgrep" | "source_analyzer"
-    related_finding_id: Optional[str]  # for variant_loop matches
-    related_cve: Optional[str]         # for retro-hunt findings
-    seeded_from_crash: bool            # True if hunter saw crash evidence first
-
-    # Verifier fields (v0.1 schema, v0.2 populates counter_argument)
-    verified: bool
-    severity_verified: Optional[Literal["critical", "high", "medium", "low", "info"]]
-    verifier_pro_argument: Optional[str]
-    verifier_counter_argument: Optional[str]   # v0.2: steel-manned counter
-    verifier_tie_breaker: Optional[str]        # v0.2: evidence that resolves it
-
-    # v0.3 patch oracle and auto-patch
-    patch_oracle_passed: Optional[bool]
-    auto_patch: Optional[str]                  # minimal fix diff, None if rejected
-    auto_patch_validated: Optional[bool]       # PoC stopped crashing after patch
-
-    # Exploit triage
-    exploit: Optional[str]
-    exploit_success: Optional[bool]
-
-    hunter_session_id: str
-    verifier_session_id: Optional[str]
+SourceFinding = Finding
 
 
 # --- SourceHuntState ---------------------------------------------------------

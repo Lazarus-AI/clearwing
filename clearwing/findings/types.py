@@ -155,6 +155,44 @@ class Finding:
         except ValueError:
             return False
 
+    # --- Phase-3 migration shim -------------------------------------------
+    # Transitional dict-style access so callers still using the legacy
+    # SourceFinding TypedDict access patterns (.get / ["k"] / ["k"]=v / `in`)
+    # keep working while we migrate file-by-file. Removed in Phase 3d once
+    # every call site uses attribute access.
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self.__dataclass_fields__:
+            return getattr(self, key)
+        if key in self.extra:
+            return self.extra[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self.__dataclass_fields__:
+            setattr(self, key, value)
+        else:
+            self.extra[key] = value
+
+    def __contains__(self, key: object) -> bool:
+        return (
+            isinstance(key, str)
+            and (key in self.__dataclass_fields__ or key in self.extra)
+        )
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Mimic dict.get() semantics against Finding attributes.
+
+        Treats None / empty string as 'field not really set' so legacy
+        TypedDict callers that rely on default-when-absent keep working.
+        """
+        if key in self.__dataclass_fields__:
+            val = getattr(self, key)
+            if val in (None, "") and default is not None:
+                return default
+            return val
+        return self.extra.get(key, default)
+
 
 # --- Converters: from legacy shapes → Finding ------------------------------
 
