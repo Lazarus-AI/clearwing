@@ -1,0 +1,67 @@
+name: Feature request
+description: Propose a new capability or enhancement for Clearwing.
+title: "[feat] "
+labels:
+  - "enhancement"
+  - "triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please describe the problem first,
+        the proposed solution second, and any alternatives you've
+        considered third. The goal of this form is to surface the
+        *why* before the *how* — a good feature request shortens the
+        design conversation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: What are you trying to do that Clearwing makes hard or impossible today? Be specific — "make hunters smarter" is harder to act on than "the memory_safety specialist can't ask for the git blame of the line it's analyzing, which would help it distinguish recent regressions from long-standing code."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Clearwing to do? A sketch of the CLI flag, tool name, config key, or API surface you imagine is ideal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds exist today? Which ones did you try before filing this? Why weren't they good enough?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which subsystem?
+      multiple: true
+      options:
+        - "scanning (network pentest agent)"
+        - "sourcehunt (source-code vulnerability hunter)"
+        - "exploitation (payloads, metasploit bridge)"
+        - "CLI / TUI / web UI"
+        - "MCP server"
+        - "telemetry / observability"
+        - "docs / developer experience"
+        - "other / unsure"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: willingness
+    attributes:
+      label: Are you willing to contribute this?
+      description: No pressure either way — this just helps us prioritize.
+      options:
+        - label: I'd be willing to open a PR for this.
+          required: false
+        - label: I'd be willing to test a PR for this.
+          required: false

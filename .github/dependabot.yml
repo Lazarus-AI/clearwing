@@ -1,0 +1,61 @@
+version: 2
+updates:
+  # Python dependencies (runtime + dev extras) via pyproject.toml.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      # Batch minor/patch bumps of the langchain stack together — they
+      # release in lockstep and individual bumps churn the PR queue.
+      langchain:
+        patterns:
+          - "langchain-*"
+          - "langgraph*"
+        update-types:
+          - "minor"
+          - "patch"
+      # tree-sitter grammar bumps almost always move together.
+      tree-sitter:
+        patterns:
+          - "tree-sitter*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Dev/lint tooling — ruff, mypy, pytest, black. Group by intent.
+      dev-tooling:
+        patterns:
+          - "ruff"
+          - "mypy*"
+          - "pytest*"
+          - "black"
+          - "flake8"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions used by the CI workflow.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

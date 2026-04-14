@@ -1,0 +1,92 @@
+name: Bug report
+description: Something in Clearwing is broken, misbehaves, or contradicts its docs.
+title: "[bug] "
+labels:
+  - "bug"
+  - "triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please keep this form for **bugs in
+        Clearwing itself** — not for vulnerabilities Clearwing finds
+        in other software (report those to the affected vendor) and
+        not for security issues in Clearwing (see
+        [SECURITY.md](https://github.com/Lazarus-AI/clearwing/blob/main/SECURITY.md)
+        and use GitHub Security Advisories instead).
+
+  - type: input
+    id: version
+    attributes:
+      label: Clearwing version
+      description: Output of `clearwing --version` or the commit SHA.
+      placeholder: "1.0.0 or abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: "3.12.3"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      placeholder: "macOS 14.5 / Ubuntu 22.04 / Windows 11 WSL2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, specific description of the observed behavior.
+      placeholder: "Running `clearwing sourcehunt --depth standard https://...` crashes with a KeyError at runner.py:423 when the verifier returns a finding without an `evidence_level` key."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal command-line reproduction. Include the target URL/path, flags, environment variables, and any config files. Please redact credentials.
+      render: shell
+      placeholder: |
+        git clone https://github.com/example/vulnerable-repo /tmp/vuln
+        clearwing sourcehunt /tmp/vuln --depth quick --budget 1
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traceback
+      description: Full traceback if one was printed, plus the last ~30 lines of `~/.clearwing/clearwing.log` if the failure was silent.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: triage
+    attributes:
+      label: Triage confirmations
+      description: Before filing, please confirm:
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: This is a bug in Clearwing itself, not in a target Clearwing scanned.
+          required: true
+        - label: This is not a security-sensitive issue (if it is, file privately via Security Advisories).
+          required: true
