@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vulnexploit.sourcehunt.semgrep_sidecar import (
+from clearwing.sourcehunt.semgrep_sidecar import (
     DEFAULT_SEMGREP_CONFIG,
     SemgrepFinding,
     SemgrepSidecar,
@@ -153,7 +153,7 @@ class TestRunScanMocked:
 class TestPreprocessorSemgrepIntegration:
     def test_preprocessor_skips_semgrep_when_binary_missing(self, tmp_path):
         """When semgrep isn't installed, run_semgrep=True is a no-op."""
-        from vulnexploit.sourcehunt.preprocessor import Preprocessor
+        from clearwing.sourcehunt.preprocessor import Preprocessor
 
         (tmp_path / "main.py").write_text("def hi(): print('x')\n")
         with patch("shutil.which", return_value=None):
@@ -167,7 +167,7 @@ class TestPreprocessorSemgrepIntegration:
 
     def test_preprocessor_applies_semgrep_hints(self, tmp_path):
         """When semgrep returns findings, semgrep_hint count per file is set."""
-        from vulnexploit.sourcehunt.preprocessor import Preprocessor
+        from clearwing.sourcehunt.preprocessor import Preprocessor
 
         (tmp_path / "app.py").write_text("def f(): exec(input())\n")
         fake_output = {
@@ -216,7 +216,7 @@ class TestRankerSemgrepFloor:
         """A file with semgrep_hint > 0 gets surface floored to 3."""
         import json as _json
         from unittest.mock import MagicMock
-        from vulnexploit.sourcehunt.ranker import Ranker
+        from clearwing.sourcehunt.ranker import Ranker
 
         llm = MagicMock()
         response = MagicMock()

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vulnexploit.sourcehunt.pool import (
+from clearwing.sourcehunt.pool import (
     HunterPool,
     HuntPoolConfig,
     TierBudget,

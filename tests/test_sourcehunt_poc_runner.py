@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sandbox.container import ExecResult
-from vulnexploit.sourcehunt.poc_runner import (
+from clearwing.sandbox.container import ExecResult
+from clearwing.sourcehunt.poc_runner import (
     PocRunner,
     PocRunnerConfig,
     build_rerun_poc_callback,

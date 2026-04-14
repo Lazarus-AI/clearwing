@@ -1,0 +1,176 @@
+"""Main Textual TUI application for Clearwing."""
+
+from __future__ import annotations
+
+import asyncio
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.widgets import Header, Footer
+
+from .components.activity_feed import ActivityFeed
+from .components.status_bar import StatusBar
+from .components.input_bar import InputBar
+from .screens.help_screen import HelpScreen
+from .screens.quit_screen import QuitScreen
+from clearwing.core.events import EventBus, EventType
+
+
+class ClearwingApp(App):
+    """Textual TUI for the Clearwing autonomous agent."""
+
+    CSS = """
+    Screen {
+        layout: grid;
+        grid-size: 1;
+        grid-rows: auto 1fr auto auto;
+    }
+    ActivityFeed {
+        height: 1fr;
+        border: solid $accent;
+    }
+    StatusBar {
+        height: 3;
+        dock: bottom;
+    }
+    InputBar {
+        height: auto;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+p", "toggle_pause", "Pause/Resume"),
+        Binding("ctrl+q", "request_quit", "Quit"),
+        Binding("f1", "show_help", "Help"),
+    ]
+
+    def __init__(self, target=None, model="claude-sonnet-4-6", session_id=None,
+                 base_url=None, api_key=None):
+        super().__init__()
+        self.target = target
+        self.model = model
+        self.session_id = session_id
+        self.base_url = base_url
+        self.api_key = api_key
+        self.paused = False
+        self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._approval_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield ActivityFeed()
+        yield StatusBar(target=self.target, session_id=self.session_id)
+        yield InputBar()
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Subscribe to EventBus events when the app is mounted."""
+        bus = EventBus()
+        bus.subscribe(EventType.MESSAGE, self._on_message)
+        bus.subscribe(EventType.TOOL_START, self._on_tool_start)
+        bus.subscribe(EventType.TOOL_RESULT, self._on_tool_result)
+        bus.subscribe(EventType.FLAG_FOUND, self._on_flag_found)
+        bus.subscribe(EventType.COST_UPDATE, self._on_cost_update)
+        bus.subscribe(EventType.ERROR, self._on_error)
+        bus.subscribe(EventType.APPROVAL_NEEDED, self._on_approval_needed)
+
+    # ------------------------------------------------------------------
+    # Event handlers — bridge from background threads into the TUI
+    # ------------------------------------------------------------------
+
+    def _on_message(self, data):
+        self.call_from_thread(self._handle_message, data)
+
+    def _on_tool_start(self, data):
+        self.call_from_thread(self._handle_tool_start, data)
+
+    def _on_tool_result(self, data):
+        self.call_from_thread(self._handle_tool_result, data)
+
+    def _on_flag_found(self, data):
+        self.call_from_thread(self._handle_flag_found, data)
+
+    def _on_cost_update(self, data):
+        self.call_from_thread(self._handle_cost_update, data)
+
+    def _on_error(self, data):
+        self.call_from_thread(self._handle_error, data)
+
+    def _on_approval_needed(self, data):
+        self.call_from_thread(self._handle_approval, data)
+
+    # ------------------------------------------------------------------
+    # Actual UI update methods (run on the Textual event loop thread)
+    # ------------------------------------------------------------------
+
+    def _handle_message(self, data):
+        feed = self.query_one(ActivityFeed)
+        msg_type = data.get("msg_type", "info") if isinstance(data, dict) else "info"
+        content = data.get("content", str(data)) if isinstance(data, dict) else str(data)
+        feed.add_message(content, msg_type)
+
+    def _handle_tool_start(self, data):
+        feed = self.query_one(ActivityFeed)
+        tool_name = data.get("tool_name", "unknown") if isinstance(data, dict) else "unknown"
+        feed.add_tool_start(tool_name, data)
+
+    def _handle_tool_result(self, data):
+        feed = self.query_one(ActivityFeed)
+        tool_name = data.get("tool_name", "unknown") if isinstance(data, dict) else "unknown"
+        feed.add_tool_result(tool_name, data)
+
+    def _handle_flag_found(self, data):
+        feed = self.query_one(ActivityFeed)
+        flag = data.get("flag", str(data)) if isinstance(data, dict) else str(data)
+        context = data.get("context", "") if isinstance(data, dict) else ""
+        feed.add_flag(flag, context)
+
+    def _handle_cost_update(self, data):
+        bar = self.query_one(StatusBar)
+        if isinstance(data, dict):
+            bar.update_cost(data.get("tokens", 0), data.get("cost_usd", 0.0))
+
+    def _handle_error(self, data):
+        feed = self.query_one(ActivityFeed)
+        content = data.get("content", str(data)) if isinstance(data, dict) else str(data)
+        feed.add_message(content, "error")
+
+    def _handle_approval(self, data):
+        feed = self.query_one(ActivityFeed)
+        prompt = data.get("prompt", str(data)) if isinstance(data, dict) else str(data)
+        feed.add_message(f"APPROVAL NEEDED: {prompt}", "warning")
+
+    # ------------------------------------------------------------------
+    # Key binding actions
+    # ------------------------------------------------------------------
+
+    def action_toggle_pause(self) -> None:
+        self.paused = not self.paused
+        bar = self.query_one(StatusBar)
+        bar.update_pause(self.paused)
+        feed = self.query_one(ActivityFeed)
+        if self.paused:
+            feed.add_message(
+                "Agent PAUSED. Type instructions or Ctrl+P to resume.", "warning"
+            )
+        else:
+            feed.add_message("Agent RESUMED.", "info")
+
+    def action_request_quit(self) -> None:
+        self.push_screen(QuitScreen())
+
+    def action_show_help(self) -> None:
+        self.push_screen(HelpScreen())
+
+    # ------------------------------------------------------------------
+    # Public helpers for the agent loop
+    # ------------------------------------------------------------------
+
+    async def get_user_input(self) -> str:
+        """Called by agent loop to get next user input."""
+        return await self._user_input_queue.get()
+
+    def submit_input(self, text: str) -> None:
+        """Called by InputBar when user submits."""
+        self._user_input_queue.put_nowait(text)

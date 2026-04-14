@@ -1,7 +1,7 @@
 import pytest
 import asyncio
-from vulnexploit.core import CoreEngine, Config, ScanConfig
-from vulnexploit.core.engine import ScanState
+from clearwing.core import CoreEngine, Config, ScanConfig
+from clearwing.core.engine import ScanState
 
 
 class TestConfig:

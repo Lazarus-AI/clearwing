@@ -1,7 +1,7 @@
 """Tests for the agent graph updates — flag detection, state expansion, guardrail integration."""
 
-from vulnexploit.agent.state import AgentState
-from vulnexploit.agent.graph import detect_flags, FLAG_PATTERNS
+from clearwing.agent.state import AgentState
+from clearwing.agent.graph import detect_flags, FLAG_PATTERNS
 
 
 class TestAgentState:
@@ -60,13 +60,13 @@ class TestFlagDetection:
 
 class TestGetAllTools:
     def test_tools_count(self):
-        from vulnexploit.agent.tools import get_all_tools
+        from clearwing.agent.tools import get_all_tools
         tools = get_all_tools()
         # 22 original + 4 new memory/skills tools = 26
         assert len(tools) >= 26
 
     def test_new_tools_present(self):
-        from vulnexploit.agent.tools import get_all_tools
+        from clearwing.agent.tools import get_all_tools
         tools = get_all_tools()
         tool_names = [getattr(t, "name", str(t)) for t in tools]
         assert "recall_target_history" in tool_names
@@ -77,7 +77,7 @@ class TestGetAllTools:
 
 class TestBuildSystemPrompt:
     def test_prompt_includes_skills_section(self):
-        from vulnexploit.agent.prompts import build_system_prompt
+        from clearwing.agent.prompts import build_system_prompt
         state = {
             "target": "10.0.0.1",
             "open_ports": [],
@@ -94,7 +94,7 @@ class TestBuildSystemPrompt:
         assert "Skills System" in prompt or "skills" in prompt.lower()
 
     def test_prompt_includes_flags(self):
-        from vulnexploit.agent.prompts import build_system_prompt
+        from clearwing.agent.prompts import build_system_prompt
         state = {
             "target": "10.0.0.1",
             "open_ports": [],
@@ -111,7 +111,7 @@ class TestBuildSystemPrompt:
         assert "flag{test}" in prompt
 
     def test_prompt_includes_target(self):
-        from vulnexploit.agent.prompts import build_system_prompt
+        from clearwing.agent.prompts import build_system_prompt
         state = {
             "target": "192.168.1.100",
             "open_ports": [],

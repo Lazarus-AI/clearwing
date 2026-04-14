@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sandbox.container import ExecResult
-from vulnexploit.sourcehunt.harness_generator import (
+from clearwing.sandbox.container import ExecResult
+from clearwing.sourcehunt.harness_generator import (
     HarnessGenerator,
     HarnessGeneratorConfig,
     HarnessGeneratorResult,
@@ -345,7 +345,7 @@ class TestHuntPoolSeededCrashPlumbing:
     def test_pool_passes_seeded_crash_to_hunter(self):
         """HuntPoolConfig.seeded_crashes_by_file → build_hunter_agent seeded_crash."""
         from unittest.mock import MagicMock, patch
-        from vulnexploit.sourcehunt.pool import HunterPool, HuntPoolConfig
+        from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
 
         ft = _ft("parser.c", "/abs/parser.c", tags=["parser"], surface=5)
         llm = MagicMock()
@@ -364,7 +364,7 @@ class TestHuntPoolSeededCrashPlumbing:
         )
         pool = HunterPool(cfg)
 
-        with patch("vulnexploit.sourcehunt.hunter.build_hunter_agent") as mock_build:
+        with patch("clearwing.sourcehunt.hunter.build_hunter_agent") as mock_build:
             mock_build.return_value = (MagicMock(), MagicMock(session_id="s1"))
             pool._build_hunter_for_file(ft, sandbox=None)
             kwargs = mock_build.call_args.kwargs

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sourcehunt.patcher import (
+from clearwing.sourcehunt.patcher import (
     AutoPatcher,
     PatchAttempt,
     apply_patch_attempt,

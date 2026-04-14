@@ -1,0 +1,80 @@
+import asyncio
+from typing import Optional
+from langchain_core.tools import tool
+
+
+@tool
+async def scan_ports(
+    target: str,
+    ports: Optional[list[int]] = None,
+    scan_type: str = "syn",
+    threads: int = 100,
+) -> list[dict]:
+    """Scan a target for open ports.
+
+    Args:
+        target: Target IP address.
+        ports: List of ports to scan. Defaults to common ports if not provided.
+        scan_type: Type of scan - 'syn' or 'connect'.
+        threads: Number of concurrent threads.
+
+    Returns:
+        List of open port info dicts with keys: port, protocol, state, service.
+    """
+    from clearwing.scanning import PortScanner
+
+    scanner = PortScanner()
+    return await scanner.scan(target, ports, scan_type, threads)
+
+
+@tool
+async def detect_services(target: str, open_ports: list[dict]) -> list[dict]:
+    """Detect services running on open ports via banner grabbing.
+
+    Args:
+        target: Target IP address.
+        open_ports: List of open port dicts from scan_ports (must have 'port' key).
+
+    Returns:
+        List of service info dicts with keys: port, service, banner, version, protocol.
+    """
+    from clearwing.scanning import ServiceScanner
+
+    scanner = ServiceScanner()
+    return await scanner.detect(target, open_ports)
+
+
+@tool
+async def scan_vulnerabilities(target: str, services: list[dict]) -> list[dict]:
+    """Scan detected services for known vulnerabilities using local DB and NVD.
+
+    Args:
+        target: Target IP address.
+        services: List of service dicts from detect_services.
+
+    Returns:
+        List of vulnerability dicts with keys: cve, description, cvss, port, service.
+    """
+    from clearwing.scanning import VulnerabilityScanner
+
+    scanner = VulnerabilityScanner()
+    try:
+        return await scanner.scan(target, services)
+    finally:
+        await scanner.close()
+
+
+@tool
+async def detect_os(target: str) -> str:
+    """Detect the operating system of the target using TTL and TCP fingerprinting.
+
+    Args:
+        target: Target IP address.
+
+    Returns:
+        Detected OS string (e.g. 'Linux/Unix', 'Windows') or 'Unknown'.
+    """
+    from clearwing.scanning import OSScanner
+
+    scanner = OSScanner()
+    return await scanner.detect(target)

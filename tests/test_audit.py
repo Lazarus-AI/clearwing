@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.safety.audit import AuditLogger, SessionMetrics
-from vulnexploit.safety.audit.logger import AuditEntry
+from clearwing.safety.audit import AuditLogger, SessionMetrics
+from clearwing.safety.audit.logger import AuditEntry
 
 
 @pytest.fixture

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.data.knowledge import KnowledgeGraph
+from clearwing.data.knowledge import KnowledgeGraph
 
 
 def _finding(**kwargs) -> dict:
@@ -128,7 +128,7 @@ class TestAddSourceFinding:
 class TestRunnerKgIntegration:
     def test_runner_populates_kg_on_run(self, tmp_path: Path):
         """After a full run, the injected KG contains the finding entities."""
-        from vulnexploit.sourcehunt.runner import SourceHuntRunner
+        from clearwing.sourcehunt.runner import SourceHuntRunner
 
         kg = KnowledgeGraph(persist_path=str(tmp_path / "kg.json"))
         fixture = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -148,7 +148,7 @@ class TestRunnerKgIntegration:
         assert len(findings) >= 1
 
     def test_runner_can_disable_kg(self, tmp_path: Path):
-        from vulnexploit.sourcehunt.runner import SourceHuntRunner
+        from clearwing.sourcehunt.runner import SourceHuntRunner
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),

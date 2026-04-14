@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.sourcehunt.preprocessor import (
+from clearwing.sourcehunt.preprocessor import (
     Preprocessor,
     PreprocessResult,
     _file_defines_constants,

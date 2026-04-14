@@ -17,8 +17,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
-from vulnexploit.sourcehunt.pool import TierBudget
+from clearwing.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
+from clearwing.sourcehunt.pool import TierBudget
 
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
@@ -160,9 +160,9 @@ class TestStandardDepth:
         )
         # Hook into the runner's preprocess + rank to inspect tiers without
         # running the full hunt
-        from vulnexploit.sourcehunt.preprocessor import Preprocessor
-        from vulnexploit.sourcehunt.ranker import Ranker
-        from vulnexploit.sourcehunt.pool import assign_tier
+        from clearwing.sourcehunt.preprocessor import Preprocessor
+        from clearwing.sourcehunt.ranker import Ranker
+        from clearwing.sourcehunt.pool import assign_tier
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),
             local_path=str(FIXTURE_C_PROPAGATION),

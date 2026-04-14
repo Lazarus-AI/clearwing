@@ -1,0 +1,480 @@
+"""GitHub Checks API integration for the Commit Monitor.
+
+Wraps the `gh api` CLI so we don't add a new Python SDK dependency. On each
+commit the Commit Monitor scans, this publisher posts a check run with:
+
+    - name: "Overwing Sourcehunt"
+    - head_sha: commit SHA
+    - status: completed
+    - conclusion: failure (critical/high) | neutral (findings) | success (clean)
+    - output.title: "N findings (M critical, K high)"
+    - output.summary: per-tier + per-severity breakdown
+    - output.annotations: per-finding {path, start_line, end_line, level, message}
+
+The annotations list is capped at 50 per API call (GitHub's limit). Extra
+annotations get split across additional `gh api` calls using the check run's
+update endpoint.
+
+Repo owner/name are auto-detected from `git remote get-url origin`. Auth is
+handled by the `gh` CLI, which respects `GITHUB_TOKEN` and `gh auth login`.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+from dataclasses import dataclass, field
+from typing import Optional
+
+from .state import SourceFinding
+
+logger = logging.getLogger(__name__)
+
+
+# GitHub's hard limits — we cap below them so a valid request always fits
+MAX_ANNOTATIONS_PER_CALL = 50
+MAX_ANNOTATION_MESSAGE_BYTES = 60_000    # under GH's 64KB for headroom
+MAX_SUMMARY_BYTES = 60_000
+
+
+# Severity → check-run conclusion mapping. "failure" is red, "neutral" is
+# yellow (info), "success" is green. We map critical/high to failure because
+# a human should see a red check when sourcehunt finds them on a commit.
+_CONCLUSION_FOR_HIGHEST_SEVERITY = {
+    "critical": "failure",
+    "high": "failure",
+    "medium": "neutral",
+    "low": "neutral",
+    "info": "neutral",
+}
+
+
+# Finding severity → GitHub annotation level. GH accepts "notice"/"warning"/"failure".
+_ANNOTATION_LEVEL = {
+    "critical": "failure",
+    "high": "failure",
+    "medium": "warning",
+    "low": "notice",
+    "info": "notice",
+}
+
+
+# --- Data classes -----------------------------------------------------------
+
+
+@dataclass
+class GitHubChecksConfig:
+    """Configuration for the GitHubChecksPublisher."""
+    repo_path: str                          # local git clone — used to detect owner/repo
+    owner: Optional[str] = None             # override auto-detection
+    repo: Optional[str] = None              # override auto-detection
+    check_name: str = "Overwing Sourcehunt"
+    gh_binary: str = "gh"
+    details_url: Optional[str] = None       # optional URL to the full report
+
+
+@dataclass
+class CheckRunOutcome:
+    """What happened when we tried to publish a check run."""
+    published: bool
+    conclusion: str = ""
+    finding_count: int = 0
+    annotation_count: int = 0
+    notes: str = ""
+    check_run_id: Optional[str] = None
+
+
+# --- Publisher --------------------------------------------------------------
+
+
+class GitHubChecksPublisher:
+    """Publishes sourcehunt findings as GitHub check runs via `gh api`."""
+
+    def __init__(self, config: GitHubChecksConfig):
+        self.config = config
+
+    # ------------------------------------------------------------------
+    # Availability check
+    # ------------------------------------------------------------------
+
+    @property
+    def available(self) -> bool:
+        """True if the gh CLI is installed."""
+        return shutil.which(self.config.gh_binary) is not None
+
+    def detect_owner_repo(self) -> Optional[tuple[str, str]]:
+        """Parse owner/repo from `git remote get-url origin`.
+
+        Supports both HTTPS and SSH remote URLs. Returns None on failure.
+        """
+        if self.config.owner and self.config.repo:
+            return self.config.owner, self.config.repo
+        try:
+            proc = subprocess.run(
+                ["git", "-C", self.config.repo_path, "remote", "get-url", "origin"],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            if proc.returncode != 0:
+                logger.debug("git remote lookup failed: %s", proc.stderr.strip())
+                return None
+            url = proc.stdout.strip()
+        except Exception:
+            logger.debug("git remote lookup errored", exc_info=True)
+            return None
+
+        return parse_owner_repo(url)
+
+    # ------------------------------------------------------------------
+    # Publish
+    # ------------------------------------------------------------------
+
+    def publish(
+        self,
+        commit_sha: str,
+        findings: list[SourceFinding],
+    ) -> CheckRunOutcome:
+        """Post a check run to GitHub for one commit.
+
+        Best-effort: returns a CheckRunOutcome indicating what happened
+        but never raises. Logs warnings on failure.
+        """
+        if not self.available:
+            return CheckRunOutcome(
+                published=False,
+                notes=f"{self.config.gh_binary} not found on PATH",
+            )
+
+        owner_repo = self.detect_owner_repo()
+        if owner_repo is None:
+            return CheckRunOutcome(
+                published=False,
+                notes="could not detect owner/repo (no git remote origin?)",
+            )
+        owner, repo = owner_repo
+
+        conclusion = self._conclusion_from_findings(findings)
+        summary = self._build_summary(findings)
+        title = self._build_title(findings)
+        all_annotations = self._build_annotations(findings)
+
+        # First API call: create the check run with up to MAX annotations
+        first_batch = all_annotations[:MAX_ANNOTATIONS_PER_CALL]
+        rest_batches = [
+            all_annotations[i:i + MAX_ANNOTATIONS_PER_CALL]
+            for i in range(MAX_ANNOTATIONS_PER_CALL, len(all_annotations), MAX_ANNOTATIONS_PER_CALL)
+        ]
+
+        create_payload = {
+            "name": self.config.check_name,
+            "head_sha": commit_sha,
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {
+                "title": title,
+                "summary": summary,
+                "annotations": first_batch,
+            },
+        }
+        if self.config.details_url:
+            create_payload["details_url"] = self.config.details_url
+
+        create_result = self._gh_api_post(
+            f"repos/{owner}/{repo}/check-runs",
+            create_payload,
+        )
+        if create_result is None or "id" not in create_result:
+            return CheckRunOutcome(
+                published=False,
+                conclusion=conclusion,
+                finding_count=len(findings),
+                notes="gh api create check-run failed",
+            )
+
+        check_run_id = str(create_result["id"])
+        published_annotations = len(first_batch)
+
+        # Additional API calls: PATCH the check run with more annotation batches
+        for batch in rest_batches:
+            patch_payload = {
+                "output": {
+                    "title": title,
+                    "summary": summary,
+                    "annotations": batch,
+                },
+            }
+            patch_result = self._gh_api_patch(
+                f"repos/{owner}/{repo}/check-runs/{check_run_id}",
+                patch_payload,
+            )
+            if patch_result is None:
+                logger.debug("PATCH annotation batch failed — stopping")
+                break
+            published_annotations += len(batch)
+
+        return CheckRunOutcome(
+            published=True,
+            conclusion=conclusion,
+            finding_count=len(findings),
+            annotation_count=published_annotations,
+            check_run_id=check_run_id,
+            notes=f"posted to {owner}/{repo}",
+        )
+
+    # ------------------------------------------------------------------
+    # Payload construction helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _conclusion_from_findings(findings: list[SourceFinding]) -> str:
+        """Pick the check run conclusion based on highest severity."""
+        if not findings:
+            return "success"
+        highest = "info"
+        order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        for f in findings:
+            sev = (f.get("severity_verified") or f.get("severity") or "info").lower()
+            if order.get(sev, 0) > order.get(highest, 0):
+                highest = sev
+        return _CONCLUSION_FOR_HIGHEST_SEVERITY.get(highest, "neutral")
+
+    def _build_title(self, findings: list[SourceFinding]) -> str:
+        if not findings:
+            return "Overwing: no findings"
+        counts = _severity_counts(findings)
+        parts = []
+        for sev in ("critical", "high", "medium", "low", "info"):
+            if counts.get(sev, 0) > 0:
+                parts.append(f"{counts[sev]} {sev}")
+        return f"{len(findings)} findings ({', '.join(parts)})"
+
+    def _build_summary(self, findings: list[SourceFinding]) -> str:
+        if not findings:
+            return "Sourcehunt scan complete — no findings on this commit."
+
+        counts = _severity_counts(findings)
+        evidence_counts = _evidence_counts(findings)
+        discovered_by_counts = _discovered_by_counts(findings)
+
+        lines = [
+            f"**{len(findings)} findings** from clearwing sourcehunt.",
+            "",
+            "### Severity breakdown",
+        ]
+        for sev in ("critical", "high", "medium", "low", "info"):
+            if counts.get(sev, 0) > 0:
+                lines.append(f"- **{sev}**: {counts[sev]}")
+
+        lines += ["", "### Evidence levels"]
+        for level in (
+            "patch_validated", "exploit_demonstrated", "root_cause_explained",
+            "crash_reproduced", "static_corroboration", "suspicion",
+        ):
+            if evidence_counts.get(level, 0) > 0:
+                lines.append(f"- `{level}`: {evidence_counts[level]}")
+
+        lines += ["", "### Discovered by"]
+        for source, count in sorted(
+            discovered_by_counts.items(), key=lambda kv: -kv[1],
+        ):
+            lines.append(f"- `{source}`: {count}")
+
+        summary = "\n".join(lines)
+        if len(summary.encode("utf-8")) > MAX_SUMMARY_BYTES:
+            summary = summary.encode("utf-8")[:MAX_SUMMARY_BYTES].decode(
+                "utf-8", errors="ignore",
+            )
+        return summary
+
+    def _build_annotations(self, findings: list[SourceFinding]) -> list[dict]:
+        """Turn SourceFindings into GitHub check-run annotation dicts."""
+        annotations: list[dict] = []
+        for f in findings:
+            path = f.get("file")
+            line = f.get("line_number")
+            if not path or not line:
+                continue   # annotations require a file path and line number
+            severity = (f.get("severity_verified") or f.get("severity") or "info").lower()
+            level = _ANNOTATION_LEVEL.get(severity, "notice")
+
+            title = self._short_title(f)
+            message = self._annotation_message(f)
+
+            end_line = f.get("end_line") or int(line)
+            try:
+                start_line = int(line)
+                end_line = int(end_line)
+            except (TypeError, ValueError):
+                continue
+
+            annotation = {
+                "path": str(path),
+                "start_line": start_line,
+                "end_line": end_line,
+                "annotation_level": level,
+                "message": message,
+                "title": title,
+            }
+            # Only include raw_details if it fits — GitHub caps the field.
+            crash = f.get("crash_evidence") or ""
+            if crash and len(crash) < 8000:
+                annotation["raw_details"] = crash[:8000]
+
+            annotations.append(annotation)
+        return annotations
+
+    @staticmethod
+    def _short_title(finding: SourceFinding) -> str:
+        ft = finding.get("finding_type") or "vulnerability"
+        cwe = finding.get("cwe") or ""
+        if cwe:
+            return f"{ft} ({cwe})"
+        return str(ft)
+
+    @staticmethod
+    def _annotation_message(finding: SourceFinding) -> str:
+        """Build the annotation message. Capped to MAX_ANNOTATION_MESSAGE_BYTES."""
+        parts = []
+        desc = finding.get("description") or "(no description)"
+        parts.append(desc)
+
+        evidence = finding.get("evidence_level")
+        if evidence:
+            parts.append(f"\nEvidence: {evidence}")
+
+        discovered_by = finding.get("discovered_by")
+        if discovered_by:
+            parts.append(f"Discovered by: {discovered_by}")
+
+        if finding.get("verified"):
+            parts.append("Verified by independent-context pass.")
+
+        counter = finding.get("verifier_counter_argument")
+        if counter:
+            parts.append(f"\nVerifier counter-argument: {counter[:500]}")
+
+        message = "\n".join(parts)
+        if len(message.encode("utf-8")) > MAX_ANNOTATION_MESSAGE_BYTES:
+            message = message.encode("utf-8")[:MAX_ANNOTATION_MESSAGE_BYTES].decode(
+                "utf-8", errors="ignore",
+            )
+        return message
+
+    # ------------------------------------------------------------------
+    # Subprocess helpers
+    # ------------------------------------------------------------------
+
+    def _gh_api_post(self, endpoint: str, payload: dict) -> Optional[dict]:
+        """POST to the gh api endpoint. Returns the parsed JSON response."""
+        return self._gh_api_call(
+            endpoint=endpoint,
+            method="POST",
+            payload=payload,
+        )
+
+    def _gh_api_patch(self, endpoint: str, payload: dict) -> Optional[dict]:
+        return self._gh_api_call(
+            endpoint=endpoint,
+            method="PATCH",
+            payload=payload,
+        )
+
+    def _gh_api_call(
+        self,
+        endpoint: str,
+        method: str,
+        payload: dict,
+    ) -> Optional[dict]:
+        """Invoke `gh api` with a JSON payload piped to stdin.
+
+        `gh api --input -` reads the body from stdin as JSON.
+        """
+        cmd = [
+            self.config.gh_binary, "api",
+            "--method", method,
+            "--input", "-",
+            endpoint,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("gh api %s %s timed out", method, endpoint)
+            return None
+        except Exception as e:
+            logger.warning("gh api %s %s failed: %s", method, endpoint, e)
+            return None
+
+        if proc.returncode != 0:
+            logger.warning(
+                "gh api %s %s exited %d: %s",
+                method, endpoint, proc.returncode, proc.stderr[:500],
+            )
+            return None
+
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            logger.warning("gh api %s %s returned non-JSON", method, endpoint)
+            return None
+
+
+# --- Helpers ---------------------------------------------------------------
+
+
+def parse_owner_repo(url: str) -> Optional[tuple[str, str]]:
+    """Extract (owner, repo) from a git remote URL.
+
+    Supports:
+        https://github.com/owner/repo
+        https://github.com/owner/repo.git
+        git@github.com:owner/repo.git
+        ssh://git@github.com/owner/repo.git
+    """
+    if not url:
+        return None
+    url = url.strip()
+
+    # SSH shorthand: git@github.com:owner/repo.git
+    m = re.match(r"^git@[^:]+:([^/]+)/(.+?)(?:\.git)?$", url)
+    if m:
+        return m.group(1), m.group(2)
+
+    # ssh:// or https://
+    m = re.match(r"^(?:ssh://[^/]+/|https?://[^/]+/)([^/]+)/(.+?)(?:\.git)?$", url)
+    if m:
+        return m.group(1), m.group(2)
+
+    return None
+
+
+def _severity_counts(findings: list[SourceFinding]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for f in findings:
+        sev = (f.get("severity_verified") or f.get("severity") or "info").lower()
+        counts[sev] = counts.get(sev, 0) + 1
+    return counts
+
+
+def _evidence_counts(findings: list[SourceFinding]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for f in findings:
+        level = f.get("evidence_level", "suspicion")
+        counts[level] = counts.get(level, 0) + 1
+    return counts
+
+
+def _discovered_by_counts(findings: list[SourceFinding]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for f in findings:
+        source = f.get("discovered_by", "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts

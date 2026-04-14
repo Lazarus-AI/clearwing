@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from vulnexploit.sourcehunt.state import (
+from clearwing.sourcehunt.state import (
     EVIDENCE_LEVELS,
     evidence_at_or_above,
     evidence_compare,

@@ -1,0 +1,283 @@
+"""Commit Monitor — watch a git repo for new commits and run sourcehunt
+against the blast radius of each change.
+
+v0.3 CLI surface: `clearwing sourcehunt watch <repo>`.
+
+On each detected commit:
+    1. `git diff prev..new --name-only` → set of changed files.
+    2. Use the existing tree-sitter callgraph to expand changed files →
+       all transitive callers (blast-radius analysis).
+    3. Run a SourceHuntRunner pass on the expanded set with
+       `--tier-split 80/15/5` (more Tier A because the file set is
+       pre-selected).
+    4. Append findings to an append-only log.
+
+v0.3 polls with `git fetch` every `poll_interval_seconds`. A webhook
+integration can replace the poll loop in v1.0+.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+from .callgraph import CallGraph, CallGraphBuilder
+from .github_checks import (
+    CheckRunOutcome,
+    GitHubChecksConfig,
+    GitHubChecksPublisher,
+)
+from .state import SourceFinding
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CommitMonitorConfig:
+    repo_path: str                      # absolute path to a git clone
+    branch: str = "main"
+    poll_interval_seconds: int = 300    # default: 5 minutes
+    max_iterations: int = 0             # 0 = infinite (until cancelled)
+    output_dir: str = "./sourcehunt-results/watch"
+    depth: str = "standard"
+    budget_usd: float = 5.0
+    on_finding: Optional[Callable] = None
+    runner_factory: Optional[Callable] = None   # test injection point
+    # v0.4 GitHub Checks integration
+    enable_github_checks: bool = False
+    github_checks_publisher: Optional[GitHubChecksPublisher] = None
+    github_check_name: str = "Overwing Sourcehunt"
+    github_owner: Optional[str] = None
+    github_repo: Optional[str] = None
+
+
+@dataclass
+class CommitScanResult:
+    """One pass of the commit monitor loop."""
+    commit_sha: str
+    parent_sha: str
+    changed_files: list[str] = field(default_factory=list)
+    blast_radius: list[str] = field(default_factory=list)
+    findings: list[SourceFinding] = field(default_factory=list)
+    duration_seconds: float = 0.0
+    notes: str = ""
+    check_run_outcome: Optional[CheckRunOutcome] = None   # v0.4
+
+
+class CommitMonitor:
+    """Polls a git repo for new commits and runs sourcehunt on each change."""
+
+    def __init__(self, config: CommitMonitorConfig):
+        self.config = config
+        self._cancelled = False
+        self._last_seen_sha: Optional[str] = None
+        # v0.4: optional GitHub Checks publisher for posting results as
+        # check runs on each scanned commit
+        self._checks_publisher: Optional[GitHubChecksPublisher] = None
+        if config.enable_github_checks:
+            self._checks_publisher = config.github_checks_publisher or GitHubChecksPublisher(
+                GitHubChecksConfig(
+                    repo_path=config.repo_path,
+                    owner=config.github_owner,
+                    repo=config.github_repo,
+                    check_name=config.github_check_name,
+                ),
+            )
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> list[CommitScanResult]:
+        """Run the monitor loop until max_iterations or cancelled.
+
+        Returns the list of CommitScanResult records, one per processed commit.
+        """
+        results: list[CommitScanResult] = []
+        iteration = 0
+        while not self._cancelled:
+            iteration += 1
+            if self.config.max_iterations and iteration > self.config.max_iterations:
+                break
+
+            try:
+                new_sha = self._poll_for_new_commit()
+            except Exception as e:
+                logger.warning("git poll failed: %s", e)
+                self._sleep()
+                continue
+
+            if new_sha is None:
+                self._sleep()
+                continue
+
+            # Process the new commit
+            try:
+                result = self.scan_commit(new_sha)
+                results.append(result)
+                if self.config.on_finding:
+                    for f in result.findings:
+                        try:
+                            self.config.on_finding(f)
+                        except Exception:
+                            logger.debug("on_finding callback failed", exc_info=True)
+            except Exception:
+                logger.warning("scan_commit failed", exc_info=True)
+
+            self._sleep()
+        return results
+
+    def scan_commit(self, commit_sha: str) -> CommitScanResult:
+        """Compute the blast radius for a commit and run a sourcehunt pass.
+
+        Public method so tests can drive it without the poll loop.
+        """
+        start = time.monotonic()
+        parent = self._parent_sha(commit_sha)
+        changed = self._changed_files(parent, commit_sha)
+
+        # Build the callgraph and compute blast radius
+        blast_radius = self._compute_blast_radius(changed)
+
+        # Kick off a sourcehunt runner scoped to the blast radius
+        findings = self._run_sourcehunt_on(blast_radius)
+
+        # v0.4: publish as a GitHub check run if configured
+        check_outcome = None
+        if self._checks_publisher is not None:
+            try:
+                check_outcome = self._checks_publisher.publish(commit_sha, findings)
+                if check_outcome.published:
+                    logger.info(
+                        "Published check run %s for %s: %s (%d annotations)",
+                        check_outcome.check_run_id, commit_sha[:8],
+                        check_outcome.conclusion, check_outcome.annotation_count,
+                    )
+                else:
+                    logger.warning("Check run publish skipped: %s", check_outcome.notes)
+            except Exception:
+                logger.warning("Check run publish errored", exc_info=True)
+
+        return CommitScanResult(
+            commit_sha=commit_sha,
+            parent_sha=parent,
+            changed_files=changed,
+            blast_radius=blast_radius,
+            findings=findings,
+            duration_seconds=round(time.monotonic() - start, 2),
+            check_run_outcome=check_outcome,
+        )
+
+    # --- git helpers --------------------------------------------------------
+
+    def _poll_for_new_commit(self) -> Optional[str]:
+        """Fetch the branch and return the new HEAD SHA if it changed.
+
+        Returns None if there's no new commit since the last poll.
+        """
+        self._run_git(["fetch", "origin", self.config.branch])
+        head = self._run_git(["rev-parse", f"origin/{self.config.branch}"])
+        head = head.strip()
+        if self._last_seen_sha is None:
+            self._last_seen_sha = head
+            return head   # First poll — process the current HEAD
+        if head == self._last_seen_sha:
+            return None
+        self._last_seen_sha = head
+        return head
+
+    def _parent_sha(self, commit_sha: str) -> str:
+        try:
+            out = self._run_git(["rev-parse", f"{commit_sha}^"])
+            return out.strip()
+        except Exception:
+            return ""
+
+    def _changed_files(self, parent: str, commit: str) -> list[str]:
+        if not parent:
+            # Root commit — consider every tracked file as changed
+            out = self._run_git(["ls-tree", "-r", "--name-only", commit])
+            return [line for line in out.splitlines() if line.strip()]
+        out = self._run_git(["diff", "--name-only", f"{parent}..{commit}"])
+        return [line for line in out.splitlines() if line.strip()]
+
+    def _run_git(self, args: list[str]) -> str:
+        cmd = ["git", "-C", self.config.repo_path] + args
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(f"git {args[0]} failed: {proc.stderr.strip()}")
+        return proc.stdout
+
+    # --- blast radius -------------------------------------------------------
+
+    def _compute_blast_radius(self, changed_files: list[str]) -> list[str]:
+        """Expand `changed_files` through the callgraph to all transitive callers.
+
+        If the callgraph can't be built (no tree-sitter grammars), just
+        return the changed files as-is.
+        """
+        builder = CallGraphBuilder()
+        if not builder.available:
+            logger.info("callgraph not available; blast radius = changed files")
+            return list(changed_files)
+
+        graph = builder.build(self.config.repo_path)
+        if graph.empty:
+            return list(changed_files)
+
+        radius: set[str] = set(changed_files)
+        for f in changed_files:
+            # Walk forward from each changed file — every file that
+            # transitively calls INTO this file should be re-scanned.
+            transitive = graph.transitive_callers_of_file(f)
+            radius |= transitive
+        return sorted(radius)
+
+    # --- sourcehunt invocation ---------------------------------------------
+
+    def _run_sourcehunt_on(self, files: list[str]) -> list[SourceFinding]:
+        """Run a SourceHuntRunner pass on a specific set of files.
+
+        v0.3 scope: calls the runner against the whole repo but doesn't yet
+        scope it down to just the blast radius (that's a runner-level
+        enhancement). For now, the blast radius is recorded in the result
+        for observability; the runner scans the whole repo as usual.
+        """
+        if self.config.runner_factory is not None:
+            runner = self.config.runner_factory(files)
+        else:
+            from .pool import TierBudget
+            from .runner import SourceHuntRunner
+            runner = SourceHuntRunner(
+                repo_url=self.config.repo_path,
+                local_path=self.config.repo_path,
+                depth=self.config.depth,
+                budget_usd=self.config.budget_usd,
+                # More Tier A allocation because we're already in a
+                # narrowed, pre-selected file set.
+                tier_budget=TierBudget(
+                    tier_a_fraction=0.80,
+                    tier_b_fraction=0.15,
+                    tier_c_fraction=0.05,
+                ),
+                output_dir=self.config.output_dir,
+            )
+        try:
+            result = runner.run()
+            return list(result.findings)
+        except Exception:
+            logger.warning("watch-mode sourcehunt run failed", exc_info=True)
+            return []
+
+    # --- poll sleep --------------------------------------------------------
+
+    def _sleep(self) -> None:
+        """Sleep in short chunks so .cancel() takes effect promptly."""
+        remaining = self.config.poll_interval_seconds
+        while remaining > 0 and not self._cancelled:
+            chunk = min(remaining, 1)
+            time.sleep(chunk)
+            remaining -= chunk

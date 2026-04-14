@@ -14,12 +14,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.agent.tools.hunter_tools import (
+from clearwing.agent.tools.hunter_tools import (
     HunterContext,
     _default_libfuzzer_template,
     build_hunter_tools,
 )
-from vulnexploit.sandbox.container import ExecResult
+from clearwing.sandbox.container import ExecResult
 
 
 class _FakeSandbox:

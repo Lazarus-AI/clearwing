@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sourcehunt.webhook_server import (
+from clearwing.sourcehunt.webhook_server import (
     WebhookConfig,
     WebhookServer,
     commit_monitor_on_push_factory,

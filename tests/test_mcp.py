@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from vulnexploit.mcp.server import MCPServer
+from clearwing.mcp.server import MCPServer
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def _build_server(tools: list | None = None):
                 },
             ),
         ]
-    with patch("vulnexploit.mcp.server.MCPServer._register_tools"):
+    with patch("clearwing.mcp.server.MCPServer._register_tools"):
         server = MCPServer()
     # Manually populate _tools from the mocks
     for t in tools:
@@ -100,7 +100,7 @@ class TestHandleInitialize:
         request = {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}
         response = server.handle_request(request)
         info = response["result"]["serverInfo"]
-        assert info["name"] == "vulnexploit"
+        assert info["name"] == "clearwing"
         assert info["version"] == "1.0.0"
 
     def test_initialize_capabilities(self):

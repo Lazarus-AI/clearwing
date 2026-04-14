@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from vulnexploit.safety.scoring import CVSSVector, CVSSCalculator, VULN_PRESETS, Finding, FindingDeduplicator
+from clearwing.safety.scoring import CVSSVector, CVSSCalculator, VULN_PRESETS, Finding, FindingDeduplicator
 
 
 # ---------------------------------------------------------------------------

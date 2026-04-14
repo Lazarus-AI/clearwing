@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from vulnexploit.runners.parallel import ParallelExecutor, ParallelScanConfig, TargetResult
+from clearwing.runners.parallel import ParallelExecutor, ParallelScanConfig, TargetResult
 
 
 class TestTargetResult:

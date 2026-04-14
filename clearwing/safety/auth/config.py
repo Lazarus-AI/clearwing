@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FormLogin:
+    """Form-based login configuration."""
+    url: str
+    username_field: str = "username"
+    password_field: str = "password"
+    submit_selector: str = "button[type=submit]"
+    username: str = ""
+    password: str = ""
+    success_indicator: str = ""  # text/element indicating successful login
+    failure_indicator: str = ""
+
+
+@dataclass
+class APIAuth:
+    """API authentication configuration."""
+    auth_type: str  # bearer, api_key, basic
+    token: str = ""
+    header_name: str = "Authorization"
+    header_prefix: str = "Bearer"
+    api_key_param: str = ""  # query param name for api_key type
+    username: str = ""  # for basic auth
+    password: str = ""  # for basic auth
+
+
+@dataclass
+class CookieAuth:
+    """Cookie-based authentication."""
+    cookies: dict = field(default_factory=dict)  # name -> value
+
+
+@dataclass
+class OAuthConfig:
+    """OAuth/SSO configuration."""
+    auth_url: str = ""
+    token_url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    scope: str = ""
+    redirect_uri: str = ""
+
+
+@dataclass
+class AuthConfig:
+    """Complete authentication configuration for a target."""
+    target: str
+    auth_type: str  # form, api, cookie, oauth, none
+    form: Optional[FormLogin] = None
+    api: Optional[APIAuth] = None
+    cookie: Optional[CookieAuth] = None
+    oauth: Optional[OAuthConfig] = None
+    login_flow: str = ""  # natural language description of login flow
+    session_persistence: bool = True
+
+    def has_credentials(self) -> bool:
+        """Check if credentials are configured."""
+        if self.auth_type == "form" and self.form:
+            return bool(self.form.username and self.form.password)
+        elif self.auth_type == "api" and self.api:
+            return bool(self.api.token or (self.api.username and self.api.password))
+        elif self.auth_type == "cookie" and self.cookie:
+            return bool(self.cookie.cookies)
+        elif self.auth_type == "oauth" and self.oauth:
+            return bool(self.oauth.client_id)
+        return False
+
+
+class AuthConfigLoader:
+    """Loads authentication configs from YAML files."""
+
+    CONFIG_DIR = Path("~/.clearwing/auth").expanduser()
+
+    def __init__(self):
+        self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    def load(self, path: str) -> AuthConfig:
+        """Load an auth config from a YAML file."""
+        p = Path(path).expanduser()
+        if not p.exists():
+            raise FileNotFoundError(f"Auth config not found: {p}")
+
+        raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+        return self._parse(raw)
+
+    def load_for_target(self, target: str) -> Optional[AuthConfig]:
+        """Try to find an auth config for the given target."""
+        # Check CONFIG_DIR for matching files
+        for config_file in self.CONFIG_DIR.glob("*.yml"):
+            try:
+                config = self.load(str(config_file))
+                if config.target == target:
+                    return config
+            except Exception:
+                logger.debug("Failed to load auth config %s", config_file, exc_info=True)
+                continue
+        for config_file in self.CONFIG_DIR.glob("*.yaml"):
+            try:
+                config = self.load(str(config_file))
+                if config.target == target:
+                    return config
+            except Exception:
+                logger.debug("Failed to load auth config %s", config_file, exc_info=True)
+                continue
+        return None
+
+    def save(self, config: AuthConfig, path: str = None):
+        """Save an auth config to a YAML file."""
+        if path is None:
+            safe_target = config.target.replace(":", "_").replace("/", "_")
+            path = str(self.CONFIG_DIR / f"{safe_target}.yml")
+
+        data = self._serialize(config)
+        Path(path).write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
+
+    def _parse(self, raw: dict) -> AuthConfig:
+        """Parse raw YAML dict into AuthConfig."""
+        auth_type = raw.get("auth_type", "none")
+        target = raw.get("target", "")
+
+        form = None
+        if "form" in raw:
+            f = raw["form"]
+            form = FormLogin(
+                url=f.get("url", ""),
+                username_field=f.get("username_field", "username"),
+                password_field=f.get("password_field", "password"),
+                submit_selector=f.get("submit_selector", "button[type=submit]"),
+                username=self._resolve_env(f.get("username", "")),
+                password=self._resolve_env(f.get("password", "")),
+                success_indicator=f.get("success_indicator", ""),
+                failure_indicator=f.get("failure_indicator", ""),
+            )
+
+        api = None
+        if "api" in raw:
+            a = raw["api"]
+            api = APIAuth(
+                auth_type=a.get("auth_type", "bearer"),
+                token=self._resolve_env(a.get("token", "")),
+                header_name=a.get("header_name", "Authorization"),
+                header_prefix=a.get("header_prefix", "Bearer"),
+                api_key_param=a.get("api_key_param", ""),
+                username=self._resolve_env(a.get("username", "")),
+                password=self._resolve_env(a.get("password", "")),
+            )
+
+        cookie = None
+        if "cookie" in raw:
+            c = raw["cookie"]
+            resolved_cookies = {}
+            for k, v in c.get("cookies", {}).items():
+                resolved_cookies[k] = self._resolve_env(str(v))
+            cookie = CookieAuth(cookies=resolved_cookies)
+
+        oauth = None
+        if "oauth" in raw:
+            o = raw["oauth"]
+            oauth = OAuthConfig(
+                auth_url=o.get("auth_url", ""),
+                token_url=o.get("token_url", ""),
+                client_id=self._resolve_env(o.get("client_id", "")),
+                client_secret=self._resolve_env(o.get("client_secret", "")),
+                scope=o.get("scope", ""),
+                redirect_uri=o.get("redirect_uri", ""),
+            )
+
+        return AuthConfig(
+            target=target,
+            auth_type=auth_type,
+            form=form,
+            api=api,
+            cookie=cookie,
+            oauth=oauth,
+            login_flow=raw.get("login_flow", ""),
+            session_persistence=raw.get("session_persistence", True),
+        )
+
+    def _serialize(self, config: AuthConfig) -> dict:
+        """Serialize AuthConfig to a dict suitable for YAML."""
+        data = {
+            "target": config.target,
+            "auth_type": config.auth_type,
+        }
+
+        if config.form:
+            data["form"] = {
+                "url": config.form.url,
+                "username_field": config.form.username_field,
+                "password_field": config.form.password_field,
+                "submit_selector": config.form.submit_selector,
+                "username": config.form.username,
+                "password": config.form.password,
+                "success_indicator": config.form.success_indicator,
+                "failure_indicator": config.form.failure_indicator,
+            }
+
+        if config.api:
+            data["api"] = {
+                "auth_type": config.api.auth_type,
+                "token": config.api.token,
+                "header_name": config.api.header_name,
+                "header_prefix": config.api.header_prefix,
+            }
+            if config.api.api_key_param:
+                data["api"]["api_key_param"] = config.api.api_key_param
+            if config.api.username:
+                data["api"]["username"] = config.api.username
+                data["api"]["password"] = config.api.password
+
+        if config.cookie:
+            data["cookie"] = {"cookies": config.cookie.cookies}
+
+        if config.oauth:
+            data["oauth"] = {
+                "auth_url": config.oauth.auth_url,
+                "token_url": config.oauth.token_url,
+                "client_id": config.oauth.client_id,
+                "client_secret": config.oauth.client_secret,
+                "scope": config.oauth.scope,
+                "redirect_uri": config.oauth.redirect_uri,
+            }
+
+        if config.login_flow:
+            data["login_flow"] = config.login_flow
+
+        data["session_persistence"] = config.session_persistence
+        return data
+
+    @staticmethod
+    def _resolve_env(value: str) -> str:
+        """Resolve environment variable references like ${ENV_VAR}."""
+        if not isinstance(value, str):
+            return str(value)
+        if value.startswith("${") and value.endswith("}"):
+            env_var = value[2:-1]
+            return os.environ.get(env_var, "")
+        return value

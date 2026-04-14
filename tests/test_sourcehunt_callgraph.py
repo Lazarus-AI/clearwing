@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.sourcehunt.callgraph import (
+from clearwing.sourcehunt.callgraph import (
     CallGraph,
     CallGraphBuilder,
 )
@@ -133,7 +133,7 @@ class TestCallGraphBuilderPython:
 
 class TestPreprocessorCallgraphIntegration:
     def test_preprocessor_populates_transitive_callers(self, builder):
-        from vulnexploit.sourcehunt.preprocessor import Preprocessor
+        from clearwing.sourcehunt.preprocessor import Preprocessor
 
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),
@@ -149,7 +149,7 @@ class TestPreprocessorCallgraphIntegration:
 
     def test_preprocessor_propagate_reachability_marks_parsers_as_entry(self, builder):
         """Files tagged parser should get reachability=5."""
-        from vulnexploit.sourcehunt.preprocessor import Preprocessor
+        from clearwing.sourcehunt.preprocessor import Preprocessor
 
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),
@@ -177,7 +177,7 @@ class TestRankerUsesTransitiveCallers:
         from unittest.mock import MagicMock
         import json
 
-        from vulnexploit.sourcehunt.ranker import Ranker
+        from clearwing.sourcehunt.ranker import Ranker
 
         llm = MagicMock()
         response = MagicMock()

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.sourcehunt.taint import (
+from clearwing.sourcehunt.taint import (
     ALL_PATTERNS,
     C_SINKS,
     C_SOURCES,

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.data.knowledge import KnowledgeGraph
+from clearwing.data.knowledge import KnowledgeGraph
 
 
 @pytest.fixture

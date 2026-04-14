@@ -3,12 +3,18 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vulnexploit"
+name = "clearwing"
 version = "1.0.0"
-description = "Comprehensive Vulnerability Scanner and Exploiter"
+description = "Autonomous vulnerability scanner and source-code hunter built on LangGraph"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Eric Hartford", email = "eric@quixi.ai" },
+]
+maintainers = [
+    { name = "Eric Hartford", email = "eric@quixi.ai" },
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -76,17 +82,23 @@ dev = [
     "mypy>=1.0.0",
 ]
 all = [
-    "vulnexploit[metasploit,browser,vector,web,dev]",
+    "clearwing[metasploit,browser,vector,web,dev]",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Lazarus-AI/clearwing"
+Repository = "https://github.com/Lazarus-AI/clearwing"
+Issues = "https://github.com/Lazarus-AI/clearwing/issues"
+Documentation = "https://github.com/Lazarus-AI/clearwing#readme"
+
 [project.scripts]
-vulnexploit = "vulnexploit:main"
+clearwing = "clearwing:main"
 
 [tool.setuptools.packages.find]
-include = ["vulnexploit*"]
+include = ["clearwing*"]
 
 [tool.setuptools.package-data]
-vulnexploit = ["core/config_data/*.yaml", "core/skills/vulnerabilities/*.md", "skills/vulnerabilities/*.md"]
+clearwing = ["core/config_data/*.yaml", "core/skills/vulnerabilities/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

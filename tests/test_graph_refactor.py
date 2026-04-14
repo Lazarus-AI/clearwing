@@ -19,12 +19,12 @@ from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-from vulnexploit.agent.graph import (
+from clearwing.agent.graph import (
     build_react_graph,
     create_agent,
     _default_pentest_state_updater,
 )
-from vulnexploit.agent.state import AgentState
+from clearwing.agent.state import AgentState
 
 
 class CustomState(TypedDict):
@@ -152,7 +152,7 @@ class TestCreateAgentDelegatesToBuildReactGraph:
 
     def test_create_agent_returns_compiled_graph(self):
         # Patch the LLM creation to avoid network/auth
-        with patch("vulnexploit.agent.graph._create_llm") as mock_create_llm:
+        with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
             mock_llm.bind_tools = MagicMock(return_value=MagicMock())
             mock_create_llm.return_value = mock_llm
@@ -168,7 +168,7 @@ class TestCreateAgentDelegatesToBuildReactGraph:
             """Doubler."""
             return x * 2
 
-        with patch("vulnexploit.agent.graph._create_llm") as mock_create_llm:
+        with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
             bound = MagicMock()
             mock_llm.bind_tools = MagicMock(return_value=bound)

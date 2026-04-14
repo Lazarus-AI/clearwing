@@ -30,7 +30,7 @@ class TestKaliDocker:
             import docker as docker_lib
             client = docker_lib.from_env()
             try:
-                container = client.containers.get("vulnexploit-kali-test")
+                container = client.containers.get("clearwing-kali-test")
                 container.stop(timeout=2)
                 container.remove()
             except docker_lib.errors.NotFound:
@@ -49,7 +49,7 @@ class TestKaliDocker:
         container = client.containers.run(
             "alpine:latest",
             command="sleep 300",
-            name="vulnexploit-kali-test",
+            name="clearwing-kali-test",
             detach=True,
         )
 
@@ -67,7 +67,7 @@ class TestKaliDocker:
 
             # Verify removed
             with pytest.raises(docker_lib.errors.NotFound):
-                client.containers.get("vulnexploit-kali-test")
+                client.containers.get("clearwing-kali-test")
         except Exception:
             # Cleanup on failure
             try:
@@ -86,13 +86,13 @@ class TestKaliDocker:
         container = client.containers.run(
             "alpine:latest",
             command="sleep 300",
-            name="vulnexploit-kali-test",
+            name="clearwing-kali-test",
             detach=True,
         )
 
         try:
             # Getting same container by name should return same ID
-            same = client.containers.get("vulnexploit-kali-test")
+            same = client.containers.get("clearwing-kali-test")
             assert same.id == container.id
         finally:
             container.stop(timeout=2)

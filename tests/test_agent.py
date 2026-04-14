@@ -5,7 +5,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 class TestAgentState:
     def test_state_instantiation(self):
-        from vulnexploit.agent.state import AgentState
+        from clearwing.agent.state import AgentState
 
         state: AgentState = {
             "messages": [],
@@ -23,7 +23,7 @@ class TestAgentState:
         assert state["open_ports"] == []
 
     def test_state_with_data(self):
-        from vulnexploit.agent.state import AgentState
+        from clearwing.agent.state import AgentState
 
         state: AgentState = {
             "messages": [],
@@ -43,7 +43,7 @@ class TestAgentState:
 
 class TestSystemPrompt:
     def test_empty_state(self):
-        from vulnexploit.agent.prompts import build_system_prompt
+        from clearwing.agent.prompts import build_system_prompt
 
         state = {
             "target": None,
@@ -57,10 +57,10 @@ class TestSystemPrompt:
         }
         prompt = build_system_prompt(state)
         assert "No scan data yet." in prompt
-        assert "VulnExploit Agent" in prompt
+        assert "Clearwing Agent" in prompt
 
     def test_populated_state(self):
-        from vulnexploit.agent.prompts import build_system_prompt
+        from clearwing.agent.prompts import build_system_prompt
 
         state = {
             "target": "10.0.0.1",
@@ -83,7 +83,7 @@ class TestSystemPrompt:
 
 class TestToolList:
     def test_get_all_tools(self):
-        from vulnexploit.agent.tools import get_all_tools
+        from clearwing.agent.tools import get_all_tools
 
         tools = get_all_tools()
         assert len(tools) >= 20
@@ -99,7 +99,7 @@ class TestToolList:
 
 class TestGraphConstruction:
     def test_create_agent(self):
-        from vulnexploit.agent.graph import create_agent
+        from clearwing.agent.graph import create_agent
 
         with patch("langchain_anthropic.ChatAnthropic") as mock_llm:
             mock_instance = MagicMock()
@@ -111,7 +111,7 @@ class TestGraphConstruction:
             mock_llm.assert_called_once_with(model="claude-sonnet-4-6")
 
     def test_create_agent_with_custom_tools(self):
-        from vulnexploit.agent.graph import create_agent
+        from clearwing.agent.graph import create_agent
         from langchain_core.tools import tool
 
         @tool
@@ -132,7 +132,7 @@ class TestGraphConstruction:
 
     def test_create_agent_with_custom_endpoint(self):
         import sys
-        from vulnexploit.agent.graph import create_agent
+        from clearwing.agent.graph import create_agent
 
         mock_openai_module = MagicMock()
         mock_llm_class = MagicMock()
@@ -158,7 +158,7 @@ class TestGraphConstruction:
 class TestScannerToolWrapping:
     @pytest.mark.asyncio
     async def test_scan_ports_wraps_scanner(self):
-        from vulnexploit.agent.tools.scanner_tools import scan_ports
+        from clearwing.agent.tools.scanner_tools import scan_ports
 
         mock_result = [{"port": 22, "protocol": "tcp", "state": "open", "service": "SSH"}]
 
@@ -166,7 +166,7 @@ class TestScannerToolWrapping:
         mock_scanner.scan = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("vulnexploit.scanning.PortScanner", mock_class):
+        with patch("clearwing.scanning.PortScanner", mock_class):
             await scan_ports.ainvoke({
                 "target": "192.168.1.1",
                 "ports": [22],
@@ -177,7 +177,7 @@ class TestScannerToolWrapping:
 
     @pytest.mark.asyncio
     async def test_detect_services_wraps_scanner(self):
-        from vulnexploit.agent.tools.scanner_tools import detect_services
+        from clearwing.agent.tools.scanner_tools import detect_services
 
         ports = [{"port": 80, "service": "HTTP"}]
         mock_result = [{"port": 80, "service": "HTTP", "banner": "Apache", "version": "2.4"}]
@@ -186,7 +186,7 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("vulnexploit.scanning.ServiceScanner", mock_class):
+        with patch("clearwing.scanning.ServiceScanner", mock_class):
             await detect_services.ainvoke({
                 "target": "192.168.1.1",
                 "open_ports": ports,
@@ -195,20 +195,20 @@ class TestScannerToolWrapping:
 
     @pytest.mark.asyncio
     async def test_detect_os_wraps_scanner(self):
-        from vulnexploit.agent.tools.scanner_tools import detect_os
+        from clearwing.agent.tools.scanner_tools import detect_os
 
         mock_scanner = MagicMock()
         mock_scanner.detect = AsyncMock(return_value="Linux/Unix")
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("vulnexploit.scanning.OSScanner", mock_class):
+        with patch("clearwing.scanning.OSScanner", mock_class):
             await detect_os.ainvoke({"target": "192.168.1.1"})
             mock_scanner.detect.assert_called_once_with("192.168.1.1")
 
 
 class TestUtilityTools:
     def test_validate_target_ip(self):
-        from vulnexploit.agent.tools.utility_tools import validate_target
+        from clearwing.agent.tools.utility_tools import validate_target
 
         result = validate_target.invoke({"ip_or_cidr": "192.168.1.1"})
         assert result["valid"] is True
@@ -216,13 +216,13 @@ class TestUtilityTools:
         assert result["ips"] == ["192.168.1.1"]
 
     def test_validate_target_invalid(self):
-        from vulnexploit.agent.tools.utility_tools import validate_target
+        from clearwing.agent.tools.utility_tools import validate_target
 
         result = validate_target.invoke({"ip_or_cidr": "not-an-ip"})
         assert result["valid"] is False
 
     def test_validate_target_cidr(self):
-        from vulnexploit.agent.tools.utility_tools import validate_target
+        from clearwing.agent.tools.utility_tools import validate_target
 
         result = validate_target.invoke({"ip_or_cidr": "192.168.1.0/30"})
         assert result["valid"] is True
@@ -230,7 +230,7 @@ class TestUtilityTools:
         assert len(result["ips"]) == 2  # /30 has 2 usable hosts
 
     def test_calculate_severity(self):
-        from vulnexploit.agent.tools.utility_tools import calculate_severity
+        from clearwing.agent.tools.utility_tools import calculate_severity
 
         assert calculate_severity.invoke({"cvss_score": 9.5}) == "CRITICAL"
         assert calculate_severity.invoke({"cvss_score": 7.5}) == "HIGH"
@@ -241,7 +241,7 @@ class TestUtilityTools:
 
 class TestReportingTools:
     def test_generate_report(self):
-        from vulnexploit.agent.tools.reporting_tools import generate_report
+        from clearwing.agent.tools.reporting_tools import generate_report
 
         scan_data = {
             "target": "192.168.1.1",
@@ -253,4 +253,4 @@ class TestReportingTools:
         }
         result = generate_report.invoke({"format": "text", "scan_data": scan_data})
         assert "192.168.1.1" in result
-        assert "VULNEXPLOIT SCAN REPORT" in result
+        assert "CLEARWING SCAN REPORT" in result

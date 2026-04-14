@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.agent.tools.hunter_tools import (
+from clearwing.agent.tools.hunter_tools import (
     HunterContext,
     _grep_python_fallback,
     _normalize_path,
@@ -25,7 +25,7 @@ from vulnexploit.agent.tools.hunter_tools import (
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
-from vulnexploit.sourcehunt.hunter import (
+from clearwing.sourcehunt.hunter import (
     GENERAL_HUNTER_PROMPT,
     PROPAGATION_AUDIT_PROMPT,
     _build_hunter_prompt,

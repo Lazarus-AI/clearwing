@@ -1,0 +1,309 @@
+"""HunterPool: tiered parallel fan-out with budget rollover.
+
+v0.4: HunterPool is now a thin adapter over clearwing/runners/parallel/executor.py
+— the generalized ParallelExecutor handles both network-pentest (flat) and
+sourcehunt (tiered) execution. HunterPool's job is:
+
+    1. Convert a HuntPoolConfig into a ParallelScanConfig with the right
+       sourcehunt seams (file tier function, per-tier cost caps, etc.)
+    2. Wrap each file in a runner that spawns a sandbox + hunter graph
+       and streams it to completion
+    3. Extract SourceFinding objects from the resulting TargetResults
+
+The existing HunterPool API (run() → list[SourceFinding], spent_per_tier,
+total_spent, cancel, assign_tier) is preserved.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+from clearwing.runners.parallel.executor import (
+    ParallelExecutor,
+    ParallelScanConfig,
+    TargetResult,
+    TierBudget as _ExecutorTierBudget,
+)
+
+from .state import FileTarget, SourceFinding
+
+logger = logging.getLogger(__name__)
+
+
+# Re-export so existing callers that import from pool.py still work
+TierBudget = _ExecutorTierBudget
+
+
+# --- Tier assignment --------------------------------------------------------
+
+
+def assign_tier(file_target: FileTarget) -> str:
+    """Return 'A', 'B', or 'C' from the file's priority.
+
+    Thresholds:
+        priority >= 3.0 → A
+        priority >= 2.0 → B
+        otherwise       → C
+
+    Calibrated so:
+      - (surface=4, influence=2, reach=3) → 0.5*4 + 0.2*2 + 0.3*3 = 3.3 → A
+      - (surface=2, influence=2, reach=3) → 0.5*2 + 0.2*2 + 0.3*3 = 2.3 → B
+      - (surface=1, influence=1, reach=3) → 0.5*1 + 0.2*1 + 0.3*3 = 1.6 → C
+      - (surface=1, influence=5, reach=3) → 0.5*1 + 0.2*5 + 0.3*3 = 2.4 → B
+        (the FFmpeg-style propagation case lands in Tier B, never Tier C)
+    """
+    p = file_target.get("priority", 0.0)
+    if p >= 3.0:
+        return "A"
+    if p >= 2.0:
+        return "B"
+    return "C"
+
+
+# --- Config -----------------------------------------------------------------
+
+
+@dataclass
+class HuntPoolConfig:
+    files: list[FileTarget]
+    repo_path: str
+    sandbox_factory: Optional[Callable] = None
+                                # Callable[[], SandboxContainer] — a fresh
+                                # container per hunter. None → host-fallback.
+    hunter_factory: Optional[Callable] = None
+                                # Callable[[FileTarget, sandbox, session_id], (graph, ctx)]
+                                # If None, the pool will import build_hunter_agent
+                                # at run time and require an llm in the config.
+    llm: Optional[object] = None  # Required if hunter_factory is None
+    max_parallel: int = 8
+    budget_usd: float = 5.0
+    tier_budget: TierBudget = field(default_factory=TierBudget)
+    cost_limit_per_file_a: float = 0.25
+    cost_limit_per_file_b: float = 0.15
+    cost_limit_per_file_c: float = 0.04
+    timeout_minutes_per_file: int = 15
+    on_finding: Optional[Callable] = None
+    session_id_prefix: str = "hunt"
+    # v0.2 seeded-crash lookup: {repo_relative_file_path: {report, target_function, ...}}
+    seeded_crashes_by_file: dict = field(default_factory=dict)
+    # v0.2 Semgrep hints: {repo_relative_file_path: [semgrep_finding_dicts]}
+    semgrep_hints_by_file: dict = field(default_factory=dict)
+
+
+# --- HunterPool -------------------------------------------------------------
+
+
+class _FileHunterRunner:
+    """CICDResult-shaped runner that executes one hunter over one FileTarget.
+
+    Used as the `runner_factory` payload for ParallelExecutor. Each
+    instance is created by HunterPool's factory closure and wraps the
+    logic that used to live in HunterPool._run_one_hunter.
+    """
+
+    def __init__(
+        self,
+        file_target: FileTarget,
+        hunter_pool: "HunterPool",
+    ):
+        self.file_target = file_target
+        self._pool = hunter_pool
+
+    def run(self):
+        findings, cost = self._pool._run_one_hunter(self.file_target, 0.0)
+        # Build a CICDResult-shaped result for ParallelExecutor to consume
+        from clearwing.runners.cicd.runner import CICDResult
+        return CICDResult(
+            exit_code=0,
+            target=self.file_target.get("path", ""),
+            depth="sourcehunt",
+            findings=list(findings),
+            duration_seconds=0.0,
+            cost_usd=cost,
+            tokens_used=0,
+            output_path=None,
+        )
+
+
+class HunterPool:
+    """Tiered parallel hunter executor — v0.4 shim over ParallelExecutor.
+
+    Preserves the existing HunterPool API (run() → list[SourceFinding],
+    spent_per_tier, total_spent, cancel) while delegating all the
+    scheduling/threading/budget logic to the generalized ParallelExecutor.
+
+    This means a single battle-tested parallel engine powers both the
+    network-pentest flat path and the sourcehunt tiered path.
+    """
+
+    def __init__(self, config: HuntPoolConfig):
+        self.config = config
+        # Pre-assign tiers (the executor reads this via item_tier_fn)
+        for ft in self.config.files:
+            ft["tier"] = assign_tier(ft)
+
+        # Build an R3-compatible runner_factory that closes over self so
+        # the inner runner can reach back into the pool for sandbox + llm
+        # configuration.
+        def factory(item: Any, pe_config: ParallelScanConfig):
+            return _FileHunterRunner(item, self)
+
+        # The executor's item_cost_limits replaces the per-tier caps.
+        self._parallel_config = ParallelScanConfig(
+            items=self.config.files,
+            runner_factory=factory,
+            max_parallel=self.config.max_parallel,
+            total_cost_limit=self.config.budget_usd,
+            timeout_minutes=self.config.timeout_minutes_per_file,
+            tier_budget=self.config.tier_budget,
+            item_tier_fn=lambda f: f.get("tier", "C"),
+            item_key_fn=lambda f: f.get("path", ""),
+            item_cost_limits={
+                "A": self.config.cost_limit_per_file_a,
+                "B": self.config.cost_limit_per_file_b,
+                "C": self.config.cost_limit_per_file_c,
+            },
+        )
+        self._executor = ParallelExecutor(self._parallel_config)
+
+    def run(self) -> list[SourceFinding]:
+        """Run the full A → B → C pipeline. Returns merged findings.
+
+        Delegates to ParallelExecutor.run() which handles submission,
+        budget gating, rollover, and per-tier cost tracking. Extracts
+        SourceFinding objects from the TargetResult.findings lists.
+        """
+        target_results = self._executor.run()
+        all_findings: list[SourceFinding] = []
+        for tr in target_results:
+            if tr.status == "completed":
+                # TargetResult.findings is list[dict] but we stashed full
+                # SourceFinding dicts in there — they pass through unchanged.
+                for f in tr.findings:
+                    all_findings.append(f)
+                if self.config.on_finding:
+                    for f in tr.findings:
+                        try:
+                            self.config.on_finding(f)
+                        except Exception:
+                            logger.debug("on_finding callback failed", exc_info=True)
+        return all_findings
+
+    def cancel(self):
+        self._executor.cancel()
+
+    @property
+    def spent_per_tier(self) -> dict[str, float]:
+        """Per-tier spend breakdown. Delegates to the underlying executor."""
+        return self._executor.spent_per_tier
+
+    @property
+    def total_spent(self) -> float:
+        return sum(self._executor.spent_per_tier.values())
+
+    # --- Internals: hunter-specific logic the runner delegates back to ----
+
+    def _run_one_hunter(
+        self,
+        file_target: FileTarget,
+        cost_limit: float,
+    ) -> tuple[list[SourceFinding], float]:
+        """Run a single hunter agent. Returns (findings, cost_usd)."""
+        from langchain_core.messages import HumanMessage
+
+        # Spawn a fresh sandbox if a factory is provided
+        sandbox = None
+        if self.config.sandbox_factory is not None:
+            try:
+                sandbox = self.config.sandbox_factory()
+            except Exception as e:
+                logger.warning("sandbox_factory failed for %s: %s",
+                               file_target.get("path"), e)
+
+        try:
+            graph, ctx = self._build_hunter_for_file(file_target, sandbox)
+            session_id = ctx.session_id
+            # Run the graph
+            initial_state = self._initial_state(file_target, session_id)
+            cfg = {"configurable": {"thread_id": f"{self.config.session_id_prefix}-{session_id}"}}
+            try:
+                for _event in graph.stream(initial_state, cfg, stream_mode="values"):
+                    pass
+            except Exception as e:
+                logger.warning("Hunter graph stream failed for %s: %s",
+                               file_target.get("path"), e)
+
+            # Pull cost from the final state if available
+            try:
+                final_state = graph.get_state(cfg)
+                final_values = final_state.values if hasattr(final_state, "values") else {}
+                cost_used = float(final_values.get("total_cost_usd", 0.0))
+            except Exception:
+                cost_used = 0.0
+
+            return list(ctx.findings), cost_used
+        finally:
+            if sandbox is not None:
+                try:
+                    sandbox.stop()
+                except Exception:
+                    pass
+
+    def _build_hunter_for_file(self, file_target: FileTarget, sandbox):
+        """Either invoke the user-supplied hunter_factory or import build_hunter_agent."""
+        import uuid
+        session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
+
+        if self.config.hunter_factory is not None:
+            return self.config.hunter_factory(file_target, sandbox, session_id)
+
+        # Default: use build_hunter_agent + the configured llm
+        from .hunter import build_hunter_agent
+        if self.config.llm is None:
+            raise ValueError("HuntPoolConfig.llm is required when hunter_factory is None")
+
+        # Pull seeded crash / semgrep hints for this file if available
+        file_path = file_target.get("path", "")
+        seeded_crash = self.config.seeded_crashes_by_file.get(file_path)
+        semgrep_hints = self.config.semgrep_hints_by_file.get(file_path)
+
+        return build_hunter_agent(
+            file_target=file_target,
+            repo_path=self.config.repo_path,
+            sandbox=sandbox,
+            llm=self.config.llm,
+            session_id=session_id,
+            seeded_crash=seeded_crash,
+            semgrep_hints=semgrep_hints,
+        )
+
+    def _initial_state(self, file_target: FileTarget, session_id: str) -> dict:
+        from langchain_core.messages import HumanMessage
+        return {
+            "messages": [HumanMessage(
+                content=f"Hunt for vulnerabilities in {file_target.get('path', 'unknown')}.",
+            )],
+            "repo_url": "",
+            "repo_path": self.config.repo_path,
+            "branch": "",
+            "files": [file_target],
+            "files_scanned": [],
+            "current_file": file_target.get("path"),
+            "callgraph": None,
+            "semgrep_findings": [],
+            "fuzz_corpora": [],
+            "seeded_crashes": [],
+            "findings": [],
+            "verified_findings": [],
+            "variant_seeds": [],
+            "exploited_findings": [],
+            "patch_attempts": [],
+            "budget_usd": 0.0,
+            "spent_usd": 0.0,
+            "spent_per_tier": {},
+            "total_tokens": 0,
+            "phase": "hunt",
+            "session_id": session_id,
+            "flags_found": [],
+        }

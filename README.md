@@ -1,4 +1,4 @@
-# VulnExploit
+# Clearwing
 
 A comprehensive, modular vulnerability scanner and exploiter with an AI-powered interactive agent. Designed for authorized security testing and vulnerability assessments.
 
@@ -63,26 +63,26 @@ preprocess → rank → [harness generator → crash seeds] → tiered hunt
 
 ```bash
 # Quick static-only sweep — preprocessor + ranker, no LLM hunters (free)
-python vulnexploit.py sourcehunt /path/to/repo --depth quick
+python clearwing.py sourcehunt /path/to/repo --depth quick
 
 # Standard — sandboxed hunters, verifier (adversarial), patch oracle, mechanism
 # memory, variant loop, exploit triage, taint analysis. Default 70/25/5 split.
-python vulnexploit.py sourcehunt https://github.com/example/repo \
+python clearwing.py sourcehunt https://github.com/example/repo \
     --depth standard --budget 5
 
 # Deep — adds the crash-first harness generator and enables auto-patch.
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --depth deep --budget 10 --max-parallel 8 \
     --auto-patch
 
 # Override the budget split (e.g. more propagation audits)
-python vulnexploit.py sourcehunt /path/to/repo --tier-split 60/30/10
+python clearwing.py sourcehunt /path/to/repo --tier-split 60/30/10
 
 # Skip Tier C propagation audits and roll that budget into Tier A
-python vulnexploit.py sourcehunt /path/to/repo --skip-tier-c
+python clearwing.py sourcehunt /path/to/repo --skip-tier-c
 
 # Disable specific features
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --no-variant-loop \
     --no-mechanism-memory \
     --no-patch-oracle
@@ -90,13 +90,13 @@ python vulnexploit.py sourcehunt /path/to/repo \
 # Adversarial-budget gate — only spend steel-man prompt budget on findings
 # whose evidence level is at least the threshold (default: static_corroboration).
 # "always" disables the gate; "crash_reproduced" is the strictest useful setting.
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --adversarial-threshold crash_reproduced
 
 # Export MITRE + HackerOne disclosure templates for every verified finding
 # reaching evidence_level >= root_cause_explained. Templates are written to
 # {output_dir}/{session_id}/disclosures/{mitre,hackerone}/*.md for human review.
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --depth standard --budget 5 \
     --export-disclosures \
     --reporter-name "Alice" \
@@ -104,18 +104,18 @@ python vulnexploit.py sourcehunt /path/to/repo \
     --reporter-email alice@acme.com
 
 # Watch mode — poll git for new commits and re-scan the blast radius
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --watch --poll-interval 300
 
 # Watch mode + GitHub Checks API — post findings as check runs on each commit
 # via the `gh` CLI (requires `gh auth login` and repo write permissions).
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --watch --github-checks \
     --github-check-name "Overwing Sourcehunt"
 
 # Webhook mode — start an HTTP server that runs sourcehunt on each GitHub push
 # event. Complements --watch (no polling latency). Requires HMAC shared secret.
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --webhook --webhook-port 8787 \
     --webhook-secret "$(cat ~/.webhook.secret)" \
     --webhook-allowed-repo acme/critical-service \
@@ -124,12 +124,12 @@ python vulnexploit.py sourcehunt /path/to/repo \
 
 # CVE retro-hunt — LLM generates a Semgrep rule from a patch diff,
 # then finds variants of the CVE pattern in the target repo.
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --retro-hunt CVE-2024-12345 \
     --patch-source /path/to/fix.patch
 
 # Auto-patch mode with draft PRs
-python vulnexploit.py sourcehunt /path/to/repo \
+python clearwing.py sourcehunt /path/to/repo \
     --depth deep --budget 10 \
     --auto-patch --auto-pr
 ```
@@ -147,7 +147,7 @@ Agent: [scans network] [calls hunt_source_code] Found 3 critical findings in src
 
 ### Mechanism memory location
 
-Cross-run mechanisms are stored at `~/.vulnexploit/sourcehunt/mechanisms.jsonl` (or the path in `$VULNEXPLOIT_HOME`). Each line is one mechanism. Delete the file to reset the store.
+Cross-run mechanisms are stored at `~/.clearwing/sourcehunt/mechanisms.jsonl` (or the path in `$CLEARWING_HOME`). Each line is one mechanism. Delete the file to reset the store.
 
 **Recall backends**:
 - **TF-IDF** *(default)* — pure-Python TF-IDF over `{summary + tags + keywords + what_made_it_exploitable + cwe}` with cosine similarity. No external dependency. Production-tuned stopword list preserves security terms like `memcpy`, `length`, `copy_from_user`.
@@ -169,7 +169,7 @@ FFmpeg is the standard benchmark: dozens of codec parsers, decades of memory-saf
 git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg
 
 # 2. Scope to libavcodec first — it's where the crashes live
-python vulnexploit.py sourcehunt /tmp/ffmpeg/libavcodec \
+python clearwing.py sourcehunt /tmp/ffmpeg/libavcodec \
     --local-path /tmp/ffmpeg/libavcodec \
     --depth deep \
     --budget 20 \
@@ -178,7 +178,7 @@ python vulnexploit.py sourcehunt /tmp/ffmpeg/libavcodec \
     --output-dir ./results/ffmpeg-libavcodec
 
 # 3. If you have a specific CVE patch you want to retro-hunt for variants:
-python vulnexploit.py sourcehunt /tmp/ffmpeg \
+python clearwing.py sourcehunt /tmp/ffmpeg \
     --local-path /tmp/ffmpeg \
     --retro-hunt CVE-2020-27814 \
     --patch-source <git-sha-of-the-fix-commit> \
@@ -202,7 +202,7 @@ cd /tmp/openbsd/sys/netinet
 ls *.c | wc -l     # ~150 files
 
 # 2. Run sourcehunt scoped to sys/netinet
-python vulnexploit.py sourcehunt /tmp/openbsd/sys/netinet \
+python clearwing.py sourcehunt /tmp/openbsd/sys/netinet \
     --local-path /tmp/openbsd/sys/netinet \
     --depth deep \
     --budget 30 \
@@ -238,18 +238,15 @@ If you reproduce an interesting outcome, please open an issue with the run param
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/vulnexploit.git
-cd vulnexploit
+git clone https://github.com/Lazarus-AI/clearwing.git
+cd clearwing
 
 # Create virtual environment
 python3 -m venv venv
 source venv/bin/activate  # or: source venv/bin/activate.fish
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Install the package
-pip install -e .
+# Install the package (and dev extras)
+pip install -e '.[dev]'
 ```
 
 ### Requirements
@@ -262,22 +259,22 @@ pip install -e .
 
 ```bash
 # Basic scan
-python vulnexploit.py scan 192.168.1.1
+python clearwing.py scan 192.168.1.1
 
 # Scan specific ports
-python vulnexploit.py scan 192.168.1.1 -p 22,80,443
+python clearwing.py scan 192.168.1.1 -p 22,80,443
 
 # Scan with exploitation
-python vulnexploit.py scan 192.168.1.1 -e
+python clearwing.py scan 192.168.1.1 -e
 
 # Generate HTML report
-python vulnexploit.py scan 192.168.1.1 -o report.html -f html
+python clearwing.py scan 192.168.1.1 -o report.html -f html
 
 # Start interactive AI agent
-python vulnexploit.py interactive --target 192.168.1.1
+python clearwing.py interactive --target 192.168.1.1
 
 # View scan history
-python vulnexploit.py history
+python clearwing.py history
 ```
 
 ## Commands
@@ -285,7 +282,7 @@ python vulnexploit.py history
 ### `scan` -- Run a scan
 
 ```
-python vulnexploit.py scan <target> [options]
+python clearwing.py scan <target> [options]
 
 Options:
   -p, --ports PORTS       Ports to scan (e.g., 22,80,443 or 1-1024)
@@ -300,7 +297,7 @@ Options:
 ### `interactive` -- AI agent session
 
 ```
-python vulnexploit.py interactive [options]
+python clearwing.py interactive [options]
 
 Options:
   --model MODEL   LLM model name (default: claude-sonnet-4-6)
@@ -336,25 +333,25 @@ Type `quit` or `exit` to end the session. Active Kali containers are cleaned up 
 ### `report` -- Generate report from database
 
 ```
-python vulnexploit.py report <target> [-o FILE] [-f FORMAT]
+python clearwing.py report <target> [-o FILE] [-f FORMAT]
 ```
 
 ### `history` -- View scan history
 
 ```
-python vulnexploit.py history [target]
+python clearwing.py history [target]
 ```
 
 ### `config` -- Show or edit configuration
 
 ```
-python vulnexploit.py config [--set KEY VALUE] [--save FILE]
+python clearwing.py config [--set KEY VALUE] [--save FILE]
 ```
 
 ## Architecture
 
 ```
-vulnexploit/
+clearwing/
 ├── core/                    # Core engine and utilities
 │   ├── engine.py            # Linear workflow orchestrator
 │   ├── config.py            # YAML configuration management
@@ -414,7 +411,7 @@ The agent can create new tools at runtime. For example, you can ask:
 
 > "Create a tool that checks if a URL returns a 200 status code"
 
-The agent will generate a `@tool`-decorated Python function, save it to `vulnexploit/agent/custom_tools/`, and recompile the graph so the new tool is immediately available in the same session.
+The agent will generate a `@tool`-decorated Python function, save it to `clearwing/agent/custom_tools/`, and recompile the graph so the new tool is immediately available in the same session.
 
 ## API Usage
 
@@ -422,7 +419,7 @@ The agent will generate a `@tool`-decorated Python function, save it to `vulnexp
 
 ```python
 import asyncio
-from vulnexploit.core import CoreEngine, Config, ScanConfig
+from clearwing.core import CoreEngine, Config, ScanConfig
 
 config = Config()
 engine = CoreEngine(config)
@@ -440,7 +437,7 @@ print(engine.get_report('text'))
 ### Agent (Programmatic)
 
 ```python
-from vulnexploit.agent import create_agent, AgentState
+from clearwing.agent import create_agent, AgentState
 from langchain_core.messages import HumanMessage
 
 graph = create_agent(model_name="claude-sonnet-4-6")
@@ -478,7 +475,7 @@ exploitation:
 reporting:
   default_format: text
 database:
-  path: vulnexploit.db
+  path: clearwing.db
 ```
 
 ## Testing

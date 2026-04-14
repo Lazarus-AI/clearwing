@@ -8,12 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vulnexploit.sandbox.builders import (
+from clearwing.sandbox.builders import (
     BuildRecipe,
     BuildSystemDetector,
     DEFAULT_BASE_IMAGES,
 )
-from vulnexploit.sandbox.hunter_sandbox import HunterSandbox
+from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 
 @pytest.fixture
@@ -127,7 +127,7 @@ class TestHunterSandboxBuildImage:
 
         sb = HunterSandbox(repo_path=str(temp_repo))
         tag = sb.build_image()
-        assert tag.startswith("vulnexploit-sourcehunt:")
+        assert tag.startswith("clearwing-sourcehunt:")
         mock_docker.images.build.assert_called_once()
         kwargs = mock_docker.images.build.call_args.kwargs
         assert kwargs["tag"] == tag
@@ -201,7 +201,7 @@ class TestHunterSandboxSpawn:
         assert volumes[repo_abs]["bind"] == "/workspace"
         assert volumes[repo_abs]["mode"] == "ro"
         # Session id was injected into env
-        assert kwargs["environment"]["VULNEXPLOIT_SESSION_ID"] == "test-session"
+        assert kwargs["environment"]["CLEARWING_SESSION_ID"] == "test-session"
 
     def test_spawn_with_scratch_mount(self, temp_repo: Path, mock_docker):
         (temp_repo / "Makefile").write_text("all:\n")

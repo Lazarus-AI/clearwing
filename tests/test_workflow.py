@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from vulnexploit.runners.workflow import (
+from clearwing.runners.workflow import (
     WorkflowEngine,
     WorkflowState,
     WorkflowStep,

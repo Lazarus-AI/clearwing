@@ -1,7 +1,7 @@
 import pytest
 import json
-from vulnexploit.reporting import ReportGenerator
-from vulnexploit.core.engine import ScanResult, ScanState
+from clearwing.reporting import ReportGenerator
+from clearwing.core.engine import ScanResult, ScanState
 
 
 class TestReportGenerator:
@@ -37,7 +37,7 @@ class TestReportGenerator:
         """Test text report generation."""
         report = generator.generate(sample_result, 'text')
         assert isinstance(report, str)
-        assert 'VULNEXPLOIT SCAN REPORT' in report
+        assert 'CLEARWING SCAN REPORT' in report
         assert '192.168.1.1' in report
         assert 'SSH' in report
     
@@ -61,7 +61,7 @@ class TestReportGenerator:
         """Test Markdown report generation."""
         report = generator.generate(sample_result, 'markdown')
         assert isinstance(report, str)
-        assert '# VulnExploit Scan Report' in report
+        assert '# Clearwing Scan Report' in report
         assert '| Port | Protocol | Service | State |' in report
     
     def test_save_report(self, generator, sample_result, tmp_path):
@@ -70,7 +70,7 @@ class TestReportGenerator:
         generator.save(sample_result, str(filepath))
         assert filepath.exists()
         content = filepath.read_text()
-        assert 'VULNEXPLOIT SCAN REPORT' in content
+        assert 'CLEARWING SCAN REPORT' in content
     
     def test_auto_format_detection(self, generator, sample_result, tmp_path):
         """Test automatic format detection from file extension."""

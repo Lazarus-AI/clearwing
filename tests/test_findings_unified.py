@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from vulnexploit.findings import (
+from clearwing.findings import (
     Finding,
     from_analysis_finding,
     from_cicd_dict,
@@ -15,7 +15,7 @@ from vulnexploit.findings import (
     to_cicd_dict,
     to_source_dict,
 )
-from vulnexploit.findings.types import _coerce_severity
+from clearwing.findings.types import _coerce_severity
 
 
 # --- Finding dataclass ------------------------------------------------------
@@ -238,7 +238,7 @@ class TestCicdDictRoundtrip:
 class TestFromAnalysisFinding:
     def test_from_dataclass_instance(self):
         """The SourceAnalyzer dataclass should convert cleanly."""
-        from vulnexploit.analysis.source_analyzer import Finding as AnalysisFinding
+        from clearwing.analysis.source_analyzer import Finding as AnalysisFinding
         af = AnalysisFinding(
             file_path="app.py",
             line_number=23,

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vulnexploit.sourcehunt.retro_hunt import (
+from clearwing.sourcehunt.retro_hunt import (
     RetroHunter,
     RetroHuntResult,
     fetch_patch_diff,
@@ -149,11 +149,11 @@ class TestHuntEndToEnd:
         })
 
         # Fake SemgrepSidecar that returns one hit
-        from vulnexploit.sourcehunt.semgrep_sidecar import SemgrepFinding
+        from clearwing.sourcehunt.semgrep_sidecar import SemgrepFinding
         fake_sidecar = MagicMock()
         fake_sidecar.available = True
 
-        with patch("vulnexploit.sourcehunt.retro_hunt.SemgrepSidecar") as MockSidecar:
+        with patch("clearwing.sourcehunt.retro_hunt.SemgrepSidecar") as MockSidecar:
             mock_instance = MagicMock()
             mock_instance.run_scan.return_value = [
                 SemgrepFinding(
@@ -197,7 +197,7 @@ class TestHuntEndToEnd:
         fake_sidecar = MagicMock(available=False)
         fake_sidecar.run_scan = MagicMock(return_value=[])
 
-        with patch("vulnexploit.sourcehunt.retro_hunt.SemgrepSidecar") as MockSidecar:
+        with patch("clearwing.sourcehunt.retro_hunt.SemgrepSidecar") as MockSidecar:
             MockSidecar.return_value = fake_sidecar
             hunter = RetroHunter(llm=llm, sidecar=fake_sidecar)
             result = hunter.hunt(

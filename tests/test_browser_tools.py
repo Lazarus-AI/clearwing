@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from vulnexploit.agent.tools.browser_tools import (
+from clearwing.agent.tools.browser_tools import (
     _browser_state,
     get_browser_tools,
 )
@@ -37,20 +37,20 @@ class TestBrowserState:
 
 class TestBrowserListTabs:
     def test_empty_tabs(self):
-        from vulnexploit.agent.tools.browser_tools import browser_list_tabs
+        from clearwing.agent.tools.browser_tools import browser_list_tabs
         result = browser_list_tabs.invoke({})
         assert result == []
 
 
 class TestBrowserClose:
     def test_close_nonexistent_tab(self):
-        from vulnexploit.agent.tools.browser_tools import browser_close
+        from clearwing.agent.tools.browser_tools import browser_close
         result = browser_close.invoke({"tab_name": "nonexistent"})
         assert result["closed"] == "nonexistent"
         assert result["remaining_tabs"] == []
 
     def test_close_all_when_empty(self):
-        from vulnexploit.agent.tools.browser_tools import browser_close
+        from clearwing.agent.tools.browser_tools import browser_close
         result = browser_close.invoke({})
         assert result["closed"] == "all"
         assert result["remaining_tabs"] == []

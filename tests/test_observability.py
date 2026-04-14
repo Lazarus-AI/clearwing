@@ -4,11 +4,11 @@ import time
 import threading
 import pytest
 
-from vulnexploit.observability.tracer import (
+from clearwing.observability.tracer import (
     Tracer, Span, SpanExporter, ConsoleExporter, InMemoryExporter,
 )
-from vulnexploit.observability.metrics import MetricsCollector, MetricPoint
-from vulnexploit.observability.integration import ObservabilityIntegration
+from clearwing.observability.metrics import MetricsCollector, MetricPoint
+from clearwing.observability.integration import ObservabilityIntegration
 
 
 # ---------------------------------------------------------------------------

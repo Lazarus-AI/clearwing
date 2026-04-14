@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.agent.tools.proxy_tools import (
+from clearwing.agent.tools.proxy_tools import (
     ProxyHistory,
     ProxyRequest,
     get_proxy_tools,

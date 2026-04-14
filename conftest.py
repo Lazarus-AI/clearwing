@@ -4,7 +4,7 @@ import warnings
 
 
 def pytest_configure(config):
-    """Turn any vulnexploit DeprecationWarning into a hard test failure.
+    """Turn any clearwing DeprecationWarning into a hard test failure.
 
     Phase 1e deleted the 22 legacy shim packages; this filter locks the trunk
     against accidental re-introduction of a deprecated import path.
@@ -12,5 +12,5 @@ def pytest_configure(config):
     warnings.filterwarnings(
         "error",
         category=DeprecationWarning,
-        module=r"vulnexploit\..*",
+        module=r"clearwing\..*",
     )

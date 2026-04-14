@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vulnexploit.sourcehunt.github_checks import (
+from clearwing.sourcehunt.github_checks import (
     MAX_ANNOTATIONS_PER_CALL,
     CheckRunOutcome,
     GitHubChecksConfig,
@@ -397,7 +397,7 @@ class TestPublishEndToEnd:
 class TestCommitMonitorIntegration:
     def test_monitor_calls_publisher_when_enabled(self, tmp_path):
         """When enable_github_checks=True, scan_commit publishes a check run."""
-        from vulnexploit.sourcehunt.commit_monitor import (
+        from clearwing.sourcehunt.commit_monitor import (
             CommitMonitor,
             CommitMonitorConfig,
         )
@@ -443,7 +443,7 @@ class TestCommitMonitorIntegration:
         assert result.check_run_outcome.published is True
 
     def test_monitor_no_op_when_disabled(self, tmp_path):
-        from vulnexploit.sourcehunt.commit_monitor import (
+        from clearwing.sourcehunt.commit_monitor import (
             CommitMonitor,
             CommitMonitorConfig,
         )
@@ -472,7 +472,7 @@ class TestCommitMonitorIntegration:
 
     def test_monitor_auto_constructs_publisher_when_none_supplied(self, tmp_path):
         """enable_github_checks=True without an explicit publisher → default one created."""
-        from vulnexploit.sourcehunt.commit_monitor import (
+        from clearwing.sourcehunt.commit_monitor import (
             CommitMonitor,
             CommitMonitorConfig,
         )

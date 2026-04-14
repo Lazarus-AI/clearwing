@@ -1,6 +1,6 @@
 """Tests for the CostTracker telemetry module."""
 
-from vulnexploit.observability.telemetry import CostTracker, CostSummary, ToolUsage
+from clearwing.observability.telemetry import CostTracker, CostSummary, ToolUsage
 
 
 def _reset_tracker():

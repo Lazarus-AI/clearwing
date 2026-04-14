@@ -2,7 +2,7 @@
 
 import threading
 
-from vulnexploit.core.events import EventBus, EventType
+from clearwing.core.events import EventBus, EventType
 
 
 def _reset_bus():

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vulnexploit.providers.manager import (
+from clearwing.providers.manager import (
     DEFAULT_ROUTES,
     ModelRoute,
     PROVIDER_PRESETS,

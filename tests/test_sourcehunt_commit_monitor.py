@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sourcehunt.commit_monitor import (
+from clearwing.sourcehunt.commit_monitor import (
     CommitMonitor,
     CommitMonitorConfig,
     CommitScanResult,

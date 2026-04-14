@@ -1,6 +1,6 @@
-# VulnExploit Tests
+# Clearwing Tests
 
-This directory contains test cases for VulnExploit modules.
+This directory contains test cases for Clearwing modules.
 
 ## Running Tests
 
@@ -9,7 +9,7 @@ This directory contains test cases for VulnExploit modules.
 pytest tests/
 
 # Run with coverage
-pytest tests/ --cov=vulnexploit
+pytest tests/ --cov=clearwing
 
 # Run specific test file
 pytest tests/test_scanners.py

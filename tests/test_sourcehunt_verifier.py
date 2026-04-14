@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sourcehunt.verifier import (
+from clearwing.sourcehunt.verifier import (
     VERIFIER_SYSTEM_PROMPT_V01,
     VERIFIER_SYSTEM_PROMPT_V02,
     Verifier,

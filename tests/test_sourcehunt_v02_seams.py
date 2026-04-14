@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.sourcehunt.preprocessor import Preprocessor
-from vulnexploit.sourcehunt.state import (
+from clearwing.sourcehunt.preprocessor import Preprocessor
+from clearwing.sourcehunt.state import (
     EVIDENCE_LEVELS,
     FileTarget,
     SourceFinding,
@@ -194,7 +194,7 @@ class TestPreprocessorV02Flags:
 
 class TestHunterAcceptsV02Seams:
     def test_build_hunter_agent_accepts_seeded_crash_and_hints(self):
-        from vulnexploit.sourcehunt.hunter import build_hunter_agent
+        from clearwing.sourcehunt.hunter import build_hunter_agent
 
         llm = MagicMock()
         llm.bind_tools.return_value = MagicMock()
@@ -223,7 +223,7 @@ class TestHunterAcceptsV02Seams:
 
 class TestPoolAcceptsV02Sandbox:
     def test_huntpool_config_accepts_sandbox_factory(self):
-        from vulnexploit.sourcehunt.pool import HunterPool, HuntPoolConfig
+        from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
 
         def factory():
             return MagicMock()
@@ -239,7 +239,7 @@ class TestPoolAcceptsV02Sandbox:
 
 class TestRunnerAcceptsV02Seams:
     def test_runner_accepts_sandbox_factory(self, tmp_path):
-        from vulnexploit.sourcehunt.runner import SourceHuntRunner
+        from clearwing.sourcehunt.runner import SourceHuntRunner
 
         def sandbox_factory():
             return MagicMock()

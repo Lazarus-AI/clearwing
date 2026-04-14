@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from vulnexploit.reporting.remediation import RemediationAdvice, RemediationGenerator, REMEDIATION_DB
+from clearwing.reporting.remediation import RemediationAdvice, RemediationGenerator, REMEDIATION_DB
 
 
 # --- RemediationAdvice dataclass ---

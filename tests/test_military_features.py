@@ -1,8 +1,8 @@
 import pytest
 import os
-from vulnexploit.exploitation.payloads.authorization import AuthorizationGate
-from vulnexploit.exploitation.payloads.obfuscator import PayloadObfuscator
-from vulnexploit.exploitation.payloads.watermark import Watermarker
+from clearwing.exploitation.payloads.authorization import AuthorizationGate
+from clearwing.exploitation.payloads.obfuscator import PayloadObfuscator
+from clearwing.exploitation.payloads.watermark import Watermarker
 
 
 def test_payload_obfuscation_requires_authorization():

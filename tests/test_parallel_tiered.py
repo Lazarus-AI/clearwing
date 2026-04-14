@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vulnexploit.runners.parallel.executor import (
+from clearwing.runners.parallel.executor import (
     ParallelExecutor,
     ParallelScanConfig,
     TargetResult,

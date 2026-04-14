@@ -2,21 +2,21 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
                                                                                                                                                                          
  Context
 
- The user wants to integrate Anthropic's Project Glasswing methodology (spec at docs/openglass.md, named Overwing here) into the vulnexploit project. Overwing is a
+ The user wants to integrate Anthropic's Project Glasswing methodology (spec at docs/openglass.md, named Overwing here) into the clearwing project. Overwing is a
  file-parallel, agent-driven vulnerability discovery pipeline: rank source files by attack surface → fan out per-file ReAct hunter agents → use crash oracles (ASan/UBSan)
   as ground truth → verify findings with a second-pass independent agent → optionally generate exploits for severity triage → emit SARIF/markdown reports.
 
  The existing project is a network-target pentest agent, but closer inspection reveals it already has most of the substrate Overwing needs:
 
- - vulnexploit/analysis/source_analyzer.py — already clones repos, walks source trees, has a Finding dataclass with file_path/line_number/cwe, runs regex+AST static
+ - clearwing/analysis/source_analyzer.py — already clones repos, walks source trees, has a Finding dataclass with file_path/line_number/cwe, runs regex+AST static
  analysis. This is ~60% of the preprocessor.
- - vulnexploit/providers/manager.py — already supports model-per-role routing (ModelRoute(task, provider, model)). Adding ranker/hunter/verifier routes is configuration,
+ - clearwing/providers/manager.py — already supports model-per-role routing (ModelRoute(task, provider, model)). Adding ranker/hunter/verifier routes is configuration,
  not code.
- - vulnexploit/agent/graph.py::create_agent() — already parameterized by custom_tools, base_url, session_id. The guarded_tools_node is generic and reuses
+ - clearwing/agent/graph.py::create_agent() — already parameterized by custom_tools, base_url, session_id. The guarded_tools_node is generic and reuses
  CostTracker/AuditLogger/EpisodicMemory — all of which are target-IP-agnostic.
- - vulnexploit/runners/cicd/runner.py — runner pattern is clean. SARIFGenerator is finding-agnostic; extending it for file-level locations is ~15 lines.
- - vulnexploit/agent/specialists/ — sub-graph pattern (e.g. recon_agent.py:24) is the template for the new hunter/verifier specialists.
- - vulnexploit/ui/commands/__init__.py — CLI auto-discovers any module in ALL_COMMANDS; new subcommand is ~50 lines.
+ - clearwing/runners/cicd/runner.py — runner pattern is clean. SARIFGenerator is finding-agnostic; extending it for file-level locations is ~15 lines.
+ - clearwing/agent/specialists/ — sub-graph pattern (e.g. recon_agent.py:24) is the template for the new hunter/verifier specialists.
+ - clearwing/ui/commands/__init__.py — CLI auto-discovers any module in ALL_COMMANDS; new subcommand is ~50 lines.
 
  The goal is to reuse aggressively, refactor narrowly, add a new package — not fork the agent stack.
 
@@ -153,9 +153,9 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  the network-pentest state clean.
 
  ---
- New package: vulnexploit/sourcehunt/
+ New package: clearwing/sourcehunt/
 
- vulnexploit/sourcehunt/
+ clearwing/sourcehunt/
  ├── __init__.py
  ├── state.py          # SourceHuntState TypedDict, FileTarget dataclass
  ├── preprocessor.py   # wraps SourceAnalyzer for clone + enumerate + static pre-scan
@@ -275,7 +275,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  preprocessor.py
 
- Pure code (mostly). Delegates to vulnexploit.analysis.SourceAnalyzer for v0.1 and exposes seams for tree-sitter, Semgrep, file tagging, reachability propagation, and
+ Pure code (mostly). Delegates to clearwing.analysis.SourceAnalyzer for v0.1 and exposes seams for tree-sitter, Semgrep, file tagging, reachability propagation, and
  fuzz-corpus auto-detection in v0.2:
 
  @dataclass
@@ -454,7 +454,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  The core of Phase 1. Rather than copy-pasting create_agent(), we extract a reusable factory:
 
- Refactor: Split vulnexploit/agent/graph.py::create_agent() into:
+ Refactor: Split clearwing/agent/graph.py::create_agent() into:
 
  def build_react_graph(
      llm_with_tools,
@@ -611,7 +611,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  pool.py — HunterPool with tiered budget
 
- Copy the pattern from vulnexploit/runners/parallel/executor.py:42 but scope-shift from "target" to "file", and replace the hard rank cutoff with tiered budget
+ Copy the pattern from clearwing/runners/parallel/executor.py:42 but scope-shift from "target" to "file", and replace the hard rank cutoff with tiered budget
  allocation.
 
  Tier assignment (lives here, runs after the ranker populates all three axes and computes priority):
@@ -737,7 +737,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  runner.py — SourceHuntRunner
 
- Public entry point, analog of vulnexploit/runners/cicd/runner.py:29:
+ Public entry point, analog of clearwing/runners/cicd/runner.py:29:
 
  @dataclass
  class SourceHuntResult:
@@ -778,14 +778,14 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  New file-aware report generator:
 
- - SARIF: extends vulnexploit/runners/cicd/sarif.py:6 via subclass or small change (see Refactor §1).
+ - SARIF: extends clearwing/runners/cicd/sarif.py:6 via subclass or small change (see Refactor §1).
  - Markdown: grouped by file, severity-sorted, includes code snippets and verification status.
  - JSON: SourceHuntResult serialized directly.
 
  ---
- New sandbox package: vulnexploit/sandbox/
+ New sandbox package: clearwing/sandbox/
 
- vulnexploit/sandbox/
+ clearwing/sandbox/
  ├── __init__.py
  ├── container.py       # generic SandboxContainer (Docker SDK wrapper)
  ├── hunter_sandbox.py  # HunterSandbox — builds per-hunt image, manages lifecycle
@@ -793,7 +793,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  container.py — SandboxContainer
 
- Generic no-network Docker abstraction, distinct from vulnexploit/agent/tools/kali_docker_tool.py (which is attack-focused and has approval gates / network access).
+ Generic no-network Docker abstraction, distinct from clearwing/agent/tools/kali_docker_tool.py (which is attack-focused and has approval gates / network access).
  Shape:
 
  @dataclass
@@ -847,7 +847,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
          - installs gdb, valgrind, rr, strace, ripgrep (via apt)
          - sets env CFLAGS/CXXFLAGS with -fsanitize=address,undefined -g -O1
          - COPYs the repo (only needed for build-time; runtime uses a mount)
-         Returns image tag (e.g. 'vulnexploit-sourcehunt-<hash>:latest')."""
+         Returns image tag (e.g. 'clearwing-sourcehunt-<hash>:latest')."""
 
      def spawn(self, session_id: str) -> SandboxContainer:
          """Start a container from the built image, with:
@@ -870,7 +870,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
   in without touching the sandbox core.
 
  ---
- New hunter tools: vulnexploit/agent/tools/hunter_tools.py
+ New hunter tools: clearwing/agent/tools/hunter_tools.py
 
  All tools are scoped to a hunter session via a closure-injected HunterContext(repo_path, sandbox, state_writer). This prevents path traversal and routes every command
  through the active sandbox:
@@ -948,10 +948,10 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  ---
  Interactive-agent @tool wrapper
 
- New file: vulnexploit/agent/tools/sourcehunt_tools.py
+ New file: clearwing/agent/tools/sourcehunt_tools.py
 
  Exposes the source-hunt pipeline as a tool callable from the existing interactive network-pentest agent. Matches the wargame/remediation tool pattern
- (vulnexploit/agent/tools/wargame_tools.py).
+ (clearwing/agent/tools/wargame_tools.py).
 
  @tool
  def hunt_source_code(repo_url_or_path: str, branch: str = "main",
@@ -977,7 +977,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
          Human-readable summary with critical/high counts and top 5 findings.
          Full SARIF/JSON/markdown are written to ./sourcehunt-results/<session>/.
      """
-     from vulnexploit.sourcehunt.runner import SourceHuntRunner
+     from clearwing.sourcehunt.runner import SourceHuntRunner
      runner = SourceHuntRunner(
          repo_url=repo_url_or_path, branch=branch, depth=depth,
          budget_usd=budget_usd, min_rank=min_rank,
@@ -995,11 +995,11 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  def get_sourcehunt_tools() -> list:
      return [hunt_source_code, list_sourcehunt_findings]
 
- Integration: One-line edit to vulnexploit/agent/tools/__init__.py:
+ Integration: One-line edit to clearwing/agent/tools/__init__.py:
  - import get_sourcehunt_tools from .sourcehunt_tools
  - append tools.extend(get_sourcehunt_tools()) near the other optional-tools block (line ~88).
 
- Prompt hint: Add one bullet to vulnexploit/agent/prompts.py::SYSTEM_PROMPT_TEMPLATE near the existing "Hybrid Whitebox/Graybox Testing" bullet (line 28), mentioning
+ Prompt hint: Add one bullet to clearwing/agent/prompts.py::SYSTEM_PROMPT_TEMPLATE near the existing "Hybrid Whitebox/Graybox Testing" bullet (line 28), mentioning
  hunt_source_code as the white-box companion tool.
 
  Re-entrancy concern: When called from inside the interactive agent, hunt_source_code spawns a new LangGraph instance with its own MemorySaver. This is safe because each
@@ -1012,7 +1012,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  R1 — Extract build_react_graph() from create_agent()
 
- File: vulnexploit/agent/graph.py
+ File: clearwing/agent/graph.py
 
  Reason: the hunter/verifier agents need the same assistant + guarded_tools_node structure with different tools and state schema. Copy-paste would duplicate ~180 lines
  (lines 227–401 of graph.py) and create a drift risk in cost/audit/memory wiring.
@@ -1020,13 +1020,13 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  Shape of the refactor:
  1. Extract the assistant() closure and guarded_tools_node() closure into build_react_graph(llm_with_tools, tools, system_prompt_fn, state_schema, feature_flags...).
  2. create_agent() (existing public API) becomes a ~30-line wrapper that calls build_react_graph() with the pentest defaults. Public signature unchanged.
- 3. vulnexploit/sourcehunt/hunter.py and verifier.py call build_react_graph() directly with their own tools + prompt.
+ 3. clearwing/sourcehunt/hunter.py and verifier.py call build_react_graph() directly with their own tools + prompt.
 
  Risk: Low — existing callers of create_agent() see no signature change. Covered by tests/test_agent.py.
 
  R2 — Make SARIFGenerator file-aware
 
- File: vulnexploit/runners/cicd/sarif.py:61
+ File: clearwing/runners/cicd/sarif.py:61
 
  Today, every finding's physicalLocation hardcodes target as the artifactLocation URI. The change: if a finding has file key, use that instead of target; if it has
  line_number, emit a region with startLine.
@@ -1042,19 +1042,19 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
 
  (Deferred) R3 — Generalize ParallelExecutor with injectable runner
 
- File: vulnexploit/runners/parallel/executor.py:101
+ File: clearwing/runners/parallel/executor.py:101
 
  Not required for Phase 1. Phase 2 will lift the hardcoded CICDRunner instantiation into a runner_factory: Callable[[str], Runner] parameter so HunterPool becomes a
  config of ParallelExecutor. Deferring keeps Phase 1 tight — HunterPool ships as a sibling class, not a refactor of the shared one.
 
  (Deferred) R4 — Unified Finding type
 
- New file: vulnexploit/findings/types.py
+ New file: clearwing/findings/types.py
 
  Currently there are three incompatible finding shapes:
- - vulnexploit.analysis.source_analyzer.Finding (file-level)
+ - clearwing.analysis.source_analyzer.Finding (file-level)
  - CICDRunner._collect_findings() dict (network-level)
- - vulnexploit.data.knowledge entities (graph nodes)
+ - clearwing.data.knowledge entities (graph nodes)
 
  Phase 2 refactor: consolidate behind a single Finding dataclass with optional network AND source fields. Until then, sourcehunt.state.SourceFinding is a deliberate
  superset that can be trivially downcast to the CICDRunner dict shape when consumed by SARIFGenerator.
@@ -1070,7 +1070,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  v0.2 will add: tree-sitter + tree-sitter-languages (cheap, pure-Python, ~20 MB of grammars). Called out here so v0.1 interfaces (CallGraph dataclass, build_callgraph
  flag) are designed to accept these without refactoring.
 
- v0.3 will add: chromadb (or equivalent — check if the project already has a vector store in vulnexploit/data/ by then) for cross-run memory.
+ v0.3 will add: chromadb (or equivalent — check if the project already has a vector store in clearwing/data/ by then) for cross-run memory.
 
  The only v0.1 external runtime requirement is Docker daemon on the host running sourcehunt. This is the same requirement as kali_docker_tool, so users of the interactive
   agent with Kali integration already have it. The CLI detects Docker availability at startup and fails cleanly with an actionable error. A documented fallback: --depth
@@ -1079,7 +1079,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  ---
  CLI: new subcommand
 
- New file: vulnexploit/ui/commands/sourcehunt.py
+ New file: clearwing/ui/commands/sourcehunt.py
 
  def add_parser(subparsers):
      p = subparsers.add_parser("sourcehunt",
@@ -1105,8 +1105,8 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
      return p
 
  def handle(cli, args):
-     from vulnexploit.sourcehunt.runner import SourceHuntRunner
-     from vulnexploit.sourcehunt.pool import TierBudget
+     from clearwing.sourcehunt.runner import SourceHuntRunner
+     from clearwing.sourcehunt.pool import TierBudget
      a, b, c = [int(x) / 100.0 for x in args.tier_split.split("/")]
      if args.skip_tier_c:
          # Redistribute Tier C allocation into A (keeps total at 1.0)
@@ -1125,14 +1125,14 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
      print(_format_summary(result))
      return result.exit_code
 
- One-line edit: vulnexploit/ui/commands/__init__.py:3 adds sourcehunt to the imports and ALL_COMMANDS list.
+ One-line edit: clearwing/ui/commands/__init__.py:3 adds sourcehunt to the imports and ALL_COMMANDS list.
 
  Note: --min-rank is deliberately absent. The tier-split IS the budget cut; there is no hard cutoff that could drop the FFmpeg-style "influence=5, surface=1" file.
 
  ---
  Provider routing: model-per-role
 
- Edit: vulnexploit/providers/manager.py:53 (DEFAULT_ROUTES)
+ Edit: clearwing/providers/manager.py:53 (DEFAULT_ROUTES)
 
  Add routes:
 
@@ -1145,7 +1145,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  ModelRoute(task="sourcehunt_exploit", provider="anthropic", model="claude-opus-4-6",
             reason="Exploit generation is hardest reasoning"),
 
- YAML override: extend vulnexploit/core/config.py to parse a models: section and call provider_manager.set_route(task, ...) for each entry. overwing.yaml from the spec
+ YAML override: extend clearwing/core/config.py to parse a models: section and call provider_manager.set_route(task, ...) for each entry. overwing.yaml from the spec
  works as-is.
 
  Ideal verifier should run on a different provider (per openglass.md §5). Default leaves this at sonnet-within-anthropic, with YAML available for openai/gpt-5 etc.
@@ -1156,31 +1156,31 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  ┌─────────────────────────────┬─────────────────────────────────────┬─────────────────────────────────────────────────────────────────┐
  │            Need             │          Reused component           │                            Location                             │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Clone repo                  │ SourceAnalyzer.clone()              │ vulnexploit/analysis/source_analyzer.py:230                     │
+ │ Clone repo                  │ SourceAnalyzer.clone()              │ clearwing/analysis/source_analyzer.py:230                     │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Enumerate files             │ SourceAnalyzer._iter_source_files() │ vulnexploit/analysis/source_analyzer.py:309                     │
+ │ Enumerate files             │ SourceAnalyzer._iter_source_files() │ clearwing/analysis/source_analyzer.py:309                     │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Language detection          │ SourceAnalyzer.LANGUAGE_MAP         │ vulnexploit/analysis/source_analyzer.py:70                      │
+ │ Language detection          │ SourceAnalyzer.LANGUAGE_MAP         │ clearwing/analysis/source_analyzer.py:70                      │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Regex/AST pre-scan          │ SourceAnalyzer.analyze()            │ vulnexploit/analysis/source_analyzer.py:256                     │
+ │ Regex/AST pre-scan          │ SourceAnalyzer.analyze()            │ clearwing/analysis/source_analyzer.py:256                     │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Cost tracking               │ CostTracker singleton               │ vulnexploit/telemetry/                                          │
+ │ Cost tracking               │ CostTracker singleton               │ clearwing/telemetry/                                          │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Audit log                   │ AuditLogger                         │ vulnexploit/safety/audit/                                       │
+ │ Audit log                   │ AuditLogger                         │ clearwing/safety/audit/                                       │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
  │ Session-scoped checkpointer │ MemorySaver                         │ via graph.compile(checkpointer=...)                             │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Flag detection              │ detect_flags()                      │ vulnexploit/agent/graph.py:70                                   │
+ │ Flag detection              │ detect_flags()                      │ clearwing/agent/graph.py:70                                   │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ SARIF schema                │ SARIFGenerator                      │ vulnexploit/runners/cicd/sarif.py:6 (needs R2)                  │
+ │ SARIF schema                │ SARIFGenerator                      │ clearwing/runners/cicd/sarif.py:6 (needs R2)                  │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Model routing               │ ProviderManager.get_llm()           │ vulnexploit/providers/manager.py:78                             │
+ │ Model routing               │ ProviderManager.get_llm()           │ clearwing/providers/manager.py:78                             │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Parallel fan-out pattern    │ ParallelExecutor                    │ vulnexploit/runners/parallel/executor.py:42 (copy, don't reuse) │
+ │ Parallel fan-out pattern    │ ParallelExecutor                    │ clearwing/runners/parallel/executor.py:42 (copy, don't reuse) │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ Subcommand registration     │ ALL_COMMANDS auto-discovery         │ vulnexploit/ui/commands/__init__.py:5                           │
+ │ Subcommand registration     │ ALL_COMMANDS auto-discovery         │ clearwing/ui/commands/__init__.py:5                           │
  ├─────────────────────────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
- │ ReAct graph skeleton        │ create_agent() (after R1)           │ vulnexploit/agent/graph.py:176                                  │
+ │ ReAct graph skeleton        │ create_agent() (after R1)           │ clearwing/agent/graph.py:176                                  │
  └─────────────────────────────┴─────────────────────────────────────┴─────────────────────────────────────────────────────────────────┘
 
  ---
@@ -1190,24 +1190,24 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  preprocess → tag → rank → fuzz → hunt → verify → exploit → report.
  Fuzzers launch in the background while preprocessing/ranking finishes; by the time the HunterPool starts, files with crashes have seeded_crash populated and their
  hunters get the easier "explain this crash" prompt instead of "find a vulnerability." Files without crashes proceed normally with the cold-start hunter prompt.
- 2. Harness Generator node — new vulnexploit/sourcehunt/harness_generator.py. For each file tagged parser or fuzzable with surface >= 4:
+ 2. Harness Generator node — new clearwing/sourcehunt/harness_generator.py. For each file tagged parser or fuzzable with surface >= 4:
    - Uses the LLM to generate a libFuzzer harness (int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size)) that calls the file's main entry point with the buffer.
    - Compiles the harness in the sandbox (ASan + libFuzzer + the project's headers).
    - Launches it in the background with a per-target time budget (default 2 hours total, distributed by rank).
    - On crash, captures the ASan report, minimized input, and stack trace into a seeded_crashes entry.
    - Files that are easily fuzzable get a rank boost (priority += 0.5) since they'll produce higher-signal hunter runs.
- 3. Tree-sitter callgraph in preprocessor — new vulnexploit/sourcehunt/callgraph.py using tree_sitter + tree_sitter_languages. Language-aware AST parsing without
+ 3. Tree-sitter callgraph in preprocessor — new clearwing/sourcehunt/callgraph.py using tree_sitter + tree_sitter_languages. Language-aware AST parsing without
  compiling. Builds a CallGraph mapping {file_path → {"functions": [...], "calls_out": [...], "called_by": [...]}}. The ranker's influence axis becomes
  clamp(log2(len(transitive_callers(f)) + 1), 1, 5) — real data, not LLM guessing. Also feeds reachability propagation.
  4. Reachability propagation — Identifies entry points by file tags (parser, syscall_entry, network-handler heuristics) and propagates "attacker-reachable" through the
  callgraph one hop at a time. Each FileTarget gains a real reachability score (1-5). Files unreachable from any tagged entry point get reachability=1 and drop in
  priority.
- 5. Two specialist hunters — MEMORY_SAFETY_HUNTER_PROMPT and LOGIC_AUTH_HUNTER_PROMPT in vulnexploit/sourcehunt/hunter.py. Routed by _choose_specialist(file_target) based
+ 5. Two specialist hunters — MEMORY_SAFETY_HUNTER_PROMPT and LOGIC_AUTH_HUNTER_PROMPT in clearwing/sourcehunt/hunter.py. Routed by _choose_specialist(file_target) based
   on tags. Same graph node as v0.1's general hunter — only the system prompt and tool emphasis change. Start with exactly two. Add more specializations only when data
  shows these are missing specific bug classes.
  6. Adversarial verifier — Activate the v0.2 prompt with the steel-manned counter-argument requirement. Verifier output schema is unchanged (slots already exist in v0.1's
   SourceFinding). Just a prompt swap.
- 7. Semgrep sidecar — new vulnexploit/sourcehunt/semgrep_sidecar.py. One static-analysis tool, one output format, one maintenance burden. Run during preprocessing with
+ 7. Semgrep sidecar — new clearwing/sourcehunt/semgrep_sidecar.py. One static-analysis tool, one output format, one maintenance burden. Run during preprocessing with
  the p/security-audit ruleset (or whichever is current). Per-file count fed into semgrep_hint for a surface boost; full findings injected as hints into hunter prompts.
  Never used as a source of truth — only as a starting hypothesis.
  8. Lightweight reachability tagging — Heuristic-based entry-point identification (network handlers via socket/bind/accept, file parsers via signature matching, CLI arg
@@ -1217,13 +1217,13 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
   they're reported as low-confidence noise (still listed but visually segregated).
  10. UBSan + MSan alongside ASan — Extend HunterSandbox.build_image() with sanitizers: list[str] config. MSan as a separate build variant (MSan can't coexist with ASan in
   the same binary). Hunter tools gain a sanitizer_variant parameter; run_with_sanitizer picks the right binary.
- 11. Blast radius analysis — vulnexploit/sourcehunt/blast_radius.py. Given a set of changed files (from git diff or commit hash), uses the callgraph to compute all
+ 11. Blast radius analysis — clearwing/sourcehunt/blast_radius.py. Given a set of changed files (from git diff or commit hash), uses the callgraph to compute all
  transitive callers. Feeds that expanded set into the HunterPool. Enabler for v0.3 Commit Monitor.
  12. R3 refactor — Generalize ParallelExecutor with runner_factory; replace HunterPool with a thin config-layer on top.
 
  v0.3 Flying — sketch (milestone after v0.2)
 
- 1. Variant Hunter Loop — new vulnexploit/sourcehunt/variant_loop.py. Slotted between Verifier and Exploiter. For each verified finding:
+ 1. Variant Hunter Loop — new clearwing/sourcehunt/variant_loop.py. Slotted between Verifier and Exploiter. For each verified finding:
    - Auto-generate three pattern artifacts: a lexical grep query, an AST pattern (tree-sitter), a semantic description.
    - Search the full codebase for structural matches.
    - Each match becomes a pre-seeded hypothesis injected back into the HunterPool as a new task: variant_seed={original_finding, pattern, match_location}.
@@ -1233,10 +1233,10 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  2. Patch-oracle in verifier — Activate the truth test in the verifier. After verification, attempt a minimal defensive fix (widen a bound, add a guard, initialize a
  default), recompile, re-run the PoC. Crash gone → causally validated, bump to evidence_level=root_cause_explained. Crash survives → flag the root cause theory as
  suspect, bounce back to a hunter for re-analysis. Lightweight, not a deliverable.
- 3. Mechanism-level cross-run memory — new vulnexploit/sourcehunt/mechanism_memory.py. Stores mechanisms, not findings: "length field trusted before allocation; 16-bit
+ 3. Mechanism-level cross-run memory — new clearwing/sourcehunt/mechanism_memory.py. Stores mechanisms, not findings: "length field trusted before allocation; 16-bit
  user-controlled value widened to size_t; mitigated by validating upper bound." Extracted via a short LLM pass after verification. Used as hunter prompt context on future
   runs: "patterns known to produce vulnerabilities in similar codebases."
-   - Defer the vector store — start with an append-only JSON file (~/.vulnexploit/sourcehunt/mechanisms.jsonl). Move to Chroma only after mechanism extraction is solid.
+   - Defer the vector store — start with an append-only JSON file (~/.clearwing/sourcehunt/mechanisms.jsonl). Move to Chroma only after mechanism extraction is solid.
  The hunter prompt picks the top-N most relevant mechanisms by simple keyword overlap on tags + language.
    - Storage seam is in v0.1's Reporter so future runs can read it; v0.1 just doesn't write to it.
  4. Commit Monitor (sourcehunt watch <repo> subcommand)
@@ -1246,11 +1246,11 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
    - Streams findings to an append-only log; integrates with GitHub Checks API to comment on PRs.
  5. CVE Retro-Hunt (sourcehunt retro-hunt <CVE_ID> subcommand)
    - Input: CVE ID + patch commit hash.
-   - Fetches the patch diff (via NVD API — already used by vulnexploit/scanners/vulnerability_scanner.py).
+   - Fetches the patch diff (via NVD API — already used by clearwing/scanners/vulnerability_scanner.py).
    - LLM generates a Semgrep rule capturing the pattern that was fixed (Semgrep, not CodeQL — one tool).
    - Runs the rule across the target repo(s).
    - Hits go into the hunter pipeline as variant seeds with related_cve: {CVE_ID}.
- 6. Auto-Patch mode — new vulnexploit/sourcehunt/patcher.py. Runs after the Exploiter on verified critical/high findings (evidence_level >= exploit_demonstrated):
+ 6. Auto-Patch mode — new clearwing/sourcehunt/patcher.py. Runs after the Exploiter on verified critical/high findings (evidence_level >= exploit_demonstrated):
    - Spawns a patcher agent. Writes a minimal fix.
    - Recompiles in sandbox, re-runs the exploit PoC.
    - Crash reproduces → patch rejected, log the attempt, don't include in report.
@@ -1354,22 +1354,22 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  export ANTHROPIC_API_KEY=...
 
  # 1. Smoke test without Docker (pure static path)
- python vulnexploit.py sourcehunt https://github.com/snoopysecurity/dvws-node \
+ python clearwing.py sourcehunt https://github.com/snoopysecurity/dvws-node \
      --branch master --depth quick --budget 0.25 \
      --output-dir /tmp/overwing-quick
 
  # 2. Standard test — sandboxed Python/JS hunter + verifier
- python vulnexploit.py sourcehunt https://github.com/OWASP/NodeGoat \
+ python clearwing.py sourcehunt https://github.com/OWASP/NodeGoat \
      --depth standard --budget 1.00 --max-parallel 4 \
      --output-dir /tmp/overwing-std
 
  # 3. Deep test — C memory-safety hunt with ASan + exploit triage
- python vulnexploit.py sourcehunt tests/fixtures/vuln_samples/c_heap_overflow \
+ python clearwing.py sourcehunt tests/fixtures/vuln_samples/c_heap_overflow \
      --depth deep --budget 2.00 --max-parallel 2 \
      --output-dir /tmp/overwing-deep
 
  # 4. Interactive agent integration
- python vulnexploit.py interactive
+ python clearwing.py interactive
  > hunt the source code at https://github.com/snoopysecurity/dvws-node
  # Expect the agent to call `hunt_source_code` tool and stream summary.
 
@@ -1377,7 +1377,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  ls /tmp/overwing-deep/
  cat /tmp/overwing-deep/findings.sarif | jq '.runs[0].results | length'
  cat /tmp/overwing-deep/report.md
- docker ps -a | grep vulnexploit-sourcehunt  # expect zero — cleanup verified
+ docker ps -a | grep clearwing-sourcehunt  # expect zero — cleanup verified
 
  Success criteria:
  - Preprocessor clones and enumerates files without errors.
@@ -1392,7 +1392,7 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  - Verifier marks at least one finding as verified with severity_verified set.
  - SARIF validates against the v2.1.0 schema (npm install -g @microsoft/sarif-multitool && sarif-multitool validate /tmp/overwing-deep/findings.sarif).
  - CostTracker total is within budget.
- - Audit log at ~/.vulnexploit/audit/<session>/audit.jsonl contains log_tool_call entries for hunter tools (including compile_file and run_with_sanitizer for Tier A/B,
+ - Audit log at ~/.clearwing/audit/<session>/audit.jsonl contains log_tool_call entries for hunter tools (including compile_file and run_with_sanitizer for Tier A/B,
  and grep_source/find_callers for Tier C).
  - All containers are torn down (docker ps -a shows zero lingering sourcehunt containers).
  - Interactive agent successfully calls hunt_source_code and surfaces the summary back to the user.
@@ -1401,23 +1401,23 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  Critical files to be created / modified (Phase 1)
 
  New files:
- - vulnexploit/sourcehunt/__init__.py
- - vulnexploit/sourcehunt/state.py
- - vulnexploit/sourcehunt/preprocessor.py
- - vulnexploit/sourcehunt/ranker.py
- - vulnexploit/sourcehunt/hunter.py
- - vulnexploit/sourcehunt/verifier.py
- - vulnexploit/sourcehunt/exploiter.py
- - vulnexploit/sourcehunt/pool.py
- - vulnexploit/sourcehunt/runner.py
- - vulnexploit/sourcehunt/reporter.py
- - vulnexploit/sandbox/__init__.py
- - vulnexploit/sandbox/container.py
- - vulnexploit/sandbox/hunter_sandbox.py
- - vulnexploit/sandbox/builders.py
- - vulnexploit/agent/tools/hunter_tools.py
- - vulnexploit/agent/tools/sourcehunt_tools.py (interactive @tool wrapper)
- - vulnexploit/ui/commands/sourcehunt.py
+ - clearwing/sourcehunt/__init__.py
+ - clearwing/sourcehunt/state.py
+ - clearwing/sourcehunt/preprocessor.py
+ - clearwing/sourcehunt/ranker.py
+ - clearwing/sourcehunt/hunter.py
+ - clearwing/sourcehunt/verifier.py
+ - clearwing/sourcehunt/exploiter.py
+ - clearwing/sourcehunt/pool.py
+ - clearwing/sourcehunt/runner.py
+ - clearwing/sourcehunt/reporter.py
+ - clearwing/sandbox/__init__.py
+ - clearwing/sandbox/container.py
+ - clearwing/sandbox/hunter_sandbox.py
+ - clearwing/sandbox/builders.py
+ - clearwing/agent/tools/hunter_tools.py
+ - clearwing/agent/tools/sourcehunt_tools.py (interactive @tool wrapper)
+ - clearwing/ui/commands/sourcehunt.py
  - tests/test_sourcehunt_*.py (11 files — see §Testing: preprocessor, ranker, tiering, pool_budget, hunter, verifier, exploiter, evidence_levels, runner, tools,
  v02_seams)
  - tests/test_sandbox_container.py
@@ -1431,13 +1431,13 @@ Overwing: Source-Code Vulnerability Hunting Pipeline
  regression fixture)
 
  Modified files:
- - vulnexploit/agent/graph.py — R1: extract build_react_graph(), keep create_agent() as wrapper.
- - vulnexploit/runners/cicd/sarif.py — R2: file-aware physicalLocation (backwards compatible).
- - vulnexploit/providers/manager.py — add ranker/hunter/verifier/sourcehunt_exploit routes to DEFAULT_ROUTES.
- - vulnexploit/core/config.py — optional YAML models: section loader calling set_route().
- - vulnexploit/ui/commands/__init__.py — register sourcehunt command.
- - vulnexploit/agent/tools/__init__.py — one-line tools.extend(get_sourcehunt_tools()) near the other optional-tools block (~line 88).
- - vulnexploit/agent/prompts.py — one bullet added to SYSTEM_PROMPT_TEMPLATE describing hunt_source_code as the white-box companion tool.
+ - clearwing/agent/graph.py — R1: extract build_react_graph(), keep create_agent() as wrapper.
+ - clearwing/runners/cicd/sarif.py — R2: file-aware physicalLocation (backwards compatible).
+ - clearwing/providers/manager.py — add ranker/hunter/verifier/sourcehunt_exploit routes to DEFAULT_ROUTES.
+ - clearwing/core/config.py — optional YAML models: section loader calling set_route().
+ - clearwing/ui/commands/__init__.py — register sourcehunt command.
+ - clearwing/agent/tools/__init__.py — one-line tools.extend(get_sourcehunt_tools()) near the other optional-tools block (~line 88).
+ - clearwing/agent/prompts.py — one bullet added to SYSTEM_PROMPT_TEMPLATE describing hunt_source_code as the white-box companion tool.
  - README.md — Overwing section in features list (no new docs files per repo convention).
 
  No existing files are deleted. No breaking changes to public APIs.

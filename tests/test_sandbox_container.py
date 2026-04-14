@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vulnexploit.sandbox.container import (
+from clearwing.sandbox.container import (
     ExecResult,
     SandboxConfig,
     SandboxContainer,

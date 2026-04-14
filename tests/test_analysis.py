@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.analysis.source_analyzer import SourceAnalyzer, AnalysisResult, Finding
-from vulnexploit.analysis.taint_tracker import TaintTracker, TaintFlow, TAINT_SOURCES, TAINT_SINKS
+from clearwing.analysis.source_analyzer import SourceAnalyzer, AnalysisResult, Finding
+from clearwing.analysis.taint_tracker import TaintTracker, TaintFlow, TAINT_SOURCES, TAINT_SINKS
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.core.skills.loader import SkillLoader, SkillInfo
+from clearwing.core.skills.loader import SkillLoader, SkillInfo
 
 
 class TestSkillInfo:
