@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from clearwing.agent.tools.hunt.hunter_tools import (
+from clearwing.agent.tools.hunt import (
     HunterContext,
     _normalize_path,
     _parse_rg_output,

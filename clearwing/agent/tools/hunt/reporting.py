@@ -1,55 +1,25 @@
-"""Per-hunter ReAct tools, scoped to a single sandboxed hunt session.
+"""Finding-reporting tool for the source-hunt hunter.
 
-All tools are built via `build_hunter_tools(ctx)` where `ctx` is a
-HunterContext containing the SandboxContainer and a mutable findings list.
-The closure prevents path traversal and routes every command through the
-sandbox.
-
-Tool subsets:
-    build_hunter_tools(ctx)            — full set for memory_safety / general
-    build_propagation_auditor_tools(ctx) — narrower set for Tier C auditors
-                                           (no compile/run; just read/grep)
+A single tool, `record_finding`, that the hunter calls to surface a
+vulnerability into `ctx.findings`. This is where hunter-emitted hits
+become `clearwing.findings.Finding` dataclass instances — the canonical
+shape consumed by the sourcehunt verifier, exploiter, patcher, and
+reporter stages downstream.
 """
 
 from __future__ import annotations
 
-import logging
 import uuid
 
 from langchain_core.tools import tool
 
 from clearwing.sourcehunt.state import Finding
 
-from .analysis import (  # noqa: F401 — re-exported for tests
-    _default_libfuzzer_template,
-    _parse_sanitizer_report,
-    build_analysis_tools,
-)
-from .discovery import (  # noqa: F401 — re-exported for tests
-    _container_path,
-    _grep_python_fallback,
-    _normalize_path,
-    _parse_rg_output,
-    build_discovery_tools,
-)
-from .sandbox import HunterContext, _parse_variant_arg  # noqa: F401 — re-exported
-
-logger = logging.getLogger(__name__)
+from .sandbox import HunterContext
 
 
-# --- Tool builders ----------------------------------------------------------
-
-
-def build_hunter_tools(ctx: HunterContext) -> list:
-    """Full hunter tool set for memory_safety / logic_auth / general specialists.
-
-    Includes file I/O, grep, compile + run with sanitizer, scratch writes,
-    and record_finding.
-    """
-
-    discovery_tools = build_discovery_tools(ctx)
-
-    analysis_tools = build_analysis_tools(ctx)
+def build_reporting_tools(ctx: HunterContext) -> list:
+    """Build the single finding-reporter tool for a hunter session."""
 
     @tool
     def record_finding(
@@ -110,21 +80,4 @@ def build_hunter_tools(ctx: HunterContext) -> list:
             f"(severity={severity}, evidence_level={evidence_level})"
         )
 
-    return [
-        *discovery_tools,
-        *analysis_tools,
-        record_finding,
-    ]
-
-
-def build_propagation_auditor_tools(ctx: HunterContext) -> list:
-    """Narrower tool set for Tier C propagation auditors.
-
-    Tier C auditors don't compile or run — they grep and reason about
-    downstream usages of definitions. This subset keeps them cheap and
-    on-task.
-    """
-    full = build_hunter_tools(ctx)
-    # Names of the tools we want to keep
-    keep = {"read_source_file", "list_source_tree", "grep_source", "find_callers", "record_finding"}
-    return [t for t in full if t.name in keep]
+    return [record_finding]
