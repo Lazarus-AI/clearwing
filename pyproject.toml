@@ -47,6 +47,14 @@ dependencies = [
     "networkx>=3.0",
     # Memory
     "numpy>=1.24.0",
+    # Source hunting (Overwing) — callgraph extraction
+    "tree-sitter>=0.21.0",
+    "tree-sitter-c>=0.21.0",
+    "tree-sitter-cpp>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-go>=0.21.0",
+    "tree-sitter-rust>=0.21.0",
 ]
 
 [project.optional-dependencies]
