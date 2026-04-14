@@ -81,12 +81,8 @@ include = ["vulnexploit*"]
 vulnexploit = ["core/config_data/*.yaml", "core/skills/vulnerabilities/*.md", "skills/vulnerabilities/*.md"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "vulnexploit/tests"]
+testpaths = ["tests"]
 asyncio_mode = "strict"
-# Phase 1 will migrate vulnexploit/tests/ out of the package. The deselected
-# test asserts an arbitrary 50-line floor on skill markdown content that
-# TacticalEdge (32 lines) fails; revisit the assertion during the migration.
-addopts = "--deselect=vulnexploit/tests/test_skills.py::TestSkillContent::test_each_skill_has_minimum_length"
 
 [tool.black]
 line-length = 100

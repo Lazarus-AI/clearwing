@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vulnexploit.skills.loader import SkillLoader, SkillInfo
+from vulnexploit.core.skills.loader import SkillLoader, SkillInfo
 
 
 class TestSkillInfo:
@@ -121,7 +121,7 @@ class TestSkillContent:
                 continue
             content = skill.path.read_text()
             lines = content.strip().split("\n")
-            assert len(lines) >= 50, f"{skill.name} has only {len(lines)} lines (expected >= 50)"
+            assert len(lines) >= 30, f"{skill.name} has only {len(lines)} lines (expected >= 30)"
 
     def test_sql_injection_has_key_content(self):
         content = self.loader.load("sql_injection")

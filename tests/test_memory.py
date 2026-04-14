@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vulnexploit.memory.session_store import SessionInfo, SessionStore
-from vulnexploit.memory.episodic_memory import EpisodicMemory, Episode
-from vulnexploit.memory.semantic_memory import SemanticMemory, Knowledge
-from vulnexploit.memory.summarizer import ContextSummarizer
+from vulnexploit.data.memory.session_store import SessionInfo, SessionStore
+from vulnexploit.data.memory.episodic_memory import EpisodicMemory, Episode
+from vulnexploit.data.memory.semantic_memory import SemanticMemory, Knowledge
+from vulnexploit.data.memory.summarizer import ContextSummarizer
 
 
 # =========================================================================

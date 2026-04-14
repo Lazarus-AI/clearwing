@@ -2,9 +2,9 @@
 
 import base64
 
-from vulnexploit.guardrails.input_guardrails import InputGuardrail
-from vulnexploit.guardrails.output_guardrails import OutputGuardrail
-from vulnexploit.guardrails.patterns import (
+from vulnexploit.safety.guardrails.input_guardrails import InputGuardrail
+from vulnexploit.safety.guardrails.output_guardrails import OutputGuardrail
+from vulnexploit.safety.guardrails.patterns import (
     GuardrailResult,
     INJECTION_PATTERNS,
     DANGEROUS_COMMAND_PATTERNS,
