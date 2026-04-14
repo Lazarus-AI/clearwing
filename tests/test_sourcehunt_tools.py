@@ -19,7 +19,7 @@ def test_hunt_source_code_is_discoverable_via_get_all_tools():
 
 
 def test_get_sourcehunt_tools_returns_two_tools():
-    from clearwing.agent.tools.sourcehunt_tools import get_sourcehunt_tools
+    from clearwing.agent.tools.meta.sourcehunt_tools import get_sourcehunt_tools
     tools = get_sourcehunt_tools()
     assert len(tools) == 2
     names = {t.name for t in tools}
@@ -28,7 +28,7 @@ def test_get_sourcehunt_tools_returns_two_tools():
 
 def test_hunt_source_code_runs_quick_against_local_fixture(tmp_path):
     """The @tool wrapper should run the runner end-to-end on a local path."""
-    from clearwing.agent.tools.sourcehunt_tools import hunt_source_code
+    from clearwing.agent.tools.meta.sourcehunt_tools import hunt_source_code
 
     summary = hunt_source_code.invoke({
         "repo_url_or_path": str(FIXTURE_PY_SQLI),
@@ -45,7 +45,7 @@ def test_hunt_source_code_runs_quick_against_local_fixture(tmp_path):
 
 def test_hunt_source_code_returns_summary_for_empty_repo(tmp_path):
     """An empty directory still produces a valid summary, not an error."""
-    from clearwing.agent.tools.sourcehunt_tools import hunt_source_code
+    from clearwing.agent.tools.meta.sourcehunt_tools import hunt_source_code
 
     empty = tmp_path / "empty_repo"
     empty.mkdir()
@@ -61,7 +61,7 @@ def test_hunt_source_code_returns_summary_for_empty_repo(tmp_path):
 
 def test_list_sourcehunt_findings_recalls_recent_run(tmp_path):
     """After hunt_source_code runs, list_sourcehunt_findings returns the cache."""
-    from clearwing.agent.tools.sourcehunt_tools import (
+    from clearwing.agent.tools.meta.sourcehunt_tools import (
         hunt_source_code,
         list_sourcehunt_findings,
         _RECENT_SESSIONS,
@@ -86,7 +86,7 @@ def test_list_sourcehunt_findings_recalls_recent_run(tmp_path):
 
 
 def test_list_sourcehunt_findings_with_unknown_session_id():
-    from clearwing.agent.tools.sourcehunt_tools import (
+    from clearwing.agent.tools.meta.sourcehunt_tools import (
         list_sourcehunt_findings,
         _RECENT_SESSIONS,
     )

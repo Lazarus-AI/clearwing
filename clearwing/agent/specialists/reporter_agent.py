@@ -33,7 +33,7 @@ class ReporterAgent:
 
     def build_graph(self):
         """Build and compile the reporter sub-graph."""
-        from clearwing.agent.tools.reporting_tools import (
+        from clearwing.agent.tools.meta.reporting_tools import (
             generate_report, save_report, query_scan_history, search_cves,
         )
 

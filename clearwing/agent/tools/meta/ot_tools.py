@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 from langchain_core.tools import tool
-from ...scanning.ot_scanner import OTScanner
+from ....scanning.ot_scanner import OTScanner
 
 @tool
 async def scan_ot_infrastructure(target: str) -> List[Dict[str, Any]]:

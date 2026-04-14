@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from clearwing.agent.tools.hunter_tools import (
+from clearwing.agent.tools.hunt.hunter_tools import (
     HunterContext,
     _default_libfuzzer_template,
     build_hunter_tools,

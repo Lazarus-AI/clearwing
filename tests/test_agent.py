@@ -158,7 +158,7 @@ class TestGraphConstruction:
 class TestScannerToolWrapping:
     @pytest.mark.asyncio
     async def test_scan_ports_wraps_scanner(self):
-        from clearwing.agent.tools.scanner_tools import scan_ports
+        from clearwing.agent.tools.scan.scanner_tools import scan_ports
 
         mock_result = [{"port": 22, "protocol": "tcp", "state": "open", "service": "SSH"}]
 
@@ -177,7 +177,7 @@ class TestScannerToolWrapping:
 
     @pytest.mark.asyncio
     async def test_detect_services_wraps_scanner(self):
-        from clearwing.agent.tools.scanner_tools import detect_services
+        from clearwing.agent.tools.scan.scanner_tools import detect_services
 
         ports = [{"port": 80, "service": "HTTP"}]
         mock_result = [{"port": 80, "service": "HTTP", "banner": "Apache", "version": "2.4"}]
@@ -195,7 +195,7 @@ class TestScannerToolWrapping:
 
     @pytest.mark.asyncio
     async def test_detect_os_wraps_scanner(self):
-        from clearwing.agent.tools.scanner_tools import detect_os
+        from clearwing.agent.tools.scan.scanner_tools import detect_os
 
         mock_scanner = MagicMock()
         mock_scanner.detect = AsyncMock(return_value="Linux/Unix")
@@ -208,7 +208,7 @@ class TestScannerToolWrapping:
 
 class TestUtilityTools:
     def test_validate_target_ip(self):
-        from clearwing.agent.tools.utility_tools import validate_target
+        from clearwing.agent.tools.meta.utility_tools import validate_target
 
         result = validate_target.invoke({"ip_or_cidr": "192.168.1.1"})
         assert result["valid"] is True
@@ -216,13 +216,13 @@ class TestUtilityTools:
         assert result["ips"] == ["192.168.1.1"]
 
     def test_validate_target_invalid(self):
-        from clearwing.agent.tools.utility_tools import validate_target
+        from clearwing.agent.tools.meta.utility_tools import validate_target
 
         result = validate_target.invoke({"ip_or_cidr": "not-an-ip"})
         assert result["valid"] is False
 
     def test_validate_target_cidr(self):
-        from clearwing.agent.tools.utility_tools import validate_target
+        from clearwing.agent.tools.meta.utility_tools import validate_target
 
         result = validate_target.invoke({"ip_or_cidr": "192.168.1.0/30"})
         assert result["valid"] is True
@@ -230,7 +230,7 @@ class TestUtilityTools:
         assert len(result["ips"]) == 2  # /30 has 2 usable hosts
 
     def test_calculate_severity(self):
-        from clearwing.agent.tools.utility_tools import calculate_severity
+        from clearwing.agent.tools.meta.utility_tools import calculate_severity
 
         assert calculate_severity.invoke({"cvss_score": 9.5}) == "CRITICAL"
         assert calculate_severity.invoke({"cvss_score": 7.5}) == "HIGH"
@@ -241,7 +241,7 @@ class TestUtilityTools:
 
 class TestReportingTools:
     def test_generate_report(self):
-        from clearwing.agent.tools.reporting_tools import generate_report
+        from clearwing.agent.tools.meta.reporting_tools import generate_report
 
         scan_data = {
             "target": "192.168.1.1",

@@ -1,10 +1,23 @@
-"""Agent tool registry.
+"""Agent tool registry — pure aggregator.
 
-Collects all built-in and optional tools into a single list via get_all_tools().
+Tools live in domain subpackages:
+    scan/     — port/service/vuln/os scanners
+    exploit/  — exploit search, execution, payload gen, metasploit bridge
+    hunt/     — source-hunt ReAct hunter tools (not in get_all_tools())
+    recon/    — browser automation, proxy interception, pivot tools
+    ops/      — kali docker, MCP stdio, dynamic tool creation, skill loading
+    data/     — knowledge graph, episodic memory, source analysis
+    meta/     — reporting, utilities, remediation, sourcehunt CLI, wargame, OT
+
+`get_all_tools()` is the network-agent contract consumed by
+`clearwing/agent/graph.py` to build the ReAct loop's tool bind-list. The
+source-hunt pipeline builds its own tool list via
+`clearwing/sourcehunt/hunter.py:build_hunter_agent()` and intentionally
+does NOT pull from this aggregator.
 """
 
-from .scanner_tools import scan_ports, detect_services, scan_vulnerabilities, detect_os
-from .exploit_tools import (
+from .scan.scanner_tools import scan_ports, detect_services, scan_vulnerabilities, detect_os
+from .exploit.exploit_tools import (
     exploit_vulnerability,
     enumerate_privesc,
     crack_password,
@@ -12,28 +25,28 @@ from .exploit_tools import (
     metasploit_list_sessions,
     metasploit_run_command,
 )
-from .kali_docker_tool import kali_setup, kali_execute, kali_install_tool, kali_cleanup
-from .reporting_tools import generate_report, save_report, query_scan_history, search_cves
-from .utility_tools import validate_target, calculate_severity
-from .dynamic_tool_creator import create_custom_tool, list_custom_tools, get_custom_tools
-from .memory_tools import recall_target_history, store_knowledge, search_knowledge
-from .skill_tools import load_skills
-from .knowledge_tools import query_knowledge_graph
-from .mcp_tools import get_mcp_tools
-from .exploit_search import get_exploit_search_tools
-from .pivot_tools import get_pivot_tools
-from .remediation_tools import get_remediation_tools
-from .wargame_tools import get_wargame_tools
-from .payload_tools import get_payload_tools
-from .ot_tools import get_ot_tools
-from .sourcehunt_tools import get_sourcehunt_tools
+from .ops.kali_docker_tool import kali_setup, kali_execute, kali_install_tool, kali_cleanup
+from .meta.reporting_tools import generate_report, save_report, query_scan_history, search_cves
+from .meta.utility_tools import validate_target, calculate_severity
+from .ops.dynamic_tool_creator import create_custom_tool, list_custom_tools, get_custom_tools
+from .data.memory_tools import recall_target_history, store_knowledge, search_knowledge
+from .ops.skill_tools import load_skills
+from .data.knowledge_tools import query_knowledge_graph
+from .ops.mcp_tools import get_mcp_tools
+from .exploit.exploit_search import get_exploit_search_tools
+from .recon.pivot_tools import get_pivot_tools
+from .meta.remediation_tools import get_remediation_tools
+from .meta.wargame_tools import get_wargame_tools
+from .exploit.payload_tools import get_payload_tools
+from .meta.ot_tools import get_ot_tools
+from .meta.sourcehunt_tools import get_sourcehunt_tools
 
 
 # --- Optional tool imports (graceful fallback) ---
 
 def _get_browser_tools() -> list:
     try:
-        from .browser_tools import get_browser_tools
+        from .recon.browser_tools import get_browser_tools
         return get_browser_tools()
     except ImportError:
         return []
@@ -41,7 +54,7 @@ def _get_browser_tools() -> list:
 
 def _get_proxy_tools() -> list:
     try:
-        from .proxy_tools import get_proxy_tools
+        from .recon.proxy_tools import get_proxy_tools
         return get_proxy_tools()
     except ImportError:
         return []
@@ -49,7 +62,7 @@ def _get_proxy_tools() -> list:
 
 def _get_analysis_tools() -> list:
     try:
-        from .analysis_tools import analyze_source, clone_and_analyze, trace_taint_flows
+        from .data.analysis_tools import analyze_source, clone_and_analyze, trace_taint_flows
         return [analyze_source, clone_and_analyze, trace_taint_flows]
     except ImportError:
         return []

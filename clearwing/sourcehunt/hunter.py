@@ -14,7 +14,7 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 
 from clearwing.agent.graph import build_react_graph
-from clearwing.agent.tools.hunter_tools import (
+from clearwing.agent.tools.hunt.hunter_tools import (
     HunterContext,
     build_hunter_tools,
     build_propagation_auditor_tools,

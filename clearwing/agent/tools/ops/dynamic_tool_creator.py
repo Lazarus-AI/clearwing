@@ -6,7 +6,7 @@ from langchain_core.tools import tool
 
 _CUSTOM_TOOL_REGISTRY: dict = {}
 
-CUSTOM_TOOLS_DIR = Path(__file__).parent.parent / "custom_tools"
+CUSTOM_TOOLS_DIR = Path(__file__).parent.parent.parent / "custom_tools"
 
 TOOL_TEMPLATE = '''"""Auto-generated custom tool: {tool_name}"""
 import asyncio

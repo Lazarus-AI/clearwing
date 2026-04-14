@@ -1,7 +1,7 @@
 import json
 from typing import List, Dict, Optional, Any
 from langchain_core.tools import tool
-from ...mcp.client import MCPClient
+from ....mcp.client import MCPClient
 
 # Global registry of active MCP clients
 _MCP_CLIENTS: Dict[str, MCPClient] = {}

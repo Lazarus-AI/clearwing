@@ -1,7 +1,7 @@
 import json
 from typing import List, Dict, Optional, Any
 from langchain_core.tools import tool
-from .kali_docker_tool import kali_execute
+from ..ops.kali_docker_tool import kali_execute
 
 @tool
 async def setup_pivot(target_ip: str, method: str = "ssh", container_id: str = None) -> Dict[str, Any]:

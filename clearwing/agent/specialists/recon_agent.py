@@ -29,10 +29,10 @@ class ReconAgent:
 
     def build_graph(self):
         """Build and compile the recon sub-graph."""
-        from clearwing.agent.tools.scanner_tools import (
+        from clearwing.agent.tools.scan.scanner_tools import (
             scan_ports, detect_services, scan_vulnerabilities, detect_os,
         )
-        from clearwing.agent.tools.kali_docker_tool import (
+        from clearwing.agent.tools.ops.kali_docker_tool import (
             kali_setup, kali_execute, kali_install_tool,
         )
 
