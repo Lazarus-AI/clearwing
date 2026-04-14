@@ -14,6 +14,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from .disclosure import (
     DisclosureGenerator,
@@ -98,24 +99,24 @@ class SourceHuntRunner:
         adversarial_verifier: bool = True,  # v0.2: on by default
         adversarial_threshold: EvidenceLevel | None = "static_corroboration",  # v0.4: budget gate
         enable_mechanism_memory: bool = True,  # v0.3: cross-run mechanism store
-        mechanism_store_path=None,  # override default store location
+        mechanism_store_path: Any = None,  # override default store location
         enable_patch_oracle: bool = True,  # v0.3: patch oracle truth test
         enable_variant_loop: bool = True,  # v0.3: compound finding density
         enable_auto_patch: bool = False,  # v0.3: opt-in auto-patch mode
         auto_pr: bool = False,  # v0.3: open a draft PR via gh
         enable_knowledge_graph: bool = True,  # v0.3: populate source-hunt KG
-        knowledge_graph=None,  # inject a KG instance for tests
+        knowledge_graph: Any = None,  # inject a KG instance for tests
         export_disclosures: bool = False,  # v0.4: write MITRE/HackerOne templates
         disclosure_reporter_name: str = "(your name)",
         disclosure_reporter_affiliation: str = "(your affiliation)",
         disclosure_reporter_email: str = "(your email)",
         model_override: str | None = None,
-        provider_manager=None,  # optional ProviderManager
-        ranker_llm=None,  # injectable for tests
-        hunter_llm=None,
-        verifier_llm=None,
-        exploiter_llm=None,
-        sandbox_factory=None,  # callable[[], SandboxContainer]
+        provider_manager: Any = None,  # optional ProviderManager
+        ranker_llm: Any = None,  # injectable for tests
+        hunter_llm: Any = None,
+        verifier_llm: Any = None,
+        exploiter_llm: Any = None,
+        sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
     ):
         self.repo_url = repo_url
@@ -593,7 +594,7 @@ class SourceHuntRunner:
         except Exception:
             logger.debug("KG save failed", exc_info=True)
 
-    def _open_draft_pr(self, finding: Finding, attempt) -> None:
+    def _open_draft_pr(self, finding: Finding, attempt: Any) -> None:
         """Open a draft PR for a validated auto-patch via the `gh` CLI.
 
         v0.3: best-effort only — failures are logged and the run continues.
@@ -784,7 +785,7 @@ class SourceHuntRunner:
 
     # --- LLM resolution -----------------------------------------------------
 
-    def _get_llm(self, task: str, override):
+    def _get_llm(self, task: str, override: Any) -> Any:
         """Return an LLM for the given task, or None if not available.
 
         Resolution order:
@@ -818,7 +819,7 @@ class SourceHuntRunner:
         except Exception:
             return None
 
-    def _build_llm_from_model_string(self, model: str):
+    def _build_llm_from_model_string(self, model: str) -> Any:
         """Build a single LLM from a model string. Used by --model override."""
         try:
             from langchain_anthropic import ChatAnthropic

@@ -19,7 +19,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -304,8 +304,8 @@ class Verifier:
         self,
         finding: Finding,
         file_content: str,
-        sandbox=None,
-        rerun_poc=None,
+        sandbox: Any = None,
+        rerun_poc: Any = None,
     ) -> tuple[bool, str, str]:
         """Write a minimal defensive fix; run it through the oracle.
 

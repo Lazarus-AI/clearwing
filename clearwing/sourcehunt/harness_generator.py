@@ -29,6 +29,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -117,9 +118,9 @@ class HarnessGenerator:
     def __init__(
         self,
         llm: BaseChatModel,
-        sandbox_factory=None,  # Callable[[], SandboxContainer] | HunterSandbox
+        sandbox_factory: Any = None,  # Callable[[], SandboxContainer] | HunterSandbox
         config: HarnessGeneratorConfig | None = None,
-    ):
+    ) -> None:
         self.llm = llm
         self.sandbox_factory = sandbox_factory
         self.config = config or HarnessGeneratorConfig()
@@ -290,7 +291,7 @@ class HarnessGenerator:
             except Exception:
                 pass
 
-    def _spawn_sandbox(self):
+    def _spawn_sandbox(self) -> Any:
         """Spawn a fresh sandbox container for this fuzz run."""
         if self.sandbox_factory is None:
             return None

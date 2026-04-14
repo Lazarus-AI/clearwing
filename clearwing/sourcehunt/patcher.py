@@ -22,7 +22,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -102,7 +102,7 @@ class AutoPatcher:
         self,
         finding: Finding,
         file_content: str = "",
-        sandbox=None,
+        sandbox: Any = None,
         rerun_poc: Callable | None = None,
     ) -> PatchAttempt:
         """Attempt an auto-patch. Validates ONLY if sandbox + rerun_poc are both provided.
