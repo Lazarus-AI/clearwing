@@ -19,42 +19,21 @@ from .state import AgentState
 from .prompts import build_system_prompt
 from .tools import get_all_tools, get_custom_tools
 
-# --- Graceful imports for Phase 1 modules ---
+# --- Subsystem imports (unconditional; Phase 4c) ---
+#
+# These used to be try/except ImportError blocks that stored `None` on
+# failure. Phase 4c makes the imports unconditional and routes the
+# presence check through `clearwing.capabilities`, which probes each
+# subsystem at clearwing import time and exposes a `has("name")` API.
+# See `clearwing/capabilities.py`.
 
-try:
-    from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
-except ImportError:
-    InputGuardrail = None
-    OutputGuardrail = None
-
-try:
-    from clearwing.data.memory import EpisodicMemory, ContextSummarizer
-except ImportError:
-    EpisodicMemory = None
-    ContextSummarizer = None
-
-try:
-    from clearwing.observability.telemetry import CostTracker
-except ImportError:
-    CostTracker = None
-
-try:
-    from clearwing.core.events import EventBus, EventType
-except ImportError:
-    EventBus = None
-    EventType = None
-
-# --- Graceful imports for Phase 2 modules ---
-
-try:
-    from clearwing.safety.audit import AuditLogger
-except ImportError:
-    AuditLogger = None
-
-try:
-    from clearwing.data.knowledge import KnowledgeGraph
-except ImportError:
-    KnowledgeGraph = None
+from clearwing.capabilities import capabilities
+from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
+from clearwing.data.memory import EpisodicMemory, ContextSummarizer
+from clearwing.observability.telemetry import CostTracker
+from clearwing.core.events import EventBus, EventType
+from clearwing.safety.audit import AuditLogger
+from clearwing.data.knowledge import KnowledgeGraph
 
 # --- Flag detection ---
 
@@ -232,24 +211,34 @@ def build_react_graph(
     if output_guardrail_tool_names is None:
         output_guardrail_tool_names = _DEFAULT_OUTPUT_GUARDRAIL_TOOLS
 
-    cost_tracker = CostTracker() if (enable_cost_tracker and CostTracker) else None
-    episodic_memory = EpisodicMemory() if (enable_episodic_memory and EpisodicMemory) else None
-    context_summarizer = (
-        ContextSummarizer() if (enable_context_summarizer and ContextSummarizer) else None
+    cost_tracker = (
+        CostTracker() if enable_cost_tracker and capabilities.has("telemetry") else None
     )
-    event_bus = EventBus() if (enable_event_bus and EventBus) else None
-    input_guardrail = InputGuardrail() if (enable_input_guardrail and InputGuardrail) else None
-    output_guardrail = OutputGuardrail() if (enable_output_guardrail and OutputGuardrail) else None
+    episodic_memory = (
+        EpisodicMemory() if enable_episodic_memory and capabilities.has("memory") else None
+    )
+    context_summarizer = (
+        ContextSummarizer()
+        if enable_context_summarizer and capabilities.has("memory")
+        else None
+    )
+    event_bus = EventBus() if enable_event_bus and capabilities.has("events") else None
+    input_guardrail = (
+        InputGuardrail() if enable_input_guardrail and capabilities.has("guardrails") else None
+    )
+    output_guardrail = (
+        OutputGuardrail() if enable_output_guardrail and capabilities.has("guardrails") else None
+    )
 
     audit_logger = None
-    if enable_audit and AuditLogger and session_id:
+    if enable_audit and capabilities.has("audit") and session_id:
         try:
             audit_logger = AuditLogger(session_id)
         except Exception:
             logger.warning("Failed to initialize AuditLogger", exc_info=True)
 
     knowledge_graph = None
-    if enable_knowledge_graph and KnowledgeGraph:
+    if enable_knowledge_graph and capabilities.has("knowledge"):
         try:
             knowledge_graph = KnowledgeGraph(persist_path="~/.clearwing/knowledge_graph.json")
         except Exception:
@@ -291,7 +280,7 @@ def build_react_graph(
                         cost_usd=cost_tracker.total_cost_usd,
                     )
 
-        if event_bus and EventType:
+        if event_bus:
             content_text = response.content if isinstance(response.content, str) else ""
             event_bus.emit_message(content_text[:200], "agent")
 
@@ -316,7 +305,7 @@ def build_react_graph(
             tool_name = tc.get("name", "")
             tool_args = tc.get("args", {})
 
-            if event_bus and EventType:
+            if event_bus:
                 event_bus.emit(EventType.TOOL_START, {
                     "tool": tool_name,
                     "args": tool_args,
@@ -385,7 +374,7 @@ def build_react_graph(
             if found_flags:
                 new_flags.extend(found_flags)
 
-            if event_bus and EventType:
+            if event_bus:
                 event_bus.emit(EventType.TOOL_RESULT, {
                     "tool": tool_name,
                     "content_length": len(content),
@@ -395,7 +384,7 @@ def build_react_graph(
         if new_flags:
             existing_flags = state.get("flags_found", [])
             state_updates["flags_found"] = existing_flags + new_flags
-            if event_bus and EventType:
+            if event_bus:
                 event_bus.emit(EventType.FLAG_FOUND, {"flags": new_flags})
 
         return state_updates
