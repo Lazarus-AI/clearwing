@@ -155,12 +155,12 @@ class SourceHuntState(TypedDict, total=False):
     fuzz_corpora: list[dict]               # detected OSS-Fuzz / project corpora
     seeded_crashes: list[dict]             # harness generator output
 
-    findings: list[SourceFinding]
-    verified_findings: list[SourceFinding]
+    findings: list[Finding]
+    verified_findings: list[Finding]
 
     # v0.3 seams
     variant_seeds: list[dict]              # hypotheses from variant hunter loop
-    exploited_findings: list[SourceFinding]
+    exploited_findings: list[Finding]
     patch_attempts: list[dict]             # auto-patcher output (validated or not)
 
     # Budget & cost

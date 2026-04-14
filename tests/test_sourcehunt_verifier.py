@@ -6,7 +6,7 @@ Critical assertions:
 - Output schema includes pro_argument / counter_argument / tie_breaker_evidence
   (counter_argument is empty in v0.1)
 - evidence_level is set to crash_reproduced or root_cause_explained on success
-- apply_verifier_result merges the verdict into the SourceFinding
+- apply_verifier_result merges the verdict into the Finding
 """
 from __future__ import annotations
 

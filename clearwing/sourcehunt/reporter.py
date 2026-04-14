@@ -13,7 +13,7 @@ from typing import Optional
 
 from clearwing.runners.cicd.sarif import SARIFGenerator
 
-from .state import EVIDENCE_LEVELS, SourceFinding
+from .state import EVIDENCE_LEVELS, Finding
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,8 @@ def write_sourcehunt_report(
     output_dir: str,
     session_id: str,
     repo_url: str,
-    findings: list[SourceFinding],
-    verified_findings: list[SourceFinding],
+    findings: list[Finding],
+    verified_findings: list[Finding],
     spent_per_tier: dict,
     formats: Optional[list[str]] = None,
 ) -> dict[str, str]:
@@ -96,8 +96,8 @@ def write_sourcehunt_report(
 # --- Format-specific helpers ------------------------------------------------
 
 
-def _to_sarif_findings(findings: list[SourceFinding]) -> list[dict]:
-    """Convert SourceFinding entries into the dict shape SARIFGenerator expects.
+def _to_sarif_findings(findings: list[Finding]) -> list[dict]:
+    """Convert Finding entries into the dict shape SARIFGenerator expects.
 
     SARIFGenerator (after R2) honors `file` and `line_number` if present.
     """
@@ -115,7 +115,7 @@ def _to_sarif_findings(findings: list[SourceFinding]) -> list[dict]:
     return out
 
 
-def _details_block(f: SourceFinding) -> str:
+def _details_block(f: Finding) -> str:
     parts = []
     if f.get("evidence_level"):
         parts.append(f"evidence_level: {f['evidence_level']}")
@@ -133,8 +133,8 @@ def _details_block(f: SourceFinding) -> str:
 def _render_markdown(
     session_id: str,
     repo_url: str,
-    findings: list[SourceFinding],
-    verified_findings: list[SourceFinding],
+    findings: list[Finding],
+    verified_findings: list[Finding],
     spent_per_tier: dict,
 ) -> str:
     lines = []
@@ -204,7 +204,7 @@ def _render_markdown(
 _SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
 
-def _severity_rank(f: SourceFinding) -> int:
+def _severity_rank(f: Finding) -> int:
     sev = (f.get("severity_verified") or f.get("severity") or "info").lower()
     return _SEVERITY_ORDER.get(sev, 0)
 

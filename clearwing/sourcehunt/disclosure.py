@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
-from .state import EVIDENCE_LEVELS, SourceFinding, evidence_at_or_above
+from .state import EVIDENCE_LEVELS, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class DisclosureBundle:
 
 
 class DisclosureGenerator:
-    """Builds MITRE + HackerOne templates from SourceFinding entries."""
+    """Builds MITRE + HackerOne templates from Finding entries."""
 
     def __init__(
         self,
@@ -87,7 +87,7 @@ class DisclosureGenerator:
 
     def generate_bundle(
         self,
-        findings: list[SourceFinding],
+        findings: list[Finding],
         formats: Optional[list[str]] = None,
     ) -> DisclosureBundle:
         """Return a DisclosureBundle containing one template per (finding, format).
@@ -117,7 +117,7 @@ class DisclosureGenerator:
 
     # --- Eligibility ---------------------------------------------------------
 
-    def _should_skip(self, finding: SourceFinding) -> Optional[str]:
+    def _should_skip(self, finding: Finding) -> Optional[str]:
         if not finding.get("verified", False):
             return "unverified"
         level = finding.get("evidence_level", "suspicion")
@@ -131,7 +131,7 @@ class DisclosureGenerator:
 
     # --- MITRE CVE Request Form ----------------------------------------------
 
-    def _mitre_template(self, finding: SourceFinding) -> DisclosureTemplate:
+    def _mitre_template(self, finding: Finding) -> DisclosureTemplate:
         severity = self._severity(finding)
         cwe = finding.get("cwe", "")
         title = self._title(finding)
@@ -149,7 +149,7 @@ class DisclosureGenerator:
 
     def _mitre_body(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         *,
         title: str,
         severity: str,
@@ -223,7 +223,7 @@ class DisclosureGenerator:
 
     # --- HackerOne report template ------------------------------------------
 
-    def _hackerone_template(self, finding: SourceFinding) -> DisclosureTemplate:
+    def _hackerone_template(self, finding: Finding) -> DisclosureTemplate:
         severity = self._severity(finding)
         cwe = finding.get("cwe", "")
         title = self._title(finding)
@@ -241,7 +241,7 @@ class DisclosureGenerator:
 
     def _hackerone_body(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         *,
         title: str,
         severity: str,
@@ -344,26 +344,26 @@ class DisclosureGenerator:
 
     # --- Field derivation ---------------------------------------------------
 
-    def _title(self, finding: SourceFinding) -> str:
+    def _title(self, finding: Finding) -> str:
         finding_type = finding.get("finding_type", "vulnerability").replace("_", " ")
         file = finding.get("file", "unknown")
         return f"{finding_type} in {self.project_name} — {file}"
 
-    def _severity(self, finding: SourceFinding) -> str:
+    def _severity(self, finding: Finding) -> str:
         return (
             finding.get("severity_verified")
             or finding.get("severity")
             or "medium"
         )
 
-    def _is_validated(self, finding: SourceFinding) -> bool:
+    def _is_validated(self, finding: Finding) -> bool:
         return bool(
             finding.get("auto_patch_validated")
             or finding.get("exploit_success")
             or finding.get("patch_oracle_passed")
         )
 
-    def _mitre_vuln_type(self, finding: SourceFinding) -> str:
+    def _mitre_vuln_type(self, finding: Finding) -> str:
         """Best-effort mapping from finding_type to MITRE's category field."""
         ft = (finding.get("finding_type") or "").lower()
         if "sql_injection" in ft:
@@ -380,7 +380,7 @@ class DisclosureGenerator:
             return "Logic flaw with wide downstream impact"
         return "Other"
 
-    def _attack_vector(self, finding: SourceFinding) -> str:
+    def _attack_vector(self, finding: Finding) -> str:
         tags = " ".join(finding.get("file", "").split("/"))
         ft = (finding.get("finding_type") or "").lower()
         if "sql" in ft or "injection" in ft:
@@ -391,7 +391,7 @@ class DisclosureGenerator:
             return "Network/remote, authentication boundary"
         return "See Steps to Reproduce"
 
-    def _impact_statement(self, finding: SourceFinding) -> str:
+    def _impact_statement(self, finding: Finding) -> str:
         ft = (finding.get("finding_type") or "").lower()
         if "heap" in ft or "overflow" in ft:
             return (

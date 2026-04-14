@@ -12,11 +12,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.findings.types import Finding
 from clearwing.sourcehunt.preprocessor import Preprocessor
 from clearwing.sourcehunt.state import (
     EVIDENCE_LEVELS,
     FileTarget,
-    SourceFinding,
     SourceHuntState,
 )
 
@@ -86,7 +86,7 @@ class TestFileTargetSchema:
 
 class TestSourceFindingSchema:
     def test_sourcefinding_accepts_v02_v03_fields(self):
-        sf: SourceFinding = {
+        sf: Finding = {
             "id": "x",
             "file": "f.c",
             "line_number": 1,
@@ -125,7 +125,7 @@ class TestSourceFindingSchema:
 
     def test_sourcefinding_evidence_level_must_be_in_ladder(self):
         for level in EVIDENCE_LEVELS:
-            sf: SourceFinding = {"id": "x", "evidence_level": level}
+            sf: Finding = {"id": "x", "evidence_level": level}
             assert sf["evidence_level"] == level
 
 

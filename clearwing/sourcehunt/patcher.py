@@ -26,7 +26,7 @@ from typing import Callable, Optional
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .state import EVIDENCE_LEVELS, SourceFinding, evidence_at_or_above
+from .state import EVIDENCE_LEVELS, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class AutoPatcher:
     def __init__(self, llm: BaseChatModel):
         self.llm = llm
 
-    def is_eligible(self, finding: SourceFinding) -> bool:
+    def is_eligible(self, finding: Finding) -> bool:
         if not finding.get("verified", False):
             return False
         sev = (finding.get("severity_verified") or finding.get("severity") or "").lower()
@@ -98,7 +98,7 @@ class AutoPatcher:
 
     def attempt(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         file_content: str = "",
         sandbox=None,
         rerun_poc: Optional[Callable] = None,
@@ -195,7 +195,7 @@ class AutoPatcher:
             raw_response=content,
         )
 
-    def _build_user_message(self, finding: SourceFinding, file_content: str) -> str:
+    def _build_user_message(self, finding: Finding, file_content: str) -> str:
         view = {
             "id": finding.get("id"),
             "file": finding.get("file"),
@@ -224,10 +224,10 @@ class AutoPatcher:
 
 
 def apply_patch_attempt(
-    finding: SourceFinding,
+    finding: Finding,
     attempt: PatchAttempt,
-) -> SourceFinding:
-    """Merge a PatchAttempt into a SourceFinding.
+) -> Finding:
+    """Merge a PatchAttempt into a Finding.
 
     Only validated patches bump the evidence level — unvalidated ones are
     recorded but do NOT raise confidence in the finding.
@@ -239,5 +239,5 @@ def apply_patch_attempt(
         # Bump evidence_level to patch_validated (the gold standard)
         current = finding.get("evidence_level", "suspicion")
         if EVIDENCE_LEVELS.index("patch_validated") > EVIDENCE_LEVELS.index(current):
-            finding["evidence_level"] = "patch_validated"  # type: ignore[typeddict-item]
+            finding["evidence_level"] = "patch_validated"
     return finding
