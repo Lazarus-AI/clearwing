@@ -98,7 +98,11 @@ clearwing = "clearwing:main"
 include = ["clearwing*"]
 
 [tool.setuptools.package-data]
-clearwing = ["core/config_data/*.yaml", "core/skills/vulnerabilities/*.md"]
+clearwing = [
+    "py.typed",                              # PEP 561 — ship type info to consumers
+    "core/config_data/*.yaml",
+    "core/skills/vulnerabilities/*.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
