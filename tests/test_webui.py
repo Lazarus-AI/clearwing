@@ -32,7 +32,7 @@ class TestHealthEndpoint:
 
 class TestSessionEndpoints:
     def test_list_sessions_empty(self, client):
-        with patch("vulnexploit.memory.SessionStore") as mock_store:
+        with patch("vulnexploit.data.memory.SessionStore") as mock_store:
             mock_store.return_value.list_sessions.return_value = []
             resp = client.get("/api/sessions")
             assert resp.status_code == 200
@@ -48,7 +48,7 @@ class TestSessionEndpoints:
         mock_session.cost_usd = 0.05
         mock_session.token_count = 1000
 
-        with patch("vulnexploit.memory.SessionStore") as mock_store:
+        with patch("vulnexploit.data.memory.SessionStore") as mock_store:
             mock_store.return_value.list_sessions.return_value = [mock_session]
             resp = client.get("/api/sessions")
             assert resp.status_code == 200
@@ -72,7 +72,7 @@ class TestSessionEndpoints:
         mock_session.exploit_results = []
         mock_session.flags_found = []
 
-        with patch("vulnexploit.memory.SessionStore") as mock_store:
+        with patch("vulnexploit.data.memory.SessionStore") as mock_store:
             mock_store.return_value.load.return_value = mock_session
             resp = client.get("/api/sessions/abc123")
             assert resp.status_code == 200
@@ -81,7 +81,7 @@ class TestSessionEndpoints:
             assert data["open_ports"] == [{"port": 22}]
 
     def test_get_session_not_found(self, client):
-        with patch("vulnexploit.memory.SessionStore") as mock_store:
+        with patch("vulnexploit.data.memory.SessionStore") as mock_store:
             mock_store.return_value.load.return_value = None
             resp = client.get("/api/sessions/nonexistent")
             assert resp.status_code == 404
@@ -89,7 +89,7 @@ class TestSessionEndpoints:
 
 class TestMetricsEndpoints:
     def test_get_metrics(self, client):
-        with patch("vulnexploit.telemetry.CostTracker") as mock_tracker:
+        with patch("vulnexploit.observability.telemetry.CostTracker") as mock_tracker:
             mock_summary = MagicMock()
             mock_summary.input_tokens = 1000
             mock_summary.output_tokens = 500
