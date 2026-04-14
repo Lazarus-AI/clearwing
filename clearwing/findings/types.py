@@ -225,8 +225,8 @@ def from_cicd_dict(d: dict, *, target: Optional[str] = None) -> Finding:
     return f
 
 
-def from_analysis_finding(finding) -> Finding:
-    """Build a Finding from a `clearwing.analysis.source_analyzer.Finding`.
+def from_analysis_finding(finding: Any) -> Finding:
+    """Build a Finding from a `clearwing.analysis.source_analyzer.AnalyzerFinding`.
 
     Accepts either the dataclass instance or a dict with the same keys.
     """

@@ -58,9 +58,9 @@ def evidence_at_or_above(level: EvidenceLevel, threshold: EvidenceLevel) -> bool
 
 
 def filter_by_evidence(
-    findings: list[dict],
+    findings: list[Finding],
     threshold: EvidenceLevel,
-) -> list[dict]:
+) -> list[Finding]:
     """Return only findings with evidence_level >= threshold.
 
     Findings without an evidence_level field are treated as 'suspicion'.

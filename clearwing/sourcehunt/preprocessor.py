@@ -246,8 +246,8 @@ class Preprocessor:
 
         # Build per-file static_hint counts
         per_file_hints: dict[str, int] = {}
-        for f in static_findings:
-            per_file_hints[f.file_path] = per_file_hints.get(f.file_path, 0) + 1
+        for sf in static_findings:
+            per_file_hints[sf.file_path] = per_file_hints.get(sf.file_path, 0) + 1
 
         # Enumerate source files and build FileTarget entries
         file_targets: list[FileTarget] = []
@@ -468,17 +468,17 @@ class Preprocessor:
             elif dist == 1:
                 ft["reachability"] = 4
                 ft["reachability_rationale"] = "directly called by an entry point"
-                tags = list(ft.get("tags", []))
-                if "attacker_reachable" not in tags:
-                    tags.append("attacker_reachable")
-                    ft["tags"] = tags
+                tag_list = list(ft.get("tags", []))
+                if "attacker_reachable" not in tag_list:
+                    tag_list.append("attacker_reachable")
+                    ft["tags"] = tag_list
             elif dist <= 3:
                 ft["reachability"] = 3
                 ft["reachability_rationale"] = f"reachable at distance {dist}"
-                tags = list(ft.get("tags", []))
-                if "attacker_reachable" not in tags:
-                    tags.append("attacker_reachable")
-                    ft["tags"] = tags
+                tag_list = list(ft.get("tags", []))
+                if "attacker_reachable" not in tag_list:
+                    tag_list.append("attacker_reachable")
+                    ft["tags"] = tag_list
             else:
                 ft["reachability"] = 2
                 ft["reachability_rationale"] = f"reachable at distance {dist}"

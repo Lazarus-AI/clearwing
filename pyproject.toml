@@ -129,3 +129,16 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+
+# Phase 3e: scoped strict gate anchored on the unified Finding types.
+# Phase 3 narrowed the gate to `clearwing.findings.*` only — the
+# `clearwing.sourcehunt.*` package carries ~60 pre-existing
+# missing-annotation errors that are out of scope for the Finding
+# unification. Phase 5 expands this override to include sourcehunt
+# once the annotations land.
+[[tool.mypy.overrides]]
+module = [
+    "clearwing.findings.*",
+]
+disallow_untyped_defs = true
+warn_unused_ignores = true

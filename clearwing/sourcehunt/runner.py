@@ -230,8 +230,8 @@ class SourceHuntRunner:
         if self._mechanism_store is not None:
             mechanism_hints = self._recalled_mechanism_hints(files)
             if mechanism_hints:
-                for f in files:
-                    key = f.get("path", "")
+                for ft in files:
+                    key = ft.get("path", "")
                     semgrep_hints_by_file.setdefault(key, []).extend(mechanism_hints)
 
         # 3. Tiered hunt
@@ -423,9 +423,9 @@ class SourceHuntRunner:
                 eligible = filter_by_evidence(verified, "crash_reproduced")
                 for finding in eligible:
                     try:
-                        result = e.attempt(finding)
-                        apply_exploiter_result(finding, result)
-                        if result.success:
+                        exploit_result = e.attempt(finding)
+                        apply_exploiter_result(finding, exploit_result)
+                        if exploit_result.success:
                             exploited.append(finding)
                     except Exception:
                         logger.warning("Exploiter failed", exc_info=True)
