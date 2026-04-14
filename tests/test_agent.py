@@ -156,6 +156,10 @@ class TestGraphConstruction:
 
 
 class TestScannerToolWrapping:
+    # NOTE: scanner_tools imports from vulnexploit.scanning (the canonical
+    # module), not the deprecated vulnexploit.scanners shim. Patching the
+    # real import path at `vulnexploit.scanning.*` is what matters.
+
     @pytest.mark.asyncio
     async def test_scan_ports_wraps_scanner(self):
         from vulnexploit.agent.tools.scanner_tools import scan_ports
@@ -166,16 +170,14 @@ class TestScannerToolWrapping:
         mock_scanner.scan = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch.dict("sys.modules", {"scapy": MagicMock(), "scapy.all": MagicMock()}):
-            with patch("vulnexploit.scanners.port_scanner.PortScanner", mock_class):
-                with patch("vulnexploit.scanners.PortScanner", mock_class):
-                    result = await scan_ports.ainvoke({
-                        "target": "192.168.1.1",
-                        "ports": [22],
-                        "scan_type": "connect",
-                        "threads": 10,
-                    })
-                    mock_scanner.scan.assert_called_once_with("192.168.1.1", [22], "connect", 10)
+        with patch("vulnexploit.scanning.PortScanner", mock_class):
+            await scan_ports.ainvoke({
+                "target": "192.168.1.1",
+                "ports": [22],
+                "scan_type": "connect",
+                "threads": 10,
+            })
+            mock_scanner.scan.assert_called_once_with("192.168.1.1", [22], "connect", 10)
 
     @pytest.mark.asyncio
     async def test_detect_services_wraps_scanner(self):
@@ -188,13 +190,12 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch.dict("sys.modules", {"scapy": MagicMock(), "scapy.all": MagicMock()}):
-            with patch("vulnexploit.scanners.ServiceScanner", mock_class):
-                result = await detect_services.ainvoke({
-                    "target": "192.168.1.1",
-                    "open_ports": ports,
-                })
-                mock_scanner.detect.assert_called_once_with("192.168.1.1", ports)
+        with patch("vulnexploit.scanning.ServiceScanner", mock_class):
+            await detect_services.ainvoke({
+                "target": "192.168.1.1",
+                "open_ports": ports,
+            })
+            mock_scanner.detect.assert_called_once_with("192.168.1.1", ports)
 
     @pytest.mark.asyncio
     async def test_detect_os_wraps_scanner(self):
@@ -204,10 +205,9 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value="Linux/Unix")
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch.dict("sys.modules", {"scapy": MagicMock(), "scapy.all": MagicMock()}):
-            with patch("vulnexploit.scanners.OSScanner", mock_class):
-                result = await detect_os.ainvoke({"target": "192.168.1.1"})
-                mock_scanner.detect.assert_called_once_with("192.168.1.1")
+        with patch("vulnexploit.scanning.OSScanner", mock_class):
+            await detect_os.ainvoke({"target": "192.168.1.1"})
+            mock_scanner.detect.assert_called_once_with("192.168.1.1")
 
 
 class TestUtilityTools:

@@ -174,6 +174,66 @@ class TestSARIFGenerator:
         assert len(sarif["runs"][0]["results"]) == 2
         assert len(sarif["runs"][0]["tool"]["driver"]["rules"]) == 1
 
+    def test_network_finding_falls_back_to_target(self):
+        """A finding without 'file' uses target as artifactLocation.uri (regression)."""
+        findings = [{"description": "Open port", "severity": "low", "cve": None, "details": ""}]
+        sarif = self.generator.generate(findings, "192.168.1.1")
+        loc = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+        assert loc["artifactLocation"]["uri"] == "192.168.1.1"
+        assert "region" not in loc
+
+    def test_file_finding_uses_file_uri(self):
+        """A finding with 'file' uses file path as artifactLocation.uri."""
+        findings = [
+            {
+                "description": "Buffer overflow",
+                "severity": "critical",
+                "cve": None,
+                "details": "",
+                "file": "src/codec_a.c",
+                "line_number": 47,
+            }
+        ]
+        sarif = self.generator.generate(findings, "https://github.com/example/repo")
+        loc = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+        assert loc["artifactLocation"]["uri"] == "src/codec_a.c"
+        assert loc["region"]["startLine"] == 47
+        assert "endLine" not in loc["region"]
+
+    def test_file_finding_with_end_line(self):
+        """A finding with end_line emits a region with both startLine and endLine."""
+        findings = [
+            {
+                "description": "SQL injection",
+                "severity": "high",
+                "cve": "CWE-89",
+                "details": "",
+                "file": "app/views.py",
+                "line_number": 120,
+                "end_line": 125,
+            }
+        ]
+        sarif = self.generator.generate(findings, "repo")
+        region = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]
+        assert region["startLine"] == 120
+        assert region["endLine"] == 125
+
+    def test_file_finding_without_line_number(self):
+        """A finding with 'file' but no line_number uses file but no region."""
+        findings = [
+            {
+                "description": "Hardcoded secret",
+                "severity": "medium",
+                "cve": None,
+                "details": "",
+                "file": "config/settings.py",
+            }
+        ]
+        sarif = self.generator.generate(findings, "repo")
+        loc = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+        assert loc["artifactLocation"]["uri"] == "config/settings.py"
+        assert "region" not in loc
+
 
 class TestBuildGoal:
     """Verify _build_goal returns different messages per depth."""
