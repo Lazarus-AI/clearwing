@@ -22,7 +22,7 @@ from typing import Optional
 from langchain_core.tools import tool
 
 from clearwing.sandbox.container import SandboxContainer
-from clearwing.sourcehunt.state import EvidenceLevel, SourceFinding
+from clearwing.sourcehunt.state import EvidenceLevel, Finding
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class HunterContext:
     """Per-hunter mutable context. Closured into every tool for state access."""
     repo_path: str                               # absolute host path
     sandbox: Optional[SandboxContainer] = None   # primary sandbox; set by hunt loop
-    findings: list[SourceFinding] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
     file_path: Optional[str] = None              # the file this hunter is scoped to
     session_id: Optional[str] = None
     specialist: str = "general"                  # "general" | "memory_safety" | "logic_auth" | "propagation"
@@ -642,37 +642,23 @@ def build_hunter_tools(ctx: HunterContext) -> list:
                 if you have a sanitizer report, or root_cause_explained if you
                 wrote a coherent explanation.
         """
-        finding: SourceFinding = {
-            "id": f"hunter-{uuid.uuid4().hex[:8]}",
-            "file": file,
-            "line_number": line_number,
-            "end_line": None,
-            "finding_type": finding_type,
-            "cwe": cwe,
-            "severity": severity,  # type: ignore[typeddict-item]
-            "confidence": confidence,  # type: ignore[typeddict-item]
-            "description": description,
-            "code_snippet": code_snippet,
-            "crash_evidence": crash_evidence or None,
-            "poc": poc or None,
-            "evidence_level": evidence_level,  # type: ignore[typeddict-item]
-            "discovered_by": f"hunter:{ctx.specialist}",
-            "related_finding_id": None,
-            "related_cve": None,
-            "seeded_from_crash": ctx.seeded_crash is not None,
-            "verified": False,
-            "severity_verified": None,
-            "verifier_pro_argument": None,
-            "verifier_counter_argument": None,
-            "verifier_tie_breaker": None,
-            "patch_oracle_passed": None,
-            "auto_patch": None,
-            "auto_patch_validated": None,
-            "exploit": None,
-            "exploit_success": None,
-            "hunter_session_id": ctx.session_id or "",
-            "verifier_session_id": None,
-        }
+        finding = Finding(
+            id=f"hunter-{uuid.uuid4().hex[:8]}",
+            file=file,
+            line_number=line_number,
+            finding_type=finding_type,
+            cwe=cwe,
+            severity=severity,  # type: ignore[arg-type]
+            confidence=confidence,  # type: ignore[arg-type]
+            description=description,
+            code_snippet=code_snippet,
+            crash_evidence=crash_evidence or None,
+            poc=poc or None,
+            evidence_level=evidence_level,  # type: ignore[arg-type]
+            discovered_by=f"hunter:{ctx.specialist}",
+            seeded_from_crash=ctx.seeded_crash is not None,
+            hunter_session_id=ctx.session_id or "",
+        )
         ctx.findings.append(finding)
         return (
             f"Finding recorded: {finding_type} at {file}:{line_number} "

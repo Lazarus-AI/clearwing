@@ -31,7 +31,7 @@ from .mechanism_memory import (
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
-from .state import SourceFinding, evidence_at_or_above, filter_by_evidence
+from .state import Finding, evidence_at_or_above, filter_by_evidence
 from .variant_loop import (
     VariantLoop,
     VariantLoopConfig,
@@ -49,9 +49,9 @@ class SourceHuntResult:
     exit_code: int                          # 0=clean, 1=medium, 2=critical/high
     repo_url: str
     repo_path: str
-    findings: list[SourceFinding]
-    verified_findings: list[SourceFinding]
-    exploited_findings: list[SourceFinding]
+    findings: list[Finding]
+    verified_findings: list[Finding]
+    exploited_findings: list[Finding]
     files_ranked: int
     files_hunted: int
     duration_seconds: float
@@ -236,7 +236,7 @@ class SourceHuntRunner:
 
         # 3. Tiered hunt
         hunter_llm = self._get_llm("hunter", self.hunter_llm)
-        all_findings: list[SourceFinding] = []
+        all_findings: list[Finding] = []
         files_hunted = 0
         if hunter_llm is not None and files:
             pool = HunterPool(HuntPoolConfig(
@@ -270,7 +270,7 @@ class SourceHuntRunner:
         all_findings = self._merge_static_findings(all_findings, preprocess_result)
 
         # 4. Verify (unless --no-verify)
-        verified: list[SourceFinding] = []
+        verified: list[Finding] = []
         if not self.no_verify:
             verifier_llm = self._get_llm("verifier", self.verifier_llm)
             if verifier_llm is not None:
@@ -377,47 +377,31 @@ class SourceHuntRunner:
                         already_seen_locations=already_seen,
                         reverify_callback=None,   # reuse the original seeds across passes
                     )
-                    # Turn VariantSeed entries into SourceFinding records.
+                    # Turn VariantSeed entries into Finding records.
                     # Each variant inherits its parent's CWE and severity
                     # but starts at evidence_level=suspicion (the hunter
                     # hasn't re-verified the match yet).
                     for seed in variant_result.seeds:
                         parent = seed.original_finding
-                        import uuid
-                        variant_finding: SourceFinding = {
-                            "id": f"variant-{uuid.uuid4().hex[:8]}",
-                            "file": seed.match.file,
-                            "line_number": seed.match.line_number,
-                            "end_line": None,
-                            "finding_type": parent.get("finding_type", "variant"),
-                            "cwe": parent.get("cwe", ""),
-                            "severity": parent.get("severity_verified") or parent.get("severity", "medium"),  # type: ignore
-                            "confidence": "low",
-                            "description": (
-                                f"Variant of {parent.get('id', '')}: "
+                        variant_finding = Finding(
+                            id=f"variant-{uuid.uuid4().hex[:8]}",
+                            file=seed.match.file,
+                            line_number=seed.match.line_number,
+                            finding_type=parent.finding_type or "variant",
+                            cwe=parent.cwe,
+                            severity=parent.effective_severity or "medium",
+                            confidence="low",
+                            description=(
+                                f"Variant of {parent.id}: "
                                 f"{seed.match.pattern.semantic_description}"
                             ),
-                            "code_snippet": seed.match.matched_text,
-                            "crash_evidence": None,
-                            "poc": None,
-                            "evidence_level": "suspicion",
-                            "discovered_by": "variant_loop",
-                            "related_finding_id": parent.get("id"),
-                            "related_cve": parent.get("related_cve"),
-                            "seeded_from_crash": False,
-                            "verified": False,
-                            "severity_verified": None,
-                            "verifier_pro_argument": None,
-                            "verifier_counter_argument": None,
-                            "verifier_tie_breaker": None,
-                            "patch_oracle_passed": None,
-                            "auto_patch": None,
-                            "auto_patch_validated": None,
-                            "exploit": None,
-                            "exploit_success": None,
-                            "hunter_session_id": self._session_id,
-                            "verifier_session_id": None,
-                        }
+                            code_snippet=seed.match.matched_text,
+                            evidence_level="suspicion",
+                            discovered_by="variant_loop",
+                            related_finding_id=parent.id or None,
+                            related_cve=parent.related_cve,
+                            hunter_session_id=self._session_id,
+                        )
                         all_findings.append(variant_finding)
                     logger.info(
                         "Variant loop: %d patterns, %d matches surfaced",
@@ -428,10 +412,10 @@ class SourceHuntRunner:
                     logger.warning("Variant loop failed", exc_info=True)
 
         # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
-        exploited: list[SourceFinding] = []
+        exploited: list[Finding] = []
         # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
         #          critical/high findings with root_cause_explained evidence.
-        patched: list[SourceFinding] = []
+        patched: list[Finding] = []
         if not self.no_exploit:
             exploiter_llm = self._get_llm("sourcehunt_exploit", self.exploiter_llm)
             if exploiter_llm is not None:
@@ -542,7 +526,7 @@ class SourceHuntRunner:
 
     def _export_disclosure_bundle(
         self,
-        verified_findings: list[SourceFinding],
+        verified_findings: list[Finding],
     ) -> dict[str, list[str]]:
         """Generate MITRE + HackerOne templates for verified findings.
 
@@ -567,7 +551,7 @@ class SourceHuntRunner:
     def _populate_knowledge_graph_source(
         self,
         repo_path: str,
-        findings: list[SourceFinding],
+        findings: list[Finding],
     ) -> None:
         """Auto-populate the KG with source-hunt entities. Best-effort."""
         kg = self._knowledge_graph
@@ -600,7 +584,7 @@ class SourceHuntRunner:
         except Exception:
             logger.debug("KG save failed", exc_info=True)
 
-    def _open_draft_pr(self, finding: SourceFinding, attempt) -> None:
+    def _open_draft_pr(self, finding: Finding, attempt) -> None:
         """Open a draft PR for a validated auto-patch via the `gh` CLI.
 
         v0.3: best-effort only — failures are logged and the run continues.
@@ -639,7 +623,7 @@ class SourceHuntRunner:
         except Exception:
             logger.debug("gh pr create failed", exc_info=True)
 
-    def _load_file_content(self, repo_path: str, finding: SourceFinding) -> str:
+    def _load_file_content(self, repo_path: str, finding: Finding) -> str:
         """Read the file referenced by a finding. Used by the patch oracle."""
         import os
         rel = finding.get("file", "")
@@ -718,9 +702,6 @@ class SourceHuntRunner:
     ) -> SourceHuntResult:
         """depth=quick exit — only static findings, no LLM hunters."""
         all_findings = self._merge_static_findings([], preprocess_result)
-        # Mark every finding as suspicion (no LLM verification)
-        for f in all_findings:
-            f.setdefault("evidence_level", "suspicion")
         # Populate KG even for the quick path
         if self.enable_knowledge_graph and all_findings:
             try:
@@ -752,50 +733,32 @@ class SourceHuntRunner:
 
     def _merge_static_findings(
         self,
-        existing: list[SourceFinding],
+        existing: list[Finding],
         preprocess_result: PreprocessResult,
-    ) -> list[SourceFinding]:
-        """Promote SourceAnalyzer static findings into the SourceFinding shape.
+    ) -> list[Finding]:
+        """Promote SourceAnalyzer static findings into the Finding shape.
 
         These get evidence_level="static_corroboration" because they're
         regex/AST hits, not just suspicion.
         """
         out = list(existing)
         for sf in preprocess_result.static_findings:
-            out.append({
-                "id": f"static-{uuid.uuid4().hex[:8]}",
-                "file": os.path.relpath(sf.file_path, preprocess_result.repo_path),
-                "line_number": sf.line_number,
-                "end_line": None,
-                "finding_type": sf.finding_type,
-                "cwe": sf.cwe,
-                "severity": sf.severity,  # type: ignore[typeddict-item]
-                "confidence": sf.confidence,  # type: ignore[typeddict-item]
-                "description": sf.description,
-                "code_snippet": sf.code_snippet,
-                "crash_evidence": None,
-                "poc": None,
-                "evidence_level": "static_corroboration",
-                "discovered_by": "source_analyzer",
-                "related_finding_id": None,
-                "related_cve": None,
-                "seeded_from_crash": False,
-                "verified": False,
-                "severity_verified": None,
-                "verifier_pro_argument": None,
-                "verifier_counter_argument": None,
-                "verifier_tie_breaker": None,
-                "patch_oracle_passed": None,
-                "auto_patch": None,
-                "auto_patch_validated": None,
-                "exploit": None,
-                "exploit_success": None,
-                "hunter_session_id": "",
-                "verifier_session_id": None,
-            })
+            out.append(Finding(
+                id=f"static-{uuid.uuid4().hex[:8]}",
+                file=os.path.relpath(sf.file_path, preprocess_result.repo_path),
+                line_number=sf.line_number,
+                finding_type=sf.finding_type,
+                cwe=sf.cwe,
+                severity=sf.severity,  # type: ignore[arg-type]
+                confidence=sf.confidence,  # type: ignore[arg-type]
+                description=sf.description,
+                code_snippet=sf.code_snippet,
+                evidence_level="static_corroboration",
+                discovered_by="source_analyzer",
+            ))
         return out
 
-    def _exit_code(self, findings: list[SourceFinding]) -> int:
+    def _exit_code(self, findings: list[Finding]) -> int:
         severities = {
             (f.get("severity_verified") or f.get("severity") or "info").lower()
             for f in findings
@@ -854,8 +817,8 @@ class SourceHuntRunner:
 
     def _write_report(
         self,
-        findings: list[SourceFinding],
-        verified: list[SourceFinding],
+        findings: list[Finding],
+        verified: list[Finding],
         spent_per_tier: dict,
     ) -> dict[str, str]:
         """Write SARIF / markdown / JSON outputs to the output directory.

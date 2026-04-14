@@ -1,6 +1,6 @@
 """Independent-context verifier agent for sourcehunt findings.
 
-The verifier takes a single SourceFinding from a hunter and decides whether
+The verifier takes a single Finding from a hunter and decides whether
 it's real. v0.1 uses a non-adversarial prompt; v0.2 turns on the adversarial
 mode where the verifier is required to steel-man both sides. v0.3 adds an
 optional patch-oracle truth test — write a minimal defensive fix, recompile,
@@ -24,7 +24,7 @@ from typing import Any, Optional
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .state import EVIDENCE_LEVELS, EvidenceLevel, SourceFinding, evidence_at_or_above
+from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ class Verifier:
             VERIFIER_SYSTEM_PROMPT_V02 if adversarial else VERIFIER_SYSTEM_PROMPT_V01
         )
 
-    def _prompt_for_finding(self, finding: SourceFinding) -> str:
+    def _prompt_for_finding(self, finding: Finding) -> str:
         """Pick the prompt per-finding, respecting the adversarial budget gate."""
         if not self.adversarial:
             return VERIFIER_SYSTEM_PROMPT_V01
@@ -185,7 +185,7 @@ class Verifier:
 
     def verify(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         file_content: str = "",
     ) -> VerifierResult:
         """Run a single verification pass on one finding.
@@ -195,7 +195,7 @@ class Verifier:
         independence guarantee.
 
         Args:
-            finding: The hunter's SourceFinding.
+            finding: The hunter's Finding.
             file_content: Optional content of the file the finding lives in.
 
         Returns:
@@ -224,7 +224,7 @@ class Verifier:
         content = response.content if isinstance(response.content, str) else str(response.content)
         return self._parse_response(finding, content)
 
-    def _build_user_message(self, finding: SourceFinding, file_content: str) -> str:
+    def _build_user_message(self, finding: Finding, file_content: str) -> str:
         # Note: we deliberately do NOT include the hunter's reasoning chain
         finding_view = {
             "id": finding.get("id"),
@@ -247,7 +247,7 @@ class Verifier:
             msg += f"\n\nFile content (capped to 8 KB):\n{capped}"
         return msg
 
-    def _parse_response(self, finding: SourceFinding, content: str) -> VerifierResult:
+    def _parse_response(self, finding: Finding, content: str) -> VerifierResult:
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             logger.warning("Verifier response had no JSON object; got: %s", content[:300])
@@ -279,7 +279,7 @@ class Verifier:
 
     def _error_result(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         raw: str,
         reason: str,
     ) -> VerifierResult:
@@ -299,7 +299,7 @@ class Verifier:
 
     def run_patch_oracle(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         file_content: str,
         sandbox=None,
         rerun_poc=None,
@@ -307,7 +307,7 @@ class Verifier:
         """Write a minimal defensive fix; run it through the oracle.
 
         Args:
-            finding: The verified SourceFinding.
+            finding: The verified Finding.
             file_content: Current source of the file (will be used in prompt).
             sandbox: Optional SandboxContainer. If provided, the fix is
                 written into the sandbox and rerun_poc is invoked.
@@ -367,7 +367,7 @@ class Verifier:
         except Exception as e:
             return False, diff, f"patch oracle error: {e}"
 
-    def _build_patch_oracle_message(self, finding: SourceFinding, file_content: str) -> str:
+    def _build_patch_oracle_message(self, finding: Finding, file_content: str) -> str:
         view = {
             "id": finding.get("id"),
             "file": finding.get("file"),
@@ -395,13 +395,17 @@ class Verifier:
 
 
 def apply_verifier_result(
-    finding: SourceFinding,
+    finding: Finding,
     result: VerifierResult,
     session_id: Optional[str] = None,
-) -> SourceFinding:
-    """Merge a VerifierResult into a SourceFinding (in-place + return)."""
+) -> Finding:
+    """Merge a VerifierResult into a Finding (in-place + return).
+
+    Accepts either a Finding dataclass or a legacy SourceFinding dict — dict
+    subscripting works on both via the transitional `Finding` compat shim.
+    """
     finding["verified"] = result.is_real
-    finding["severity_verified"] = result.severity_verified  # type: ignore[typeddict-item]
+    finding["severity_verified"] = result.severity_verified
     finding["verifier_pro_argument"] = result.pro_argument
     finding["verifier_counter_argument"] = result.counter_argument
     finding["verifier_tie_breaker"] = result.tie_breaker
@@ -410,7 +414,7 @@ def apply_verifier_result(
     current = finding.get("evidence_level", "suspicion")
     new = result.evidence_level
     if EVIDENCE_LEVELS.index(new) > EVIDENCE_LEVELS.index(current):
-        finding["evidence_level"] = new  # type: ignore[typeddict-item]
+        finding["evidence_level"] = new
     # v0.3: patch-oracle outcome
     if result.patch_oracle_attempted:
         finding["patch_oracle_passed"] = result.patch_oracle_passed
@@ -419,5 +423,5 @@ def apply_verifier_result(
         if result.patch_oracle_passed:
             level = finding.get("evidence_level", "suspicion")
             if EVIDENCE_LEVELS.index("root_cause_explained") > EVIDENCE_LEVELS.index(level):
-                finding["evidence_level"] = "root_cause_explained"  # type: ignore[typeddict-item]
+                finding["evidence_level"] = "root_cause_explained"
     return finding

@@ -31,7 +31,7 @@ from .github_checks import (
     GitHubChecksConfig,
     GitHubChecksPublisher,
 )
-from .state import SourceFinding
+from .state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class CommitScanResult:
     parent_sha: str
     changed_files: list[str] = field(default_factory=list)
     blast_radius: list[str] = field(default_factory=list)
-    findings: list[SourceFinding] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
     duration_seconds: float = 0.0
     notes: str = ""
     check_run_outcome: Optional[CheckRunOutcome] = None   # v0.4
@@ -238,7 +238,7 @@ class CommitMonitor:
 
     # --- sourcehunt invocation ---------------------------------------------
 
-    def _run_sourcehunt_on(self, files: list[str]) -> list[SourceFinding]:
+    def _run_sourcehunt_on(self, files: list[str]) -> list[Finding]:
         """Run a SourceHuntRunner pass on a specific set of files.
 
         v0.3 scope: calls the runner against the whole repo but doesn't yet

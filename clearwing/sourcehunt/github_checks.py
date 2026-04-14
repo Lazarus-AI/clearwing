@@ -29,7 +29,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .state import SourceFinding
+from .state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class GitHubChecksPublisher:
     def publish(
         self,
         commit_sha: str,
-        findings: list[SourceFinding],
+        findings: list[Finding],
     ) -> CheckRunOutcome:
         """Post a check run to GitHub for one commit.
 
@@ -228,7 +228,7 @@ class GitHubChecksPublisher:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _conclusion_from_findings(findings: list[SourceFinding]) -> str:
+    def _conclusion_from_findings(findings: list[Finding]) -> str:
         """Pick the check run conclusion based on highest severity."""
         if not findings:
             return "success"
@@ -240,7 +240,7 @@ class GitHubChecksPublisher:
                 highest = sev
         return _CONCLUSION_FOR_HIGHEST_SEVERITY.get(highest, "neutral")
 
-    def _build_title(self, findings: list[SourceFinding]) -> str:
+    def _build_title(self, findings: list[Finding]) -> str:
         if not findings:
             return "Overwing: no findings"
         counts = _severity_counts(findings)
@@ -250,7 +250,7 @@ class GitHubChecksPublisher:
                 parts.append(f"{counts[sev]} {sev}")
         return f"{len(findings)} findings ({', '.join(parts)})"
 
-    def _build_summary(self, findings: list[SourceFinding]) -> str:
+    def _build_summary(self, findings: list[Finding]) -> str:
         if not findings:
             return "Sourcehunt scan complete — no findings on this commit."
 
@@ -288,7 +288,7 @@ class GitHubChecksPublisher:
             )
         return summary
 
-    def _build_annotations(self, findings: list[SourceFinding]) -> list[dict]:
+    def _build_annotations(self, findings: list[Finding]) -> list[dict]:
         """Turn SourceFindings into GitHub check-run annotation dicts."""
         annotations: list[dict] = []
         for f in findings:
@@ -326,7 +326,7 @@ class GitHubChecksPublisher:
         return annotations
 
     @staticmethod
-    def _short_title(finding: SourceFinding) -> str:
+    def _short_title(finding: Finding) -> str:
         ft = finding.get("finding_type") or "vulnerability"
         cwe = finding.get("cwe") or ""
         if cwe:
@@ -334,7 +334,7 @@ class GitHubChecksPublisher:
         return str(ft)
 
     @staticmethod
-    def _annotation_message(finding: SourceFinding) -> str:
+    def _annotation_message(finding: Finding) -> str:
         """Build the annotation message. Capped to MAX_ANNOTATION_MESSAGE_BYTES."""
         parts = []
         desc = finding.get("description") or "(no description)"
@@ -456,7 +456,7 @@ def parse_owner_repo(url: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def _severity_counts(findings: list[SourceFinding]) -> dict[str, int]:
+def _severity_counts(findings: list[Finding]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for f in findings:
         sev = (f.get("severity_verified") or f.get("severity") or "info").lower()
@@ -464,7 +464,7 @@ def _severity_counts(findings: list[SourceFinding]) -> dict[str, int]:
     return counts
 
 
-def _evidence_counts(findings: list[SourceFinding]) -> dict[str, int]:
+def _evidence_counts(findings: list[Finding]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for f in findings:
         level = f.get("evidence_level", "suspicion")
@@ -472,7 +472,7 @@ def _evidence_counts(findings: list[SourceFinding]) -> dict[str, int]:
     return counts
 
 
-def _discovered_by_counts(findings: list[SourceFinding]) -> dict[str, int]:
+def _discovered_by_counts(findings: list[Finding]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for f in findings:
         source = f.get("discovered_by", "unknown")

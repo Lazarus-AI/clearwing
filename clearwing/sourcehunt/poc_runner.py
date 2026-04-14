@@ -25,7 +25,7 @@ from typing import Optional
 
 from clearwing.sandbox.container import SandboxContainer
 
-from .state import SourceFinding
+from .state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class PocRunner:
 
     def replay(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         candidate_diff: str = "",
     ) -> dict:
         """Apply the candidate diff, rebuild, run the PoC, return a report.
@@ -222,7 +222,7 @@ class PocRunner:
     def _run_poc(
         self,
         binary_path: str,
-        finding: SourceFinding,
+        finding: Finding,
     ) -> tuple[bool, int, str]:
         """Run the binary with the PoC input as stdin.
 
@@ -258,7 +258,7 @@ class PocRunner:
 
     def _still_crashed(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         exit_code: int,
         stderr: str,
     ) -> bool:

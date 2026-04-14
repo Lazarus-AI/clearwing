@@ -28,7 +28,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .semgrep_sidecar import SemgrepSidecar
-from .state import SourceFinding
+from .state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class RetroHuntResult:
     diff_text: str = ""
     semgrep_rule: str = ""
     rule_description: str = ""
-    findings: list[SourceFinding] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
     notes: str = ""
 
 
@@ -171,7 +171,7 @@ class RetroHunter:
         hits = self._run_rule(semgrep_rule_yaml, target_repo_path)
         result.notes = f"matched {len(hits)} locations"
 
-        # 4. Convert hits into SourceFinding entries with related_cve set
+        # 4. Convert hits into Finding entries with related_cve set
         for hit in hits:
             result.findings.append(self._hit_to_finding(hit, cve_id, rule_info))
 
@@ -262,45 +262,28 @@ class RetroHunter:
         hit: dict,
         cve_id: str,
         rule_info: dict,
-    ) -> SourceFinding:
-        """Turn a Semgrep hit into a SourceFinding with related_cve set."""
+    ) -> Finding:
+        """Turn a Semgrep hit into a Finding with related_cve set."""
         severity = hit.get("severity", "WARNING").lower()
         # Semgrep uses ERROR/WARNING/INFO — map to our scale
         severity_map = {"error": "high", "warning": "medium", "info": "low"}
         mapped_severity = severity_map.get(severity, "medium")
 
-        return {
-            "id": f"retro-{uuid.uuid4().hex[:8]}",
-            "file": hit.get("file", ""),
-            "line_number": int(hit.get("line", 0)),
-            "end_line": None,
-            "finding_type": "cve_variant",
-            "cwe": rule_info.get("cwe", ""),
-            "severity": mapped_severity,     # type: ignore[typeddict-item]
-            "confidence": "low",              # hunter must re-verify
-            "description": (
+        return Finding(
+            id=f"retro-{uuid.uuid4().hex[:8]}",
+            file=hit.get("file", ""),
+            line_number=int(hit.get("line", 0)),
+            finding_type="cve_variant",
+            cwe=rule_info.get("cwe", ""),
+            severity=mapped_severity,  # type: ignore[arg-type]
+            confidence="low",          # hunter must re-verify
+            description=(
                 f"Possible variant of {cve_id}: "
                 f"{rule_info.get('description', '')}. "
                 f"Hunter must confirm — Semgrep match only."
             ),
-            "code_snippet": hit.get("code_snippet", ""),
-            "crash_evidence": None,
-            "poc": None,
-            "evidence_level": "static_corroboration",
-            "discovered_by": "retro_hunt",
-            "related_finding_id": None,
-            "related_cve": cve_id,
-            "seeded_from_crash": False,
-            "verified": False,
-            "severity_verified": None,
-            "verifier_pro_argument": None,
-            "verifier_counter_argument": None,
-            "verifier_tie_breaker": None,
-            "patch_oracle_passed": None,
-            "auto_patch": None,
-            "auto_patch_validated": None,
-            "exploit": None,
-            "exploit_success": None,
-            "hunter_session_id": "",
-            "verifier_session_id": None,
-        }
+            code_snippet=hit.get("code_snippet", ""),
+            evidence_level="static_corroboration",
+            discovered_by="retro_hunt",
+            related_cve=cve_id,
+        )

@@ -37,7 +37,7 @@ from typing import Optional
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .state import SourceFinding
+from .state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ class MechanismExtractor:
 
     def extract(
         self,
-        finding: SourceFinding,
+        finding: Finding,
         source_repo: str = "",
     ) -> Optional[Mechanism]:
         """Extract a Mechanism from one verified finding. Returns None on failure."""
@@ -173,7 +173,7 @@ class MechanismExtractor:
             source_repo=source_repo,
         )
 
-    def _build_user_message(self, finding: SourceFinding) -> str:
+    def _build_user_message(self, finding: Finding) -> str:
         view = {
             "file": finding.get("file"),
             "line_number": finding.get("line_number"),

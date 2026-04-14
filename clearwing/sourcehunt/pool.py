@@ -8,9 +8,9 @@ sourcehunt (tiered) execution. HunterPool's job is:
        sourcehunt seams (file tier function, per-tier cost caps, etc.)
     2. Wrap each file in a runner that spawns a sandbox + hunter graph
        and streams it to completion
-    3. Extract SourceFinding objects from the resulting TargetResults
+    3. Extract Finding objects from the resulting TargetResults
 
-The existing HunterPool API (run() → list[SourceFinding], spent_per_tier,
+The existing HunterPool API (run() → list[Finding], spent_per_tier,
 total_spent, cancel, assign_tier) is preserved.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ from clearwing.runners.parallel.executor import (
     TierBudget as _ExecutorTierBudget,
 )
 
-from .state import FileTarget, SourceFinding
+from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ class _FileHunterRunner:
 class HunterPool:
     """Tiered parallel hunter executor — v0.4 shim over ParallelExecutor.
 
-    Preserves the existing HunterPool API (run() → list[SourceFinding],
+    Preserves the existing HunterPool API (run() → list[Finding],
     spent_per_tier, total_spent, cancel) while delegating all the
     scheduling/threading/budget logic to the generalized ParallelExecutor.
 
@@ -167,19 +167,19 @@ class HunterPool:
         )
         self._executor = ParallelExecutor(self._parallel_config)
 
-    def run(self) -> list[SourceFinding]:
+    def run(self) -> list[Finding]:
         """Run the full A → B → C pipeline. Returns merged findings.
 
         Delegates to ParallelExecutor.run() which handles submission,
         budget gating, rollover, and per-tier cost tracking. Extracts
-        SourceFinding objects from the TargetResult.findings lists.
+        Finding objects from the TargetResult.findings lists.
         """
         target_results = self._executor.run()
-        all_findings: list[SourceFinding] = []
+        all_findings: list[Finding] = []
         for tr in target_results:
             if tr.status == "completed":
                 # TargetResult.findings is list[dict] but we stashed full
-                # SourceFinding dicts in there — they pass through unchanged.
+                # Finding dicts in there — they pass through unchanged.
                 for f in tr.findings:
                     all_findings.append(f)
                 if self.config.on_finding:
@@ -208,7 +208,7 @@ class HunterPool:
         self,
         file_target: FileTarget,
         cost_limit: float,
-    ) -> tuple[list[SourceFinding], float]:
+    ) -> tuple[list[Finding], float]:
         """Run a single hunter agent. Returns (findings, cost_usd)."""
         from langchain_core.messages import HumanMessage
 

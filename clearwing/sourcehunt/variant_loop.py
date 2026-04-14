@@ -25,7 +25,7 @@ from typing import Optional
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .state import SourceFinding
+from .state import Finding
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class VariantMatch:
 @dataclass
 class VariantSeed:
     """Shape the runner hands to the hunter pool as pre-seeded context."""
-    original_finding: SourceFinding
+    original_finding: Finding
     match: VariantMatch
     message: str
 
@@ -102,7 +102,7 @@ class VariantPatternGenerator:
     def __init__(self, llm: BaseChatModel):
         self.llm = llm
 
-    def generate(self, finding: SourceFinding) -> Optional[VariantPattern]:
+    def generate(self, finding: Finding) -> Optional[VariantPattern]:
         user_msg = self._build_user_message(finding)
         try:
             response = self.llm.invoke([
@@ -122,7 +122,7 @@ class VariantPatternGenerator:
             semantic_description=parsed.get("semantic_description", ""),
         )
 
-    def _build_user_message(self, finding: SourceFinding) -> str:
+    def _build_user_message(self, finding: Finding) -> str:
         view = {
             "file": finding.get("file"),
             "line_number": finding.get("line_number"),
@@ -164,7 +164,7 @@ class VariantSearcher:
         self,
         repo_path: str,
         pattern: VariantPattern,
-        source_finding: SourceFinding,
+        source_finding: Finding,
         exclude_paths: Optional[set] = None,
     ) -> list[VariantMatch]:
         """Return a list of VariantMatch hits, excluding the source finding's
@@ -265,7 +265,7 @@ class VariantLoop:
 
     def run(
         self,
-        verified_findings: list[SourceFinding],
+        verified_findings: list[Finding],
         repo_path: str,
         already_seen_locations: Optional[set] = None,
         reverify_callback: Optional[object] = None,
@@ -284,7 +284,7 @@ class VariantLoop:
             repo_path: clone root.
             already_seen_locations: initial (file, line_number) tuples to skip.
             reverify_callback: Optional callable
-                `(seeds: list[VariantSeed]) -> list[SourceFinding]`. If
+                `(seeds: list[VariantSeed]) -> list[Finding]`. If
                 supplied, the driver calls it after each iteration to
                 re-verify the seeds as SourceFindings, then feeds those
                 new findings into the NEXT iteration's pattern generation.
@@ -358,7 +358,7 @@ class VariantLoop:
 
     def run_once(
         self,
-        verified_findings: list[SourceFinding],
+        verified_findings: list[Finding],
         repo_path: str,
         already_seen_locations: Optional[set] = None,
     ) -> VariantLoopResult:
@@ -400,7 +400,7 @@ class VariantLoop:
 
     def _build_seed_message(
         self,
-        original: SourceFinding,
+        original: Finding,
         match: VariantMatch,
     ) -> str:
         """The message injected into the pre-seeded hunter's prompt."""

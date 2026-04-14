@@ -12,11 +12,12 @@ Public entry points: SourceHuntRunner (programmatic), `clearwing sourcehunt`
 (CLI), and `hunt_source_code` (interactive @tool).
 """
 
+from clearwing.findings.types import Finding
+
 from .state import (
     EvidenceLevel,
     FileTag,
     FileTarget,
-    SourceFinding,
     SourceHuntState,
     EVIDENCE_LEVELS,
     evidence_at_or_above,
@@ -28,7 +29,7 @@ __all__ = [
     "EvidenceLevel",
     "FileTag",
     "FileTarget",
-    "SourceFinding",
+    "Finding",
     "SourceHuntState",
     "EVIDENCE_LEVELS",
     "evidence_at_or_above",
