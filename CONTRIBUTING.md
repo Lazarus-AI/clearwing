@@ -20,8 +20,37 @@ make install-dev
 against the active interpreter. Once it finishes, `clearwing --help`
 should work and `make test` should pass.
 
-If you prefer `uv` over pip, `uv sync --all-extras` reproduces the
-locked environment from `uv.lock`.
+### Reproducible environment via `uv` (recommended)
+
+The repo ships a `uv.lock` that pins exact versions of every runtime
+and dev dependency — including transitive ones — against a specific
+Python version. If you want a bit-for-bit reproducible environment:
+
+```bash
+# Install uv once: https://docs.astral.sh/uv/
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and sync
+git clone https://github.com/Lazarus-AI/clearwing.git
+cd clearwing
+uv sync --all-extras
+
+# Drop into the locked environment for any command
+uv run make gate
+uv run clearwing --help
+uv run pytest tests/test_sourcehunt_hunter.py
+```
+
+`uv sync --all-extras` reads `pyproject.toml` + `uv.lock` and builds a
+virtualenv in `.venv/` with the exact package set. Unlike `pip install
+-e '.[dev]'`, this is guaranteed to match CI and other contributors'
+environments — no "works on my machine" surprises from a transitive
+dep silently upgrading.
+
+When you bump a dependency in `pyproject.toml`, run `uv lock` to
+regenerate the lockfile and commit both files together. CI reads from
+`pyproject.toml` only (to catch lockfile drift) but local development
+is faster with `uv sync`.
 
 ## The local gate
 
