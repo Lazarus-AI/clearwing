@@ -144,13 +144,15 @@ def build_discovery_tools(ctx: HunterContext) -> list:
         except OSError as e:
             return f"Error reading {rel}: {e}"
         total = len(lines)
-        s = max(0, start_line - 1)
-        e = total if end_line < 0 else min(total, end_line)
-        sliced = lines[s:e]
+        first = max(0, start_line - 1)
+        last = total if end_line < 0 else min(total, end_line)
+        sliced = lines[first:last]
         # Cap at 500 lines
         if len(sliced) > 500:
             sliced = sliced[:500]
-            footer = f"\n... (truncated; file has {total} lines, showing {s + 1}..{s + 500})"
+            footer = (
+                f"\n... (truncated; file has {total} lines, showing {first + 1}..{first + 500})"
+            )
         else:
             footer = ""
         return "".join(sliced) + footer
@@ -221,6 +223,7 @@ def build_discovery_tools(ctx: HunterContext) -> list:
         """
         # Word-boundary-ish search on the symbol
         pattern = rf"\b{re.escape(symbol)}\b"
-        return grep_source.invoke({"pattern": pattern, "path": "."})
+        matches: list[dict] = grep_source.invoke({"pattern": pattern, "path": "."})
+        return matches
 
     return [read_source_file, list_source_tree, grep_source, find_callers]

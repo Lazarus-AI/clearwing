@@ -5,7 +5,7 @@ from langchain_core.tools import tool
 
 @tool
 async def setup_pivot(
-    target_ip: str, method: str = "ssh", container_id: str = None
+    target_ip: str, method: str = "ssh", container_id: str | None = None
 ) -> dict[str, Any]:
     """Establish a pivot point on a compromised host to access internal networks.
 

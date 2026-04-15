@@ -77,7 +77,7 @@ def parse_port_range(port_spec: str) -> list[int]:
     Returns:
         List of port numbers
     """
-    ports = []
+    ports: list[int] = []
     for part in port_spec.split(","):
         part = part.strip()
         if "-" in part:

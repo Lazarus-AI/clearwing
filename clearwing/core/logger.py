@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-def setup_logger(log_file: str = None, level: int = logging.INFO) -> logging.Logger:
+def setup_logger(log_file: str | None = None, level: int = logging.INFO) -> logging.Logger:
     """Setup and return a logger instance with file and console handlers."""
     logger = logging.getLogger("Clearwing")
     logger.setLevel(level)

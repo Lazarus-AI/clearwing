@@ -22,7 +22,7 @@ async def scan_ports(
     from clearwing.scanning import PortScanner
 
     scanner = PortScanner()
-    return await scanner.scan(target, ports, scan_type, threads)
+    return await scanner.scan(target, ports or [], scan_type, threads)
 
 
 @tool

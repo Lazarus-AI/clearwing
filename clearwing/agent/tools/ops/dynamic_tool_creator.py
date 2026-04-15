@@ -83,6 +83,12 @@ def create_custom_tool(
     spec = importlib.util.spec_from_file_location(
         f"clearwing.agent.custom_tools.{tool_name}", str(file_path)
     )
+    if spec is None or spec.loader is None:
+        return {
+            "success": False,
+            "tool_name": tool_name,
+            "message": f"Failed to build import spec for {file_path}",
+        }
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 

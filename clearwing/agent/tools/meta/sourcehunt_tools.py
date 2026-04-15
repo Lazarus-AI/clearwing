@@ -8,6 +8,7 @@ wargame/remediation tool pattern.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from langchain_core.tools import tool
 
@@ -107,7 +108,8 @@ def list_sourcehunt_findings(session_id: str = "") -> list[dict]:
     if cached is None:
         return [{"error": f"session_id not found: {session_id}"}]
 
-    return cached["findings"]
+    findings: list[dict] = cached["findings"]
+    return findings
 
 
 def get_sourcehunt_tools() -> list:
@@ -118,7 +120,7 @@ def get_sourcehunt_tools() -> list:
 # --- Helpers ----------------------------------------------------------------
 
 
-def _format_summary(result) -> str:
+def _format_summary(result: Any) -> str:
     """Build a one-screen summary that the interactive agent can show the user."""
     lines = [
         f"Source hunt complete (session={result.session_id})",

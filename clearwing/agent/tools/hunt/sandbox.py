@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import cast
 
 from clearwing.sandbox.container import SandboxContainer
 from clearwing.sourcehunt.state import Finding
@@ -60,7 +61,7 @@ class HunterContext:
         key = "+".join(sorted(chosen))
         cached = self.variant_sandboxes.get(key)
         if cached is not None:
-            return cached
+            return cast(SandboxContainer, cached)
         # Need to spawn a new variant container
         if self.sandbox_manager is None:
             # No manager — degrade to the primary sandbox
@@ -78,7 +79,7 @@ class HunterContext:
             logger.warning("Failed to spawn variant sandbox %s", chosen, exc_info=True)
             return self.sandbox
         self.variant_sandboxes[key] = sb
-        return sb
+        return cast(SandboxContainer, sb)
 
     def cleanup_variants(self) -> None:
         """Stop every cached variant container. Call when the hunter finishes."""

@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 
 @dataclass
@@ -97,7 +97,7 @@ class Config:
         with open(path, "w") as f:
             yaml.dump(self.config, f, default_flow_style=False)
 
-    def get(self, *keys, default=None) -> Any:
+    def get(self, *keys: str, default: Any = None) -> Any:
         """Get a configuration value by nested keys."""
         value = self.config
         for key in keys:
@@ -107,9 +107,9 @@ class Config:
                 return default
         return value
 
-    def set(self, *keys, value: Any) -> None:
+    def set(self, *keys: str, value: Any) -> None:
         """Set a configuration value by nested keys."""
-        config = self.config
+        config: dict[str, Any] = self.config
         for key in keys[:-1]:
             if key not in config:
                 config[key] = {}

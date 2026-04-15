@@ -50,7 +50,7 @@ def store_knowledge(category: str, content: str) -> str:
 
 
 @tool
-def search_knowledge(query: str, category: str = None) -> str:
+def search_knowledge(query: str, category: str | None = None) -> str:
     """Search stored knowledge across sessions.
 
     Args:

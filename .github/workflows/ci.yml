@@ -41,7 +41,13 @@ jobs:
         run: ruff format --check clearwing/ tests/
 
       - name: Mypy scoped gate
-        run: mypy --follow-imports=silent clearwing/findings clearwing/sourcehunt clearwing/capabilities.py
+        run: |
+          mypy --follow-imports=silent \
+            clearwing/findings \
+            clearwing/sourcehunt \
+            clearwing/capabilities.py \
+            clearwing/agent/tools \
+            clearwing/core
 
       - name: Run pytest
         run: pytest -q --strict-markers --strict-config
