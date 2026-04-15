@@ -1,5 +1,7 @@
 # Clearwing
 
+By Eric Hartford, Lazarus AI
+
 **Autonomous vulnerability scanner and source-code hunter built on
 LangGraph.**
 
