@@ -96,7 +96,7 @@ Documentation = "https://lazarus-ai.github.io/clearwing/"
 clearwing = "clearwing:main"
 
 [tool.uv.sources]
-genai-pyo3 = { git = "https://github.com/ropoctl/genai-pyo3", rev = "54dd4684ee764f5689fd3dc5d2f03116126706fb" }
+genai-pyo3 = { git = "https://github.com/ropoctl/genai-pyo3", rev = "9d4018ea5124b6ac13b4d993739fa0640212299b" }
 
 [tool.setuptools.packages.find]
 include = ["clearwing*"]

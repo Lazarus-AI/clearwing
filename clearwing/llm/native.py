@@ -6,6 +6,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from genai_pyo3 import (
+    ChatMessage,
+    ChatOptions,
+    ChatRequest,
+    ChatResponse,
+    Client,
+    Tool,
+    ToolCall,
+    Usage,
+)
+
 
 def _run_coro_sync(coro):
     try:
@@ -93,11 +104,6 @@ class AsyncLLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> NativeResponse:
-        try:
-            from genai_pyo3 import ChatMessage, ChatOptions, ChatRequest, Client, Tool, ToolCall
-        except ImportError as exc:  # pragma: no cover - dependency issue
-            raise ImportError("genai-pyo3 is required for native async LLM calls") from exc
-
         request_messages: list[Any] = []
         for message in messages:
             if message.role == "assistant" and message.tool_calls:
@@ -152,7 +158,7 @@ class AsyncLLMClient:
 
         async with self._semaphore:
             client = self._build_client(Client)
-            response = await client.achat(self.model_name, request, options)
+            response = await self._achat_with_provider_policy(client, request, options)
 
         tool_calls: list[NativeToolCall] = []
         for tool_call in response.tool_calls or []:
@@ -234,6 +240,62 @@ class AsyncLLMClient:
         if self.api_key:
             return client_cls.with_api_key(self.provider_name, self.api_key)
         return client_cls()
+
+    async def _achat_with_provider_policy(
+        self,
+        client: Client,
+        request: ChatRequest,
+        options: ChatOptions,
+    ) -> ChatResponse:
+        if self.provider_name != "openai_resp":
+            return await client.achat(self.model_name, request, options)
+        return await self._collect_stream_response(client, request, options)
+
+    async def _collect_stream_response(
+        self,
+        client: Client,
+        request: ChatRequest,
+        options: ChatOptions,
+    ) -> ChatResponse:
+        texts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        end_event = None
+
+        stream = await client.astream_chat(self.model_name, request, options)
+        async for event in stream:
+            if event.kind == "chunk" and event.content:
+                texts.append(event.content)
+            elif event.kind == "tool_call_chunk" and event.tool_call is not None:
+                tool_calls.append(event.tool_call)
+            elif event.kind == "end" and event.end is not None:
+                end_event = event.end
+
+        if end_event is not None:
+            final_texts = list(end_event.captured_texts or [])
+            if not final_texts and end_event.captured_first_text:
+                final_texts = [end_event.captured_first_text]
+            final_tool_calls = list(end_event.captured_tool_calls or tool_calls)
+            usage = end_event.captured_usage or Usage()
+            text = end_event.captured_first_text
+            if text is None and final_texts:
+                text = final_texts[0]
+        else:
+            final_texts = ["".join(texts)] if texts else []
+            final_tool_calls = tool_calls
+            usage = Usage()
+            text = final_texts[0] if final_texts else None
+
+        return ChatResponse(
+            text=text,
+            texts=final_texts,
+            reasoning_content=None,
+            model_adapter_kind=self.provider_name,
+            model_name=self.model_name,
+            provider_model_adapter_kind=self.provider_name,
+            provider_model_name=self.model_name,
+            usage=usage,
+            tool_calls=final_tool_calls,
+        )
 
 
 def extract_json_object(text: str) -> dict[str, Any]:

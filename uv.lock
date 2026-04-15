@@ -561,7 +561,7 @@ requires-dist = [
     { name = "docker", specifier = ">=7.0.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "genai-pyo3", git = "https://github.com/ropoctl/genai-pyo3?rev=54dd4684ee764f5689fd3dc5d2f03116126706fb" },
+    { name = "genai-pyo3", git = "https://github.com/ropoctl/genai-pyo3?rev=9d4018ea5124b6ac13b4d993739fa0640212299b" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.4.0" },
@@ -954,10 +954,7 @@ wheels = [
 [[package]]
 name = "genai-pyo3"
 version = "0.1.0"
-source = { git = "https://github.com/ropoctl/genai-pyo3?rev=54dd4684ee764f5689fd3dc5d2f03116126706fb#54dd4684ee764f5689fd3dc5d2f03116126706fb" }
-dependencies = [
-    { name = "aiohttp" },
-]
+source = { git = "https://github.com/ropoctl/genai-pyo3?rev=9d4018ea5124b6ac13b4d993739fa0640212299b#9d4018ea5124b6ac13b4d993739fa0640212299b" }
 
 [[package]]
 name = "ghp-import"
