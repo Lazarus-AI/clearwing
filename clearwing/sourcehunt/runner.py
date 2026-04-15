@@ -182,7 +182,16 @@ class SourceHuntRunner:
         if ranker_llm is not None and files:
             logger.info("Ranker starting on %d files", len(files))
             try:
-                Ranker(ranker_llm, RankerConfig()).rank(files)
+                ranker_config = RankerConfig()
+                if ranker_llm.provider_name == "openai_resp":
+                    ranker_config.chunk_size = 100
+                    ranker_config.max_inflight_chunks = 2
+                    logger.info(
+                        "Ranker tuned for openai_resp backend: chunk_size=%d max_inflight_chunks=%d",
+                        ranker_config.chunk_size,
+                        ranker_config.max_inflight_chunks,
+                    )
+                Ranker(ranker_llm, ranker_config).rank(files)
                 logger.info("Ranker completed")
             except Exception:
                 logger.warning("Ranker failed", exc_info=True)

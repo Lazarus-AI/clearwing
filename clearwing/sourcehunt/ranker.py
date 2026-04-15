@@ -58,6 +58,7 @@ Return ONLY a JSON array, no other text:
 @dataclass
 class RankerConfig:
     chunk_size: int = 150  # files per LLM call
+    max_inflight_chunks: int = 4
     llm_timeout_seconds: int | None = None
     large_repo_file_threshold: int = 2000
     include_static_hints: bool = True
@@ -123,12 +124,7 @@ class Ranker:
 
         chunks = self._chunk(files, self.config.chunk_size)
         total_chunks = len(chunks)
-        scores_by_chunk = await asyncio.gather(
-            *[
-                self._rank_chunk(chunk, idx=idx, total_chunks=total_chunks)
-                for idx, chunk in enumerate(chunks, start=1)
-            ]
-        )
+        scores_by_chunk = await self._rank_chunks_bounded(chunks)
         for chunk, scores in zip(chunks, scores_by_chunk, strict=False):
             self._apply_scores(chunk, scores)
 
@@ -143,6 +139,36 @@ class Ranker:
             self._apply_fuzzable_boost(ft)
 
         return files
+
+    async def _rank_chunks_bounded(
+        self,
+        chunks: list[list[FileTarget]],
+    ) -> list[dict[str, dict[str, Any]]]:
+        total_chunks = len(chunks)
+        max_inflight = max(1, min(self.config.max_inflight_chunks, total_chunks))
+        semaphore = asyncio.Semaphore(max_inflight)
+        scores_by_chunk: list[dict[str, dict[str, Any]]] = [{} for _ in chunks]
+        completed = 0
+
+        async def run_one(index: int, chunk: list[FileTarget]) -> tuple[int, dict[str, dict[str, Any]]]:
+            async with semaphore:
+                return index, await self._rank_chunk(
+                    chunk,
+                    idx=index + 1,
+                    total_chunks=total_chunks,
+                )
+
+        tasks = [asyncio.create_task(run_one(index, chunk)) for index, chunk in enumerate(chunks)]
+        for future in asyncio.as_completed(tasks):
+            index, scores = await future
+            scores_by_chunk[index] = scores
+            completed += 1
+            logger.info(
+                "Ranker progress %d/%d chunks completed",
+                completed,
+                total_chunks,
+            )
+        return scores_by_chunk
 
     def _apply_heuristic_baseline(self, files: list[FileTarget]) -> None:
         """Populate cheap baseline scores before any LLM reranking."""
@@ -170,6 +196,7 @@ class Ranker:
     ) -> dict[str, dict[str, Any]]:
         """Return {path: {surface, influence, surface_rationale, influence_rationale}}."""
         user_msg = self._build_user_message(chunk)
+        started_at = asyncio.get_running_loop().time()
         try:
             logger.info(
                 "Ranker chunk %d/%d starting (%d files)",
@@ -200,7 +227,13 @@ class Ranker:
         except Exception:
             logger.warning("Ranker LLM call failed", exc_info=True)
             return {}
-        logger.info("Ranker chunk %d/%d completed", idx, total_chunks)
+        elapsed = asyncio.get_running_loop().time() - started_at
+        logger.info(
+            "Ranker chunk %d/%d completed in %.1fs",
+            idx,
+            total_chunks,
+            elapsed,
+        )
         return self._parse_response(response.text)
 
     def _build_user_message(self, chunk: list[FileTarget]) -> str:
