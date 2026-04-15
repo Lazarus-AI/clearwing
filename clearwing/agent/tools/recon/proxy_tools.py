@@ -8,6 +8,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from langchain_core.tools import tool
 
@@ -31,7 +32,7 @@ class ProxyRequest:
 class ProxyHistory:
     """Thread-safe in-memory store for proxy request/response history."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._entries: list[ProxyRequest] = []
         self._lock = threading.Lock()
         self._next_id = 1
@@ -40,10 +41,10 @@ class ProxyHistory:
         self,
         method: str,
         url: str,
-        request_headers: dict = None,
+        request_headers: dict | None = None,
         request_body: str = "",
         status_code: int = 0,
-        response_headers: dict = None,
+        response_headers: dict | None = None,
         response_body: str = "",
         duration_ms: int = 0,
     ) -> ProxyRequest:
@@ -74,7 +75,11 @@ class ProxyHistory:
         return None
 
     def get_all(
-        self, method: str = None, url_contains: str = None, status_code: int = None, limit: int = 50
+        self,
+        method: str | None = None,
+        url_contains: str | None = None,
+        status_code: int | None = None,
+        limit: int = 50,
     ) -> list[ProxyRequest]:
         """Get entries with optional filtering."""
         with self._lock:
@@ -89,7 +94,7 @@ class ProxyHistory:
 
         return results[-limit:]
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear all history."""
         with self._lock:
             self._entries.clear()
@@ -100,7 +105,7 @@ class ProxyHistory:
         with self._lock:
             return len(self._entries)
 
-    def export(self, path: str):
+    def export(self, path: str) -> None:
         """Export history to a JSON file."""
         with self._lock:
             data = [asdict(e) for e in self._entries]
@@ -116,7 +121,7 @@ _proxy_running = False
 def proxy_request(
     method: str,
     url: str,
-    headers: dict = None,
+    headers: dict | None = None,
     body: str = "",
     follow_redirects: bool = True,
 ) -> dict:
@@ -153,7 +158,7 @@ def proxy_request(
         if not follow_redirects:
 
             class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-                def redirect_request(self, *args, **kwargs):
+                def redirect_request(self, *args: Any, **kwargs: Any) -> None:
                     return None
 
             opener = urllib.request.build_opener(NoRedirectHandler)
@@ -212,9 +217,9 @@ def proxy_request(
 
 @tool
 def proxy_get_history(
-    method: str = None,
-    url_contains: str = None,
-    status_code: int = None,
+    method: str | None = None,
+    url_contains: str | None = None,
+    status_code: int | None = None,
     limit: int = 20,
 ) -> list[dict]:
     """Get proxy request/response history with optional filtering.
@@ -268,9 +273,9 @@ def proxy_get_request(request_id: int) -> dict:
 @tool
 def proxy_replay(
     request_id: int,
-    modify_headers: dict = None,
-    modify_body: str = None,
-    modify_url: str = None,
+    modify_headers: dict | None = None,
+    modify_body: str | None = None,
+    modify_url: str | None = None,
 ) -> dict:
     """Replay a previous request with optional modifications.
 
@@ -294,7 +299,7 @@ def proxy_replay(
     body = modify_body if modify_body is not None else original.request_body
     url = modify_url if modify_url is not None else original.url
 
-    return proxy_request.invoke(
+    result: dict = proxy_request.invoke(
         {
             "method": original.method,
             "url": url,
@@ -302,6 +307,7 @@ def proxy_replay(
             "body": body,
         }
     )
+    return result
 
 
 @tool

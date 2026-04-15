@@ -7,7 +7,7 @@ from ....reporting.remediation.generator import RemediationGenerator
 
 @tool
 def generate_remediation_patch(
-    vuln_type: str, cve: str = None, description: str = ""
+    vuln_type: str, cve: str | None = None, description: str = ""
 ) -> dict[str, Any]:
     """Generate a remediation patch (code or config) for a vulnerability.
 

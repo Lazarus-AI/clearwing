@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 
-# Module-level browser state
-_browser_state = {
+# Module-level browser state. Typed as `dict[str, Any]` rather than a
+# TypedDict because the shape is transiently inconsistent across the
+# `_ensure_browser()` lazy-init transition — the hunter tools only call
+# through the `_ensure_browser` + `_get_page` helpers, which encapsulate
+# the "state is valid" invariant.
+_browser_state: dict[str, Any] = {
     "browser": None,
     "context": None,
     "tabs": {},  # name -> page
@@ -14,7 +20,7 @@ _browser_state = {
 }
 
 
-def _ensure_browser():
+def _ensure_browser() -> None:
     """Lazily initialize the browser if not already running."""
     if _browser_state["browser"] is not None:
         return
@@ -23,14 +29,15 @@ def _ensure_browser():
 
     pw = sync_playwright().start()
     _browser_state["_pw"] = pw
-    _browser_state["browser"] = pw.chromium.launch(headless=True)
-    _browser_state["context"] = _browser_state["browser"].new_context(
+    browser = pw.chromium.launch(headless=True)
+    _browser_state["browser"] = browser
+    _browser_state["context"] = browser.new_context(
         ignore_https_errors=True,
         user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Clearwing/1.0",
     )
 
 
-def _get_page(tab_name: str | None = None):
+def _get_page(tab_name: str | None = None) -> Any:
     """Get the active page, or create one if none exists."""
     _ensure_browser()
     name = tab_name or _browser_state.get("active_tab") or "default"
@@ -282,7 +289,7 @@ def browser_list_tabs() -> list[dict]:
 
 
 @tool
-def browser_close(tab_name: str = None) -> dict:
+def browser_close(tab_name: str | None = None) -> dict:
     """Close a browser tab or all tabs if no name specified.
 
     Args:

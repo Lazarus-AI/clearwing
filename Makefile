@@ -8,7 +8,7 @@ PYTEST   := $(PY) -m pytest
 RUFF     := $(PY) -m ruff
 MYPY     := $(PY) -m mypy
 
-MYPY_SCOPE := clearwing/findings clearwing/sourcehunt clearwing/capabilities.py
+MYPY_SCOPE := clearwing/findings clearwing/sourcehunt clearwing/capabilities.py clearwing/agent/tools clearwing/core
 
 help:
 	@echo "Clearwing developer commands:"

@@ -9,7 +9,7 @@ _MCP_CLIENTS: dict[str, MCPClient] = {}
 
 
 @tool
-def connect_mcp_server(name: str, command: str, args: list[str] = None) -> dict[str, Any]:
+def connect_mcp_server(name: str, command: str, args: list[str] | None = None) -> dict[str, Any]:
     """Connect to an external MCP server (Model Context Protocol).
 
     This allows the agent to access additional tools from external providers,
@@ -27,7 +27,7 @@ def connect_mcp_server(name: str, command: str, args: list[str] = None) -> dict[
         return {"status": "already_connected", "name": name}
 
     try:
-        client = MCPClient(command, args)
+        client = MCPClient(command, args or [])
         client.connect()
         _MCP_CLIENTS[name] = client
 

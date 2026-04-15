@@ -37,6 +37,12 @@ class EventBus:
     _instance: EventBus | None = None
     _init_lock = threading.Lock()
 
+    # Instance attributes — set in __new__ (singleton construction path,
+    # not __init__). Declared here so mypy sees them on every EventBus
+    # instance after the first call.
+    _handlers: dict[EventType, list[Callable]]
+    _lock: threading.Lock
+
     # ------------------------------------------------------------------
     # Singleton
     # ------------------------------------------------------------------
@@ -47,9 +53,7 @@ class EventBus:
                 # Double-checked locking
                 if cls._instance is None:
                     instance = super().__new__(cls)
-                    instance._handlers: dict[EventType, list[Callable]] = {
-                        et: [] for et in EventType
-                    }
+                    instance._handlers = {et: [] for et in EventType}
                     instance._lock = threading.Lock()
                     cls._instance = instance
         return cls._instance

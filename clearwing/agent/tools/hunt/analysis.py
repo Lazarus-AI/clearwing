@@ -178,7 +178,7 @@ def build_analysis_tools(ctx: HunterContext) -> list:
     @tool
     def compile_file(
         file_path: str,
-        sanitizers: list[str] = None,
+        sanitizers: list[str] | None = None,
         extra_flags: str = "",
         sanitizer_variant: str = "",
     ) -> dict:
@@ -234,7 +234,7 @@ def build_analysis_tools(ctx: HunterContext) -> list:
     @tool
     def run_with_sanitizer(
         binary: str,
-        argv: list[str] = None,
+        argv: list[str] | None = None,
         stdin: str = "",
         timeout: int = 30,
         sanitizer_variant: str = "",

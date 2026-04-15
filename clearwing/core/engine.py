@@ -41,7 +41,7 @@ class ScanResult:
 class CoreEngine:
     """Core engine for orchestrating the scanning and exploitation workflow."""
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config | None = None):
         self.config = config or Config()
         self.logger = setup_logger()
         self.module_loader = ModuleLoader()
@@ -59,7 +59,7 @@ class CoreEngine:
         if event in self.callbacks:
             self.callbacks[event].append(callback)
 
-    def _trigger_callback(self, event: str, *args, **kwargs) -> None:
+    def _trigger_callback(self, event: str, *args: Any, **kwargs: Any) -> None:
         """Trigger all callbacks for a specific event."""
         for callback in self.callbacks.get(event, []):
             try:
@@ -67,7 +67,7 @@ class CoreEngine:
             except Exception as e:
                 self.logger.error(f"Callback error for {event}: {e}")
 
-    async def scan(self, target: str, config: ScanConfig = None) -> ScanResult:
+    async def scan(self, target: str, config: ScanConfig | None = None) -> ScanResult:
         """Perform a complete scan on the target."""
         self.scan_result = ScanResult(target=target)
         self.scan_result.state = ScanState.PORT_SCANNING

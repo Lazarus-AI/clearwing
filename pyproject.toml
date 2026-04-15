@@ -135,26 +135,29 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 
-# Scoped mypy gate, built up across phases.
+# Scoped mypy gate, built up across phases. Every module here runs with
+# `disallow_untyped_defs = true` and `warn_unused_ignores = true` — the
+# typed-core policy.
 #
-# Strict (`disallow_untyped_defs = true`):
 #   - clearwing.findings.*          (Phase 3e)
 #   - clearwing.capabilities        (Phase 4c)
-#   - clearwing.sourcehunt.*        (Phase 5 — flipped from relaxed, all
-#                                    ~37 untyped-def errors cleaned up
-#                                    via real annotations, not suppressions)
-#
-# Still deferred:
-#   - clearwing.agent.tools.*  and  clearwing.core.*
-#     ~78 type errors remain here (implicit Optional, no-any-return from
-#     json.loads/.invoke(), a handful of dict/None attr errors, real
-#     arg-type mismatches). These are a mix of real bugs and typing
-#     debt that belongs in a dedicated pass rather than piecemeal fixes.
+#   - clearwing.sourcehunt.*        (Phase 5 — ~37 untyped-def errors
+#                                    cleaned up via real annotations)
+#   - clearwing.agent.tools.*       (Phase 5 — implicit Optional,
+#                                    no-any-return, browser-state None
+#                                    narrowing, and a handful of real
+#                                    arg-type mismatches all fixed)
+#   - clearwing.core.*              (Phase 5 — EventBus _handlers/_lock
+#                                    class attributes, implicit Optional
+#                                    on config/engine/logger/module_loader,
+#                                    yaml stub ignore)
 [[tool.mypy.overrides]]
 module = [
     "clearwing.findings.*",
     "clearwing.capabilities",
     "clearwing.sourcehunt.*",
+    "clearwing.agent.tools.*",
+    "clearwing.core.*",
 ]
 disallow_untyped_defs = true
 warn_unused_ignores = true

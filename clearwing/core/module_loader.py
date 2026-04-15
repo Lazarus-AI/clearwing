@@ -18,7 +18,7 @@ class ModuleInfo:
 class ModuleLoader:
     """Dynamic module loader for scanners and exploiters."""
 
-    def __init__(self, module_dirs: list[str] = None):
+    def __init__(self, module_dirs: list[str] | None = None):
         self.module_dirs = module_dirs or []
         self.loaded_modules: dict[str, ModuleInfo] = {}
 
@@ -28,7 +28,7 @@ class ModuleLoader:
         if path.is_dir() and str(path) not in self.module_dirs:
             self.module_dirs.append(str(path))
 
-    def load_module(self, module_path: str, base_class: type = None) -> ModuleInfo:
+    def load_module(self, module_path: str, base_class: type | None = None) -> ModuleInfo:
         """Load a module from a file path."""
         path = Path(module_path)
         if not path.exists():

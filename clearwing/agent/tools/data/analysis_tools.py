@@ -43,7 +43,7 @@ def clone_and_analyze(git_url: str, branch: str = "main") -> str:
         with SourceAnalyzer() as analyzer:
             analyzer.clone(git_url, branch=branch)
             result = analyzer.analyze()
-            return result.summary()
+            return str(result.summary())
     except Exception as e:
         return f"Error: {e}"
 
