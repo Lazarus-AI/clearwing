@@ -1,0 +1,125 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+a[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+b[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  # Re-run the full CI gate against the tagged commit so we never
+  # ship artifacts that don't pass the same checks PRs do.
+  gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          pip install build twine ruff
+
+      - name: Ruff check
+        run: ruff check clearwing/ tests/
+
+      - name: Ruff format (check)
+        run: ruff format --check clearwing/ tests/
+
+      - name: Mypy scoped gate
+        run: |
+          mypy --follow-imports=silent \
+            clearwing/findings \
+            clearwing/sourcehunt \
+            clearwing/capabilities.py \
+            clearwing/agent/tools \
+            clearwing/core
+
+      - name: Run pytest
+        run: pytest -q --strict-markers --strict-config
+
+  # Build wheel + sdist on one Python version (they're pure-Python,
+  # so one is enough) and attach them to the GitHub Release.
+  build-and-release:
+    name: Build and publish release
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Validate artifacts
+        run: twine check dist/*
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # github.ref is "refs/tags/v1.0.0" → strip the prefix
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          # Pull the section between "## [VERSION]" and the next "## [" heading.
+          # Written in pure sed so the release workflow has no python-side deps.
+          python - <<'PY' > RELEASE_NOTES.md
+          import re, pathlib
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          version = "${{ steps.version.outputs.version }}"
+          pattern = re.compile(
+              rf"^## \[{re.escape(version)}\].*?(?=^## \[|\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          match = pattern.search(text)
+          if match:
+              print(match.group(0).rstrip())
+          else:
+              print(f"(No CHANGELOG entry for {version}.)")
+          PY
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Clearwing ${{ steps.version.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, 'rc') || contains(steps.version.outputs.tag, 'a') || contains(steps.version.outputs.tag, 'b') }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          fail_on_unmatched_files: true
