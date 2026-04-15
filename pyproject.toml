@@ -81,15 +81,20 @@ dev = [
     "flake8>=6.0.0",
     "mypy>=1.0.0",
 ]
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.4.0",
+    "mkdocstrings[python]>=0.24.0",
+]
 all = [
-    "clearwing[metasploit,browser,vector,web,dev]",
+    "clearwing[metasploit,browser,vector,web,dev,docs]",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Lazarus-AI/clearwing"
 Repository = "https://github.com/Lazarus-AI/clearwing"
 Issues = "https://github.com/Lazarus-AI/clearwing/issues"
-Documentation = "https://github.com/Lazarus-AI/clearwing#readme"
+Documentation = "https://lazarus-ai.github.io/clearwing/"
 
 [project.scripts]
 clearwing = "clearwing:main"

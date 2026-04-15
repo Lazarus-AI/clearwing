@@ -1,7 +1,7 @@
 # Clearwing developer commands. Mirror the CI gate so `make lint type test`
 # gives you the same pass/fail signal as a PR.
 
-.PHONY: help install-dev lint format fmt type test test-strict build clean gate all
+.PHONY: help install-dev lint format fmt type test test-strict build clean gate all docs docs-serve
 
 PY       := venv/bin/python
 PYTEST   := $(PY) -m pytest
@@ -22,6 +22,8 @@ help:
 	@echo "  clean        remove dist/, build/, *.egg-info/, __pycache__/, .pytest_cache/"
 	@echo "  gate         lint + type + test-strict + build (full CI gate, local)"
 	@echo "  all          alias for gate"
+	@echo "  docs         mkdocs build --strict (writes site/)"
+	@echo "  docs-serve   mkdocs serve on http://127.0.0.1:8000"
 
 install-dev:
 	$(PY) -m pip install --upgrade pip
@@ -59,3 +61,9 @@ clean:
 gate: lint type test-strict build
 
 all: gate
+
+docs:
+	$(PY) -m mkdocs build --strict
+
+docs-serve:
+	$(PY) -m mkdocs serve --dev-addr 127.0.0.1:8000
