@@ -107,6 +107,22 @@ def _make_verifier_llm() -> MagicMock:
 
 
 class TestQuickDepth:
+    def test_session_dir_exists_even_if_run_fails_early(self, tmp_path, monkeypatch):
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="quick",
+            output_dir=str(tmp_path),
+        )
+        monkeypatch.setattr(
+            runner, "_preprocess", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            runner.run()
+
+        assert (tmp_path / runner.session_id).is_dir()
+
     def test_quick_runs_without_hunter_llm(self, tmp_path):
         runner = SourceHuntRunner(
             repo_url=str(FIXTURE_C_PROPAGATION),

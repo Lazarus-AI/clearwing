@@ -648,3 +648,18 @@ class TestApplyVerifierResult:
         apply_verifier_result(finding, result)
         assert finding["verified"] is False
         assert finding["severity_verified"] is None
+
+    def test_invalid_existing_evidence_level_falls_back_to_suspicion(self):
+        finding = _make_finding(evidence_level="made_up_level")
+        result = VerifierResult(
+            finding_id="x",
+            is_real=True,
+            severity_verified="high",
+            evidence_level="crash_reproduced",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
+            duplicate_cve=None,
+        )
+        apply_verifier_result(finding, result)
+        assert finding["evidence_level"] == "crash_reproduced"

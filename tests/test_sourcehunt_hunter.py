@@ -12,7 +12,11 @@ These tests verify:
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +30,7 @@ from clearwing.agent.tools.hunt import (
 )
 from clearwing.sandbox.container import ExecResult
 from clearwing.sourcehunt.hunter import (
+    NativeHunter,
     _build_hunter_prompt,
     _build_propagation_prompt,
     _choose_specialist,
@@ -433,6 +438,72 @@ class TestBuildHunterAgent:
             variant_seed={"original": "ignored in v0.1"},
         )
         assert ctx.seeded_crash is not None
+
+
+class TestHunterTrajectoryLogging:
+    def test_trajectory_is_append_log_of_turns(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLEARWING_HOME", str(tmp_path))
+
+        class _StubLLM:
+            model_name = "stub-model"
+
+            async def achat(self, *, messages, system, tools):
+                assert system == "system prompt"
+                assert len(messages) == 1
+                return SimpleNamespace(
+                    text="No findings.",
+                    tool_calls=[],
+                    usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+                    provider_model_name="stub-provider",
+                )
+
+        ctx = HunterContext(
+            repo_path=str(FIXTURE_C_PROPAGATION),
+            findings=[],
+            file_path="src/codec_a.c",
+            session_id="traj-test",
+            specialist="general",
+        )
+        hunter = NativeHunter(
+            llm=_StubLLM(),
+            prompt="system prompt",
+            tools=[],
+            ctx=ctx,
+            max_steps=1,
+        )
+
+        findings, _, _ = asyncio.run(hunter.arun())
+
+        assert findings == []
+
+        trajectory_path = (
+            Path(os.environ["CLEARWING_HOME"])
+            / "sourcehunt"
+            / "trajectories"
+            / "traj-test"
+            / "src__codec_a.c.jsonl"
+        )
+        records = [
+            json.loads(line) for line in trajectory_path.read_text(encoding="utf-8").splitlines()
+        ]
+        start = next(record for record in records if record["event"] == "start")
+        messages = [record for record in records if record["event"] == "message"]
+
+        assert start["prompt"] == "system prompt"
+        assert start["tools"] == []
+        assert len(messages) == 2
+        assert messages[0]["step"] == 0
+        assert messages[0]["message"]["role"] == "user"
+        assert messages[0]["message"]["content"] == "Hunt for vulnerabilities in src/codec_a.c."
+        assert messages[1]["step"] == 1
+        assert messages[1]["message"]["role"] == "assistant"
+        assert messages[1]["message"]["content"] == "No findings."
+        assert messages[1]["usage"] == {
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "total_tokens": 18,
+        }
+        assert all(record["event"] != "request" for record in records)
 
 
 # --- Hunter tools (host fallback paths) -------------------------------------

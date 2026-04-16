@@ -485,7 +485,11 @@ def apply_verifier_result(
     finding["verifier_session_id"] = session_id
     # Bump evidence_level if the verifier confirms a stronger one
     current = finding.get("evidence_level", "suspicion")
+    if current not in EVIDENCE_LEVELS:
+        current = "suspicion"
     new = result.evidence_level
+    if new not in EVIDENCE_LEVELS:
+        new = "suspicion"
     if EVIDENCE_LEVELS.index(new) > EVIDENCE_LEVELS.index(current):
         finding["evidence_level"] = new
     # v0.3: patch-oracle outcome
@@ -495,6 +499,8 @@ def apply_verifier_result(
         # validated — the fix actually killed the crash).
         if result.patch_oracle_passed:
             level = finding.get("evidence_level", "suspicion")
+            if level not in EVIDENCE_LEVELS:
+                level = "suspicion"
             if EVIDENCE_LEVELS.index("root_cause_explained") > EVIDENCE_LEVELS.index(level):
                 finding["evidence_level"] = "root_cause_explained"
     return finding

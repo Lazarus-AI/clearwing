@@ -219,6 +219,7 @@ class HunterTrajectoryLogger:
         *,
         prompt: str,
         initial_messages: list[ChatMessage],
+        tools: list[NativeToolSpec],
     ) -> HunterTrajectoryLogger:
         path = _trajectory_path(ctx)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,10 +231,18 @@ class HunterTrajectoryLogger:
                 "file_path": ctx.file_path,
                 "specialist": ctx.specialist,
                 "prompt": prompt,
-                "initial_messages": [_serialize_message(msg) for msg in initial_messages],
+                "tools": [tool.name for tool in tools],
                 "seeded_crash": ctx.seeded_crash,
             },
         )
+        for message in initial_messages:
+            logger_obj.log(
+                "message",
+                {
+                    "step": 0,
+                    "message": _serialize_message(message),
+                },
+            )
         return logger_obj
 
     def log(self, event: str, payload: dict[str, Any]) -> None:
@@ -812,6 +821,7 @@ class NativeHunter:
             self.ctx,
             prompt=self.prompt,
             initial_messages=messages,
+            tools=self.tools,
         )
         total_input_tokens = 0
         total_output_tokens = 0
@@ -820,26 +830,22 @@ class NativeHunter:
         tools_by_name = {tool.name: tool for tool in self.tools}
 
         for step in range(1, self.max_steps + 1):
-            trajectory.log(
-                "request",
-                {
-                    "step": step,
-                    "system": self.prompt,
-                    "messages": [_serialize_message(message) for message in messages],
-                    "tools": [tool.name for tool in self.tools],
-                },
-            )
             response = await self.llm.achat(
                 messages=messages,
                 system=self.prompt,
                 tools=self.tools,
             )
             trajectory.log(
-                "assistant_response",
+                "message",
                 {
                     "step": step,
-                    "text": response.text,
-                    "tool_calls": [_serialize_tool_call(tc) for tc in response.tool_calls],
+                    "message": _serialize_message(
+                        ChatMessage(
+                            "assistant",
+                            response.text or "",
+                            tool_calls=response.tool_calls,
+                        )
+                    ),
                     "usage": {
                         "input_tokens": response.usage.prompt_tokens or 0,
                         "output_tokens": response.usage.completion_tokens or 0,
@@ -918,6 +924,13 @@ class NativeHunter:
                             tool_summary,
                             tool_response_call_id=tool_call.call_id,
                         )
+                    )
+                    trajectory.log(
+                        "message",
+                        {
+                            "step": step,
+                            "message": _serialize_message(messages[-1]),
+                        },
                     )
                 continue
 

@@ -16,6 +16,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from clearwing.llm.native import AsyncLLMClient
@@ -172,6 +173,7 @@ class SourceHuntRunner:
 
     def run(self) -> SourceHuntResult:
         start_time = time.monotonic()
+        self._ensure_output_dir_layout()
         logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
         try:
             # 1. Preprocess
@@ -571,6 +573,11 @@ class SourceHuntRunner:
         return self._session_id
 
     # --- Pipeline helpers ---------------------------------------------------
+
+    def _ensure_output_dir_layout(self) -> Path:
+        session_dir = Path(self.output_dir) / self._session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir
 
     def _export_disclosure_bundle(
         self,
