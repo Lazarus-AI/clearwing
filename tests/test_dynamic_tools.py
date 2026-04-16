@@ -4,6 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from clearwing.agent.tools.ops.dynamic_tool_creator import (
+    _CUSTOM_TOOL_REGISTRY,
+    create_custom_tool,
+    get_custom_tools,
+    list_custom_tools,
+)
+
 CUSTOM_TOOLS_DIR = Path(__file__).parent.parent / "clearwing" / "agent" / "custom_tools"
 
 
@@ -17,16 +24,9 @@ class TestDynamicToolCreator:
             if path.exists():
                 path.unlink()
         # Clear registry
-        from clearwing.agent.tools.ops.dynamic_tool_creator import _CUSTOM_TOOL_REGISTRY
-
         _CUSTOM_TOOL_REGISTRY.clear()
 
     def test_create_simple_tool(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import (
-            _CUSTOM_TOOL_REGISTRY,
-            create_custom_tool,
-        )
-
         result = create_custom_tool.invoke(
             {
                 "tool_name": "test_greeting",
@@ -50,11 +50,6 @@ class TestDynamicToolCreator:
         assert "test_greeting" in _CUSTOM_TOOL_REGISTRY
 
     def test_create_tool_with_multiple_params(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import (
-            _CUSTOM_TOOL_REGISTRY,
-            create_custom_tool,
-        )
-
         result = create_custom_tool.invoke(
             {
                 "tool_name": "test_adder",
@@ -71,8 +66,6 @@ class TestDynamicToolCreator:
         assert "test_adder" in _CUSTOM_TOOL_REGISTRY
 
     def test_name_validation_rejects_path_traversal(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import create_custom_tool
-
         result = create_custom_tool.invoke(
             {
                 "tool_name": "../../../etc/evil",
@@ -84,8 +77,6 @@ class TestDynamicToolCreator:
         assert result["success"] is False
 
     def test_name_validation_rejects_special_chars(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import create_custom_tool
-
         result = create_custom_tool.invoke(
             {
                 "tool_name": "my-tool",
@@ -97,8 +88,6 @@ class TestDynamicToolCreator:
         assert result["success"] is False
 
     def test_name_validation_rejects_starting_digit(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import create_custom_tool
-
         result = create_custom_tool.invoke(
             {
                 "tool_name": "1tool",
@@ -110,11 +99,6 @@ class TestDynamicToolCreator:
         assert result["success"] is False
 
     def test_list_custom_tools(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import (
-            create_custom_tool,
-            list_custom_tools,
-        )
-
         create_custom_tool.invoke(
             {
                 "tool_name": "test_greeting",
@@ -129,11 +113,6 @@ class TestDynamicToolCreator:
         assert result[0]["name"] == "test_greeting"
 
     def test_get_custom_tools(self):
-        from clearwing.agent.tools.ops.dynamic_tool_creator import (
-            create_custom_tool,
-            get_custom_tools,
-        )
-
         create_custom_tool.invoke(
             {
                 "tool_name": "test_greeting",

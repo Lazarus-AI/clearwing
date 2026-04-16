@@ -24,8 +24,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from clearwing.llm import AsyncLLMClient
+from clearwing.llm.compat import invoke_text_compat
 
 from .state import Finding
 
@@ -104,23 +104,21 @@ Return ONLY the JSON."""
 class VariantPatternGenerator:
     """Ask the LLM for a grep pattern + semantic description."""
 
-    def __init__(self, llm: BaseChatModel):
+    def __init__(self, llm: AsyncLLMClient):
         self.llm = llm
 
     def generate(self, finding: Finding) -> VariantPattern | None:
         user_msg = self._build_user_message(finding)
         try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=PATTERN_GEN_SYSTEM_PROMPT),
-                    HumanMessage(content=user_msg),
-                ]
+            content = invoke_text_compat(
+                self.llm,
+                system=PATTERN_GEN_SYSTEM_PROMPT,
+                user=user_msg,
             )
         except Exception:
             logger.debug("Variant pattern LLM call failed", exc_info=True)
             return None
 
-        content = response.content if isinstance(response.content, str) else str(response.content)
         parsed = self._parse_response(content)
         if not parsed:
             return None

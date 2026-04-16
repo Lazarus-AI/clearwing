@@ -3,7 +3,7 @@ import importlib.util
 import re
 from pathlib import Path
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
 
 _CUSTOM_TOOL_REGISTRY: dict = {}
 
@@ -16,7 +16,7 @@ import re
 import socket
 import subprocess
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
 
 
 @tool

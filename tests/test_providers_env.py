@@ -15,8 +15,6 @@ Structured around the precedence ladder:
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from clearwing.providers import (
@@ -29,6 +27,7 @@ from clearwing.providers import (
     ProviderManager,
     resolve_llm_endpoint,
 )
+from clearwing.providers.genai_pyo3_chat import GenAIPyO3ChatModel
 
 
 @pytest.fixture
@@ -290,22 +289,17 @@ class TestProviderManagerForEndpoint:
             source="cli",
         )
         pm = ProviderManager.for_endpoint(endpoint)
+        ranker = pm.get_llm("ranker")
+        hunter = pm.get_llm("hunter")
+        verifier = pm.get_llm("verifier")
 
-        with patch("langchain_anthropic.ChatAnthropic") as mock_anthropic:
-            mock_instance = object()
-            mock_anthropic.return_value = mock_instance
+        assert isinstance(ranker, GenAIPyO3ChatModel)
+        assert ranker is hunter
+        assert hunter is verifier
+        assert ranker.provider_name == "anthropic"
+        assert ranker.model_name == "claude-sonnet-4-6"
 
-            ranker = pm.get_llm("ranker")
-            hunter = pm.get_llm("hunter")
-            verifier = pm.get_llm("verifier")
-
-            assert ranker is mock_instance
-            assert hunter is mock_instance
-            assert verifier is mock_instance
-            # Cached — only one construction even across 3 get_llm calls
-            assert mock_anthropic.call_count == 1
-
-    def test_for_endpoint_openai_compat_uses_chatopenai(self, clean_env):
+    def test_for_endpoint_openai_compat_uses_native_chat_model(self, clean_env):
         endpoint = LLMEndpoint(
             provider="openai_compat",
             model="anthropic/claude-opus-4",
@@ -314,17 +308,12 @@ class TestProviderManagerForEndpoint:
             source="cli",
         )
         pm = ProviderManager.for_endpoint(endpoint)
-
-        with patch("langchain_openai.ChatOpenAI") as mock_openai:
-            mock_openai.return_value = "openai-instance"
-            got = pm.get_llm("hunter")
-            assert got == "openai-instance"
-            # Check it was called with the right kwargs
-            mock_openai.assert_called_once()
-            call_kwargs = mock_openai.call_args.kwargs
-            assert call_kwargs["base_url"] == "https://openrouter.ai/api/v1"
-            assert call_kwargs["api_key"] == "sk-or-test"
-            assert call_kwargs["model"] == "anthropic/claude-opus-4"
+        got = pm.get_llm("hunter")
+        assert isinstance(got, GenAIPyO3ChatModel)
+        assert got.base_url == "https://openrouter.ai/api/v1"
+        assert got.api_key == "sk-or-test"
+        assert got.model_name == "anthropic/claude-opus-4"
+        assert got.provider_name == "openai"
 
     def test_for_endpoint_get_route_info_shows_global(self, clean_env):
         endpoint = LLMEndpoint(

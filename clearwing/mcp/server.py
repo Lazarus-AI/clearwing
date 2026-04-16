@@ -21,17 +21,21 @@ class MCPServer:
     # ------------------------------------------------------------------
 
     def _tool_to_mcp(self, tool: Any) -> tuple[str, str, dict]:
-        """Convert a langchain tool to MCP tool registration.
+        """Convert a Clearwing tool to MCP tool registration.
 
         Returns:
             Tuple of (name, description, input_schema).
         """
         name: str = tool.name
         description: str = tool.description or ""
-        # Get JSON schema from langchain tool
-        if hasattr(tool, "args_schema") and tool.args_schema:
-            schema = tool.args_schema.schema()
-        else:
+        schema = getattr(tool, "input_schema", None)
+        if not isinstance(schema, dict):
+            args_schema = getattr(tool, "args_schema", None)
+            if args_schema is not None and hasattr(args_schema, "schema"):
+                schema = args_schema.schema()
+            elif args_schema is not None and hasattr(args_schema, "model_json_schema"):
+                schema = args_schema.model_json_schema()
+        if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
         return name, description, schema
 

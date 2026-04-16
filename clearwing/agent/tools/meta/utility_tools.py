@@ -1,4 +1,5 @@
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
+from clearwing.core.helpers import calculate_cvss_severity, cidr_to_ips, validate_ip
 
 
 @tool
@@ -11,8 +12,6 @@ def validate_target(ip_or_cidr: str) -> dict:
     Returns:
         Dict with keys: valid (bool), is_cidr (bool), ips (list of IP strings).
     """
-    from clearwing.core.helpers import cidr_to_ips, validate_ip
-
     if "/" in ip_or_cidr:
         ips = cidr_to_ips(ip_or_cidr)
         return {"valid": len(ips) > 0, "is_cidr": True, "ips": ips}
@@ -31,6 +30,4 @@ def calculate_severity(cvss_score: float) -> str:
     Returns:
         Severity string: CRITICAL, HIGH, MEDIUM, LOW, or NONE.
     """
-    from clearwing.core.helpers import calculate_cvss_severity
-
     return calculate_cvss_severity(cvss_score)

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -476,8 +477,6 @@ class TaintAnalyzer:
             files: optional pre-filtered list of absolute file paths.
                 If None, walk the tree.
         """
-        import time
-
         start = time.monotonic()
         result = TaintAnalysisResult()
 
@@ -935,7 +934,7 @@ def _node_text(node: Any, source: Any) -> str:
     still pass decoded text.
     """
     try:
-        if isinstance(source, (bytes, bytearray)):
+        if isinstance(source, bytes | bytearray):
             return bytes(source[node.start_byte : node.end_byte]).decode(
                 "utf-8",
                 errors="replace",

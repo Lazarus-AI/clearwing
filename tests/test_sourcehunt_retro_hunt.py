@@ -19,6 +19,7 @@ from clearwing.sourcehunt.retro_hunt import (
     RetroHuntResult,
     fetch_patch_diff,
 )
+from clearwing.sourcehunt.semgrep_sidecar import SemgrepFinding
 
 
 def _mock_llm(payload: dict) -> MagicMock:
@@ -160,8 +161,6 @@ class TestHuntEndToEnd:
         )
 
         # Fake SemgrepSidecar that returns one hit
-        from clearwing.sourcehunt.semgrep_sidecar import SemgrepFinding
-
         fake_sidecar = MagicMock()
         fake_sidecar.available = True
 

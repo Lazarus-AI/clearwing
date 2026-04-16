@@ -9,6 +9,7 @@ from clearwing.sourcehunt.disclosure import (
     DisclosureGenerator,
     write_bundle,
 )
+from clearwing.sourcehunt.runner import SourceHuntRunner
 
 
 def _finding(**kwargs) -> dict:
@@ -284,8 +285,6 @@ class TestWriteBundle:
 class TestRunnerDisclosureIntegration:
     def test_disclosures_opt_in(self, tmp_path: Path):
         """Disclosures should NOT be exported when the flag is off."""
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         fixture = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
         runner = SourceHuntRunner(
             repo_url=str(fixture),
@@ -300,8 +299,6 @@ class TestRunnerDisclosureIntegration:
 
     def test_disclosures_runner_flag(self):
         """The runner stores the flag and reporter fields."""
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         runner = SourceHuntRunner(
             repo_url="x",
             local_path="/tmp",

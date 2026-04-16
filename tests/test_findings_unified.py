@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from clearwing.analysis.source_analyzer import AnalyzerFinding as AnalysisFinding
 from clearwing.findings import (
     Finding,
     from_analysis_finding,
@@ -156,8 +157,6 @@ class TestCicdDictRoundtrip:
 class TestFromAnalysisFinding:
     def test_from_dataclass_instance(self):
         """The SourceAnalyzer dataclass should convert cleanly."""
-        from clearwing.analysis.source_analyzer import AnalyzerFinding as AnalysisFinding
-
         af = AnalysisFinding(
             file_path="app.py",
             line_number=23,

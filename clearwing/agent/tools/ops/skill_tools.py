@@ -1,6 +1,7 @@
 """Skill loading tools."""
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
+from clearwing.core.skills import SkillLoader
 
 
 @tool
@@ -14,8 +15,6 @@ def load_skills(skill_names: list[str]) -> str:
         Combined skill content.
     """
     try:
-        from clearwing.core.skills import SkillLoader
-
         loader = SkillLoader()
         return loader.load(*skill_names)
     except Exception as e:

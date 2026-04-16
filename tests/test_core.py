@@ -16,12 +16,14 @@ class TestConfig:
     def test_load_config(self, tmp_path):
         """Test loading configuration from file."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text("""
+        config_file.write_text(
+            """
 scanning:
   max_threads: 50
 exploitation:
   metasploit_host: 192.168.1.100
-""")
+"""
+        )
         config = Config(str(config_file))
         assert config.get("scanning", "max_threads") == 50
         assert config.get("exploitation", "metasploit_host") == "192.168.1.100"

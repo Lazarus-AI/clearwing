@@ -14,7 +14,7 @@ recall backends with automatic backend selection:
 
     keyword  — language + tag overlap (v0.3 default)
     tfidf    — pure-python TF-IDF over the mechanism text (v0.4 default)
-    chromadb — optional chromadb-backed embeddings (best but needs install)
+    chromadb — chromadb-backed embeddings (best; falls back to TF-IDF on runtime error)
 
 JSONL remains the portable persistence format — both vector backends read
 from it at load time, so a store written by one client is readable by any
@@ -33,9 +33,10 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from clearwing.llm import AsyncLLMClient
+from clearwing.llm.compat import invoke_text_compat
 
 from .state import Finding
 
@@ -138,7 +139,7 @@ Return ONLY the JSON object."""
 class MechanismExtractor:
     """Extracts abstract mechanisms from verified findings via an LLM pass."""
 
-    def __init__(self, llm: BaseChatModel):
+    def __init__(self, llm: AsyncLLMClient):
         self.llm = llm
 
     def extract(
@@ -149,17 +150,15 @@ class MechanismExtractor:
         """Extract a Mechanism from one verified finding. Returns None on failure."""
         user_msg = self._build_user_message(finding)
         try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=MECHANISM_EXTRACTION_PROMPT),
-                    HumanMessage(content=user_msg),
-                ]
+            content = invoke_text_compat(
+                self.llm,
+                system=MECHANISM_EXTRACTION_PROMPT,
+                user=user_msg,
             )
         except Exception:
             logger.debug("Mechanism extraction LLM call failed", exc_info=True)
             return None
 
-        content = response.content if isinstance(response.content, str) else str(response.content)
         parsed = self._parse_response(content)
         if not parsed:
             return None
@@ -209,8 +208,8 @@ def _detect_best_backend() -> str:
     """Pick the best available recall backend.
 
     Precedence: chromadb > tfidf > keyword. The tfidf path is pure Python
-    and always available, so it's the practical default unless chromadb is
-    explicitly installed.
+    and always available, so it's the practical fallback if chromadb is
+    unavailable at runtime.
     """
     try:
         import chromadb  # noqa: F401
@@ -236,8 +235,8 @@ class MechanismStore:
         self.path = path or default_store_path()
         self.backend = _detect_best_backend() if backend == "auto" else backend
         # chromadb client is constructed lazily in _recall_chromadb
-        self._chromadb_client = None
-        self._chromadb_collection = None
+        self._chromadb_client: Any | None = None
+        self._chromadb_collection: Any | None = None
 
     def append(self, mechanism: Mechanism) -> None:
         """Append a mechanism as one JSONL line.
@@ -393,6 +392,8 @@ class MechanismStore:
         # 7. Score by cosine similarity + language boost
         scored: list[tuple[float, Mechanism]] = []
         for m, doc_vec in zip(mechanisms, doc_vecs, strict=False):
+            if query_text is None and language and m.language and m.language != language:
+                continue
             score = _cosine_similarity(query_vec, doc_vec)
             if m.language and m.language == language:
                 score += 0.5
@@ -401,7 +402,7 @@ class MechanismStore:
         scored.sort(key=lambda kv: -kv[0])
         return [m for _, m in scored[:top_n]]
 
-    # --- chromadb backend (v0.4 optional) -----------------------------------
+    # --- chromadb backend ----------------------------------------------------
 
     def _recall_chromadb(
         self,
@@ -432,14 +433,16 @@ class MechanismStore:
                 self._chromadb_collection = collection
                 docs = [self._mechanism_to_doc(m) for m in mechanisms]
                 ids = [m.id for m in mechanisms]
-                metadatas = [
+                metadatas: list[
+                    dict[str, str | int | float | bool | list[str | int | float | bool] | None]
+                ] = [
                     {"language": m.language, "tags": ",".join(m.tags), "cwe": m.cwe}
                     for m in mechanisms
                 ]
                 collection.add(
                     documents=docs,
                     ids=ids,
-                    metadatas=metadatas,
+                    metadatas=cast(Any, metadatas),
                 )
             else:
                 collection = self._chromadb_collection
@@ -466,7 +469,15 @@ class MechanismStore:
         out: list[Mechanism] = []
         for mid in returned_ids:
             if mid in id_to_mech:
-                out.append(id_to_mech[mid])
+                mechanism = id_to_mech[mid]
+                if (
+                    query_text is None
+                    and language
+                    and mechanism.language
+                    and mechanism.language != language
+                ):
+                    continue
+                out.append(mechanism)
         return out
 
     @staticmethod

@@ -8,6 +8,7 @@ runner_factory so tests don't call any LLMs.
 from __future__ import annotations
 
 import subprocess
+import unittest.mock as mock
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -163,8 +164,6 @@ class TestPollLoopCancellation:
             )
         )
         # Mock the poll to always return a new SHA so the loop doesn't sleep forever
-        import unittest.mock as mock
-
         with mock.patch.object(
             monitor, "_poll_for_new_commit", return_value=_git(tiny_git_repo, "rev-parse", "HEAD")
         ):

@@ -4,6 +4,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from ..data.database import Database
+from ..exploitation.exploiters import MetasploitBridge, RCEExploiter
+from ..reporting import ReportGenerator
+from ..scanning import OSScanner, PortScanner, ServiceScanner, VulnerabilityScanner
 from .config import Config, ScanConfig
 from .logger import setup_logger
 from .module_loader import ModuleLoader
@@ -115,8 +119,6 @@ class CoreEngine:
 
     async def _port_scan(self, target: str, config: ScanConfig) -> None:
         """Perform port scanning."""
-        from ..scanning import PortScanner
-
         scanner = PortScanner()
         ports = await scanner.scan(target, config.ports, config.scan_type, config.threads)
         self.scan_result.open_ports = ports
@@ -125,8 +127,6 @@ class CoreEngine:
 
     async def _service_scan(self, target: str, config: ScanConfig) -> None:
         """Perform service detection."""
-        from ..scanning import ServiceScanner
-
         scanner = ServiceScanner()
         services = await scanner.detect(target, self.scan_result.open_ports)
         self.scan_result.services = services
@@ -135,16 +135,12 @@ class CoreEngine:
 
     async def _os_detect(self, target: str, config: ScanConfig) -> None:
         """Detect the operating system."""
-        from ..scanning import OSScanner
-
         scanner = OSScanner()
         os_info = await scanner.detect(target)
         self.scan_result.os_info = os_info
 
     async def _vulnerability_scan(self, target: str, config: ScanConfig) -> None:
         """Perform vulnerability scanning."""
-        from ..scanning import VulnerabilityScanner
-
         scanner = VulnerabilityScanner()
         vulnerabilities = await scanner.scan(target, self.scan_result.services)
         self.scan_result.vulnerabilities = vulnerabilities
@@ -153,8 +149,6 @@ class CoreEngine:
 
     async def _exploit(self, target: str, config: ScanConfig) -> None:
         """Perform exploitation."""
-        from ..exploitation.exploiters import MetasploitBridge, RCEExploiter
-
         rce_exploiter = RCEExploiter()
         MetasploitBridge(
             self.config.get("exploitation", "metasploit_host"),
@@ -170,14 +164,10 @@ class CoreEngine:
 
     def get_report(self, format: str = "text") -> str:
         """Generate a report from the scan results."""
-        from ..reporting import ReportGenerator
-
         generator = ReportGenerator()
         return generator.generate(self.scan_result, format)
 
     def save_results(self, filepath: str) -> None:
         """Save scan results to database."""
-        from ..data.database import Database
-
         db = Database(self.config.get("database", "path"))
         db.save_scan_result(self.scan_result)

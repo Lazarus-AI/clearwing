@@ -32,7 +32,7 @@ class ProviderPreset:
     docs_url: str
 
     #: Default `base_url` for the OpenAI-compatible endpoint. None for
-    #: Anthropic direct (which uses `langchain-anthropic` not base_url).
+    #: Anthropic direct, which does not use a base_url override.
     default_base_url: str | None = None
 
     #: Default model identifier. Used both as the initial prompt

@@ -3,9 +3,19 @@
 import logging
 import os
 import socket
+from datetime import datetime
 
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
+
+from clearwing.agent.graph import create_agent
+from clearwing.agent.runtime import Command
+from clearwing.agent.tools.ops.dynamic_tool_creator import get_custom_tools
+from clearwing.agent.tools.ops.kali_docker_tool import kali_cleanup
+from clearwing.data.memory import SessionStore
+from clearwing.llm import HumanMessage
+from clearwing.observability.telemetry import CostTracker
+from clearwing.ui.tui import ClearwingApp
 
 logger = logging.getLogger(__name__)
 
@@ -45,46 +55,30 @@ def handle(cli, args):
     # Set up cost limit
     cost_limit = getattr(args, "cost_limit", None)
     if cost_limit:
-        try:
-            from ...observability.telemetry import CostTracker
-
-            tracker = CostTracker()
-            tracker.cost_limit = cost_limit
-        except ImportError:
-            pass
+        tracker = CostTracker()
+        tracker.cost_limit = cost_limit
 
     # Session management
     session = None
-    try:
-        from ...data.memory import SessionStore
-
-        store = SessionStore()
-        resume_id = getattr(args, "resume", None)
-        if resume_id:
-            session = store.load(resume_id)
-            if session:
-                cli.console.print(f"[green]Resuming session {session.session_id}[/green]")
-                args.target = session.target
-                args.model = session.model
-            else:
-                cli.console.print(f"[red]Session {resume_id} not found.[/red]")
-                return
+    store = SessionStore()
+    resume_id = getattr(args, "resume", None)
+    if resume_id:
+        session = store.load(resume_id)
+        if session:
+            cli.console.print(f"[green]Resuming session {session.session_id}[/green]")
+            args.target = session.target
+            args.model = session.model
         else:
-            session = store.create(target=args.target or "", model=args.model)
-    except ImportError:
-        pass
+            cli.console.print(f"[red]Session {resume_id} not found.[/red]")
+            return
+    else:
+        session = store.create(target=args.target or "", model=args.model)
 
     # Launch TUI or legacy mode
     use_tui = not getattr(args, "no_tui", False)
     if use_tui:
-        try:
-            _run_tui(cli, args, session)
-            return
-        except ImportError:
-            cli.console.print(
-                "[yellow]Textual not installed. Falling back to legacy mode. "
-                "Install with: pip install textual[/yellow]"
-            )
+        _run_tui(cli, args, session)
+        return
 
     _run_interactive_legacy(cli, args, session)
 
@@ -137,8 +131,6 @@ def _preflight_check(cli, args) -> bool:
 
 def _run_tui(cli, args, session=None):
     """Launch the Textual TUI."""
-    from ..tui import ClearwingApp
-
     session_id = session.session_id if session else None
     app = ClearwingApp(
         target=args.target,
@@ -151,8 +143,6 @@ def _run_tui(cli, args, session=None):
 
     if session:
         try:
-            from ...data.memory import SessionStore
-
             session.status = "completed"
             SessionStore().save(session)
         except Exception:
@@ -161,13 +151,6 @@ def _run_tui(cli, args, session=None):
 
 def _run_interactive_legacy(cli, args, session=None):
     """Run the legacy Rich-based interactive agent loop."""
-    from langchain_core.messages import HumanMessage
-    from langgraph.types import Command
-
-    from ...agent import create_agent
-    from ...agent.tools.dynamic_tool_creator import get_custom_tools
-    from ...agent.tools.kali_docker_tool import kali_cleanup
-
     cli.console.print(
         Panel.fit(
             "[bold cyan]Clearwing Interactive Agent[/bold cyan]\n"
@@ -176,7 +159,7 @@ def _run_interactive_legacy(cli, args, session=None):
         )
     )
 
-    thread_id = session.langgraph_thread_id if session else "interactive-session"
+    thread_id = session.thread_id if session else "interactive-session"
     graph = create_agent(
         model_name=args.model,
         base_url=getattr(args, "base_url", None),
@@ -288,8 +271,6 @@ def _run_interactive_legacy(cli, args, session=None):
             # Auto-save session
             if session:
                 try:
-                    from ...data.memory import SessionStore
-
                     sv = current_state.values if hasattr(current_state, "values") else {}
                     session.open_ports = sv.get("open_ports", session.open_ports)
                     session.services = sv.get("services", session.services)
@@ -331,10 +312,6 @@ def _run_interactive_legacy(cli, args, session=None):
     # Final session save
     if session:
         try:
-            from datetime import datetime
-
-            from ...data.memory import SessionStore
-
             session.status = "completed"
             session.end_time = datetime.now()
             SessionStore().save(session)

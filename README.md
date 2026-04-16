@@ -36,7 +36,7 @@ authorization, and disclosure. See `SECURITY.md`.
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
-pip install clearwing[all]@'git+https://github.com/Lazarus-AI/clearwing.git@v1.0.0'
+uv pip install "clearwing[all] @ git+https://github.com/Lazarus-AI/clearwing.git@v1.0.0"
 
 # Interactive setup wizard — menu-driven provider selection,
 # credential entry, optional live test, persists to ~/.clearwing/config.yaml
@@ -72,15 +72,8 @@ recipes and per-task routing.
 git clone https://github.com/Lazarus-AI/clearwing.git
 cd clearwing
 python3 -m venv venv && source venv/bin/activate
-pip install -e '.[dev]'
-```
-
-Faster alternative with [uv](https://docs.astral.sh/uv/) — reproduces
-the locked environment from `uv.lock` in seconds:
-
-```bash
-uv sync --all-extras
-uv run clearwing --help
+uv pip install -e '.[dev]'
+clearwing --help
 ```
 
 Requirements: Python 3.10+, optionally Docker for the Kali container
@@ -147,7 +140,7 @@ Once the GitHub Pages workflow ships, docs will be hosted at
 ## Development
 
 ```bash
-make install-dev           # pip install -e '.[dev]' + build/twine/ruff
+make install-dev           # uv pip install -e '.[dev]' + build/twine/ruff
 make gate                  # full CI gate locally (lint + type + test + build)
 make test                  # pytest -q
 make lint                  # ruff check + ruff format --check

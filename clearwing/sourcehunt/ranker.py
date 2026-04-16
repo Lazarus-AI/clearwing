@@ -13,18 +13,37 @@ defaults to 3 in v0.1 — v0.2's tree-sitter callgraph fills it in for real.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, ConfigDict, Field
+
+from clearwing.llm import AsyncLLMClient
+from clearwing.llm.compat import aask_json_compat
+from clearwing.llm.native import extract_json_array, extract_json_object
 
 from .state import FileTarget
 
 logger = logging.getLogger(__name__)
+
+
+class RankedFileScore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    surface: int = Field(ge=1, le=5)
+    influence: int = Field(ge=1, le=5)
+    surface_rationale: str
+    influence_rationale: str
+
+
+class RankedFileScoreResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[RankedFileScore]
 
 
 RANKER_SYSTEM_PROMPT = """You are a security researcher triaging files in a project for vulnerability hunting. For each file listed below, return TWO independent scores from 1 to 5:
@@ -45,10 +64,12 @@ RANKER_SYSTEM_PROMPT = """You are a security researcher triaging files in a proj
 
 A file can score HIGH on influence and LOW on surface. That combination is what you're looking for — bugs in boring files that propagate widely.
 
-Return ONLY a JSON array, no other text:
-[
-  {"path": "...", "surface": N, "influence": N, "surface_rationale": "one short sentence", "influence_rationale": "one short sentence"}
-]
+Return ONLY a JSON object with this shape, no other text:
+{
+  "results": [
+    {"path": "...", "surface": N, "influence": N, "surface_rationale": "one short sentence", "influence_rationale": "one short sentence"}
+  ]
+}
 """
 
 
@@ -58,6 +79,9 @@ Return ONLY a JSON array, no other text:
 @dataclass
 class RankerConfig:
     chunk_size: int = 150  # files per LLM call
+    max_inflight_chunks: int = 4
+    llm_timeout_seconds: int | None = None
+    large_repo_file_threshold: int = 2000
     include_static_hints: bool = True
     include_imports_by: bool = True
     static_hint_surface_floor: int = 3  # files with static_hint > 0 → min surface 3
@@ -93,19 +117,35 @@ class Ranker:
 
     def __init__(
         self,
-        llm: BaseChatModel,
+        llm: AsyncLLMClient,
         config: RankerConfig | None = None,
     ):
         self.llm = llm
         self.config = config or RankerConfig()
 
     def rank(self, files: list[FileTarget]) -> list[FileTarget]:
+        return asyncio.run(self.arank(files))
+
+    async def arank(self, files: list[FileTarget]) -> list[FileTarget]:
         if not files:
             return files
 
+        # Seed the whole corpus with cheap heuristic scores first so large
+        # repositories can skip an all-files LLM pass and still produce
+        # actionable tiers quickly.
+        self._apply_heuristic_baseline(files)
+
+        if len(files) > self.config.large_repo_file_threshold:
+            logger.info(
+                "Large repo detected for ranker; heuristics applied to %d files, "
+                "LLM reranking all %d files",
+                len(files),
+                len(files),
+            )
+
         chunks = self._chunk(files, self.config.chunk_size)
-        for chunk in chunks:
-            scores = self._rank_chunk(chunk)
+        scores_by_chunk = await self._rank_chunks_bounded(chunks)
+        for chunk, scores in zip(chunks, scores_by_chunk, strict=False):
             self._apply_scores(chunk, scores)
 
         # Apply floors and compute priority for every file
@@ -120,6 +160,47 @@ class Ranker:
 
         return files
 
+    async def _rank_chunks_bounded(
+        self,
+        chunks: list[list[FileTarget]],
+    ) -> list[dict[str, dict[str, Any]]]:
+        total_chunks = len(chunks)
+        max_inflight = max(1, min(self.config.max_inflight_chunks, total_chunks))
+        semaphore = asyncio.Semaphore(max_inflight)
+        scores_by_chunk: list[dict[str, dict[str, Any]]] = [{} for _ in chunks]
+        completed = 0
+
+        async def run_one(
+            index: int, chunk: list[FileTarget]
+        ) -> tuple[int, dict[str, dict[str, Any]]]:
+            async with semaphore:
+                return index, await self._rank_chunk(
+                    chunk,
+                    idx=index + 1,
+                    total_chunks=total_chunks,
+                )
+
+        tasks = [asyncio.create_task(run_one(index, chunk)) for index, chunk in enumerate(chunks)]
+        for future in asyncio.as_completed(tasks):
+            index, scores = await future
+            scores_by_chunk[index] = scores
+            completed += 1
+            logger.info(
+                "Ranker progress %d/%d chunks completed",
+                completed,
+                total_chunks,
+            )
+        return scores_by_chunk
+
+    def _apply_heuristic_baseline(self, files: list[FileTarget]) -> None:
+        """Populate cheap baseline scores before any LLM reranking."""
+        for ft in files:
+            ft["surface"] = self._fallback_surface(ft)
+            ft["influence"] = self._fallback_influence(ft)
+            self._apply_floors(ft)
+            ft["priority"] = self._compute_priority(ft)
+            self._apply_fuzzable_boost(ft)
+
     # --- Chunking -----------------------------------------------------------
 
     @staticmethod
@@ -128,22 +209,60 @@ class Ranker:
 
     # --- LLM call -----------------------------------------------------------
 
-    def _rank_chunk(self, chunk: list[FileTarget]) -> dict[str, dict[str, Any]]:
+    async def _rank_chunk(
+        self,
+        chunk: list[FileTarget],
+        *,
+        idx: int,
+        total_chunks: int,
+    ) -> dict[str, dict[str, Any]]:
         """Return {path: {surface, influence, surface_rationale, influence_rationale}}."""
         user_msg = self._build_user_message(chunk)
+        started_at = asyncio.get_running_loop().time()
         try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=RANKER_SYSTEM_PROMPT),
-                    HumanMessage(content=user_msg),
-                ]
+            logger.info(
+                "Ranker chunk %d/%d starting (%d files)",
+                idx,
+                total_chunks,
+                len(chunk),
             )
+            if self.config.llm_timeout_seconds and self.config.llm_timeout_seconds > 0:
+                scores, response = await asyncio.wait_for(
+                    aask_json_compat(
+                        self.llm,
+                        system=RANKER_SYSTEM_PROMPT,
+                        user=user_msg,
+                        schema_model=RankedFileScoreResponse,
+                        schema_name="ranked_file_score_response",
+                    ),
+                    timeout=self.config.llm_timeout_seconds,
+                )
+            else:
+                scores, response = await aask_json_compat(
+                    self.llm,
+                    system=RANKER_SYSTEM_PROMPT,
+                    user=user_msg,
+                    schema_model=RankedFileScoreResponse,
+                    schema_name="ranked_file_score_response",
+                )
+        except TimeoutError:
+            logger.warning(
+                "Ranker LLM call timed out after %ss for %d files; falling back to heuristics",
+                self.config.llm_timeout_seconds,
+                len(chunk),
+            )
+            return {}
         except Exception:
             logger.warning("Ranker LLM call failed", exc_info=True)
             return {}
-
-        content = response.content if isinstance(response.content, str) else str(response.content)
-        return self._parse_response(content)
+        elapsed = asyncio.get_running_loop().time() - started_at
+        logger.info(
+            "Ranker chunk %d/%d completed in %.1fs",
+            idx,
+            total_chunks,
+            elapsed,
+        )
+        return self._parse_response(scores)
 
     def _build_user_message(self, chunk: list[FileTarget]) -> str:
         """Build the user message — a JSON list of files with cheap static hints."""
@@ -173,32 +292,41 @@ class Ranker:
             f"{json.dumps(items, indent=2)}"
         )
 
-    def _parse_response(self, content: str) -> dict[str, dict[str, Any]]:
-        """Extract the JSON array from the model response, robustly."""
-        # Try to find the first JSON array in the content
-        match = re.search(r"\[\s*\{.*\}\s*\]", content, re.DOTALL)
-        if not match:
-            logger.warning("Ranker response had no JSON array; got: %s", content[:300])
-            return {}
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            logger.warning("Ranker JSON parse failed; got: %s", match.group(0)[:300])
+    def _parse_response(self, parsed: Any) -> dict[str, dict[str, Any]]:
+        if isinstance(parsed, str):
+            try:
+                parsed_obj = extract_json_object(parsed)
+            except ValueError:
+                parsed_obj = None
+            if isinstance(parsed_obj, dict) and "results" in parsed_obj:
+                parsed = parsed_obj
+            elif isinstance(parsed_obj, dict) and "path" in parsed_obj:
+                parsed = [parsed_obj]
+            else:
+                try:
+                    parsed = extract_json_array(parsed)
+                except ValueError:
+                    return {}
+
+        items = parsed.get("results", []) if isinstance(parsed, dict) else parsed
+        if not isinstance(items, list):
             return {}
         out: dict[str, dict[str, Any]] = {}
-        if not isinstance(parsed, list):
-            return out
-        for entry in parsed:
-            if not isinstance(entry, dict):
+        for entry in items:
+            if isinstance(entry, RankedFileScore):
+                item = entry.model_dump()
+            elif isinstance(entry, dict):
+                item = entry
+            else:
                 continue
-            path = entry.get("path")
+            path = item.get("path")
             if not path:
                 continue
             out[path] = {
-                "surface": int(entry.get("surface", 0)),
-                "influence": int(entry.get("influence", 0)),
-                "surface_rationale": str(entry.get("surface_rationale", "")),
-                "influence_rationale": str(entry.get("influence_rationale", "")),
+                "surface": int(item.get("surface", 0)),
+                "influence": int(item.get("influence", 0)),
+                "surface_rationale": str(item.get("surface_rationale", "")),
+                "influence_rationale": str(item.get("influence_rationale", "")),
             }
         return out
 

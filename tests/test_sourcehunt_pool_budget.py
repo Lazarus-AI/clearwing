@@ -44,7 +44,7 @@ def _ft(path: str, surface: int, influence: int) -> dict:
 
 
 def _stub_hunter_factory(per_call_cost: float, finding_per_file: bool = True):
-    """Return a hunter_factory that fakes a graph + ctx with a fixed cost."""
+    """Return a hunter_factory that fakes a native hunter + ctx with a fixed cost."""
 
     def factory(file_target, sandbox, session_id):
         ctx = MagicMock()
@@ -63,14 +63,13 @@ def _stub_hunter_factory(per_call_cost: float, finding_per_file: bool = True):
         else:
             ctx.findings = []
         ctx.session_id = session_id
+        ctx.cleanup_variants = MagicMock()
 
-        graph = MagicMock()
-        graph.stream = MagicMock(return_value=iter([{}]))
-        # graph.get_state returns a state with the fake cost
-        state = MagicMock()
-        state.values = {"total_cost_usd": per_call_cost}
-        graph.get_state.return_value = state
-        return graph, ctx
+        class _StubHunter:
+            async def arun(self):
+                return list(ctx.findings), per_call_cost, 0
+
+        return _StubHunter(), ctx
 
     return factory
 

@@ -1,5 +1,7 @@
 """Report subcommand."""
 
+from ...data.database import Database
+
 
 def add_parser(subparsers):
     parser = subparsers.add_parser("report", help="Generate report from database")
@@ -17,8 +19,6 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Show report from database."""
-    from ...data.database import Database
-
     db = Database()
     target = db.get_target(args.target)
 

@@ -2,6 +2,8 @@
 
 from rich.table import Table
 
+from ...data.memory import SessionStore
+
 
 def add_parser(subparsers):
     parser = subparsers.add_parser("sessions", help="List past interactive sessions")
@@ -11,8 +13,6 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Show past interactive sessions."""
-    from ...data.memory import SessionStore
-
     store = SessionStore()
     sessions = store.list_sessions(target=getattr(args, "target", None))
 

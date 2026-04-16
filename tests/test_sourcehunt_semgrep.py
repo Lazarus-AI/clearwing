@@ -9,6 +9,8 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
+from clearwing.sourcehunt.preprocessor import Preprocessor
+from clearwing.sourcehunt.ranker import Ranker
 from clearwing.sourcehunt.semgrep_sidecar import (
     SemgrepFinding,
     SemgrepSidecar,
@@ -166,8 +168,6 @@ class TestRunScanMocked:
 class TestPreprocessorSemgrepIntegration:
     def test_preprocessor_skips_semgrep_when_binary_missing(self, tmp_path):
         """When semgrep isn't installed, run_semgrep=True is a no-op."""
-        from clearwing.sourcehunt.preprocessor import Preprocessor
-
         (tmp_path / "main.py").write_text("def hi(): print('x')\n")
         with patch("shutil.which", return_value=None):
             pp = Preprocessor(
@@ -180,8 +180,6 @@ class TestPreprocessorSemgrepIntegration:
 
     def test_preprocessor_applies_semgrep_hints(self, tmp_path):
         """When semgrep returns findings, semgrep_hint count per file is set."""
-        from clearwing.sourcehunt.preprocessor import Preprocessor
-
         (tmp_path / "app.py").write_text("def f(): exec(input())\n")
         fake_output = {
             "results": [
@@ -229,14 +227,9 @@ class TestPreprocessorSemgrepIntegration:
 class TestRankerSemgrepFloor:
     def test_semgrep_hint_floors_surface(self):
         """A file with semgrep_hint > 0 gets surface floored to 3."""
-        import json as _json
-        from unittest.mock import MagicMock
-
-        from clearwing.sourcehunt.ranker import Ranker
-
         llm = MagicMock()
         response = MagicMock()
-        response.content = _json.dumps(
+        response.content = json.dumps(
             [
                 {
                     "path": "foo.py",

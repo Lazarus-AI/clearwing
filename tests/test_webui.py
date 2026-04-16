@@ -6,6 +6,7 @@ import pytest
 
 # Import guard - tests skip if fastapi not installed
 fastapi = pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient
 
 from clearwing.ui.web.app import create_app
 
@@ -17,8 +18,6 @@ def app():
 
 @pytest.fixture
 def client(app):
-    from fastapi.testclient import TestClient
-
     return TestClient(app)
 
 

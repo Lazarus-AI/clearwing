@@ -1,4 +1,5 @@
-from langchain_core.tools import tool
+import clearwing.scanning as scanning
+from clearwing.agent.tooling import tool
 
 
 @tool
@@ -19,9 +20,7 @@ async def scan_ports(
     Returns:
         List of open port info dicts with keys: port, protocol, state, service.
     """
-    from clearwing.scanning import PortScanner
-
-    scanner = PortScanner()
+    scanner = scanning.PortScanner()
     return await scanner.scan(target, ports or [], scan_type, threads)
 
 
@@ -36,9 +35,7 @@ async def detect_services(target: str, open_ports: list[dict]) -> list[dict]:
     Returns:
         List of service info dicts with keys: port, service, banner, version, protocol.
     """
-    from clearwing.scanning import ServiceScanner
-
-    scanner = ServiceScanner()
+    scanner = scanning.ServiceScanner()
     return await scanner.detect(target, open_ports)
 
 
@@ -53,9 +50,7 @@ async def scan_vulnerabilities(target: str, services: list[dict]) -> list[dict]:
     Returns:
         List of vulnerability dicts with keys: cve, description, cvss, port, service.
     """
-    from clearwing.scanning import VulnerabilityScanner
-
-    scanner = VulnerabilityScanner()
+    scanner = scanning.VulnerabilityScanner()
     try:
         return await scanner.scan(target, services)
     finally:
@@ -72,7 +67,5 @@ async def detect_os(target: str) -> str:
     Returns:
         Detected OS string (e.g. 'Linux/Unix', 'Windows') or 'Unknown'.
     """
-    from clearwing.scanning import OSScanner
-
-    scanner = OSScanner()
+    scanner = scanning.OSScanner()
     return await scanner.detect(target)

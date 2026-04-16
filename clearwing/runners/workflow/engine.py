@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -110,8 +111,6 @@ class WorkflowEngine:
                     target=target,
                 )
         else:
-            import uuid
-
             self._state = WorkflowState(
                 workflow_id=uuid.uuid4().hex[:12],
                 name=name,

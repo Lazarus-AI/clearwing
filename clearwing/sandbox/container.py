@@ -8,7 +8,11 @@ write access to the source tree.
 
 from __future__ import annotations
 
+import io
 import logging
+import os
+import tarfile
+import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -128,8 +132,6 @@ class SandboxContainer:
         if self._container is None:
             raise RuntimeError("SandboxContainer.exec called before start()")
 
-        import time
-
         start_time = time.monotonic()
         effective_timeout = timeout or self.config.timeout_seconds
 
@@ -191,10 +193,6 @@ class SandboxContainer:
         if self._container is None:
             raise RuntimeError("SandboxContainer.write_file called before start()")
 
-        import io
-        import os
-        import tarfile
-
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             info = tarfile.TarInfo(name=os.path.basename(container_path))
@@ -212,9 +210,6 @@ class SandboxContainer:
         """
         if self._container is None:
             raise RuntimeError("SandboxContainer.read_file called before start()")
-
-        import io
-        import tarfile
 
         stream, _stat = self._container.get_archive(container_path)
         buf = io.BytesIO(b"".join(stream))

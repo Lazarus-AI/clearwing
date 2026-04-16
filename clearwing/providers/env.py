@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class LLMEndpoint:
 
     Fields:
         provider: "anthropic" | "openai_compat" | "ollama" — decides
-                  which langchain class handles the actual call.
+                  which native transport configuration handles the actual call.
         model:    The model identifier as the provider expects it
                   (e.g. "claude-sonnet-4-6", "anthropic/claude-opus-4"
                   for OpenRouter, "llama3:70b" for Ollama, "gpt-4o"
@@ -89,7 +90,7 @@ class LLMEndpoint:
 
     @property
     def is_anthropic_direct(self) -> bool:
-        """True if this endpoint uses `langchain-anthropic` directly."""
+        """True if this endpoint talks to Anthropic directly."""
         return self.provider == "anthropic" and self.base_url is None
 
     def describe(self) -> str:
@@ -223,8 +224,6 @@ def _load_default_config_provider() -> dict[str, Any]:
     to avoid a circular import (core → yaml is fine; providers → core
     would tangle the two packages).
     """
-    from pathlib import Path
-
     config_path = Path.home() / ".clearwing" / "config.yaml"
     if not config_path.exists():
         return {}

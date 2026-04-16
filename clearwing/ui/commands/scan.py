@@ -6,6 +6,8 @@ from typing import Any
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
+from ...core import ScanConfig
+
 
 def add_parser(subparsers):
     parser = subparsers.add_parser("scan", help="Scan a target for vulnerabilities")
@@ -30,8 +32,6 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Run a scan."""
-    from ...core import ScanConfig
-
     cli.console.print(Panel.fit(f"[bold blue]Scanning target: {args.target}[/bold blue]"))
 
     # Parse ports

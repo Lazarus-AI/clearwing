@@ -12,8 +12,11 @@ from clearwing.sourcehunt.mechanism_memory import (
     Mechanism,
     MechanismExtractor,
     MechanismStore,
+    _cosine_similarity,
+    _tokenize,
     format_mechanisms_for_prompt,
 )
+from clearwing.sourcehunt.runner import SourceHuntRunner
 
 # --- Mechanism dataclass ----------------------------------------------------
 
@@ -118,51 +121,37 @@ class TestBackendSelection:
 
 class TestTfidfHelpers:
     def test_tokenize_strips_stopwords(self):
-        from clearwing.sourcehunt.mechanism_memory import _tokenize
-
         tokens = _tokenize("the quick brown memcpy was on the stack")
         assert "the" not in tokens  # stopword
         assert "memcpy" in tokens
         assert "stack" in tokens
 
     def test_tokenize_lowercase(self):
-        from clearwing.sourcehunt.mechanism_memory import _tokenize
-
         tokens = _tokenize("MemCpy OVERFLOW")
         assert "memcpy" in tokens
         assert "overflow" in tokens
 
     def test_tokenize_keeps_underscores(self):
-        from clearwing.sourcehunt.mechanism_memory import _tokenize
-
         tokens = _tokenize("copy_from_user heap_buffer_overflow")
         assert "copy_from_user" in tokens
         assert "heap_buffer_overflow" in tokens
 
     def test_tokenize_drops_short_tokens(self):
-        from clearwing.sourcehunt.mechanism_memory import _tokenize
-
         tokens = _tokenize("a b cd efghi")
         assert "a" not in tokens  # length 1
         assert "cd" in tokens  # length 2 — kept
         assert "efghi" in tokens
 
     def test_cosine_empty_vectors(self):
-        from clearwing.sourcehunt.mechanism_memory import _cosine_similarity
-
         assert _cosine_similarity({}, {}) == 0.0
         assert _cosine_similarity({"a": 1.0}, {}) == 0.0
 
     def test_cosine_identical_vectors(self):
-        from clearwing.sourcehunt.mechanism_memory import _cosine_similarity
-
         v = {"a": 1.0, "b": 2.0}
         sim = _cosine_similarity(v, dict(v))
         assert sim == pytest.approx(1.0)
 
     def test_cosine_orthogonal_vectors(self):
-        from clearwing.sourcehunt.mechanism_memory import _cosine_similarity
-
         a = {"x": 1.0}
         b = {"y": 1.0}
         assert _cosine_similarity(a, b) == 0.0
@@ -544,8 +533,6 @@ class TestRunnerMechanismIntegration:
     """Runner creates a MechanismStore and recalls from it."""
 
     def test_runner_initializes_store(self, tmp_path):
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),
@@ -558,8 +545,6 @@ class TestRunnerMechanismIntegration:
         assert runner._mechanism_store.path == tmp_path / "mechs.jsonl"
 
     def test_runner_can_disable_store(self, tmp_path):
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),
@@ -572,8 +557,6 @@ class TestRunnerMechanismIntegration:
     def test_recalled_mechanisms_injected_as_hints(self, tmp_path):
         """Pre-populate the store, run the runner, confirm the mechanism
         text appears in the files' hint list."""
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         store_path = tmp_path / "mechs.jsonl"
         store = MechanismStore(path=store_path)
         store.append(

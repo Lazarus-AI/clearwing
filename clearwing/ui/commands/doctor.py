@@ -9,7 +9,7 @@ the missing piece:
 - No LLM credentials?                  → run `clearwing setup`
 - Docker daemon not running?           → `colima start` / Docker Desktop
 - `ripgrep` not on PATH?               → brew install ripgrep
-- `langchain-openai` out of date?      → pip install -U clearwing
+- `genai-pyo3` missing or broken?      → reinstall Clearwing (`uv pip install -e .`)
 - `~/.clearwing/` not writable?        → fix permissions
 - Can't reach the configured endpoint? → network / wrong base_url
 
@@ -25,6 +25,7 @@ gracefully on every missing dependency.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import platform
 import shutil
@@ -40,6 +41,8 @@ from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+
+from clearwing import __version__ as cw_version
 
 # --- Result type ---------------------------------------------------------
 
@@ -138,8 +141,6 @@ def handle(cli, args) -> None:
 
 
 def _check_python_and_clearwing() -> DoctorSection:
-    from clearwing import __version__ as cw_version
-
     section = DoctorSection("Core")
 
     py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -472,16 +473,10 @@ def _check_optional_extras() -> DoctorSection:
     extras = [
         # (module_name, extras_key, one_line_purpose)
         (
-            "langchain_openai",
+            "genai_pyo3",
             None,
-            "OpenAI-compat backend — needed for OpenRouter/Ollama/LM Studio (runtime dep, should always be present)",
+            "Native LLM transport — required runtime dependency",
         ),
-        (
-            "langchain_ollama",
-            "ollama",
-            "Native Ollama transport (OpenAI-compat endpoint at :11434/v1 works without this)",
-        ),
-        ("langchain_google_genai", "google", "Google Gemini support"),
         (
             "playwright",
             "browser",
@@ -494,7 +489,11 @@ def _check_optional_extras() -> DoctorSection:
         ),
         ("fastapi", "web", "REST + WebSocket server (`clearwing webui`)"),
         ("pymetasploit3", "metasploit", "Metasploit RPC bridge for exploit tools"),
-        ("chromadb", "vector", "Optional vector store for mechanism memory (TF-IDF works without)"),
+        (
+            "chromadb",
+            "vector",
+            "Vector store backend for mechanism memory (TF-IDF remains fallback)",
+        ),
     ]
 
     for module, extras_key, purpose in extras:
@@ -510,11 +509,13 @@ def _check_optional_extras() -> DoctorSection:
             )
         else:
             hint = (
-                f"pip install 'clearwing[{extras_key}]'" if extras_key else "pip install clearwing"
+                f"uv pip install 'clearwing[{extras_key}]'"
+                if extras_key
+                else "uv pip install clearwing"
             )
-            # Missing langchain_openai is an error (it's a runtime dep);
+            # Missing genai_pyo3 is an error (it's a runtime dep);
             # everything else is a warning (they're optional extras).
-            status = STATUS_ERR if module == "langchain_openai" else STATUS_WARN
+            status = STATUS_ERR if module == "genai_pyo3" else STATUS_WARN
             section.add(
                 DoctorCheck(
                     module.replace("_", "-"),
@@ -656,8 +657,6 @@ def _print_rich(console: Console, sections: list[DoctorSection]) -> None:
 
 def _print_json(console: Console, sections: list[DoctorSection]) -> None:
     """Machine-readable output for scripting / CI integration."""
-    import json
-
     payload = {
         "sections": [
             {

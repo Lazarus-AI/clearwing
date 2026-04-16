@@ -18,7 +18,7 @@ import os
 import re
 import uuid
 
-from langchain_core.tools import tool
+from clearwing.llm import NativeToolSpec
 
 from .discovery import _container_path, _normalize_path
 from .sandbox import HunterContext, _parse_variant_arg
@@ -175,7 +175,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {{
 def build_analysis_tools(ctx: HunterContext) -> list:
     """Build the four sandboxed build/execute tools for a hunter session."""
 
-    @tool
     def compile_file(
         file_path: str,
         sanitizers: list[str] | None = None,
@@ -231,7 +230,6 @@ def build_analysis_tools(ctx: HunterContext) -> list:
             "variant": san_flags,
         }
 
-    @tool
     def run_with_sanitizer(
         binary: str,
         argv: list[str] | None = None,
@@ -284,7 +282,6 @@ def build_analysis_tools(ctx: HunterContext) -> list:
             "variant": ",".join(variant_list) if variant_list else "default",
         }
 
-    @tool
     def write_test_case(filename: str, content: str) -> str:
         """Write a test input / PoC into /scratch inside the sandbox.
 
@@ -304,7 +301,6 @@ def build_analysis_tools(ctx: HunterContext) -> list:
             return f"Error writing test case: {e}"
         return f"Wrote {len(content)} bytes to {scratch_path}"
 
-    @tool
     def fuzz_harness(
         target_function: str,
         signature: str = "",
@@ -432,4 +428,64 @@ def build_analysis_tools(ctx: HunterContext) -> list:
             "variant": ",".join(variant_list) if variant_list else "default",
         }
 
-    return [compile_file, run_with_sanitizer, write_test_case, fuzz_harness]
+    return [
+        NativeToolSpec(
+            name="compile_file",
+            description="Compile a repo-relative file in the sandbox with sanitizers enabled.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "sanitizers": {"type": "array", "items": {"type": "string"}},
+                    "extra_flags": {"type": "string", "default": ""},
+                    "sanitizer_variant": {"type": "string", "default": ""},
+                },
+                "required": ["file_path"],
+            },
+            handler=compile_file,
+        ),
+        NativeToolSpec(
+            name="run_with_sanitizer",
+            description="Run a binary in the sandbox and capture sanitizer crash evidence.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "binary": {"type": "string"},
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                    "stdin": {"type": "string", "default": ""},
+                    "timeout": {"type": "integer", "default": 30},
+                    "sanitizer_variant": {"type": "string", "default": ""},
+                },
+                "required": ["binary"],
+            },
+            handler=run_with_sanitizer,
+        ),
+        NativeToolSpec(
+            name="write_test_case",
+            description="Write a proof-of-concept or test input file into /scratch in the sandbox.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["filename", "content"],
+            },
+            handler=write_test_case,
+        ),
+        NativeToolSpec(
+            name="fuzz_harness",
+            description="Generate and run a libFuzzer harness for a target function in the sandbox.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "target_function": {"type": "string", "default": ""},
+                    "signature": {"type": "string", "default": ""},
+                    "harness_source": {"type": "string", "default": ""},
+                    "duration_seconds": {"type": "integer", "default": 30},
+                    "sanitizer_variant": {"type": "string", "default": ""},
+                },
+            },
+            handler=fuzz_harness,
+        ),
+    ]

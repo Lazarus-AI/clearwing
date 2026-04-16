@@ -1,6 +1,7 @@
 """Memory tools: recall history, store/search knowledge."""
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
+from clearwing.data.memory import EpisodicMemory, SemanticMemory
 
 
 @tool
@@ -14,8 +15,6 @@ def recall_target_history(target: str) -> str:
         Formatted string of previous findings for this target.
     """
     try:
-        from clearwing.data.memory import EpisodicMemory
-
         memory = EpisodicMemory()
         episodes = memory.recall(target, limit=30)
         if not episodes:
@@ -40,8 +39,6 @@ def store_knowledge(category: str, content: str) -> str:
         Confirmation message.
     """
     try:
-        from clearwing.data.memory import SemanticMemory
-
         memory = SemanticMemory()
         memory.store(category, content)
         return f"Knowledge stored in category '{category}'."
@@ -61,8 +58,6 @@ def search_knowledge(query: str, category: str | None = None) -> str:
         Formatted search results.
     """
     try:
-        from clearwing.data.memory import SemanticMemory
-
         memory = SemanticMemory()
         results = memory.search(query, category=category, top_k=5)
         if not results:

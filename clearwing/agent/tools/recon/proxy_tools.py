@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
 
 
 @dataclass
@@ -140,9 +142,6 @@ def proxy_request(
     Returns:
         Dict with keys: request_id, status_code, response_headers, response_body, duration_ms.
     """
-    import urllib.error
-    import urllib.request
-
     req_headers = headers or {}
     start = time.time()
 

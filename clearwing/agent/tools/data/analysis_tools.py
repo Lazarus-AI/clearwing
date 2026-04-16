@@ -1,6 +1,7 @@
 """Agent tools for white-box source code analysis."""
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
+from clearwing.analysis import SourceAnalyzer, TaintTracker
 
 
 @tool
@@ -17,8 +18,6 @@ def analyze_source(path: str) -> str:
         Analysis summary with all findings.
     """
     try:
-        from clearwing.analysis import SourceAnalyzer
-
         analyzer = SourceAnalyzer(repo_path=path)
         result = analyzer.analyze()
         return result.summary()
@@ -38,8 +37,6 @@ def clone_and_analyze(git_url: str, branch: str = "main") -> str:
         Analysis summary with all findings.
     """
     try:
-        from clearwing.analysis import SourceAnalyzer
-
         with SourceAnalyzer() as analyzer:
             analyzer.clone(git_url, branch=branch)
             result = analyzer.analyze()
@@ -62,8 +59,6 @@ def trace_taint_flows(path: str) -> str:
         Summary of discovered taint flows.
     """
     try:
-        from clearwing.analysis import TaintTracker
-
         tracker = TaintTracker()
         tracker.analyze_directory(path)
         return tracker.get_summary()

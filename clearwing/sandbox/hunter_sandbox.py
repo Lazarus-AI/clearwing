@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import tempfile
 
 from .builders import (
@@ -236,8 +237,6 @@ class HunterSandbox:
             scratch = getattr(sb, "_scratch_host_dir", None)
             if scratch:
                 try:
-                    import shutil
-
                     shutil.rmtree(scratch, ignore_errors=True)
                 except Exception:
                     pass

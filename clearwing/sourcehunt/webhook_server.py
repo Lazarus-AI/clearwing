@@ -48,7 +48,7 @@ class WebhookConfig:
     # e.g. ["main"]; empty = allow all
     # Callback invoked in a worker thread when a push is accepted.
     # Signature: (repo_full_name: str, commit_sha: str, payload: dict) -> None
-    on_push: Callable | None = None
+    on_push: Callable[[str, str, dict[str, Any]], None] | None = None
 
 
 @dataclass
@@ -209,15 +209,14 @@ class _Handler(BaseHTTPRequestHandler):
         # Dispatch the callback in a background thread so GitHub gets a
         # prompt 202 Accepted and doesn't hit its 10-second timeout.
         on_push = config.on_push
+        full_name = push_info["full_name"]
+        head_sha = push_info["head_sha"]
         if on_push is not None:
+            callback = on_push
 
             def _run() -> None:
                 try:
-                    on_push(
-                        push_info["full_name"],
-                        push_info["head_sha"],
-                        payload,
-                    )
+                    callback(full_name, head_sha, payload)
                 except Exception:
                     with server._stats_lock:
                         stats.handler_errors += 1
@@ -229,7 +228,7 @@ class _Handler(BaseHTTPRequestHandler):
                 stats.dispatched += 1
             self._respond(
                 202,
-                f"accepted {push_info['full_name']} @ {push_info['head_sha'][:8]}\n",
+                f"accepted {full_name} @ {head_sha[:8]}\n",
             )
             return
 

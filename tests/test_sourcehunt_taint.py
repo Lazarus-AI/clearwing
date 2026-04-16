@@ -114,46 +114,53 @@ class TestCTaintDetection:
 
     def test_clean_c_file_has_no_paths(self, analyzer, tmp_path: Path):
         """A file with no sources or sinks should produce zero paths."""
-        (tmp_path / "clean.c").write_text("""
+        (tmp_path / "clean.c").write_text(
+            """
 int add(int a, int b) {
     return a + b;
 }
 int main(int argc, char **argv) {
     return add(1, 2);
 }
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         assert result.paths == []
         assert result.files_analyzed == 1
 
     def test_source_without_sink_produces_no_path(self, analyzer, tmp_path: Path):
         """A source without a downstream sink in the same function → no path."""
-        (tmp_path / "source_only.c").write_text("""
+        (tmp_path / "source_only.c").write_text(
+            """
 #include <unistd.h>
 int reader(int fd) {
     char buf[64];
     read(fd, buf, sizeof(buf));
     return buf[0];  /* no sink downstream */
 }
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         assert result.paths == []
 
     def test_sink_without_source_produces_no_path(self, analyzer, tmp_path: Path):
         """A sink whose args aren't tainted → no path."""
-        (tmp_path / "sink_only.c").write_text("""
+        (tmp_path / "sink_only.c").write_text(
+            """
 #include <string.h>
 void copy_literal() {
     char dst[16];
     memcpy(dst, "hello", 5);  /* literal — no taint */
 }
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         assert result.paths == []
 
     def test_intraprocedural_only(self, analyzer, tmp_path: Path):
         """A taint that crosses function boundaries isn't detected in v0.4."""
-        (tmp_path / "cross_fn.c").write_text("""
+        (tmp_path / "cross_fn.c").write_text(
+            """
 #include <unistd.h>
 #include <string.h>
 char *get_input(int fd) {
@@ -168,7 +175,8 @@ void copier(int fd) {
      * v0.4 doesn't track this cross-function. Expected: no path. */
     memcpy(dst, s, 16);
 }
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         # Deliberately: no path found (documented limitation)
         memcpy_paths = [p for p in result.paths if p.sink_function == "memcpy"]
@@ -194,11 +202,13 @@ class TestPythonTaintDetection:
         assert p.language == "python"
 
     def test_input_to_eval_detected(self, analyzer, tmp_path: Path):
-        (tmp_path / "danger.py").write_text("""
+        (tmp_path / "danger.py").write_text(
+            """
 def run():
     x = input('> ')
     eval(x)
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         eval_paths = [p for p in result.paths if p.sink_function == "eval"]
         assert len(eval_paths) >= 1
@@ -206,10 +216,12 @@ def run():
         assert eval_paths[0].severity == "critical"
 
     def test_clean_python_file_has_no_paths(self, analyzer, tmp_path: Path):
-        (tmp_path / "clean.py").write_text("""
+        (tmp_path / "clean.py").write_text(
+            """
 def add(a, b):
     return a + b
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         assert result.paths == []
 
@@ -219,7 +231,8 @@ def add(a, b):
 
 class TestResultAggregation:
     def test_paths_by_file_grouping(self, analyzer, tmp_path: Path):
-        (tmp_path / "a.c").write_text("""
+        (tmp_path / "a.c").write_text(
+            """
 #include <unistd.h>
 #include <string.h>
 void f(int fd) {
@@ -228,12 +241,15 @@ void f(int fd) {
     char d[16];
     memcpy(d, buf, 16);
 }
-""")
-        (tmp_path / "b.py").write_text("""
+"""
+        )
+        (tmp_path / "b.py").write_text(
+            """
 def g():
     x = input()
     eval(x)
-""")
+"""
+        )
         result = analyzer.analyze_repo(str(tmp_path))
         by_file = result.paths_by_file()
         assert "a.c" in by_file

@@ -13,6 +13,7 @@ try:
     client.ping()
     docker_running = True
 except Exception:
+    docker_lib = None
     docker_running = False
 
 skip_no_docker = pytest.mark.skipif(
@@ -29,8 +30,6 @@ class TestKaliDocker:
         """Cleanup any leftover test containers."""
         yield
         try:
-            import docker as docker_lib
-
             client = docker_lib.from_env()
             try:
                 container = client.containers.get("clearwing-kali-test")
@@ -43,8 +42,6 @@ class TestKaliDocker:
 
     def test_container_lifecycle(self):
         """Test start, execute, cleanup using alpine."""
-
-        import docker as docker_lib
 
         client = docker_lib.from_env()
 
@@ -82,8 +79,6 @@ class TestKaliDocker:
 
     def test_container_reuse(self):
         """Test that existing containers are reused."""
-        import docker as docker_lib
-
         client = docker_lib.from_env()
 
         container = client.containers.run(

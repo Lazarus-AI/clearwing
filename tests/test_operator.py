@@ -1,5 +1,6 @@
 """Tests for the Operator agent."""
 
+import time
 from unittest.mock import MagicMock, patch
 
 from clearwing.agent.operator import (
@@ -208,8 +209,6 @@ class TestDecideNext:
 
 class TestBuildResult:
     def test_completed_result(self):
-        import time
-
         cfg = OperatorConfig(goals=["scan"], target="10.0.0.1")
         op = OperatorAgent(cfg)
         op._turns = 5
@@ -233,8 +232,6 @@ class TestBuildResult:
         assert result.cost_usd == 0.12
 
     def test_escalated_result(self):
-        import time
-
         cfg = OperatorConfig(goals=["scan"], target="10.0.0.1")
         op = OperatorAgent(cfg)
 
@@ -254,8 +251,6 @@ class TestBuildResult:
         assert result.escalation_question == "Need credentials"
 
     def test_exploit_results_added_to_findings(self):
-        import time
-
         cfg = OperatorConfig(goals=["exploit"], target="10.0.0.1")
         op = OperatorAgent(cfg)
 
@@ -424,7 +419,7 @@ class TestOperatorRun:
 
     @patch("clearwing.agent.operator.OperatorAgent._decide_next")
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_completes_when_goals_met(self, mock_create, mock_create_llm, mock_decide):
         mock_graph = self._make_mock_graph(["Scanning ports...", "All done."])
         mock_create.return_value = mock_graph
@@ -442,7 +437,7 @@ class TestOperatorRun:
 
     @patch("clearwing.agent.operator.OperatorAgent._decide_next")
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_escalates_on_unknown_question(self, mock_create, mock_create_llm, mock_decide):
         mock_graph = self._make_mock_graph(["What credentials should I use?"])
         mock_create.return_value = mock_graph
@@ -459,7 +454,7 @@ class TestOperatorRun:
 
     @patch("clearwing.agent.operator.OperatorAgent._decide_next")
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_escalate_with_callback(self, mock_create, mock_create_llm, mock_decide):
         mock_graph = self._make_mock_graph(
             [
@@ -487,7 +482,7 @@ class TestOperatorRun:
 
     @patch("clearwing.agent.operator.OperatorAgent._decide_next")
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_max_turns_stops(self, mock_create, mock_create_llm, mock_decide):
         mock_graph = self._make_mock_graph(["still scanning..."] * 5)
         mock_create.return_value = mock_graph
@@ -503,7 +498,7 @@ class TestOperatorRun:
 
     @patch("clearwing.agent.operator.OperatorAgent._decide_next")
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_on_complete_callback(self, mock_create, mock_create_llm, mock_decide):
         mock_graph = self._make_mock_graph(["done"])
         mock_create.return_value = mock_graph
@@ -524,7 +519,7 @@ class TestOperatorRun:
 
     @patch("clearwing.agent.operator.OperatorAgent._decide_next")
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_on_message_callback(self, mock_create, mock_create_llm, mock_decide):
         mock_graph = self._make_mock_graph(["scanning..."])
         mock_create.return_value = mock_graph
@@ -545,7 +540,7 @@ class TestOperatorRun:
         assert len(agent_msgs) >= 1
 
     @patch("clearwing.agent.graph._create_llm")
-    @patch("clearwing.agent.create_agent")
+    @patch("clearwing.agent.operator.create_agent")
     def test_empty_response_ends_loop(self, mock_create, mock_create_llm):
         mock_graph = self._make_mock_graph([])  # no real responses
         mock_create.return_value = mock_graph

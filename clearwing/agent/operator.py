@@ -15,7 +15,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from langchain_core.messages import HumanMessage
+from clearwing.agent.graph import _create_llm, create_agent
+from clearwing.agent.runtime import Command
+from clearwing.llm import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +124,6 @@ class OperatorAgent:
         session_id = uuid.uuid4().hex[:8]
 
         # Create inner agent
-        from . import create_agent
-
         graph = create_agent(
             model_name=self.config.model,
             session_id=session_id,
@@ -133,8 +133,6 @@ class OperatorAgent:
         config = {"configurable": {"thread_id": f"operator-{session_id}"}}
 
         # Create operator LLM for decision-making
-        from .graph import _create_llm
-
         op_model = self.config.operator_model or self.config.model
         operator_llm = _create_llm(
             op_model,
@@ -300,8 +298,6 @@ class OperatorAgent:
 
         Returns True if handled, False if needs user escalation.
         """
-        from langgraph.types import Command
-
         tasks = getattr(state, "tasks", None)
         if not tasks:
             return True
@@ -345,26 +341,9 @@ class OperatorAgent:
             progress=progress_text,
         )
 
-        [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
-                    f"What should I tell the agent to do next? "
-                    f"Reply with GOALS_COMPLETE if all goals are done, "
-                    f"ESCALATE: <question> if you need to ask the real user, "
-                    f"or give the next instruction."
-                ),
-            },
-        ]
-
-        from langchain_core.messages import HumanMessage as HM
-        from langchain_core.messages import SystemMessage as SM
-
-        lc_messages = [
-            SM(content=system),
-            HM(
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(
                 content=(
                     f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
                     f"What should I tell the agent to do next? "
@@ -376,7 +355,7 @@ class OperatorAgent:
         ]
 
         try:
-            response = operator_llm.invoke(lc_messages)
+            response = operator_llm.invoke(messages)
             content = response.content
             if isinstance(content, list):
                 content = "\n".join(

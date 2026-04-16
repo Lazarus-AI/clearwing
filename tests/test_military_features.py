@@ -1,3 +1,6 @@
+import io
+from contextlib import redirect_stdout
+
 import pytest
 
 from clearwing.exploitation.payloads.authorization import AuthorizationGate
@@ -23,9 +26,6 @@ def test_payload_obfuscation():
     assert "exec(" in obfuscated
 
     # Capture output of the obfuscated payload
-    import io
-    from contextlib import redirect_stdout
-
     f = io.StringIO()
     with redirect_stdout(f):
         exec(obfuscated)

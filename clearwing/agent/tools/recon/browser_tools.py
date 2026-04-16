@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.tools import tool
-from langgraph.types import interrupt
+from clearwing.agent.tooling import interrupt, tool
 
 # Module-level browser state. Typed as `dict[str, Any]` rather than a
 # TypedDict because the shape is transiently inconsistent across the

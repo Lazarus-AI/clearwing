@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.sourcehunt.pool import assign_tier
 from clearwing.sourcehunt.ranker import (
     RANKER_SYSTEM_PROMPT,
     Ranker,
@@ -547,8 +548,6 @@ class TestFuzzableRankBoost:
     def test_boost_changes_tier_assignment(self):
         """A fuzzable file at the B/A boundary should get bumped to A by
         the boost — the whole point of the back-propagation."""
-        from clearwing.sourcehunt.pool import assign_tier
-
         llm = _mock_llm_returning(
             [
                 {
@@ -568,8 +567,6 @@ class TestFuzzableRankBoost:
     def test_boost_rescues_borderline_file(self):
         """A file with surface=4, influence=1, reach=3 → base priority 2.9 → B.
         With the fuzzable boost: 3.4 → A."""
-        from clearwing.sourcehunt.pool import assign_tier
-
         llm = _mock_llm_returning(
             [
                 {

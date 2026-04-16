@@ -24,6 +24,7 @@ cold-start hunters remain the fallback.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import uuid
@@ -31,9 +32,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
-
+from clearwing.llm import AsyncLLMClient
+from clearwing.llm.compat import invoke_text_compat
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 from .state import FileTarget
@@ -117,7 +117,7 @@ class HarnessGenerator:
 
     def __init__(
         self,
-        llm: BaseChatModel,
+        llm: AsyncLLMClient,
         sandbox_factory: Any = None,  # Callable[[], SandboxContainer] | HunterSandbox
         config: HarnessGeneratorConfig | None = None,
     ) -> None:
@@ -216,8 +216,6 @@ class HarnessGenerator:
 
         try:
             # 1. Read the file contents
-            import os
-
             abs_path = file_target.get("absolute_path", "")
             if not abs_path or not os.path.exists(abs_path):
                 return None
@@ -316,17 +314,15 @@ class HarnessGenerator:
             f"File source (may be truncated):\n\n{file_source}\n"
         )
         try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=HARNESS_GEN_SYSTEM_PROMPT),
-                    HumanMessage(content=user_msg),
-                ]
+            response_text = invoke_text_compat(
+                self.llm,
+                system=HARNESS_GEN_SYSTEM_PROMPT,
+                user=user_msg,
             )
         except Exception:
             logger.debug("Harness-gen LLM call failed", exc_info=True)
             return None
-        content = response.content if isinstance(response.content, str) else str(response.content)
-        return _strip_markdown_fences(content)
+        return _strip_markdown_fences(response_text)
 
 
 # --- Helpers ----------------------------------------------------------------

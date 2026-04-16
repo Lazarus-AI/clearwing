@@ -15,12 +15,15 @@ decision tree, not new file handling.
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
+
+from clearwing import __version__
 
 if TYPE_CHECKING:
     from clearwing.providers import ProviderPreset
@@ -134,8 +137,6 @@ def handle(cli, args) -> None:
 
 
 def _print_welcome(console: Console, cli) -> None:
-    from clearwing import __version__
-
     existing = cli.config.get_provider_section()
     lines = [
         f"[bold]Clearwing {__version__} — LLM provider setup[/bold]",
@@ -381,8 +382,6 @@ def _run_test_invoke(
             api_key=resolved_key or None,
             source="cli",
         )
-
-    import time
 
     console.print("\n[dim]Testing endpoint...[/dim]", end=" ")
     try:

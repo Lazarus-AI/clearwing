@@ -95,7 +95,7 @@ class TaintTracker:
 
         flows = []
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 func_flows = self._analyze_function(node, file_path)
                 flows.extend(func_flows)
 

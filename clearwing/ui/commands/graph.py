@@ -1,5 +1,9 @@
 """Attack graph subcommand."""
 
+import tempfile
+import webbrowser
+from pathlib import Path
+
 
 def add_parser(subparsers):
     parser = subparsers.add_parser("graph", help="Show interactive attack graph")
@@ -11,10 +15,6 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Show the interactive attack graph in the browser."""
-    import tempfile
-    import webbrowser
-    from pathlib import Path
-
     import networkx as nx
 
     from ...data.knowledge.graph import KnowledgeGraph

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import sys
-from unittest.mock import patch
-
 import pytest
 
+from clearwing.providers.genai_pyo3_chat import GenAIPyO3ChatModel
 from clearwing.providers.manager import (
     DEFAULT_ROUTES,
     PROVIDER_PRESETS,
@@ -75,7 +73,6 @@ class TestProviderPresets:
 
     def test_anthropic_preset(self):
         preset = PROVIDER_PRESETS["anthropic"]
-        assert "class" in preset
         assert "env_key" in preset
         assert "models" in preset
         assert preset["env_key"] == "ANTHROPIC_API_KEY"
@@ -146,23 +143,26 @@ class TestProviderManager:
     def test_get_llm_default_returns_anthropic(self):
         mgr = ProviderManager()
         llm = mgr.get_llm("default")
-        from langchain_anthropic import ChatAnthropic
 
-        assert isinstance(llm, ChatAnthropic)
+        assert isinstance(llm, GenAIPyO3ChatModel)
+        assert llm.provider_name == "anthropic"
+        assert llm.model_name == "claude-sonnet-4-6"
 
     def test_get_llm_recon_returns_llm(self):
         mgr = ProviderManager()
         llm = mgr.get_llm("recon")
-        from langchain_anthropic import ChatAnthropic
 
-        assert isinstance(llm, ChatAnthropic)
+        assert isinstance(llm, GenAIPyO3ChatModel)
+        assert llm.provider_name == "anthropic"
+        assert llm.model_name == "claude-haiku-4-5-20251001"
 
     def test_get_llm_unknown_task_falls_back_to_default(self):
         mgr = ProviderManager()
         llm = mgr.get_llm("nonexistent_task")
-        from langchain_anthropic import ChatAnthropic
 
-        assert isinstance(llm, ChatAnthropic)
+        assert isinstance(llm, GenAIPyO3ChatModel)
+        assert llm.provider_name == "anthropic"
+        assert llm.model_name == "claude-sonnet-4-6"
 
     def test_get_llm_no_route_raises(self):
         mgr = ProviderManager(
@@ -219,20 +219,23 @@ class TestCreateLlmErrors:
         with pytest.raises(ValueError, match="Unknown provider"):
             mgr._create_llm("fakeprovider", "some-model")
 
-    def test_openai_import_error(self):
+    def test_openai_provider_uses_native_chat_model(self):
         mgr = ProviderManager()
-        with patch.dict(sys.modules, {"langchain_openai": None}):
-            with pytest.raises(ImportError, match="langchain-openai"):
-                mgr._create_llm("openai", "gpt-4o")
+        llm = mgr._create_llm("openai", "gpt-4o")
+        assert isinstance(llm, GenAIPyO3ChatModel)
+        assert llm.provider_name == "openai"
+        assert llm.model_name == "gpt-4o"
 
-    def test_google_import_error(self):
+    def test_google_provider_uses_native_chat_model(self):
         mgr = ProviderManager()
-        with patch.dict(sys.modules, {"langchain_google_genai": None}):
-            with pytest.raises(ImportError, match="langchain-google-genai"):
-                mgr._create_llm("google", "gemini-2.0-flash")
+        llm = mgr._create_llm("google", "gemini-2.0-flash")
+        assert isinstance(llm, GenAIPyO3ChatModel)
+        assert llm.provider_name == "gemini"
+        assert llm.model_name == "gemini-2.0-flash"
 
-    def test_ollama_import_error(self):
+    def test_ollama_provider_uses_native_chat_model(self):
         mgr = ProviderManager()
-        with patch.dict(sys.modules, {"langchain_ollama": None}):
-            with pytest.raises(ImportError, match="langchain-ollama"):
-                mgr._create_llm("ollama", "llama3")
+        llm = mgr._create_llm("ollama", "llama3")
+        assert isinstance(llm, GenAIPyO3ChatModel)
+        assert llm.provider_name == "ollama"
+        assert llm.base_url == "http://localhost:11434"

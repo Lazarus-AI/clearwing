@@ -1,4 +1,7 @@
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
+from clearwing.core.engine import ScanResult
+from clearwing.data.database import Database
+from clearwing.reporting import ReportGenerator
 
 
 @tool
@@ -13,9 +16,6 @@ def generate_report(format: str, scan_data: dict) -> str:
     Returns:
         Formatted report string.
     """
-    from clearwing.core.engine import ScanResult
-    from clearwing.reporting import ReportGenerator
-
     result = ScanResult(target=scan_data.get("target", "unknown"))
     result.open_ports = scan_data.get("open_ports", [])
     result.services = scan_data.get("services", [])
@@ -40,9 +40,6 @@ def save_report(filepath: str, format: str, scan_data: dict) -> str:
     Returns:
         Confirmation message with file path.
     """
-    from clearwing.core.engine import ScanResult
-    from clearwing.reporting import ReportGenerator
-
     result = ScanResult(target=scan_data.get("target", "unknown"))
     result.open_ports = scan_data.get("open_ports", [])
     result.services = scan_data.get("services", [])
@@ -65,8 +62,6 @@ def query_scan_history(target: str | None = None) -> list[dict]:
     Returns:
         List of scan history records.
     """
-    from clearwing.data.database import Database
-
     db = Database()
     if target:
         return db.get_target_history(target)
@@ -83,7 +78,5 @@ def search_cves(pattern: str) -> list[dict]:
     Returns:
         List of matching vulnerability records.
     """
-    from clearwing.data.database import Database
-
     db = Database()
     return db.search_vulnerabilities(pattern)

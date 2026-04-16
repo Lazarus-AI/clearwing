@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,6 +12,8 @@ from clearwing.sourcehunt.callgraph import (
     CallGraph,
     CallGraphBuilder,
 )
+from clearwing.sourcehunt.preprocessor import Preprocessor
+from clearwing.sourcehunt.ranker import Ranker
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -133,8 +137,6 @@ class TestCallGraphBuilderPython:
 
 class TestPreprocessorCallgraphIntegration:
     def test_preprocessor_populates_transitive_callers(self, builder):
-        from clearwing.sourcehunt.preprocessor import Preprocessor
-
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),
             local_path=str(FIXTURE_C_PROPAGATION),
@@ -149,8 +151,6 @@ class TestPreprocessorCallgraphIntegration:
 
     def test_preprocessor_propagate_reachability_marks_parsers_as_entry(self, builder):
         """Files tagged parser should get reachability=5."""
-        from clearwing.sourcehunt.preprocessor import Preprocessor
-
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),
             local_path=str(FIXTURE_C_PROPAGATION),
@@ -174,11 +174,6 @@ class TestPreprocessorCallgraphIntegration:
 class TestRankerUsesTransitiveCallers:
     def test_transitive_callers_floors_influence(self):
         """Ranker._apply_floors should use transitive_callers if set, else imports_by."""
-        import json
-        from unittest.mock import MagicMock
-
-        from clearwing.sourcehunt.ranker import Ranker
-
         llm = MagicMock()
         response = MagicMock()
         response.content = json.dumps(

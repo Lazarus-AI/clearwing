@@ -24,10 +24,13 @@ from clearwing.agent.tools.hunt import (
     _parse_sanitizer_report,
     build_hunter_tools,
 )
+from clearwing.sandbox.container import ExecResult
 from clearwing.sourcehunt.hunter import (
     _build_hunter_prompt,
     _build_propagation_prompt,
     _choose_specialist,
+    _memory_safety_heuristic_hints,
+    _tool_output_text,
     build_hunter_agent,
 )
 
@@ -188,6 +191,7 @@ class TestPromptBuilders:
         assert "test_project" in prompt
         # Phrase must mention severity and evidence_level (from the prompt template)
         assert "evidence_level" in prompt
+        assert "This is a single-file hunt" in prompt
 
     def test_general_prompt_with_seeded_crash(self):
         ft = _make_file_target("foo.c")
@@ -227,7 +231,11 @@ class TestPromptBuilders:
         assert "SIGNED / UNSIGNED" in prompt
         assert "WIDTH TRUNCATION" in prompt
         assert "MEMCPY BOUNDS" in prompt
+        assert "SENTINEL / COUNTER COLLISIONS" in prompt
         assert "USE-AFTER-FREE" in prompt
+        assert "Do not spend the final step on marginal confirmation" in prompt
+        assert "record_finding with" in prompt
+        assert "evidence_level=static_corroboration" in prompt
 
     def test_logic_auth_specialist_prompt(self):
         ft = _make_file_target("auth.py", tags=["auth_boundary"])
@@ -272,30 +280,71 @@ class TestPromptBuilders:
         assert "mass assignment" in prompt.lower()
 
 
+class TestMemorySafetyHeuristicHints:
+    def test_detects_slice_table_counter_collision_cues(self, tmp_path):
+        repo = tmp_path / "repo"
+        libavcodec = repo / "libavcodec"
+        libavcodec.mkdir(parents=True)
+
+        (libavcodec / "h264_slice.c").write_text(
+            "\n".join(
+                [
+                    "void f(void) {",
+                    "    memset(h->slice_table, -1, n * sizeof(*h->slice_table));",
+                    "    sl->slice_num = ++h->current_slice;",
+                    "    if (h->slice_table[top_xy] == 0xFFFF) top_type = 0;",
+                    "    if (h->slice_table[top_xy] != sl->slice_num) top_type = 0;",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (libavcodec / "h264dec.h").write_text(
+            "\n".join(
+                [
+                    "typedef struct H264Context {",
+                    "    uint16_t *slice_table;",
+                    "    int current_slice;",
+                    "} H264Context;",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (libavcodec / "h264_cabac.c").write_text(
+            "void g(void) { h->slice_table[mb_xy] = sl->slice_num; }\n",
+            encoding="utf-8",
+        )
+
+        hints = _memory_safety_heuristic_hints(
+            str(repo),
+            _make_file_target("libavcodec/h264_slice.c", tags=["memory_unsafe"]),
+        )
+
+        descriptions = [hint["description"] for hint in hints]
+        assert any("Potential sentinel/counter collision" in d for d in descriptions)
+        assert any("Width check" in d for d in descriptions)
+        assert any("Cross-file cue" in d for d in descriptions)
+
+
 # --- build_hunter_agent -----------------------------------------------------
 
 
 class TestBuildHunterAgent:
     def test_tier_b_untagged_file_uses_general(self):
         llm = MagicMock()
-        bound = MagicMock()
-        llm.bind_tools.return_value = bound
-        bound.invoke = MagicMock(return_value=MagicMock(content="ok", tool_calls=[]))
 
         # Empty tags → general specialist
         ft = _make_file_target("src/main.py", tier="B", tags=[], language="python")
-        graph, ctx = build_hunter_agent(
+        hunter, ctx = build_hunter_agent(
             file_target=ft,
             repo_path=str(FIXTURE_C_PROPAGATION),
             sandbox=None,
             llm=llm,
             session_id="test-session",
         )
-        assert graph is not None
+        assert hunter is not None
         assert ctx.specialist == "general"
-        # Full tool set (9 tools) was bound
-        bind_args = llm.bind_tools.call_args[0][0]
-        tool_names = {t.name for t in bind_args}
+        tool_names = {t.name for t in hunter.tools}
         assert tool_names == {
             "read_source_file",
             "list_source_tree",
@@ -310,7 +359,6 @@ class TestBuildHunterAgent:
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
         llm = MagicMock()
-        llm.bind_tools.return_value = MagicMock()
         ft = _make_file_target("src/codec_a.c", tier="B", tags=["memory_unsafe", "parser"])
         graph, ctx = build_hunter_agent(
             file_target=ft,
@@ -323,7 +371,6 @@ class TestBuildHunterAgent:
 
     def test_tier_b_auth_boundary_routes_to_logic_auth(self):
         llm = MagicMock()
-        llm.bind_tools.return_value = MagicMock()
         ft = _make_file_target("auth.py", tier="B", tags=["auth_boundary"], language="python")
         graph, ctx = build_hunter_agent(
             file_target=ft,
@@ -336,12 +383,9 @@ class TestBuildHunterAgent:
 
     def test_tier_c_uses_propagation_auditor_tools(self):
         llm = MagicMock()
-        bound = MagicMock()
-        llm.bind_tools.return_value = bound
-        bound.invoke = MagicMock(return_value=MagicMock(content="ok", tool_calls=[]))
 
         ft = _make_file_target("include/codec_limits.h", tier="C")
-        graph, ctx = build_hunter_agent(
+        hunter, ctx = build_hunter_agent(
             file_target=ft,
             repo_path=str(FIXTURE_C_PROPAGATION),
             sandbox=None,
@@ -349,9 +393,7 @@ class TestBuildHunterAgent:
             session_id="test-session",
         )
         assert ctx.specialist == "propagation"
-        # Narrower tool set: no compile/run/write_test_case/fuzz
-        bind_args = llm.bind_tools.call_args[0][0]
-        tool_names = {t.name for t in bind_args}
+        tool_names = {t.name for t in hunter.tools}
         assert tool_names == {
             "read_source_file",
             "list_source_tree",
@@ -364,7 +406,6 @@ class TestBuildHunterAgent:
 
     def test_explicit_specialist_override(self):
         llm = MagicMock()
-        llm.bind_tools.return_value = MagicMock()
         ft = _make_file_target("foo.c", tier="B")
         graph, ctx = build_hunter_agent(
             file_target=ft,
@@ -378,7 +419,6 @@ class TestBuildHunterAgent:
 
     def test_v02_seam_seeded_crash_param_accepted(self):
         llm = MagicMock()
-        llm.bind_tools.return_value = MagicMock()
         ft = _make_file_target("foo.c")
         # The v0.2 seed parameters are accepted in v0.1 — they just don't
         # do anything if the prompt template doesn't reference them
@@ -443,6 +483,61 @@ class TestHunterToolsHostFallback:
         callers = next(t for t in tools if t.name == "find_callers")
         matches = callers.invoke({"symbol": "MAX_FRAME_BYTES"})
         assert len(matches) >= 4
+
+    def test_grep_source_sandbox_ignores_glob_when_path_is_file(self):
+        class _FakeSandbox:
+            def __init__(self):
+                self.argv = None
+
+            def exec(self, argv, timeout=30):
+                self.argv = argv
+                return ExecResult(
+                    exit_code=0,
+                    stdout="/workspace/include/codec_limits.h:3:#define MAX_FRAME_BYTES 4096\n",
+                    stderr="",
+                )
+
+        fake = _FakeSandbox()
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION), sandbox=fake)
+        tools = build_hunter_tools(ctx)
+        grep = next(t for t in tools if t.name == "grep_source")
+        matches = grep.invoke(
+            {
+                "pattern": "MAX_FRAME_BYTES",
+                "path": "include/codec_limits.h",
+                "file_glob": "include/codec_limits.h",
+            }
+        )
+        assert matches[0]["file"] == "include/codec_limits.h"
+        assert "-g" not in fake.argv
+
+    def test_grep_source_sandbox_exact_file_glob_becomes_target(self):
+        class _FakeSandbox:
+            def __init__(self):
+                self.argv = None
+
+            def exec(self, argv, timeout=30):
+                self.argv = argv
+                return ExecResult(
+                    exit_code=0,
+                    stdout="/workspace/include/codec_limits.h:3:#define MAX_FRAME_BYTES 4096\n",
+                    stderr="",
+                )
+
+        fake = _FakeSandbox()
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION), sandbox=fake)
+        tools = build_hunter_tools(ctx)
+        grep = next(t for t in tools if t.name == "grep_source")
+        matches = grep.invoke(
+            {
+                "pattern": "MAX_FRAME_BYTES",
+                "path": ".",
+                "file_glob": "include/codec_limits.h",
+            }
+        )
+        assert matches[0]["file"] == "include/codec_limits.h"
+        assert fake.argv[-1] == "/workspace/include/codec_limits.h"
+        assert "-g" not in fake.argv
 
     def test_compile_file_without_sandbox_returns_error(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
@@ -579,6 +674,11 @@ class TestRgOutputParser:
         matches = _parse_rg_output(stdout)
         assert len(matches) == 100
 
+    def test_single_file_rg_output_uses_default_file(self):
+        stdout = "42:    int x = 1;\n"
+        matches = _parse_rg_output(stdout, default_file="foo.c")
+        assert matches == [{"file": "foo.c", "line_number": 42, "matched_text": "    int x = 1;"}]
+
 
 class TestNormalizePath:
     def test_strips_leading_slash(self):
@@ -593,3 +693,40 @@ class TestNormalizePath:
     def test_clean_rel_path(self):
         rel = _normalize_path("/tmp/repo", "src/foo.c")
         assert rel == "src/foo.c"
+
+
+class TestToolOutputSummary:
+    def test_list_source_tree_is_summarized(self):
+        summary = _tool_output_text(
+            "list_source_tree",
+            {"dir_path": "libavcodec"},
+            [f"libavcodec/file_{i}.c" for i in range(80)],
+        )
+        assert "list_source_tree(libavcodec): 80 entries" in summary
+        assert "narrow dir_path or max_depth" in summary
+        assert "file_0.c" in summary
+        assert "file_79.c" not in summary
+
+    def test_grep_source_is_summarized(self):
+        summary = _tool_output_text(
+            "grep_source",
+            {"pattern": "foo", "path": "src"},
+            [
+                {"file": "src/a.c", "line_number": 10, "matched_text": "foo(bar);"},
+                {"file": "src/b.c", "line_number": 20, "matched_text": "foo(baz);"},
+            ],
+        )
+        assert "grep_source: 2 matches" in summary
+        assert "src/a.c:10" in summary
+        assert "foo(bar);" in summary
+
+    def test_read_source_file_is_capped(self):
+        content = "\n".join(f"line {i}" for i in range(1, 180))
+        summary = _tool_output_text(
+            "read_source_file",
+            {"path": "src/huge.c", "start_line": 1, "end_line": 179},
+            content,
+        )
+        assert "read_source_file(src/huge.c, start_line=1, end_line=179):" in summary
+        assert "truncated" in summary
+        assert "line 1" in summary
