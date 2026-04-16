@@ -17,6 +17,7 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
+from clearwing.sourcehunt.commit_monitor import CommitMonitor, CommitMonitorConfig
 from clearwing.sourcehunt.github_checks import (
     CheckRunOutcome,
     GitHubChecksConfig,
@@ -424,11 +425,6 @@ class TestPublishEndToEnd:
 class TestCommitMonitorIntegration:
     def test_monitor_calls_publisher_when_enabled(self, tmp_path):
         """When enable_github_checks=True, scan_commit publishes a check run."""
-        from clearwing.sourcehunt.commit_monitor import (
-            CommitMonitor,
-            CommitMonitorConfig,
-        )
-
         # Set up a minimal git repo so _changed_files works
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -476,11 +472,6 @@ class TestCommitMonitorIntegration:
         assert result.check_run_outcome.published is True
 
     def test_monitor_no_op_when_disabled(self, tmp_path):
-        from clearwing.sourcehunt.commit_monitor import (
-            CommitMonitor,
-            CommitMonitorConfig,
-        )
-
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
@@ -508,11 +499,6 @@ class TestCommitMonitorIntegration:
 
     def test_monitor_auto_constructs_publisher_when_none_supplied(self, tmp_path):
         """enable_github_checks=True without an explicit publisher → default one created."""
-        from clearwing.sourcehunt.commit_monitor import (
-            CommitMonitor,
-            CommitMonitorConfig,
-        )
-
         monitor = CommitMonitor(
             CommitMonitorConfig(
                 repo_path=str(tmp_path),

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
+
+from clearwing.agent.graph import create_agent
+from clearwing.llm import HumanMessage
+from clearwing.observability.telemetry import CostTracker
 
 from .sarif import SARIFGenerator
 
@@ -96,11 +101,6 @@ class CICDRunner:
         # 1. Validate target
         self._validate_target()
 
-        # 2. Create agent with session_id
-        from langchain_core.messages import HumanMessage
-
-        from clearwing.agent import create_agent
-
         session_id = uuid.uuid4().hex[:8]
         graph = create_agent(
             model_name=self.model,
@@ -111,16 +111,10 @@ class CICDRunner:
         config = {"configurable": {"thread_id": f"cicd-{session_id}"}}
 
         # Set up cost tracking
-        cost_tracker = None
-        try:
-            from clearwing.observability.telemetry import CostTracker
-
-            cost_tracker = CostTracker()
-            cost_tracker.reset()
-            if self.cost_limit is not None:
-                cost_tracker.cost_limit = self.cost_limit
-        except ImportError:
-            pass
+        cost_tracker = CostTracker()
+        cost_tracker.reset()
+        if self.cost_limit is not None:
+            cost_tracker.cost_limit = self.cost_limit
 
         # 3. Build goal message
         goal = self._build_goal()
@@ -190,8 +184,6 @@ class CICDRunner:
 
     def _validate_target(self) -> None:
         """Validate that the target is a resolvable host or valid IP."""
-        import socket
-
         try:
             socket.getaddrinfo(self.target, None)
         except socket.gaierror as exc:

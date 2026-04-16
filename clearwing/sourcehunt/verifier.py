@@ -19,14 +19,17 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any, cast
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from clearwing.llm import AsyncLLMClient
+from clearwing.llm.compat import invoke_text_compat
 
 from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
+
+_LINE_REF_RE = re.compile(r"\blines?\s+(\d+)(?:\s*-\s*(\d+))?")
 
 
 # --- Verifier prompts -------------------------------------------------------
@@ -153,7 +156,7 @@ class Verifier:
 
     def __init__(
         self,
-        llm: BaseChatModel,
+        llm: AsyncLLMClient,
         adversarial: bool = False,
         adversarial_threshold: EvidenceLevel | None = "static_corroboration",
     ):
@@ -205,12 +208,7 @@ class Verifier:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
         try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_msg),
-                ]
-            )
+            content = invoke_text_compat(self.llm, system=system_prompt, user=user_msg)
         except Exception as e:
             logger.warning("Verifier LLM call failed", exc_info=True)
             return VerifierResult(
@@ -224,7 +222,6 @@ class Verifier:
                 duplicate_cve=None,
             )
 
-        content = response.content if isinstance(response.content, str) else str(response.content)
         return self._parse_response(finding, content)
 
     def _build_user_message(self, finding: Finding, file_content: str) -> str:
@@ -245,10 +242,86 @@ class Verifier:
         msg = "Verify the following bug report:\n\n"
         msg += json.dumps(finding_view, indent=2)
         if file_content:
-            # Cap to keep the context tight
-            capped = file_content[:8000]
-            msg += f"\n\nFile content (capped to 8 KB):\n{capped}"
+            excerpts = self._build_file_context(finding, file_content)
+            if excerpts:
+                msg += f"\n\nRelevant file excerpts:\n{excerpts}"
         return msg
+
+    def _build_file_context(self, finding: Finding, file_content: str) -> str:
+        lines = file_content.splitlines()
+        if not lines:
+            return ""
+
+        requested_lines = self._line_refs_from_finding(finding)
+        windows = self._merge_windows(
+            [
+                (
+                    max(1, line_number - 24),
+                    min(len(lines), line_number + 24),
+                )
+                for line_number in requested_lines
+                if 1 <= line_number <= len(lines)
+            ]
+        )
+
+        excerpts: list[str] = []
+        total_chars = 0
+        for start, end in islice(windows, 6):
+            header = f"--- lines {start}-{end} ---"
+            body = "\n".join(
+                f"{line_no:5d}: {lines[line_no - 1]}" for line_no in range(start, end + 1)
+            )
+            chunk = f"{header}\n{body}"
+            total_chars += len(chunk)
+            if total_chars > 12000 and excerpts:
+                break
+            excerpts.append(chunk)
+
+        if excerpts:
+            return "\n\n".join(excerpts)
+
+        capped = file_content[:8000]
+        return f"--- file head (fallback, capped to 8 KB) ---\n{capped}"
+
+    def _line_refs_from_finding(self, finding: Finding) -> list[int]:
+        refs: list[int] = []
+
+        for key in ("line_number", "end_line"):
+            value = finding.get(key)
+            if isinstance(value, int) and value > 0:
+                refs.append(value)
+
+        text_fields = [
+            str(finding.get("description") or ""),
+            str(finding.get("code_snippet") or ""),
+            str(finding.get("crash_evidence") or ""),
+        ]
+        for field in text_fields:
+            for match in _LINE_REF_RE.finditer(field):
+                start = int(match.group(1))
+                end = int(match.group(2) or start)
+                refs.extend(range(start, min(end, start + 6) + 1))
+
+        # Preserve order while deduplicating.
+        seen: set[int] = set()
+        ordered: list[int] = []
+        for ref in refs:
+            if ref not in seen:
+                seen.add(ref)
+                ordered.append(ref)
+        return ordered
+
+    def _merge_windows(self, windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        if not windows:
+            return []
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(windows):
+            if not merged or start > merged[-1][1] + 5:
+                merged.append((start, end))
+                continue
+            prev_start, prev_end = merged[-1]
+            merged[-1] = (prev_start, max(prev_end, end))
+        return merged
 
     def _parse_response(self, finding: Finding, content: str) -> VerifierResult:
         match = re.search(r"\{[\s\S]*\}", content)
@@ -327,17 +400,11 @@ class Verifier:
         """
         user_msg = self._build_patch_oracle_message(finding, file_content)
         try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=PATCH_ORACLE_PROMPT),
-                    HumanMessage(content=user_msg),
-                ]
-            )
+            content = invoke_text_compat(self.llm, system=PATCH_ORACLE_PROMPT, user=user_msg)
         except Exception as e:
             logger.debug("Patch-oracle LLM call failed", exc_info=True)
             return False, "", f"llm error: {e}"
 
-        content = response.content if isinstance(response.content, str) else str(response.content)
         parsed = self._parse_patch_oracle_response(content)
         if not parsed:
             return False, "", "patch oracle: could not parse response"

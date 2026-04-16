@@ -8,9 +8,10 @@ wargame/remediation tool pattern.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,6 @@ def hunt_source_code(
         from clearwing.sourcehunt.runner import SourceHuntRunner
     except ImportError as e:
         return f"sourcehunt module unavailable: {e}"
-
-    # Decide whether the input is a local path or a remote URL
-    import os
 
     local_path: str | None = None
     if os.path.isdir(repo_url_or_path):

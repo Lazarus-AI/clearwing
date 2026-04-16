@@ -1,12 +1,10 @@
-from typing import Annotated
-
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+from clearwing.llm import BaseMessage
 
 
 class AgentState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+    messages: list[BaseMessage]
     target: str | None
     open_ports: list[dict]
     services: list[dict]

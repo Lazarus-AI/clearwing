@@ -12,11 +12,12 @@ clamped inside the repo root before we touch the filesystem.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
 
-from langchain_core.tools import tool
+from clearwing.llm import NativeToolSpec
 
 from .sandbox import HunterContext
 
@@ -49,15 +50,19 @@ def _container_path(rel_path: str) -> str:
     return f"/workspace/{rel_path}".replace("//", "/")
 
 
-def _parse_rg_output(stdout: str) -> list[dict]:
+def _parse_rg_output(stdout: str, default_file: str = "") -> list[dict]:
     """Turn ripgrep's `--no-heading --line-number` output into match dicts."""
     matches: list[dict] = []
     for line in stdout.splitlines():
         # Format: <path>:<line>:<text>
         parts = line.split(":", 2)
-        if len(parts) != 3:
+        if len(parts) == 3:
+            path, line_num, text = parts
+        elif len(parts) == 2 and default_file:
+            path = default_file
+            line_num, text = parts
+        else:
             continue
-        path, line_num, text = parts
         try:
             ln = int(line_num)
         except ValueError:
@@ -87,30 +92,41 @@ def _grep_python_fallback(
         return [{"error": f"invalid regex: {e}"}]
     base = os.path.join(repo_path, rel_dir)
     matches: list[dict] = []
-    for dirpath, dirnames, filenames in os.walk(base):
-        # Skip common cruft
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "node_modules"]
-        for fname in filenames:
-            if file_glob:
-                # Very simple glob: only handles trailing-extension globs like '*.c'
-                if file_glob.startswith("*.") and not fname.endswith(file_glob[1:]):
-                    continue
-            full = os.path.join(dirpath, fname)
-            try:
-                with open(full, encoding="utf-8", errors="ignore") as f:
-                    for i, line in enumerate(f, 1):
-                        if regex.search(line):
-                            matches.append(
-                                {
-                                    "file": os.path.relpath(full, repo_path),
-                                    "line_number": i,
-                                    "matched_text": line.rstrip(),
-                                }
-                            )
-                            if len(matches) >= 100:
-                                return matches
-            except OSError:
-                continue
+    candidate_files: list[str] = []
+
+    if os.path.isfile(base):
+        candidate_files.append(base)
+    else:
+        for dirpath, dirnames, filenames in os.walk(base):
+            # Skip common cruft
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "node_modules"]
+            for fname in filenames:
+                candidate_files.append(os.path.join(dirpath, fname))
+
+    for full in candidate_files:
+        fname = os.path.basename(full)
+        rel_file = os.path.relpath(full, repo_path)
+        if file_glob and not (
+            fnmatch.fnmatch(rel_file, file_glob)
+            or fnmatch.fnmatch(fname, file_glob)
+            or rel_file == file_glob
+        ):
+            continue
+        try:
+            with open(full, encoding="utf-8", errors="ignore") as f:
+                for i, line in enumerate(f, 1):
+                    if regex.search(line):
+                        matches.append(
+                            {
+                                "file": rel_file,
+                                "line_number": i,
+                                "matched_text": line.rstrip(),
+                            }
+                        )
+                        if len(matches) >= 100:
+                            return matches
+        except OSError:
+            continue
     return matches
 
 
@@ -124,7 +140,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
     so the aggregate registry is byte-identical.
     """
 
-    @tool
     def read_source_file(path: str, start_line: int = 1, end_line: int = -1) -> str:
         """Read a source file (path is repo-relative) and return up to 500 lines.
 
@@ -157,7 +172,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             footer = ""
         return "".join(sliced) + footer
 
-    @tool
     def list_source_tree(dir_path: str = ".", max_depth: int = 2) -> list[str]:
         """List files and directories relative to the repo root.
 
@@ -187,7 +201,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
                 return out
         return out
 
-    @tool
     def grep_source(pattern: str, path: str = ".", file_glob: str = "") -> list[dict]:
         """ripgrep-style search for a pattern. Returns up to 100 matches.
 
@@ -201,20 +214,31 @@ def build_discovery_tools(ctx: HunterContext) -> list:
         except ValueError as e:
             return [{"error": str(e)}]
 
+        if file_glob and not any(ch in file_glob for ch in "*?[]{}"):
+            try:
+                exact_rel = _normalize_path(ctx.repo_path, file_glob)
+            except ValueError:
+                exact_rel = ""
+            if exact_rel and os.path.isfile(os.path.join(ctx.repo_path, exact_rel)):
+                rel = exact_rel
+                file_glob = ""
+
+        host_target = os.path.join(ctx.repo_path, rel)
+        path_is_file = os.path.isfile(host_target)
+
         if ctx.sandbox is not None:
             # Run rg inside the sandbox so we don't depend on the host having it
             target = _container_path(rel)
-            argv = ["rg", "--no-heading", "--line-number", "--max-count", "100"]
-            if file_glob:
+            argv = ["rg", "--no-heading", "--line-number", "--with-filename", "--max-count", "100"]
+            if file_glob and not path_is_file:
                 argv += ["-g", file_glob]
             argv += [pattern, target]
             result = ctx.sandbox.exec(argv, timeout=30)
-            return _parse_rg_output(result.stdout)
+            return _parse_rg_output(result.stdout, default_file=rel if path_is_file else "")
         else:
             # Fallback: use Python re on the host file tree (slower but works in tests)
             return _grep_python_fallback(ctx.repo_path, rel, pattern, file_glob)
 
-    @tool
     def find_callers(symbol: str) -> list[dict]:
         """Find files/lines that reference a symbol. Wraps grep_source.
 
@@ -223,7 +247,60 @@ def build_discovery_tools(ctx: HunterContext) -> list:
         """
         # Word-boundary-ish search on the symbol
         pattern = rf"\b{re.escape(symbol)}\b"
-        matches: list[dict] = grep_source.invoke({"pattern": pattern, "path": "."})
+        matches: list[dict] = grep_source(pattern=pattern, path=".")
         return matches
 
-    return [read_source_file, list_source_tree, grep_source, find_callers]
+    return [
+        NativeToolSpec(
+            name="read_source_file",
+            description="Read a repo-relative source file and return up to 500 lines.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "default": 1},
+                    "end_line": {"type": "integer", "default": -1},
+                },
+                "required": ["path"],
+            },
+            handler=read_source_file,
+        ),
+        NativeToolSpec(
+            name="list_source_tree",
+            description="List files and directories relative to the repo root.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "dir_path": {"type": "string", "default": "."},
+                    "max_depth": {"type": "integer", "default": 2},
+                },
+            },
+            handler=list_source_tree,
+        ),
+        NativeToolSpec(
+            name="grep_source",
+            description="Search the repo with a ripgrep-style regex and return up to 100 matches.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "default": "."},
+                    "file_glob": {"type": "string", "default": ""},
+                },
+                "required": ["pattern"],
+            },
+            handler=grep_source,
+        ),
+        NativeToolSpec(
+            name="find_callers",
+            description="Find files and lines that reference a symbol.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                },
+                "required": ["symbol"],
+            },
+            handler=find_callers,
+        ),
+    ]

@@ -1,5 +1,6 @@
 """Sourcehunt CLI subcommand — runs the Clearwing source-code vulnerability pipeline."""
 
+import logging
 import os
 import sys
 
@@ -221,6 +222,8 @@ def handle(cli, args):
     from ...providers import ProviderManager, resolve_llm_endpoint
     from ...sourcehunt.pool import TierBudget
     from ...sourcehunt.runner import SourceHuntRunner
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
 
     # Resolve the LLM endpoint once at the top of the command.
     # CLI > env > ~/.clearwing/config.yaml > ANTHROPIC_API_KEY default.

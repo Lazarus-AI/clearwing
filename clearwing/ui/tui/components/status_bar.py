@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import Static
 
@@ -41,8 +42,6 @@ class StatusBar(Static):
             self.elapsed = int(time.time() - self._start_time)
 
     def render(self):
-        from rich.text import Text
-
         minutes, seconds = divmod(self.elapsed, 60)
         hours, minutes = divmod(minutes, 60)
 

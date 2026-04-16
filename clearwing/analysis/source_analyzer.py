@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -534,8 +535,6 @@ class SourceAnalyzer:
         Returns:
             AnalysisResult with all findings.
         """
-        import time
-
         start = time.time()
 
         target_path = path or self.repo_path
@@ -653,7 +652,7 @@ class SourceAnalyzer:
                             )
                         )
                     elif node.args and isinstance(node.args[0], ast.BinOp):
-                        if isinstance(node.args[0].op, (ast.Mod, ast.Add)):
+                        if isinstance(node.args[0].op, ast.Mod | ast.Add):
                             findings.append(
                                 AnalyzerFinding(
                                     file_path=file_path,

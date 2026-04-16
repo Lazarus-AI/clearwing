@@ -2,6 +2,8 @@
 
 import sys
 
+from ...runners.cicd import CICDRunner
+
 
 def add_parser(subparsers):
     parser = subparsers.add_parser("ci", help="Run non-interactive CI/CD scan")
@@ -39,8 +41,6 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Run a non-interactive CI/CD scan."""
-    from ...runners.cicd import CICDRunner
-
     runner = CICDRunner(
         target=args.target,
         depth=args.depth,

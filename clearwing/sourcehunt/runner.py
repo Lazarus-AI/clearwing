@@ -11,11 +11,23 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from clearwing.llm.native import AsyncLLMClient
+from clearwing.providers import (
+    ENV_ANTHROPIC_KEY,
+    ENV_API_KEY,
+    ENV_BASE_URL,
+    ProviderManager,
+    resolve_llm_endpoint,
+)
+
+from ..sandbox.hunter_sandbox import HunterSandbox
 from .disclosure import (
     DisclosureGenerator,
 )
@@ -34,7 +46,7 @@ from .poc_runner import build_rerun_poc_callback
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
-from .state import EvidenceLevel, Finding, filter_by_evidence
+from .state import EvidenceLevel, FileTarget, Finding, filter_by_evidence
 from .variant_loop import (
     VariantLoop,
     VariantPatternGenerator,
@@ -111,7 +123,7 @@ class SourceHuntRunner:
         disclosure_reporter_affiliation: str = "(your affiliation)",
         disclosure_reporter_email: str = "(your email)",
         model_override: str | None = None,
-        provider_manager: Any = None,  # optional ProviderManager
+        provider_manager: ProviderManager | None = None,
         ranker_llm: Any = None,  # injectable for tests
         hunter_llm: Any = None,
         verifier_llm: Any = None,
@@ -147,12 +159,13 @@ class SourceHuntRunner:
         self.disclosure_reporter_affiliation = disclosure_reporter_affiliation
         self.disclosure_reporter_email = disclosure_reporter_email
         self.model_override = model_override
-        self.provider_manager = provider_manager
+        self.provider_manager: ProviderManager | None = provider_manager
         self.ranker_llm = ranker_llm
         self.hunter_llm = hunter_llm
         self.verifier_llm = verifier_llm
         self.exploiter_llm = exploiter_llm
         self.sandbox_factory = sandbox_factory
+        self._sandbox_manager: HunterSandbox | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
 
     # --- Public API ---------------------------------------------------------
@@ -160,371 +173,398 @@ class SourceHuntRunner:
     def run(self) -> SourceHuntResult:
         start_time = time.monotonic()
         logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
+        try:
+            # 1. Preprocess
+            preprocess_result = self._preprocess()
+            repo_path = preprocess_result.repo_path
+            files = preprocess_result.file_targets
+            files_ranked = len(files)
+            logger.info("Preprocessor enumerated %d files", files_ranked)
+            self._ensure_sandbox_factory(repo_path, files)
 
-        # 1. Preprocess
-        preprocess_result = self._preprocess()
-        repo_path = preprocess_result.repo_path
-        files = preprocess_result.file_targets
-        files_ranked = len(files)
-        logger.info("Preprocessor enumerated %d files", files_ranked)
-
-        # 2. Rank — unless depth=quick AND no LLM available
-        ranker_llm = self._get_llm("ranker", self.ranker_llm)
-        if ranker_llm is not None and files:
-            try:
-                Ranker(ranker_llm, RankerConfig()).rank(files)
-            except Exception:
-                logger.warning("Ranker failed", exc_info=True)
-        else:
-            # Fallback: assign reasonable defaults so tier assignment still works
-            for ft in files:
-                ft["surface"] = ft.get("surface") or 3
-                ft["influence"] = ft.get("influence") or 2
-                ft["reachability"] = ft.get("reachability") or 3
-                ft["priority"] = (
-                    ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                )
-
-        # depth=quick exits here with the static_findings as-is
-        if self.depth == "quick":
-            return self._build_quick_result(
-                start_time=start_time,
-                repo_path=repo_path,
-                preprocess_result=preprocess_result,
-                files_ranked=files_ranked,
-            )
-
-        # 2.5. Harness Generator (crash-first ordering) — only at depth=deep
-        #      and only if we have a sandbox and an LLM.
-        seeded_crashes: list[SeededCrash] = []
-        if self.depth == "deep":
-            harness_llm = self._get_llm("hunter", self.hunter_llm)
-            if harness_llm is not None and self.sandbox_factory is not None:
+            # 2. Rank — unless depth=quick AND no LLM available
+            ranker_llm = self._get_native_client("ranker", self.ranker_llm)
+            if ranker_llm is not None and files:
+                logger.info("Ranker starting on %d files", len(files))
                 try:
-                    hg = HarnessGenerator(
-                        llm=harness_llm,
-                        sandbox_factory=self.sandbox_factory,
-                        config=HarnessGeneratorConfig(),
-                    )
-                    hg_result = hg.run(files, repo_path)
-                    seeded_crashes = hg_result.seeded_crashes
-                    logger.info(
-                        "Harness generator produced %d crashes from %d harnesses",
-                        len(seeded_crashes),
-                        hg_result.harnesses_generated,
-                    )
-                except Exception:
-                    logger.warning("Harness generator failed", exc_info=True)
-
-        # Build a lookup so hunters for fuzzed files can pull their seeded
-        # crash context via file path
-        seeded_by_file: dict[str, dict] = {}
-        for c in seeded_crashes:
-            seeded_by_file[c.file] = {
-                "report": c.report,
-                "target_function": c.target_function,
-                "harness_source": c.harness_source,
-            }
-
-        # Build a per-file Semgrep hint lookup so hunters get their file's hits
-        semgrep_hints_by_file: dict[str, list[dict]] = {}
-        for sf in preprocess_result.semgrep_findings:
-            semgrep_hints_by_file.setdefault(sf.get("file", ""), []).append(sf)
-
-        # v0.3: Recall cross-run mechanisms and inject them into every hunter's
-        # hint list as a synthetic entry. The hunter's prompt wraps these in
-        # "static analysis hints — NOT ground truth" framing.
-        if self._mechanism_store is not None:
-            mechanism_hints = self._recalled_mechanism_hints(files)
-            if mechanism_hints:
-                for ft in files:
-                    key = ft.get("path", "")
-                    semgrep_hints_by_file.setdefault(key, []).extend(mechanism_hints)
-
-        # 3. Tiered hunt
-        hunter_llm = self._get_llm("hunter", self.hunter_llm)
-        all_findings: list[Finding] = []
-        files_hunted = 0
-        if hunter_llm is not None and files:
-            pool = HunterPool(
-                HuntPoolConfig(
-                    files=files,
-                    repo_path=repo_path,
-                    sandbox_factory=self.sandbox_factory,
-                    hunter_factory=None,
-                    llm=hunter_llm,
-                    max_parallel=self.max_parallel,
-                    budget_usd=self.budget_usd,
-                    tier_budget=self.tier_budget,
-                    session_id_prefix=self._session_id,
-                    seeded_crashes_by_file=seeded_by_file,
-                    semgrep_hints_by_file=semgrep_hints_by_file,
-                )
-            )
-            try:
-                all_findings = pool.run()
-            except Exception:
-                logger.warning("HunterPool run failed", exc_info=True)
-            spent_per_tier = pool.spent_per_tier
-            files_hunted = sum(
-                [
-                    p.get("tier") in ("A", "B", "C")
-                    for p in files
-                    if p.get("tier") != "C" or self.tier_budget.tier_c_fraction > 0
-                ]
-            )
-        else:
-            spent_per_tier = {"A": 0.0, "B": 0.0, "C": 0.0}
-
-        # Promote static findings into the all_findings list so depth=quick
-        # output is still useful when no hunter llm is available
-        all_findings = self._merge_static_findings(all_findings, preprocess_result)
-
-        # 4. Verify (unless --no-verify)
-        verified: list[Finding] = []
-        if not self.no_verify:
-            verifier_llm = self._get_llm("verifier", self.verifier_llm)
-            if verifier_llm is not None:
-                v = Verifier(
-                    verifier_llm,
-                    adversarial=self.adversarial_verifier,
-                    adversarial_threshold=self.adversarial_threshold,
-                )
-                for finding in all_findings:
-                    try:
-                        result = v.verify(finding)
-                        # v0.3: patch-oracle truth test on verified findings.
-                        # Use a real sandbox validator when sandbox_factory is
-                        # wired; otherwise fall back to LLM-only mode.
-                        if self.enable_patch_oracle and result.is_real:
-                            try:
-                                oracle_sandbox = None
-                                oracle_rerun_poc = None
-                                if self.sandbox_factory is not None:
-                                    try:
-                                        oracle_sandbox = self.sandbox_factory()
-                                        oracle_rerun_poc = build_rerun_poc_callback(
-                                            oracle_sandbox,
-                                        )
-                                    except Exception:
-                                        logger.debug(
-                                            "Patch-oracle sandbox spawn failed",
-                                            exc_info=True,
-                                        )
-                                        oracle_sandbox = None
-                                        oracle_rerun_poc = None
-                                try:
-                                    passed, diff, notes = v.run_patch_oracle(
-                                        finding,
-                                        file_content=self._load_file_content(repo_path, finding),
-                                        sandbox=oracle_sandbox,
-                                        rerun_poc=oracle_rerun_poc,
-                                    )
-                                finally:
-                                    if oracle_sandbox is not None:
-                                        try:
-                                            oracle_sandbox.stop()
-                                        except Exception:
-                                            pass
-                                result.patch_oracle_attempted = True
-                                result.patch_oracle_passed = passed
-                                result.patch_oracle_diff = diff
-                                result.patch_oracle_notes = notes
-                            except Exception:
-                                logger.debug("Patch-oracle pass failed", exc_info=True)
-                        apply_verifier_result(finding, result, session_id=self._session_id + "-v")
-                        if finding.get("verified"):
-                            verified.append(finding)
-                    except Exception:
-                        logger.warning("Verifier failed for %s", finding.get("id"), exc_info=True)
-            else:
-                # Without a verifier LLM, treat every finding as verified
-                # (low-trust mode — mark them as static-only confidence)
-                for f in all_findings:
-                    f["verified"] = True
-                verified = all_findings
-        else:
-            verified = all_findings
-
-        # 4.5. v0.3: Extract mechanisms from verified findings and persist them
-        #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
-        if self._mechanism_store is not None and verified:
-            verifier_llm_for_extract = self._get_llm("verifier", self.verifier_llm)
-            if verifier_llm_for_extract is not None:
-                try:
-                    extractor = MechanismExtractor(verifier_llm_for_extract)
-                    for finding in verified:
-                        mech = extractor.extract(finding, source_repo=self.repo_url)
-                        if mech is not None:
-                            self._mechanism_store.append(mech)
-                except Exception:
-                    logger.warning("Mechanism extraction failed", exc_info=True)
-
-        # 4.75. v0.3: Variant Hunter Loop — compound finding density within
-        #       this run. For each verified finding, generate a grep pattern,
-        #       search the codebase for structural matches, and surface each
-        #       match as a new suspicion-level finding linked back to the
-        #       original. v0.3 scope: we surface the matches in the report;
-        #       we don't re-spawn hunters on each match (that's a v1.0 pass).
-        if self.enable_variant_loop and verified:
-            variant_llm = self._get_llm("verifier", self.verifier_llm)
-            if variant_llm is not None:
-                try:
-                    loop = VariantLoop(
-                        pattern_gen=VariantPatternGenerator(variant_llm),
-                    )
-                    # Track locations we've already reported to avoid dupes
-                    already_seen = {
-                        (f.get("file", ""), f.get("line_number", 0)) for f in all_findings
-                    }
-                    # v0.4: drive the multi-iteration fixpoint loop rather
-                    # than the single-pass run_once. Each iteration feeds
-                    # its new seeds back in as starting points for the
-                    # next pattern generation pass.
-                    variant_result = loop.run(
-                        verified_findings=verified,
-                        repo_path=repo_path,
-                        already_seen_locations=already_seen,
-                        reverify_callback=None,  # reuse the original seeds across passes
-                    )
-                    # Turn VariantSeed entries into Finding records.
-                    # Each variant inherits its parent's CWE and severity
-                    # but starts at evidence_level=suspicion (the hunter
-                    # hasn't re-verified the match yet).
-                    for seed in variant_result.seeds:
-                        parent = seed.original_finding
-                        variant_finding = Finding(
-                            id=f"variant-{uuid.uuid4().hex[:8]}",
-                            file=seed.match.file,
-                            line_number=seed.match.line_number,
-                            finding_type=parent.finding_type or "variant",
-                            cwe=parent.cwe,
-                            severity=parent.effective_severity or "medium",
-                            confidence="low",
-                            description=(
-                                f"Variant of {parent.id}: {seed.match.pattern.semantic_description}"
-                            ),
-                            code_snippet=seed.match.matched_text,
-                            evidence_level="suspicion",
-                            discovered_by="variant_loop",
-                            related_finding_id=parent.id or None,
-                            related_cve=parent.related_cve,
-                            hunter_session_id=self._session_id,
+                    ranker_config = RankerConfig()
+                    if ranker_llm.provider_name == "openai_resp":
+                        ranker_config.chunk_size = 30
+                        ranker_config.max_inflight_chunks = self.max_parallel
+                        logger.info(
+                            "Ranker tuned for openai_resp backend: chunk_size=%d max_inflight_chunks=%d",
+                            ranker_config.chunk_size,
+                            ranker_config.max_inflight_chunks,
                         )
-                        all_findings.append(variant_finding)
-                    logger.info(
-                        "Variant loop: %d patterns, %d matches surfaced",
-                        variant_result.patterns_generated,
-                        variant_result.matches_found,
-                    )
+                    Ranker(ranker_llm, ranker_config).rank(files)
+                    logger.info("Ranker completed")
                 except Exception:
-                    logger.warning("Variant loop failed", exc_info=True)
+                    logger.warning("Ranker failed", exc_info=True)
+            else:
+                logger.info("Ranker skipped; no LLM available")
+                # Fallback: assign reasonable defaults so tier assignment still works
+                for ft in files:
+                    ft["surface"] = ft.get("surface") or 3
+                    ft["influence"] = ft.get("influence") or 2
+                    ft["reachability"] = ft.get("reachability") or 3
+                    ft["priority"] = (
+                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
+                    )
 
-        # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
-        exploited: list[Finding] = []
-        # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
-        #          critical/high findings with root_cause_explained evidence.
-        patched: list[Finding] = []
-        if not self.no_exploit:
-            exploiter_llm = self._get_llm("sourcehunt_exploit", self.exploiter_llm)
-            if exploiter_llm is not None:
-                e = Exploiter(exploiter_llm)
-                eligible = filter_by_evidence(verified, "crash_reproduced")
-                for finding in eligible:
+            # depth=quick exits here with the static_findings as-is
+            if self.depth == "quick":
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                )
+
+            # 2.5. Harness Generator (crash-first ordering) — only at depth=deep
+            #      and only if we have a sandbox and an LLM.
+            seeded_crashes: list[SeededCrash] = []
+            if self.depth == "deep":
+                harness_llm = self._get_native_client("hunter", self.hunter_llm)
+                harness_sandbox = self._sandbox_manager or self.sandbox_factory
+                if harness_llm is not None and harness_sandbox is not None:
                     try:
-                        exploit_result = e.attempt(finding)
-                        apply_exploiter_result(finding, exploit_result)
-                        if exploit_result.success:
-                            exploited.append(finding)
+                        hg = HarnessGenerator(
+                            llm=harness_llm,
+                            sandbox_factory=harness_sandbox,
+                            config=HarnessGeneratorConfig(),
+                        )
+                        hg_result = hg.run(files, repo_path)
+                        seeded_crashes = hg_result.seeded_crashes
+                        logger.info(
+                            "Harness generator produced %d crashes from %d harnesses",
+                            len(seeded_crashes),
+                            hg_result.harnesses_generated,
+                        )
                     except Exception:
-                        logger.warning("Exploiter failed", exc_info=True)
+                        logger.warning("Harness generator failed", exc_info=True)
 
-        # 5.5. v0.3: Auto-patch mode (opt-in).
-        # The verify-by-recompile gate is MANDATORY — a patch is only marked
-        # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
-        if self.enable_auto_patch and verified:
-            patcher_llm = self._get_llm("sourcehunt_exploit", self.exploiter_llm)
-            if patcher_llm is not None:
+            # Build a lookup so hunters for fuzzed files can pull their seeded
+            # crash context via file path
+            seeded_by_file: dict[str, dict] = {}
+            for c in seeded_crashes:
+                seeded_by_file[c.file] = {
+                    "report": c.report,
+                    "target_function": c.target_function,
+                    "harness_source": c.harness_source,
+                }
+
+            # Build a per-file Semgrep hint lookup so hunters get their file's hits
+            semgrep_hints_by_file: dict[str, list[dict]] = {}
+            for sf in preprocess_result.semgrep_findings:
+                semgrep_hints_by_file.setdefault(sf.get("file", ""), []).append(sf)
+
+            # v0.3: Recall cross-run mechanisms and inject them into every hunter's
+            # hint list as a synthetic entry. The hunter's prompt wraps these in
+            # "static analysis hints — NOT ground truth" framing.
+            if self._mechanism_store is not None:
+                mechanism_hints = self._recalled_mechanism_hints(files)
+                if mechanism_hints:
+                    for ft in files:
+                        key = ft.get("path", "")
+                        semgrep_hints_by_file.setdefault(key, []).extend(mechanism_hints)
+
+            # 3. Tiered hunt
+            hunter_llm = self._get_native_client("hunter", self.hunter_llm)
+            all_findings: list[Finding] = []
+            files_hunted = 0
+            if hunter_llm is not None and files:
+                logger.info("HunterPool starting on %d files", len(files))
+                pool = HunterPool(
+                    HuntPoolConfig(
+                        files=files,
+                        repo_path=repo_path,
+                        sandbox_factory=self.sandbox_factory,
+                        sandbox_manager=self._sandbox_manager,
+                        hunter_factory=None,
+                        llm=hunter_llm,
+                        max_parallel=self.max_parallel,
+                        budget_usd=self.budget_usd,
+                        tier_budget=self.tier_budget,
+                        session_id_prefix=self._session_id,
+                        seeded_crashes_by_file=seeded_by_file,
+                        semgrep_hints_by_file=semgrep_hints_by_file,
+                    )
+                )
                 try:
-                    patcher = AutoPatcher(patcher_llm)
-                    for finding in verified:
-                        if not patcher.is_eligible(finding):
-                            continue
-                        # Spawn a fresh sandbox per attempt so patches don't
-                        # cross-contaminate.
-                        patch_sandbox = None
-                        rerun_cb = None
-                        if self.sandbox_factory is not None:
-                            try:
-                                patch_sandbox = self.sandbox_factory()
-                                rerun_cb = build_rerun_poc_callback(patch_sandbox)
-                            except Exception:
-                                logger.debug(
-                                    "Auto-patch sandbox spawn failed",
-                                    exc_info=True,
-                                )
-                                patch_sandbox = None
-                                rerun_cb = None
+                    all_findings = pool.run()
+                    logger.info("HunterPool completed with %d findings", len(all_findings))
+                except Exception:
+                    logger.warning("HunterPool run failed", exc_info=True)
+                spent_per_tier = pool.spent_per_tier
+                files_hunted = sum(
+                    [
+                        p.get("tier") in ("A", "B", "C")
+                        for p in files
+                        if p.get("tier") != "C" or self.tier_budget.tier_c_fraction > 0
+                    ]
+                )
+            else:
+                logger.info("HunterPool skipped; no LLM available")
+                spent_per_tier = {"A": 0.0, "B": 0.0, "C": 0.0}
+
+            # Promote static findings into the all_findings list so depth=quick
+            # output is still useful when no hunter llm is available
+            all_findings = self._merge_static_findings(all_findings, preprocess_result)
+
+            # 4. Verify (unless --no-verify)
+            verified: list[Finding] = []
+            if not self.no_verify:
+                verifier_llm = self._get_native_client("verifier", self.verifier_llm)
+                if verifier_llm is not None:
+                    v = Verifier(
+                        verifier_llm,
+                        adversarial=self.adversarial_verifier,
+                        adversarial_threshold=self.adversarial_threshold,
+                    )
+                    for finding in all_findings:
                         try:
-                            attempt = patcher.attempt(
+                            result = v.verify(
                                 finding,
                                 file_content=self._load_file_content(repo_path, finding),
-                                sandbox=patch_sandbox,
-                                rerun_poc=rerun_cb,
                             )
-                        finally:
-                            if patch_sandbox is not None:
+                            # v0.3: patch-oracle truth test on verified findings.
+                            # Use a real sandbox validator when sandbox_factory is
+                            # wired; otherwise fall back to LLM-only mode.
+                            if self.enable_patch_oracle and result.is_real:
                                 try:
-                                    patch_sandbox.stop()
+                                    oracle_sandbox = None
+                                    oracle_rerun_poc = None
+                                    if self.sandbox_factory is not None:
+                                        try:
+                                            oracle_sandbox = self.sandbox_factory()
+                                            oracle_rerun_poc = build_rerun_poc_callback(
+                                                oracle_sandbox,
+                                            )
+                                        except Exception:
+                                            logger.debug(
+                                                "Patch-oracle sandbox spawn failed",
+                                                exc_info=True,
+                                            )
+                                            oracle_sandbox = None
+                                            oracle_rerun_poc = None
+                                    try:
+                                        passed, diff, notes = v.run_patch_oracle(
+                                            finding,
+                                            file_content=self._load_file_content(
+                                                repo_path, finding
+                                            ),
+                                            sandbox=oracle_sandbox,
+                                            rerun_poc=oracle_rerun_poc,
+                                        )
+                                    finally:
+                                        if oracle_sandbox is not None:
+                                            try:
+                                                oracle_sandbox.stop()
+                                            except Exception:
+                                                pass
+                                    result.patch_oracle_attempted = True
+                                    result.patch_oracle_passed = passed
+                                    result.patch_oracle_diff = diff
+                                    result.patch_oracle_notes = notes
                                 except Exception:
-                                    pass
-                        apply_patch_attempt(finding, attempt)
-                        if attempt.validated:
-                            patched.append(finding)
-                            if self.auto_pr:
-                                self._open_draft_pr(finding, attempt)
-                except Exception:
-                    logger.warning("Auto-patcher failed", exc_info=True)
+                                    logger.debug("Patch-oracle pass failed", exc_info=True)
+                            apply_verifier_result(
+                                finding, result, session_id=self._session_id + "-v"
+                            )
+                            if finding.get("verified"):
+                                verified.append(finding)
+                        except Exception:
+                            logger.warning(
+                                "Verifier failed for %s", finding.get("id"), exc_info=True
+                            )
+                else:
+                    # Without a verifier LLM, treat every finding as verified
+                    # (low-trust mode — mark them as static-only confidence)
+                    for f in all_findings:
+                        f["verified"] = True
+                    verified = all_findings
+            else:
+                verified = all_findings
 
-        # 5.75. v0.3: Populate the cross-run knowledge graph with source
-        #       findings. Best-effort — never blocks the run.
-        if self.enable_knowledge_graph and all_findings:
+            # 4.5. v0.3: Extract mechanisms from verified findings and persist them
+            #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
+            if self._mechanism_store is not None and verified:
+                verifier_llm_for_extract = self._get_native_client("verifier", self.verifier_llm)
+                if verifier_llm_for_extract is not None:
+                    try:
+                        extractor = MechanismExtractor(verifier_llm_for_extract)
+                        for finding in verified:
+                            mech = extractor.extract(finding, source_repo=self.repo_url)
+                            if mech is not None:
+                                self._mechanism_store.append(mech)
+                    except Exception:
+                        logger.warning("Mechanism extraction failed", exc_info=True)
+
+            # 4.75. v0.3: Variant Hunter Loop — compound finding density within
+            #       this run. For each verified finding, generate a grep pattern,
+            #       search the codebase for structural matches, and surface each
+            #       match as a new suspicion-level finding linked back to the
+            #       original. v0.3 scope: we surface the matches in the report;
+            #       we don't re-spawn hunters on each match (that's a v1.0 pass).
+            if self.enable_variant_loop and verified:
+                variant_llm = self._get_native_client("verifier", self.verifier_llm)
+                if variant_llm is not None:
+                    try:
+                        loop = VariantLoop(
+                            pattern_gen=VariantPatternGenerator(variant_llm),
+                        )
+                        # Track locations we've already reported to avoid dupes
+                        already_seen = {
+                            (f.get("file", ""), f.get("line_number", 0)) for f in all_findings
+                        }
+                        # v0.4: drive the multi-iteration fixpoint loop rather
+                        # than the single-pass run_once. Each iteration feeds
+                        # its new seeds back in as starting points for the
+                        # next pattern generation pass.
+                        variant_result = loop.run(
+                            verified_findings=verified,
+                            repo_path=repo_path,
+                            already_seen_locations=already_seen,
+                            reverify_callback=None,
+                        )
+                        for seed in variant_result.seeds:
+                            parent = seed.original_finding
+                            variant_finding = Finding(
+                                id=f"variant-{uuid.uuid4().hex[:8]}",
+                                file=seed.match.file,
+                                line_number=seed.match.line_number,
+                                finding_type=parent.finding_type or "variant",
+                                cwe=parent.cwe,
+                                severity=parent.effective_severity or "medium",
+                                confidence="low",
+                                description=(
+                                    f"Variant of {parent.id}: {seed.match.pattern.semantic_description}"
+                                ),
+                                code_snippet=seed.match.matched_text,
+                                evidence_level="suspicion",
+                                discovered_by="variant_loop",
+                                related_finding_id=parent.id or None,
+                                related_cve=parent.related_cve,
+                                hunter_session_id=self._session_id,
+                            )
+                            all_findings.append(variant_finding)
+                        logger.info(
+                            "Variant loop: %d patterns, %d matches surfaced",
+                            variant_result.patterns_generated,
+                            variant_result.matches_found,
+                        )
+                    except Exception:
+                        logger.warning("Variant loop failed", exc_info=True)
+
+            # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
+            exploited: list[Finding] = []
+            # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
+            #          critical/high findings with root_cause_explained evidence.
+            patched: list[Finding] = []
+            if not self.no_exploit:
+                exploiter_llm = self._get_native_client("sourcehunt_exploit", self.exploiter_llm)
+                if exploiter_llm is not None:
+                    e = Exploiter(exploiter_llm)
+                    eligible = filter_by_evidence(verified, "crash_reproduced")
+                    for finding in eligible:
+                        try:
+                            exploit_result = e.attempt(finding)
+                            apply_exploiter_result(finding, exploit_result)
+                            if exploit_result.success:
+                                exploited.append(finding)
+                        except Exception:
+                            logger.warning("Exploiter failed", exc_info=True)
+
+            # 5.5. v0.3: Auto-patch mode (opt-in).
+            # The verify-by-recompile gate is MANDATORY — a patch is only marked
+            # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
+            if self.enable_auto_patch and verified:
+                patcher_llm = self._get_native_client("sourcehunt_exploit", self.exploiter_llm)
+                if patcher_llm is not None:
+                    try:
+                        patcher = AutoPatcher(patcher_llm)
+                        for finding in verified:
+                            if not patcher.is_eligible(finding):
+                                continue
+                            patch_sandbox = None
+                            rerun_cb = None
+                            if self.sandbox_factory is not None:
+                                try:
+                                    patch_sandbox = self.sandbox_factory()
+                                    rerun_cb = build_rerun_poc_callback(patch_sandbox)
+                                except Exception:
+                                    logger.debug(
+                                        "Auto-patch sandbox spawn failed",
+                                        exc_info=True,
+                                    )
+                                    patch_sandbox = None
+                                    rerun_cb = None
+                            try:
+                                attempt = patcher.attempt(
+                                    finding,
+                                    file_content=self._load_file_content(repo_path, finding),
+                                    sandbox=patch_sandbox,
+                                    rerun_poc=rerun_cb,
+                                )
+                            finally:
+                                if patch_sandbox is not None:
+                                    try:
+                                        patch_sandbox.stop()
+                                    except Exception:
+                                        pass
+                            apply_patch_attempt(finding, attempt)
+                            if attempt.validated:
+                                patched.append(finding)
+                                if self.auto_pr:
+                                    self._open_draft_pr(finding, attempt)
+                    except Exception:
+                        logger.warning("Auto-patcher failed", exc_info=True)
+
+            # 5.75. v0.3: Populate the cross-run knowledge graph with source
+            #       findings. Best-effort — never blocks the run.
             try:
-                self._populate_knowledge_graph_source(repo_path, all_findings)
+                if self.enable_knowledge_graph and all_findings:
+                    self._populate_knowledge_graph_source(repo_path, all_findings)
             except Exception:
                 logger.warning("Knowledge graph population failed", exc_info=True)
 
-        # 5.85. v0.4: Coordinated-disclosure templates (opt-in).
-        if self.export_disclosures and verified:
-            try:
-                self._export_disclosure_bundle(verified)
-            except Exception:
-                logger.warning("Disclosure export failed", exc_info=True)
+            # 5.85. v0.4: Coordinated-disclosure templates (opt-in).
+            if self.export_disclosures and verified:
+                try:
+                    self._export_disclosure_bundle(verified)
+                except Exception:
+                    logger.warning("Disclosure export failed", exc_info=True)
 
-        # 6. Report
-        output_paths = self._write_report(
-            findings=all_findings,
-            verified=verified,
-            spent_per_tier=spent_per_tier,
-        )
+            # 6. Report
+            output_paths = self._write_report(
+                findings=all_findings,
+                verified=verified,
+                spent_per_tier=spent_per_tier,
+            )
 
-        duration = time.monotonic() - start_time
-        return SourceHuntResult(
-            exit_code=self._exit_code(verified),
-            repo_url=self.repo_url,
-            repo_path=repo_path,
-            findings=all_findings,
-            verified_findings=verified,
-            exploited_findings=exploited,
-            files_ranked=files_ranked,
-            files_hunted=files_hunted,
-            duration_seconds=round(duration, 2),
-            cost_usd=sum(spent_per_tier.values()),
-            spent_per_tier=spent_per_tier,
-            tokens_used=0,  # filled by cost tracker if attached
-            output_paths=output_paths,
-            session_id=self._session_id,
-        )
+            duration = time.monotonic() - start_time
+            return SourceHuntResult(
+                exit_code=self._exit_code(verified),
+                repo_url=self.repo_url,
+                repo_path=repo_path,
+                findings=all_findings,
+                verified_findings=verified,
+                exploited_findings=exploited,
+                files_ranked=files_ranked,
+                files_hunted=files_hunted,
+                duration_seconds=round(duration, 2),
+                cost_usd=sum(spent_per_tier.values()),
+                spent_per_tier=spent_per_tier,
+                tokens_used=0,  # filled by cost tracker if attached
+                output_paths=output_paths,
+                session_id=self._session_id,
+            )
+        finally:
+            if self._sandbox_manager is not None:
+                try:
+                    self._sandbox_manager.cleanup(remove_image=False)
+                except Exception:
+                    logger.debug("HunterSandbox cleanup failed", exc_info=True)
 
     @property
     def session_id(self) -> str:
@@ -600,9 +640,6 @@ class SourceHuntRunner:
         v0.3: best-effort only — failures are logged and the run continues.
         The PR is always opened as draft so a human reviews before merge.
         """
-        import shutil
-        import subprocess
-
         if shutil.which("gh") is None:
             logger.info("auto_pr=True but `gh` CLI not found; skipping")
             return
@@ -635,8 +672,6 @@ class SourceHuntRunner:
 
     def _load_file_content(self, repo_path: str, finding: Finding) -> str:
         """Read the file referenced by a finding. Used by the patch oracle."""
-        import os
-
         rel = finding.get("file", "")
         if not rel:
             return ""
@@ -705,6 +740,43 @@ class SourceHuntRunner:
             run_taint=(self.depth != "quick"),  # v0.4: taint analysis
         )
         return pp.run()
+
+    def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
+        if self.depth == "quick":
+            return
+        if self.sandbox_factory is not None:
+            return
+        if self._sandbox_manager is not None:
+            self.sandbox_factory = self._sandbox_manager.spawn
+            return
+
+        languages = sorted(
+            {
+                str(ft.get("language", "")).lower()
+                for ft in files
+                if str(ft.get("language", "")).strip()
+            }
+        )
+        logger.info(
+            "Initializing HunterSandbox for %s languages=%s",
+            repo_path,
+            ",".join(languages) or "unknown",
+        )
+        try:
+            manager = HunterSandbox(
+                repo_path=repo_path,
+                languages=languages,
+            )
+            image_tag = manager.build_image()
+        except Exception:
+            logger.warning(
+                "HunterSandbox initialization failed; falling back to host mode", exc_info=True
+            )
+            return
+
+        logger.info("HunterSandbox ready image=%s", image_tag)
+        self._sandbox_manager = manager
+        self.sandbox_factory = manager.spawn
 
     def _build_quick_result(
         self,
@@ -800,18 +872,15 @@ class SourceHuntRunner:
              direct via ANTHROPIC_API_KEY.
           5. None — caller falls back to a no-LLM path
         """
-        import os
-
-        from clearwing.providers import (
-            ENV_ANTHROPIC_KEY,
-            ENV_API_KEY,
-            ENV_BASE_URL,
-            ProviderManager,
-            resolve_llm_endpoint,
-        )
-
         if override is not None:
             return override
+
+        # Inject-via-constructor wins (sourcehunt CLI command + tests)
+        if self.provider_manager is not None:
+            try:
+                return self.provider_manager.get_llm(task)
+            except Exception:
+                logger.debug("Injected ProviderManager failed for task=%s", task, exc_info=True)
 
         # Preflight: does *any* credential / endpoint exist? If not,
         # skip the LLM entirely so we don't throw a noisy stack trace
@@ -824,12 +893,42 @@ class SourceHuntRunner:
             logger.debug("No API key / endpoint in environment; skipping LLM for task=%s", task)
             return None
 
-        # Inject-via-constructor wins (sourcehunt CLI command + tests)
+    def _get_native_client(
+        self,
+        task: str,
+        override: AsyncLLMClient | None,
+    ) -> AsyncLLMClient | None:
+        """Return a native async LLM client for sourcehunt tasks."""
+        if override is not None:
+            return override
+
         if self.provider_manager is not None:
             try:
-                return self.provider_manager.get_llm(task)
+                return self.provider_manager.get_native_client(task)
             except Exception:
-                logger.debug("Injected ProviderManager failed for task=%s", task, exc_info=True)
+                logger.debug(
+                    "Injected ProviderManager native client failed for task=%s", task, exc_info=True
+                )
+
+        has_creds = any(
+            os.environ.get(name)
+            for name in (ENV_BASE_URL, ENV_API_KEY, ENV_ANTHROPIC_KEY, "OPENAI_API_KEY")
+        )
+        if not has_creds:
+            logger.debug(
+                "No API key / endpoint in environment; skipping native client for task=%s", task
+            )
+            return None
+
+        if self.model_override:
+            return self._build_native_from_model_string(self.model_override)
+
+        try:
+            endpoint = resolve_llm_endpoint()
+            return ProviderManager.for_endpoint(endpoint).get_native_client(task)
+        except Exception:
+            logger.debug("Default endpoint native resolution failed", exc_info=True)
+            return None
 
         # --model override (single model string, routed through the
         # same endpoint resolution as --base-url)
@@ -852,12 +951,18 @@ class SourceHuntRunner:
         lands on OpenRouter, not on Anthropic direct.
         """
         try:
-            from clearwing.providers import ProviderManager, resolve_llm_endpoint
-
             endpoint = resolve_llm_endpoint(cli_model=model)
             return ProviderManager.for_endpoint(endpoint).get_llm("default")
         except Exception:
             logger.warning("Failed to build LLM from model string", exc_info=True)
+            return None
+
+    def _build_native_from_model_string(self, model: str) -> AsyncLLMClient | None:
+        try:
+            endpoint = resolve_llm_endpoint(cli_model=model)
+            return ProviderManager.for_endpoint(endpoint).get_native_client("default")
+        except Exception:
+            logger.warning("Failed to build native client from model string", exc_info=True)
             return None
 
     # --- Reporting ----------------------------------------------------------

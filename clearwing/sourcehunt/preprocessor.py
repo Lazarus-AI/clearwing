@@ -211,6 +211,8 @@ class Preprocessor:
 
     # Static-analysis hits sample this many lines from each file for tagging
     _CONTENT_SAMPLE_BYTES = 16 * 1024
+    _LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD = 2000
+    _LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD = 2000
 
     def __init__(
         self,
@@ -242,18 +244,52 @@ class Preprocessor:
         repo_path = self._clone_or_use_local()
 
         # Pre-scan for static findings — also gives us the file iterator
+        logger.info("Preprocessor: running static analyzer")
         self._analyzer = SourceAnalyzer(repo_path=repo_path)
         analysis_result = self._analyzer.analyze()
         static_findings = analysis_result.findings
+        logger.info(
+            "Preprocessor: static analyzer complete (%d findings)",
+            len(static_findings),
+        )
 
         # Build per-file static_hint counts
         per_file_hints: dict[str, int] = {}
         for sf in static_findings:
             per_file_hints[sf.file_path] = per_file_hints.get(sf.file_path, 0) + 1
 
+        logger.info("Preprocessor: enumerating source files")
+        source_files = list(self._analyzer._iter_source_files(repo_path))
+        logger.info("Preprocessor: found %d source files", len(source_files))
+        imports_by_budget = self.max_imports_by_files
+        large_repo = len(source_files) > self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD
+        if len(source_files) > self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD:
+            imports_by_budget = 0
+            logger.info(
+                "Large repo detected (%d source files); skipping imports_by scans",
+                len(source_files),
+            )
+        build_callgraph = self.build_callgraph
+        propagate_reachability = self.propagate_reachability
+        run_taint = self.run_taint
+        if large_repo:
+            if build_callgraph or propagate_reachability:
+                logger.info(
+                    "Large repo detected (%d source files); skipping callgraph/reachability",
+                    len(source_files),
+                )
+            if run_taint:
+                logger.info(
+                    "Large repo detected (%d source files); skipping taint analysis",
+                    len(source_files),
+                )
+            build_callgraph = False
+            propagate_reachability = False
+            run_taint = False
+
         # Enumerate source files and build FileTarget entries
         file_targets: list[FileTarget] = []
-        for abs_path in self._analyzer._iter_source_files(repo_path):
+        for abs_path in source_files:
             ext = Path(abs_path).suffix.lower()
             language = _SOURCE_EXTS_TO_LANG.get(ext)
             if not language:
@@ -276,7 +312,7 @@ class Preprocessor:
 
             # v0.1 imports_by — capped to keep large repos snappy
             imports_by = 0
-            if len(file_targets) < self.max_imports_by_files:
+            if len(file_targets) < imports_by_budget:
                 imports_by = _count_imports_by(repo_path, abs_path, language)
 
             target: FileTarget = {
@@ -309,7 +345,7 @@ class Preprocessor:
         semgrep_findings: list[dict] = []
         fuzz_corpora: list[dict] = []
 
-        if self.build_callgraph:
+        if build_callgraph:
             try:
                 builder = CallGraphBuilder()
                 if builder.available:
@@ -320,7 +356,7 @@ class Preprocessor:
             except Exception:
                 logger.warning("Callgraph build failed", exc_info=True)
 
-        if self.propagate_reachability:
+        if propagate_reachability:
             if callgraph is not None and not callgraph.empty:
                 self._propagate_reachability(file_targets, callgraph)
             else:
@@ -343,7 +379,7 @@ class Preprocessor:
 
         # v0.4: tree-sitter taint analysis
         taint_paths: list[TaintPath] = []
-        if self.run_taint:
+        if run_taint:
             try:
                 analyzer = TaintAnalyzer()
                 if analyzer.available:

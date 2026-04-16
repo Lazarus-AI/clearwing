@@ -5,11 +5,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
-try:
-    from clearwing.core.events import EventBus, EventType
-except ImportError:
-    EventBus = None
-    EventType = None
+from clearwing.core.events import EventBus, EventType
 
 
 @dataclass
@@ -87,20 +83,19 @@ class CostTracker:
             self.output_tokens += output_tokens
             self.total_cost_usd += cost
 
-        if EventBus is not None and EventType is not None:
-            try:
-                EventBus.emit(
-                    EventType.COST_UPDATE,
-                    {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "cost": cost,
-                        "total_cost_usd": self.total_cost_usd,
-                        "model": model,
-                    },
-                )
-            except Exception:
-                pass  # telemetry should never break the caller
+        try:
+            EventBus.emit(
+                EventType.COST_UPDATE,
+                {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cost": cost,
+                    "total_cost_usd": self.total_cost_usd,
+                    "model": model,
+                },
+            )
+        except Exception:
+            pass  # telemetry should never break the caller
 
     def record_tool_call(self, tool_name: str, duration_ms: int) -> None:
         """Record a tool invocation and its wall-clock duration."""

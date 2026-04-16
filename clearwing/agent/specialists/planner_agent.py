@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from clearwing.agent.graph import _create_llm
+from clearwing.llm import HumanMessage, SystemMessage
 
 
 @dataclass
 class Subtask:
     id: int
     description: str
-    agent: str  # "recon", "exploit", "reporter"
-    status: str = "pending"  # pending, in_progress, completed, skipped
+    agent: str
+    status: str = "pending"
     result: str | None = None
 
 
@@ -76,23 +76,18 @@ class PlannerAgent:
     """Decomposes a high-level pentest goal into ordered subtasks."""
 
     def __init__(self, model_name: str = "claude-sonnet-4-6"):
-        self.llm = ChatAnthropic(model=model_name)
+        self.llm = _create_llm(model_name)
 
     def create_plan(self, goal: str, context: str = "") -> Plan:
-        """Create a plan from a high-level goal."""
         messages = [
             SystemMessage(content=PLANNER_PROMPT),
             HumanMessage(content=f"Goal: {goal}\n\nContext:\n{context}"),
         ]
         response = self.llm.invoke(messages)
         content = response.content if isinstance(response.content, str) else str(response.content)
-
-        # Parse JSON from response
-        subtasks = self._parse_subtasks(content)
-        return Plan(goal=goal, subtasks=subtasks)
+        return Plan(goal=goal, subtasks=self._parse_subtasks(content))
 
     def refine_plan(self, plan: Plan, feedback: str) -> Plan:
-        """Refine an existing plan based on results so far."""
         messages = [
             SystemMessage(content=PLANNER_PROMPT),
             HumanMessage(
@@ -100,41 +95,32 @@ class PlannerAgent:
                     f"Original goal: {plan.goal}\n\n"
                     f"Current plan status:\n{plan.summary()}\n\n"
                     f"Feedback/new findings: {feedback}\n\n"
-                    "Revise the remaining subtasks (keep completed ones as-is). "
-                    "Return the full updated subtask list as JSON."
+                    "Revise the remaining subtasks and return the full updated list as JSON."
                 )
             ),
         ]
         response = self.llm.invoke(messages)
         content = response.content if isinstance(response.content, str) else str(response.content)
         new_subtasks = self._parse_subtasks(content)
-
-        # Preserve completed tasks, replace pending ones
         completed = [st for st in plan.subtasks if st.status == "completed"]
-        # Re-number new tasks starting after completed
         start_id = max((st.id for st in completed), default=0) + 1
         for i, st in enumerate(new_subtasks):
             st.id = start_id + i
-
         plan.subtasks = completed + new_subtasks
         return plan
 
     @staticmethod
     def _parse_subtasks(content: str) -> list[Subtask]:
-        """Extract JSON subtask array from LLM response."""
-        # Find JSON array in response
         start = content.find("[")
         end = content.rfind("]") + 1
         if start == -1 or end == 0:
             return [Subtask(id=1, description=content.strip(), agent="recon")]
-
         try:
             raw = json.loads(content[start:end])
         except json.JSONDecodeError:
             return [Subtask(id=1, description=content.strip(), agent="recon")]
-
         subtasks = []
-        for i, item in enumerate(raw[:15]):  # Max 15 subtasks
+        for i, item in enumerate(raw[:15]):
             subtasks.append(
                 Subtask(
                     id=i + 1,

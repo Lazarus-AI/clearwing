@@ -12,7 +12,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from clearwing.findings.types import Finding
+from clearwing.llm import HumanMessage
+from clearwing.sourcehunt.hunter import build_hunter_agent
+from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
 from clearwing.sourcehunt.preprocessor import Preprocessor
+from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.state import (
     EVIDENCE_LEVELS,
     FileTarget,
@@ -129,8 +133,6 @@ class TestSourceFindingSchema:
 
 class TestSourceHuntStateSchema:
     def test_state_has_v02_v03_seams(self):
-        from langchain_core.messages import HumanMessage
-
         state: SourceHuntState = {
             "messages": [HumanMessage(content="hunt")],
             "repo_url": "x",
@@ -193,8 +195,6 @@ class TestPreprocessorV02Flags:
 
 class TestHunterAcceptsV02Seams:
     def test_build_hunter_agent_accepts_seeded_crash_and_hints(self):
-        from clearwing.sourcehunt.hunter import build_hunter_agent
-
         llm = MagicMock()
         llm.bind_tools.return_value = MagicMock()
         ft: FileTarget = {
@@ -225,8 +225,6 @@ class TestHunterAcceptsV02Seams:
 
 class TestPoolAcceptsV02Sandbox:
     def test_huntpool_config_accepts_sandbox_factory(self):
-        from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
-
         def factory():
             return MagicMock()
 
@@ -241,8 +239,6 @@ class TestPoolAcceptsV02Sandbox:
 
 class TestRunnerAcceptsV02Seams:
     def test_runner_accepts_sandbox_factory(self, tmp_path):
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         def sandbox_factory():
             return MagicMock()
 

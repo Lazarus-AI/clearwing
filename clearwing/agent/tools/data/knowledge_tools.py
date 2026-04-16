@@ -1,6 +1,7 @@
 """Knowledge graph query tools."""
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
+from clearwing.data.knowledge import KnowledgeGraph
 
 
 @tool
@@ -21,8 +22,6 @@ def query_knowledge_graph(query: str) -> str:
         Formatted query results.
     """
     try:
-        from clearwing.data.knowledge import KnowledgeGraph
-
         kg = KnowledgeGraph(persist_path="~/.clearwing/knowledge_graph.json")
         return kg.query(query)
     except Exception as e:

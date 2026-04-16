@@ -12,7 +12,7 @@ MYPY_SCOPE := clearwing/findings clearwing/sourcehunt clearwing/capabilities.py 
 
 help:
 	@echo "Clearwing developer commands:"
-	@echo "  install-dev  pip install -e '.[dev]' (requires venv)"
+	@echo "  install-dev  uv pip install -e '.[dev]' (requires venv)"
 	@echo "  lint         ruff check + ruff format --check"
 	@echo "  format       ruff format (writes changes)"
 	@echo "  type         mypy on the scoped gate modules"
@@ -26,9 +26,7 @@ help:
 	@echo "  docs-serve   mkdocs serve on http://127.0.0.1:8000"
 
 install-dev:
-	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -e '.[dev]'
-	$(PY) -m pip install build twine ruff
+	uv pip install --python $(PY) -e '.[dev]'
 
 lint:
 	$(RUFF) check clearwing/ tests/

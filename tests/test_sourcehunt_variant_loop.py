@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.variant_loop import (
     VariantLoop,
     VariantLoopConfig,
@@ -399,8 +400,6 @@ class TestMultiIterationDriver:
 
 class TestRunnerVariantLoopIntegration:
     def test_runner_initializes_with_variant_loop_enabled(self, tmp_path):
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),
@@ -411,8 +410,6 @@ class TestRunnerVariantLoopIntegration:
         assert runner.enable_variant_loop is True
 
     def test_variant_loop_can_be_disabled(self, tmp_path):
-        from clearwing.sourcehunt.runner import SourceHuntRunner
-
         runner = SourceHuntRunner(
             repo_url=str(tmp_path),
             local_path=str(tmp_path),

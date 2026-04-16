@@ -20,12 +20,12 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from clearwing.llm import ChatModel, HumanMessage, SystemMessage
 
 from .semgrep_sidecar import SemgrepSidecar
 from .state import Finding
@@ -135,7 +135,7 @@ class RetroHunter:
 
     def __init__(
         self,
-        llm: BaseChatModel,
+        llm: ChatModel,
         sidecar: SemgrepSidecar | None = None,
     ):
         self.llm = llm
@@ -234,8 +234,6 @@ class RetroHunter:
         if not self.sidecar.available:
             logger.info("Retro-hunt: Semgrep binary not found; returning empty")
             return []
-
-        import tempfile
 
         with tempfile.NamedTemporaryFile(
             mode="w",

@@ -6,20 +6,32 @@ import logging
 import uuid
 from typing import Any
 
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+import clearwing.data.memory as memory_data
+import clearwing.observability.telemetry as telemetry
+from clearwing.agent.graph import create_agent
+from clearwing.agent.operator import OperatorAgent, OperatorConfig
+from clearwing.agent.runtime import Command
+from clearwing.core.events import EventBus, EventType
+from clearwing.llm import HumanMessage
+from clearwing.observability import MetricsCollector
+
 logger = logging.getLogger(__name__)
+
+
+def _make_session_store():
+    return memory_data.SessionStore()
+
+
+def _make_cost_tracker():
+    return telemetry.CostTracker()
 
 
 def create_app():
     """Create and configure the FastAPI application."""
-    try:
-        from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-        from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import JSONResponse
-    except ImportError as e:
-        raise ImportError(
-            "FastAPI is required for the web UI. Install with: pip install 'clearwing[web]'"
-        ) from e
-
     app = FastAPI(
         title="Clearwing API",
         description="REST and WebSocket API for the Clearwing penetration testing agent",
@@ -48,83 +60,66 @@ def create_app():
     @app.get("/api/sessions")
     async def list_sessions():
         """List all known sessions."""
-        try:
-            from clearwing.data.memory import SessionStore
-
-            store = SessionStore()
-            sessions = store.list_sessions()
-            return [
-                {
-                    "session_id": s.session_id,
-                    "target": s.target,
-                    "model": s.model,
-                    "status": s.status,
-                    "start_time": str(s.start_time),
-                    "cost_usd": s.cost_usd,
-                    "token_count": s.token_count,
-                }
-                for s in sessions
-            ]
-        except ImportError:
-            return []
+        store = _make_session_store()
+        sessions = store.list_sessions()
+        return [
+            {
+                "session_id": s.session_id,
+                "target": s.target,
+                "model": s.model,
+                "status": s.status,
+                "start_time": str(s.start_time),
+                "cost_usd": s.cost_usd,
+                "token_count": s.token_count,
+            }
+            for s in sessions
+        ]
 
     @app.get("/api/sessions/{session_id}")
     async def get_session(session_id: str):
         """Get details for a specific session."""
+        store = _make_session_store()
         try:
-            from clearwing.data.memory import SessionStore
-
-            store = SessionStore()
             session = store.load(session_id)
-            if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
-            return {
-                "session_id": session.session_id,
-                "target": session.target,
-                "model": session.model,
-                "status": session.status,
-                "start_time": str(session.start_time),
-                "cost_usd": session.cost_usd,
-                "token_count": session.token_count,
-                "open_ports": session.open_ports,
-                "services": session.services,
-                "vulnerabilities": session.vulnerabilities,
-                "exploit_results": session.exploit_results,
-                "flags_found": session.flags_found,
-            }
-        except ImportError as e:
-            raise HTTPException(status_code=500, detail="SessionStore not available") from e
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {
+            "session_id": session.session_id,
+            "target": session.target,
+            "model": session.model,
+            "status": session.status,
+            "start_time": str(session.start_time),
+            "cost_usd": session.cost_usd,
+            "token_count": session.token_count,
+            "open_ports": session.open_ports,
+            "services": session.services,
+            "vulnerabilities": session.vulnerabilities,
+            "exploit_results": session.exploit_results,
+            "flags_found": session.flags_found,
+        }
 
     @app.get("/api/metrics")
     async def get_metrics():
         """Get current metrics in JSON format."""
-        try:
-            from clearwing.observability.telemetry import CostTracker
-
-            tracker = CostTracker()
-            summary = tracker.get_summary()
-            return {
-                "input_tokens": summary.input_tokens,
-                "output_tokens": summary.output_tokens,
-                "total_cost_usd": summary.total_cost_usd,
-                "tool_calls": summary.tool_calls,
-            }
-        except ImportError:
-            return {"error": "CostTracker not available"}
+        tracker = _make_cost_tracker()
+        summary = tracker.get_summary()
+        return {
+            "input_tokens": summary.input_tokens,
+            "output_tokens": summary.output_tokens,
+            "total_cost_usd": summary.total_cost_usd,
+            "tool_calls": summary.tool_calls,
+        }
 
     @app.get("/api/metrics/prometheus")
     async def get_prometheus_metrics():
         """Get metrics in Prometheus exposition format."""
-        try:
-            from clearwing.observability import MetricsCollector
-
-            collector = MetricsCollector()
-            return JSONResponse(
-                content=collector.format_prometheus(),
-                media_type="text/plain",
-            )
-        except ImportError:
-            return JSONResponse(content="# no metrics available\n", media_type="text/plain")
+        collector = MetricsCollector()
+        return JSONResponse(
+            content=collector.format_prometheus(),
+            media_type="text/plain",
+        )
 
     @app.post("/api/operate")
     async def start_operator(request_body: dict):
@@ -156,8 +151,6 @@ def create_app():
         # Run operator in background
         async def run_operator():
             try:
-                from clearwing.agent.operator import OperatorAgent, OperatorConfig
-
                 config = OperatorConfig(
                     goals=goals,
                     target=target,
@@ -225,8 +218,6 @@ def create_app():
 
         # Subscribe to EventBus and forward events to the WebSocket
         try:
-            from clearwing.core.events import EventBus, EventType
-
             bus = EventBus()
 
             def on_event(event_type_name: str):
@@ -236,7 +227,9 @@ def create_app():
                             {
                                 "type": event_type_name,
                                 "data": data
-                                if isinstance(data, (dict, list, str, int, float, bool, type(None)))
+                                if isinstance(
+                                    data, dict | list | str | int | float | bool | type(None)
+                                )
                                 else str(data),
                             }
                         )
@@ -290,10 +283,6 @@ def create_app():
 
                 if msg_type == "start":
                     # Initialize agent
-                    from langchain_core.messages import HumanMessage
-
-                    from clearwing.agent import create_agent
-
                     model = data.get("model", "claude-sonnet-4-6")
                     target = data.get("target", "")
                     session_id = uuid.uuid4().hex[:8]
@@ -316,8 +305,6 @@ def create_app():
                     )
 
                 elif msg_type == "message" and graph and config:
-                    from langchain_core.messages import HumanMessage
-
                     content = data.get("content", "")
                     input_msg = {"messages": [HumanMessage(content=content)]}
 
@@ -360,8 +347,6 @@ def create_app():
                         )
 
                 elif msg_type == "approve" and graph and config:
-                    from langgraph.types import Command
-
                     approved = data.get("approved", False)
                     try:
                         loop = asyncio.get_event_loop()

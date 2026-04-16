@@ -9,7 +9,7 @@ mocked sandbox so they run fast and don't need docker or gcc.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from clearwing.sandbox.container import ExecResult
 from clearwing.sourcehunt.harness_generator import (
@@ -20,6 +20,7 @@ from clearwing.sourcehunt.harness_generator import (
     _parse_sanitizer_report,
     _strip_markdown_fences,
 )
+from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 
@@ -209,13 +210,15 @@ class TestFuzzOneHappyPath:
     def test_compile_success_and_no_crash(self, tmp_path):
         """Harness compiles and runs cleanly → returns a non-crashed SeededCrash."""
         src_file = tmp_path / "parser.c"
-        src_file.write_text("""
+        src_file.write_text(
+            """
 #include <stdint.h>
 int decode(const uint8_t *d, size_t n) {
     (void)d; (void)n;
     return 0;
 }
-""")
+"""
+        )
         harness_llm = _mock_llm(
             "#include <stdint.h>\n"
             "int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {\n"
@@ -359,10 +362,6 @@ class TestHuntPoolSeededCrashPlumbing:
 
     def test_pool_passes_seeded_crash_to_hunter(self):
         """HuntPoolConfig.seeded_crashes_by_file → build_hunter_agent seeded_crash."""
-        from unittest.mock import MagicMock, patch
-
-        from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
-
         ft = _ft("parser.c", "/abs/parser.c", tags=["parser"], surface=5)
         llm = MagicMock()
         llm.bind_tools.return_value = MagicMock()

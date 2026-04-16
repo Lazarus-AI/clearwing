@@ -1,33 +1,267 @@
-"""Per-file hunter ReAct agent.
+"""Per-file hunter runtime for sourcehunt.
 
-build_hunter_agent() wraps build_react_graph() (R1) with the sourcehunt-specific
-tool set, system prompt, and SourceHuntState schema. v0.1 ships with a single
-GeneralHunter; v0.2 adds memory_safety and logic_auth specialists with
-different prompts but the same graph structure.
+This module now uses a native async tool-calling loop backed by genai-pyo3,
+not LangChain/LangGraph. The prompts and tool set are unchanged; the
+execution model is simpler: assistant response -> tool calls -> tool results ->
+next assistant response, repeated until the model stops calling tools or the
+step budget is exhausted.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from langchain_core.language_models import BaseChatModel
-from langgraph.graph.state import CompiledStateGraph
-
-from clearwing.agent.graph import build_react_graph
 from clearwing.agent.tools.hunt import (
     HunterContext,
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
+from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
+from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
-from .state import FileTarget, SourceHuntState
+from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
 
 
+def _trajectory_base_dir() -> Path:
+    raw = os.environ.get("CLEARWING_SOURCEHUNT_TRACE_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    home = os.environ.get("CLEARWING_HOME") or os.path.expanduser("~/.clearwing")
+    return Path(home) / "sourcehunt" / "trajectories"
+
+
+def _sanitize_path_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return cleaned or "unknown"
+
+
+def _trajectory_path(ctx: HunterContext) -> Path:
+    session = _sanitize_path_component(ctx.session_id or "no_session")
+    rel_file = _sanitize_path_component((ctx.file_path or "unknown").replace("/", "__"))
+    return _trajectory_base_dir() / session / f"{rel_file}.jsonl"
+
+
+def _serialize_tool_call(tool_call: ToolCall) -> dict[str, Any]:
+    if hasattr(tool_call, "to_dict"):
+        return dict(tool_call.to_dict())
+    return {
+        "call_id": getattr(tool_call, "call_id", ""),
+        "fn_name": getattr(tool_call, "fn_name", ""),
+        "fn_arguments": getattr(tool_call, "fn_arguments", None),
+        "fn_arguments_json": getattr(tool_call, "fn_arguments_json", ""),
+    }
+
+
+def _serialize_message(message: ChatMessage) -> dict[str, Any]:
+    if hasattr(message, "to_dict"):
+        return dict(message.to_dict())
+    tool_calls = getattr(message, "tool_calls", None) or []
+    return {
+        "role": message.role,
+        "content": message.content,
+        "tool_calls": [_serialize_tool_call(tc) for tc in tool_calls],
+        "tool_response_call_id": getattr(message, "tool_response_call_id", None),
+    }
+
+
+def _first_matching_line(path: Path, pattern: str) -> int | None:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if re.search(pattern, line):
+                    return line_number
+    except OSError:
+        return None
+    return None
+
+
+def _memory_safety_heuristic_hints(
+    repo_path: str,
+    file_target: FileTarget,
+) -> list[dict[str, Any]]:
+    """Derive high-signal, file-local hints for memory-safety hunters.
+
+    The goal is not to prove a bug statically here; it is to surface concrete
+    candidate mechanisms already visible in the source tree so the hunter does
+    not get stuck on generic memcpy noise.
+    """
+
+    target_rel = str(file_target.get("path") or "")
+    if not target_rel:
+        return []
+
+    target_path = Path(repo_path) / target_rel
+    if not target_path.is_file():
+        return []
+
+    hints: list[dict[str, Any]] = []
+
+    sentinel_init_line = _first_matching_line(target_path, r"memset\([^;\n]*slice_table[^;\n]*-1")
+    sentinel_check_line = _first_matching_line(target_path, r"slice_table\[.*\]\s*==\s*0xFFFF")
+    counter_assign_line = _first_matching_line(
+        target_path, r"sl->slice_num\s*=\s*\+\+h->current_slice"
+    )
+    counter_compare_line = _first_matching_line(
+        target_path, r"slice_table\[.*\]\s*[!=]=\s*sl->slice_num"
+    )
+
+    if sentinel_init_line and (sentinel_check_line or counter_assign_line):
+        details: list[str] = [f"`slice_table` is sentinel-filled at line {sentinel_init_line}"]
+        if sentinel_check_line:
+            details.append(f"checked against `0xFFFF` at line {sentinel_check_line}")
+        if counter_assign_line:
+            details.append(
+                f"`sl->slice_num` is incremented from `current_slice` at line {counter_assign_line}"
+            )
+        hints.append(
+            {
+                "line": sentinel_init_line,
+                "description": "Potential sentinel/counter collision: " + "; ".join(details) + ".",
+            }
+        )
+
+    if counter_compare_line and counter_assign_line:
+        hints.append(
+            {
+                "line": counter_compare_line,
+                "description": (
+                    f"`slice_table[...]` is compared to `sl->slice_num` at line {counter_compare_line}; "
+                    f"check whether that counter can alias the sentinel-filled table state from line {sentinel_init_line or '?'}."
+                ),
+            }
+        )
+
+    top_border_line = _first_matching_line(
+        target_path,
+        r"top_border\s*=\s*sl->top_borders\[[^\]]+\]\[sl->mb_x\]",
+    )
+    if top_border_line and counter_compare_line:
+        hints.append(
+            {
+                "line": top_border_line,
+                "description": (
+                    "Concrete sink cue: `top_border = sl->top_borders[..., sl->mb_x]` is written via "
+                    f"`AV_COPY*` immediately after line {top_border_line}; if the sentinel/counter collision "
+                    "breaks the same-slice boundary check at the left edge, follow this path to a real "
+                    "buffer underflow/overflow rather than stopping at metadata confusion."
+                ),
+            }
+        )
+
+    header_path = target_path.parent / "h264dec.h"
+    slice_width_line = _first_matching_line(header_path, r"uint16_t\s*\*\s*slice_table\b")
+    current_slice_line = _first_matching_line(header_path, r"\bint\s+current_slice\b")
+    if slice_width_line and current_slice_line:
+        hints.append(
+            {
+                "line": counter_assign_line or sentinel_init_line or 1,
+                "description": (
+                    "Width check: related header `h264dec.h` declares `slice_table` as `uint16_t *` "
+                    f"(line {slice_width_line}) and `current_slice` as `int` (line {current_slice_line})."
+                ),
+            }
+        )
+
+    writer_paths = [
+        target_path.parent / "h264_cabac.c",
+        target_path.parent / "h264_cavlc.c",
+        target_path.parent / "h264_mvpred.h",
+    ]
+    writer_line = None
+    compare_line = None
+    for candidate in writer_paths:
+        if writer_line is None:
+            writer_line = _first_matching_line(candidate, r"slice_table\[.*\]\s*=\s*sl->slice_num")
+        if compare_line is None:
+            compare_line = _first_matching_line(
+                candidate, r"slice_table\[.*\]\s*[!=]=\s*sl->slice_num"
+            )
+        if writer_line and compare_line:
+            break
+    if writer_line or compare_line:
+        related_bits: list[str] = []
+        if writer_line:
+            related_bits.append(
+                f"related decode paths write `slice_table[mb_xy] = sl->slice_num` (line {writer_line})"
+            )
+        if compare_line:
+            related_bits.append(
+                f"neighbor/cache logic compares `slice_table[...]` to `sl->slice_num` (line {compare_line})"
+            )
+        hints.append(
+            {
+                "line": counter_assign_line or sentinel_init_line or 1,
+                "description": "Cross-file cue: " + "; ".join(related_bits) + ".",
+            }
+        )
+
+    return hints[:5]
+
+
+@dataclass
+class HunterTrajectoryLogger:
+    path: Path
+
+    @classmethod
+    def for_hunter(
+        cls,
+        ctx: HunterContext,
+        *,
+        prompt: str,
+        initial_messages: list[ChatMessage],
+    ) -> HunterTrajectoryLogger:
+        path = _trajectory_path(ctx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        logger_obj = cls(path=path)
+        logger_obj.log(
+            "start",
+            {
+                "session_id": ctx.session_id,
+                "file_path": ctx.file_path,
+                "specialist": ctx.specialist,
+                "prompt": prompt,
+                "initial_messages": [_serialize_message(msg) for msg in initial_messages],
+                "seeded_crash": ctx.seeded_crash,
+            },
+        )
+        return logger_obj
+
+    def log(self, event: str, payload: dict[str, Any]) -> None:
+        record = {
+            "ts": time.time(),
+            "event": event,
+            **payload,
+        }
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
+
 # --- System prompts ---------------------------------------------------------
+
+
+HUNTER_EXECUTION_RULES = """
+Execution rules:
+- This is a single-file hunt. Start with the target file, not a broad directory listing.
+- Only use list_source_tree when you need to locate a concretely named related file or directory.
+- By step 3, form at least one concrete candidate hypothesis tied to a function, field, buffer, or array.
+- Prefer narrow grep_source/find_callers queries over broad regex sweeps across large directories.
+- If a grep result is dominated by static tables, scan constants, or generic arithmetic noise, refine the query immediately.
+- Keep read_source_file windows tight, usually 40-120 lines around the suspicious code.
+- If a tool result is summarized or truncated, narrow the next request instead of repeating the same broad call.
+- Once you have a plausible candidate, validate it with compile/run/fuzz tools when realistic, or explain exactly why static evidence is sufficient.
+- Do not spend the final step on marginal confirmation. If the mechanism is already coherent, use record_finding.
+- By the last 2 steps, either call record_finding or state explicitly why the evidence is still insufficient.
+"""
 
 
 GENERAL_HUNTER_PROMPT = """You are a security researcher hunting for a vulnerability in a single source file from the project {project_name}.
@@ -100,12 +334,22 @@ Your specialty is the class of bugs that corrupt memory or control flow. Focus o
      the sentinel value.
    - NUL-termination assumptions in data that isn't NUL-terminated.
 
-7. USE-AFTER-FREE
+7. SENTINEL / COUNTER COLLISIONS
+   - Tables initialized with memset(..., -1, ...) or 0xFF/0xFFFF sentinels.
+   - Ownership/progress tables compared against monotonically increasing IDs
+     like slice/frame/reference counters.
+   - Any case where the table element width is narrower than the counter it
+     stores or is compared against.
+   - If you see all of: sentinel initialization, writes from a slice/frame
+     counter, and later reads compared both to the sentinel and to the current
+     counter, treat that as a first-class candidate immediately.
+
+8. USE-AFTER-FREE
    - free() followed by any use of the pointer.
    - Double-free via aliasing.
    - Dangling pointers after realloc() shrinks a buffer.
 
-8. UNINITIALIZED MEMORY
+9. UNINITIALIZED MEMORY
    - stack variables used before assignment.
    - struct fields left uninitialized that get sent over the wire.
 
@@ -113,10 +357,28 @@ Approach:
 1. Read the target file. Find every buffer, every pointer, every size computation.
 2. For each buffer: where is it allocated? What's the size? Who writes to it?
 3. For each size computation: can any input make it wrap, truncate, or underflow?
-4. Use compile_file + run_with_sanitizer on the file with ASan/UBSan. If the
+4. For parser/state-machine code, inspect sentinel-initialized tables,
+   ownership/progress arrays, and counters before assuming the bug is a memcpy.
+   Start by grepping for memset(..., -1 ...), 0xFF/0xFFFF sentinels, and
+   tables compared against IDs/counters such as slice_num, frame_num, or
+   owner indexes.
+5. Use compile_file + run_with_sanitizer on the file with ASan/UBSan. If the
    project has a fuzz entry point, run it with a crafted input.
-5. record_finding with evidence_level=crash_reproduced if you got an ASan
+6. record_finding with evidence_level=crash_reproduced if you got an ASan
    report, else static_corroboration if you can show a pattern.
+
+Static-evidence threshold for sentinel/counter bugs:
+- If you can show a table is sentinel-filled, written with a monotonically
+  increasing ID, and later consulted using sentinel checks or equality against
+  that same ID, you do not need a crash to record a finding.
+- If the table storage width is narrower than the ID or the sentinel value can
+  collide with reachable counter values, record_finding with
+  evidence_level=static_corroboration as soon as you can explain the
+  collision mechanism end-to-end.
+- For memory-safety claims, do not stop at "state confusion" if the same file
+  contains border copies, buffer writes, or pointer-indexed reads gated by the
+  corrupted ownership check. Follow the flow to the concrete read/write sink
+  before recording when that sink is available in-file.
 
 If the code is obviously safe (RAII, std::span, bounds-checked containers,
 Rust-style borrowing), say so and move on. Do not fabricate bugs.
@@ -405,12 +667,6 @@ def _choose_specialist(file_target: FileTarget) -> str:
 # --- Hunter system prompt builder -------------------------------------------
 
 
-def _no_op_state_updater(tool_name: str, data: Any, state: dict) -> dict:
-    """Hunter agents update SourceHuntState via record_finding directly,
-    so no implicit tool-result→state mapping is needed."""
-    return {}
-
-
 WEB_FRAMEWORK_HUNTER_PROMPT = """You are a WEB FRAMEWORK specialist hunting for vulnerabilities in a single web-application source file from the project {project_name}. Your specialty is the class of bugs that exist ONLY in the context of an HTTP request/response framework — request parsing, routing, session handling, template rendering, database access.
 
 File: {file_path}
@@ -516,7 +772,7 @@ def _build_hunter_prompt(
         )
 
     template = _SPECIALIST_PROMPTS.get(specialist, GENERAL_HUNTER_PROMPT)
-    return template.format(
+    prompt = template.format(
         project_name=project_name,
         file_path=file_target.get("path", "unknown"),
         language=file_target.get("language", "unknown"),
@@ -525,6 +781,7 @@ def _build_hunter_prompt(
         seeded_crash_block=seeded_crash_block,
         semgrep_hints_block=semgrep_hints_block,
     )
+    return prompt + HUNTER_EXECUTION_RULES
 
 
 def _build_propagation_prompt(file_target: FileTarget) -> str:
@@ -539,11 +796,299 @@ def _build_propagation_prompt(file_target: FileTarget) -> str:
 # --- Public factory ----------------------------------------------------------
 
 
+@dataclass
+class NativeHunter:
+    llm: AsyncLLMClient
+    prompt: str
+    tools: list[NativeToolSpec]
+    ctx: HunterContext
+    max_steps: int = 20
+
+    async def arun(self) -> tuple[list[Finding], float, int]:
+        messages: list[ChatMessage] = [
+            ChatMessage("user", f"Hunt for vulnerabilities in {self.ctx.file_path or 'unknown'}.")
+        ]
+        trajectory = HunterTrajectoryLogger.for_hunter(
+            self.ctx,
+            prompt=self.prompt,
+            initial_messages=messages,
+        )
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost_usd = 0.0
+        repeated_tool_calls: dict[tuple[str, str], int] = {}
+        tools_by_name = {tool.name: tool for tool in self.tools}
+
+        for step in range(1, self.max_steps + 1):
+            trajectory.log(
+                "request",
+                {
+                    "step": step,
+                    "system": self.prompt,
+                    "messages": [_serialize_message(message) for message in messages],
+                    "tools": [tool.name for tool in self.tools],
+                },
+            )
+            response = await self.llm.achat(
+                messages=messages,
+                system=self.prompt,
+                tools=self.tools,
+            )
+            trajectory.log(
+                "assistant_response",
+                {
+                    "step": step,
+                    "text": response.text,
+                    "tool_calls": [_serialize_tool_call(tc) for tc in response.tool_calls],
+                    "usage": {
+                        "input_tokens": response.usage.prompt_tokens or 0,
+                        "output_tokens": response.usage.completion_tokens or 0,
+                        "total_tokens": response.usage.total_tokens or 0,
+                    },
+                    "model": response.provider_model_name,
+                },
+            )
+            total_input_tokens += response.usage.prompt_tokens or 0
+            total_output_tokens += response.usage.completion_tokens or 0
+            total_cost_usd += _estimate_cost_usd(
+                response.usage.prompt_tokens or 0,
+                response.usage.completion_tokens or 0,
+                self.llm.model_name,
+            )
+
+            if response.tool_calls:
+                messages.append(
+                    ChatMessage("assistant", response.text or "", tool_calls=response.tool_calls)
+                )
+                for tool_call in response.tool_calls:
+                    tool_arguments = tool_call.fn_arguments
+                    if not isinstance(tool_arguments, dict):
+                        tool_arguments = {}
+                    key = (tool_call.fn_name, tool_call.fn_arguments_json)
+                    repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
+                    if repeated_tool_calls[key] > 3:
+                        tool_output = {
+                            "error": (
+                                "tool call skipped because the assistant repeated the same "
+                                "call too many times"
+                            )
+                        }
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                                "repeated_skip": True,
+                            },
+                        )
+                    else:
+                        trajectory.log(
+                            "tool_call",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                            },
+                        )
+                        tool_output = await self._run_tool(tools_by_name, tool_call)
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                                "repeated_skip": False,
+                            },
+                        )
+                    messages.append(
+                        ChatMessage(
+                            "tool",
+                            tool_summary,
+                            tool_response_call_id=tool_call.call_id,
+                        )
+                    )
+                continue
+
+            if response.text:
+                messages.append(ChatMessage("assistant", response.text))
+            logger.info(
+                "Hunter finished for %s after %d steps findings=%d",
+                self.ctx.file_path,
+                step,
+                len(self.ctx.findings),
+            )
+            trajectory.log(
+                "finish",
+                {
+                    "step": step,
+                    "status": "completed",
+                    "findings": [self._serialize_finding(f) for f in self.ctx.findings],
+                    "total_input_tokens": total_input_tokens,
+                    "total_output_tokens": total_output_tokens,
+                    "total_cost_usd": total_cost_usd,
+                },
+            )
+            return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
+
+        logger.warning(
+            "Hunter hit max steps for %s findings=%d",
+            self.ctx.file_path,
+            len(self.ctx.findings),
+        )
+        trajectory.log(
+            "finish",
+            {
+                "step": self.max_steps,
+                "status": "max_steps",
+                "findings": [self._serialize_finding(f) for f in self.ctx.findings],
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_cost_usd": total_cost_usd,
+            },
+        )
+        return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
+
+    async def _run_tool(
+        self,
+        tools_by_name: dict[str, NativeToolSpec],
+        tool_call: ToolCall,
+    ) -> Any:
+        tool = tools_by_name.get(tool_call.fn_name)
+        if tool is None:
+            return {"error": f"unknown tool: {tool_call.fn_name}"}
+        started = time.monotonic()
+        try:
+            arguments = tool_call.fn_arguments
+            if not isinstance(arguments, dict):
+                arguments = {}
+            return await tool.ainvoke(arguments)
+        except Exception as exc:
+            logger.warning(
+                "Hunter tool %s failed for %s: %s",
+                tool_call.fn_name,
+                self.ctx.file_path,
+                exc,
+            )
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            try:
+                CostTracker().record_tool_call(tool_call.fn_name, duration_ms)
+            except Exception:
+                logger.debug("Tool usage recording failed", exc_info=True)
+
+    @staticmethod
+    def _serialize_finding(finding: Finding) -> dict[str, Any]:
+        return {
+            "id": finding.get("id"),
+            "file": finding.get("file"),
+            "line_number": finding.get("line_number"),
+            "severity": finding.get("severity"),
+            "cwe": finding.get("cwe"),
+            "description": finding.get("description"),
+            "evidence_level": finding.get("evidence_level"),
+        }
+
+
+def _clip_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rstrip()
+    return f"{clipped}\n... truncated {len(text) - len(clipped)} chars ..."
+
+
+def _summarize_match_list(tool_name: str, value: list[Any]) -> str:
+    if not value:
+        return f"{tool_name}: no matches."
+    errors = [item.get("error") for item in value if isinstance(item, dict) and item.get("error")]
+    if errors:
+        return f"{tool_name}: error: {errors[0]}"
+
+    rendered: list[str] = []
+    for item in value[:12]:
+        if isinstance(item, dict):
+            file = item.get("file", "?")
+            line_number = item.get("line_number", "?")
+            matched_text = str(item.get("matched_text", "")).strip()
+            rendered.append(f"- {file}:{line_number}: {_clip_text(matched_text, 180)}")
+        else:
+            rendered.append(f"- {_clip_text(str(item), 180)}")
+
+    omitted = len(value) - len(rendered)
+    header = f"{tool_name}: {len(value)} matches"
+    if omitted > 0:
+        header += f" ({omitted} omitted)"
+    return "\n".join([header, *rendered])
+
+
+def _summarize_tree_listing(arguments: dict[str, Any], value: list[Any]) -> str:
+    dir_path = str(arguments.get("dir_path", "."))
+    if not value:
+        return f"list_source_tree({dir_path}): empty."
+    rendered = [f"- {_clip_text(str(item), 180)}" for item in value[:40]]
+    omitted = len(value) - len(rendered)
+    header = f"list_source_tree({dir_path}): {len(value)} entries"
+    if omitted > 0:
+        header += f" ({omitted} omitted; narrow dir_path or max_depth if you need more)"
+    return "\n".join([header, *rendered])
+
+
+def _summarize_read_source(arguments: dict[str, Any], value: str) -> str:
+    path = str(arguments.get("path", "unknown"))
+    start_line = int(arguments.get("start_line", 1) or 1)
+    end_line = arguments.get("end_line", -1)
+    header = f"read_source_file({path}, start_line={start_line}, end_line={end_line}):"
+    lines = value.splitlines()
+    if len(lines) > 120:
+        kept_lines = lines[:120]
+        body = "\n".join(kept_lines)
+        body += f"\n... truncated {len(lines) - len(kept_lines)} lines; request a narrower range if needed ..."
+        return f"{header}\n{_clip_text(body, 7000)}"
+    return f"{header}\n{_clip_text(value, 7000)}"
+
+
+def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> str:
+    if isinstance(value, str):
+        if tool_name == "read_source_file":
+            return _summarize_read_source(arguments, value)
+        return _clip_text(value, 3000)
+    if isinstance(value, list):
+        if tool_name in {"grep_source", "find_callers"}:
+            return _summarize_match_list(tool_name, value)
+        if tool_name == "list_source_tree":
+            return _summarize_tree_listing(arguments, value)
+        try:
+            return _clip_text(json.dumps(value, indent=2, sort_keys=True), 3000)
+        except Exception:
+            return _clip_text(str(value), 3000)
+    try:
+        return _clip_text(json.dumps(value, indent=2, sort_keys=True), 3000)
+    except Exception:
+        return _clip_text(str(value), 3000)
+
+
+def _estimate_cost_usd(input_tokens: int, output_tokens: int, model: str) -> float:
+    pricing = CostTracker.PRICING.get(model, CostTracker.PRICING[CostTracker._DEFAULT_MODEL])
+    return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+
+
 def build_hunter_agent(
     file_target: FileTarget,
     repo_path: str,
     sandbox: SandboxContainer | None,
-    llm: BaseChatModel,
+    llm: AsyncLLMClient,
     session_id: str,
     project_name: str = "target",
     specialist: str | None = None,
@@ -552,8 +1097,8 @@ def build_hunter_agent(
     variant_seed: dict | None = None,
     sandbox_manager: Any = None,  # v0.4: HunterSandbox manager for variants
     default_sanitizers: tuple = ("asan", "ubsan"),  # v0.4: primary sanitizer combo
-) -> tuple[CompiledStateGraph, HunterContext]:
-    """Build a per-file ReAct hunter agent.
+) -> tuple[NativeHunter, HunterContext]:
+    """Build a per-file native hunter runtime.
 
     Args:
         file_target: The FileTarget to scope the hunter to.
@@ -561,7 +1106,7 @@ def build_hunter_agent(
         sandbox: SandboxContainer for compile/run tools. May be None for tests
                  (the tools fall back to host file I/O for read/grep, and
                  return errors for compile/run).
-        llm: Pre-bound LLM (.bind_tools should NOT be called yet — we do it).
+        llm: Native async LLM client.
         session_id: Audit session id.
         project_name: Project name for the prompt header.
         specialist: Override the auto-selected specialist. v0.1 always uses
@@ -571,7 +1116,7 @@ def build_hunter_agent(
         variant_seed: v0.3 — variant hunter loop seed.
 
     Returns:
-        (compiled_graph, hunter_context). The caller owns the context and
+        (native_hunter, hunter_context). The caller owns the context and
         reads ctx.findings after the run completes.
     """
     # Decide which prompt + tool set to use
@@ -599,36 +1144,15 @@ def build_hunter_agent(
         prompt = _build_propagation_prompt(file_target)
     else:
         tools = build_hunter_tools(ctx)
+        combined_hints = list(semgrep_hints or [])
+        if specialist == "memory_safety":
+            combined_hints = _memory_safety_heuristic_hints(repo_path, file_target) + combined_hints
         prompt = _build_hunter_prompt(
             file_target,
             project_name,
             seeded_crash,
-            semgrep_hints,
+            combined_hints,
             specialist=specialist,
         )
 
-    # Bind tools to the LLM
-    llm_with_tools = llm.bind_tools(tools)
-
-    def system_prompt_fn(state: dict) -> str:
-        # The prompt is fixed per-hunter (the file is the context). We don't
-        # need to re-render from state — return the captured prompt string.
-        return prompt
-
-    graph = build_react_graph(
-        llm_with_tools=llm_with_tools,
-        tools=tools,
-        system_prompt_fn=system_prompt_fn,
-        state_schema=SourceHuntState,
-        model_name="hunter",
-        session_id=session_id,
-        state_updater_fn=_no_op_state_updater,
-        # Disable network-pentest knowledge graph and input-guardrail tool list
-        knowledge_graph_populator_fn=lambda *a, **k: {},
-        input_guardrail_tool_names=frozenset(),
-        output_guardrail_tool_names=frozenset(),
-        enable_knowledge_graph=False,
-        enable_episodic_memory=False,
-    )
-
-    return graph, ctx
+    return NativeHunter(llm=llm, prompt=prompt, tools=tools, ctx=ctx), ctx

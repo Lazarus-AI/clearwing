@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clearwing"
 version = "1.0.0"
-description = "Autonomous vulnerability scanner and source-code hunter built on LangGraph"
+description = "Autonomous vulnerability scanner and source-code hunter"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -40,23 +40,22 @@ dependencies = [
     # Reporting
     "jinja2>=3.1.0",
     "reportlab>=4.0.0",
-    # AI Agent (LangGraph)
-    "langgraph>=0.2.0",
-    "langchain-core>=0.3.0",
-    "langchain-anthropic>=0.3.0",
-    # OpenAI-compatible provider support — covers OpenRouter, Ollama,
-    # LM Studio, vLLM, Together, and any `/v1/chat/completions`
-    # endpoint that speaks the OpenAI dialect.
-    "langchain-openai>=0.3.0",
+    "genai-pyo3",
+    "pydantic>=2.0.0",
     "docker>=7.0.0",
     # TUI
     "textual>=0.47.0",
+    # Web UI
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "websockets>=11.0",
     # Token counting
     "tiktoken>=0.5.0",
     # Knowledge graph
     "networkx>=3.0",
     # Memory
     "numpy>=1.24.0",
+    "chromadb>=1.0.0",
     # Source-hunt pipeline — callgraph extraction
     "tree-sitter>=0.21.0",
     "tree-sitter-c>=0.21.0",
@@ -70,20 +69,8 @@ dependencies = [
 [project.optional-dependencies]
 metasploit = ["pymetasploit3>=1.0.0"]
 browser = ["playwright>=1.40.0"]
-# Native Ollama transport — the OpenAI-compat endpoint at
-# http://localhost:11434/v1 works out-of-the-box via langchain-openai,
-# but the native integration has tighter tool-calling and streaming
-# semantics on some models. Install with `pip install clearwing[ollama]`.
-ollama = ["langchain-ollama>=0.2.0"]
-# Google Gemini support.
-google = ["langchain-google-genai>=2.0.0"]
 vector = [
     "sentence-transformers>=2.2.0",
-]
-web = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
-    "websockets>=11.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -91,6 +78,9 @@ dev = [
     "black>=23.0.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
+    "ruff>=0.11.0",
+    "build>=1.2.0",
+    "twine>=6.0.0",
 ]
 docs = [
     "mkdocs>=1.5.0",
@@ -98,7 +88,7 @@ docs = [
     "mkdocstrings[python]>=0.24.0",
 ]
 all = [
-    "clearwing[metasploit,browser,vector,web,dev,docs,ollama,google]",
+    "clearwing[metasploit,browser,vector,dev,docs]",
 ]
 
 [project.urls]
@@ -109,6 +99,9 @@ Documentation = "https://lazarus-ai.github.io/clearwing/"
 
 [project.scripts]
 clearwing = "clearwing:main"
+
+[tool.uv.sources]
+genai-pyo3 = { git = "https://github.com/ropoctl/genai-pyo3", rev = "59e35864b8a00197ff992c50c90d5ef3132b53b1" }
 
 [tool.setuptools.packages.find]
 include = ["clearwing*"]
@@ -138,7 +131,7 @@ target-version = "py310"
 select = ["E", "F", "I", "UP", "B"]
 ignore = [
     "E501",  # line-too-long — deferred; many tool docstrings exceed 100
-    "B008",  # function calls in default args — frequent in langgraph/pydantic
+    "B008",  # function calls in default args
 ]
 
 [tool.ruff.lint.per-file-ignores]

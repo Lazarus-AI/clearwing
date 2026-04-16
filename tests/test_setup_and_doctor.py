@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -270,13 +271,12 @@ class TestFilesystemCheck:
 
 
 class TestOptionalExtrasCheck:
-    def test_langchain_openai_is_present(self):
-        """langchain-openai is now a runtime dep (Phase 5 multi-provider
-        work). doctor should always report it as OK on a dev install."""
+    def test_genai_pyo3_is_present(self):
+        """genai-pyo3 is the required native LLM runtime dependency."""
         section = doctor._check_optional_extras()
-        langchain_openai = next((c for c in section.checks if c.name == "langchain-openai"), None)
-        assert langchain_openai is not None
-        assert langchain_openai.status == STATUS_OK
+        genai_pyo3 = next((c for c in section.checks if c.name == "genai-pyo3"), None)
+        assert genai_pyo3 is not None
+        assert genai_pyo3.status == STATUS_OK
 
 
 class TestLLMProviderCheck:
@@ -330,8 +330,6 @@ class TestSetupSubcommand:
         assert "init" in setup.ALIASES
 
     def test_setup_parser_accepts_provider_flag(self):
-        import argparse
-
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command")
         setup.add_parser(subparsers)
@@ -343,8 +341,6 @@ class TestSetupSubcommand:
 
 class TestDoctorSubcommand:
     def test_doctor_parser_accepts_json_flag(self):
-        import argparse
-
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command")
         doctor.add_parser(subparsers)

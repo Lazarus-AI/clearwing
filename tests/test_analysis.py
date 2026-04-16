@@ -65,60 +65,76 @@ class TestSourceAnalyzerPatterns:
             return analyzer.analyze()
 
     def test_python_sql_injection_format(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "sql_injection" in types
 
     def test_python_sql_injection_fstring(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             cursor.execute(f"SELECT * FROM users WHERE id = {uid}")
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "sql_injection" in types
 
     def test_python_command_injection_os_system(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             import os
             os.system("ping " + user_input)
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "command_injection" in types
 
     def test_python_eval(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             result = eval(user_expr)
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "code_injection" in types
 
     def test_python_pickle(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             import pickle
             obj = pickle.loads(data)
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "insecure_deserialization" in types
 
     def test_python_hardcoded_secret(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             api_key = "sk-1234567890abcdef"
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "hardcoded_secret" in types
 
     def test_python_debug_mode(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             DEBUG = True
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "misconfiguration" in types
 
     def test_python_ssl_verify_false(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             requests.get(url, verify=False)
-        """)
+        """
+        )
         types = {f.finding_type for f in result.findings}
         assert "insecure_transport" in types
 
@@ -174,10 +190,12 @@ class TestSourceAnalyzerPatterns:
         assert "sql_injection" in types
 
     def test_clean_code_no_findings(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             def add(a, b):
                 return a + b
-        """)
+        """
+        )
         assert len(result.findings) == 0
 
     def test_skips_large_files(self):
@@ -199,9 +217,11 @@ class TestSourceAnalyzerPatterns:
 
     def test_deduplication(self):
         # Same pattern matched twice at same location should be deduped
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             cursor.execute("SELECT * FROM t WHERE x = %s" % val)
-        """)
+        """
+        )
         # Should only appear once for the line
         sql_findings = [f for f in result.findings if f.finding_type == "sql_injection"]
         file_line_combos = {(f.file_path, f.line_number) for f in sql_findings}
@@ -230,27 +250,33 @@ class TestSourceAnalyzerAST:
             return analyzer.analyze()
 
     def test_ast_fstring_in_execute(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             def get_user(uid):
                 cursor.execute(f"SELECT * FROM users WHERE id = {uid}")
-        """)
+        """
+        )
         high_conf = [f for f in result.findings if f.confidence == "high"]
         assert len(high_conf) > 0
 
     def test_ast_binop_in_execute(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             def get_user(uid):
                 cursor.execute("SELECT * FROM users WHERE id = " + uid)
-        """)
+        """
+        )
         sql = [f for f in result.findings if f.finding_type == "sql_injection"]
         assert len(sql) > 0
 
     def test_ast_assert_auth(self):
-        result = self._analyze_code("""
+        result = self._analyze_code(
+            """
             def admin_action(user):
                 assert user.is_admin
                 do_stuff()
-        """)
+        """
+        )
         auth = [f for f in result.findings if f.finding_type == "assert_auth"]
         assert len(auth) > 0
 
@@ -269,76 +295,92 @@ class TestTaintTracker:
             return tracker.analyze_file(fpath)
 
     def test_direct_taint_to_execute(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def view(request):
                 uid = request.args.get('id')
                 cursor.execute("SELECT * FROM users WHERE id = " + uid)
-        """)
+        """
+        )
         assert len(flows) > 0
         assert flows[0].finding_type == "sql_injection"
 
     def test_taint_through_assignment(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def view(request):
                 uid = request.args.get('id')
                 query = "SELECT * FROM users WHERE id = " + uid
                 cursor.execute(query)
-        """)
+        """
+        )
         assert len(flows) > 0
 
     def test_taint_to_os_system(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def ping(request):
                 host = request.form.get('host')
                 os.system("ping " + host)
-        """)
+        """
+        )
         assert len(flows) > 0
         assert flows[0].finding_type == "command_injection"
 
     def test_taint_to_eval(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def calc(request):
                 expr = request.args.get('expr')
                 eval(expr)
-        """)
+        """
+        )
         assert len(flows) > 0
         assert flows[0].finding_type == "code_injection"
 
     def test_no_taint_clean_code(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def add(a, b):
                 return a + b
-        """)
+        """
+        )
         assert len(flows) == 0
 
     def test_no_taint_parameterized_query(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def view(request):
                 uid = request.args.get('id')
                 cursor.execute("SELECT * FROM users WHERE id = %s", (uid,))
-        """)
+        """
+        )
         # The taint goes to execute but as a second arg (param), not the query string itself
         # Our simple analysis may still flag this — that's acceptable for this implementation
         # The key point is the tracker processes without error
         assert isinstance(flows, list)
 
     def test_taint_to_open(self):
-        flows = self._trace("""
+        flows = self._trace(
+            """
             def download(request):
                 fname = request.args.get('file')
                 f = open(fname)
-        """)
+        """
+        )
         assert len(flows) > 0
         assert flows[0].finding_type == "path_traversal"
 
     def test_analyze_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(os.path.join(tmp, "a.py")).write_text(
-                textwrap.dedent("""
+                textwrap.dedent(
+                    """
                 def view(request):
                     uid = request.args.get('id')
                     cursor.execute(uid)
-            """)
+            """
+                )
             )
             Path(os.path.join(tmp, "b.py")).write_text("x = 1\n")
             tracker = TaintTracker()
@@ -352,11 +394,13 @@ class TestTaintTracker:
     def test_get_summary_with_flows(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(os.path.join(tmp, "a.py")).write_text(
-                textwrap.dedent("""
+                textwrap.dedent(
+                    """
                 def view(request):
                     uid = request.args.get('id')
                     eval(uid)
-            """)
+            """
+                )
             )
             tracker = TaintTracker()
             tracker.analyze_directory(tmp)

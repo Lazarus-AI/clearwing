@@ -20,7 +20,8 @@ class Database:
             cursor = conn.cursor()
 
             # Targets table
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS targets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ip_address TEXT UNIQUE NOT NULL,
@@ -28,10 +29,12 @@ class Database:
                     os TEXT,
                     last_scan TIMESTAMP
                 )
-            """)
+            """
+            )
 
             # Ports table
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     target_id INTEGER NOT NULL,
@@ -42,10 +45,12 @@ class Database:
                     version TEXT,
                     FOREIGN KEY (target_id) REFERENCES targets(id)
                 )
-            """)
+            """
+            )
 
             # Vulnerabilities table
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS vulnerabilities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     port_id INTEGER NOT NULL,
@@ -55,10 +60,12 @@ class Database:
                     exploit_available BOOLEAN,
                     FOREIGN KEY (port_id) REFERENCES ports(id)
                 )
-            """)
+            """
+            )
 
             # Exploits table
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS exploits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     vuln_id INTEGER NOT NULL,
@@ -68,7 +75,8 @@ class Database:
                     timestamp TIMESTAMP,
                     FOREIGN KEY (vuln_id) REFERENCES vulnerabilities(id)
                 )
-            """)
+            """
+            )
 
             conn.commit()
 

@@ -1,6 +1,6 @@
 from typing import Any
 
-from langchain_core.tools import tool
+from clearwing.agent.tooling import tool
 
 
 @tool

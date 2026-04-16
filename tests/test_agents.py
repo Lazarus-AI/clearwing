@@ -1,5 +1,8 @@
 """Tests for the specialist agent modules (planner, recon, exploit, reporter)."""
 
+import json
+
+from clearwing.agent.specialists import ExploitAgent, ReconAgent, ReporterAgent
 from clearwing.agent.specialists.planner_agent import Plan, PlannerAgent, Subtask
 
 # --- Subtask ---
@@ -105,7 +108,6 @@ class TestParseSubtasks:
 
     def test_max_15_subtasks(self):
         items = [{"description": f"Task {i}", "agent": "recon"} for i in range(20)]
-        import json
 
         content = json.dumps(items)
         subtasks = PlannerAgent._parse_subtasks(content)
@@ -138,19 +140,13 @@ class TestAgentInterfaces:
         assert agent.llm is not None
 
     def test_recon_agent_init(self):
-        from clearwing.agent.specialists import ReconAgent
-
         agent = ReconAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"
 
     def test_exploit_agent_init(self):
-        from clearwing.agent.specialists import ExploitAgent
-
         agent = ExploitAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"
 
     def test_reporter_agent_init(self):
-        from clearwing.agent.specialists import ReporterAgent
-
         agent = ReporterAgent(model_name="claude-sonnet-4-6")
         assert agent.model_name == "claude-sonnet-4-6"

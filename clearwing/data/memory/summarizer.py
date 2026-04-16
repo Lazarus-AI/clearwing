@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from clearwing.llm import HumanMessage, SystemMessage
 
 # Patterns that indicate a captured flag — these messages must never be dropped.
 _FLAG_PATTERNS = re.compile(
@@ -77,11 +77,7 @@ class ContextSummarizer:
         ]
 
         summary_response = await llm.ainvoke(summary_input)
-        summary_text = (
-            summary_response.content
-            if hasattr(summary_response, "content")
-            else str(summary_response)
-        )
+        summary_text = getattr(summary_response, "content", str(summary_response))
 
         # Reconstruct the message list.
         result: list = [

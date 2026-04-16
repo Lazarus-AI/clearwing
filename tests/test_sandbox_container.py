@@ -7,6 +7,8 @@ wrapping. They do NOT touch a real docker daemon.
 
 from __future__ import annotations
 
+import io
+import tarfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -200,9 +202,6 @@ class TestSandboxFileIO:
         _, container = mock_docker
 
         # Build a fake tar stream containing one file
-        import io
-        import tarfile
-
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             data = b"file contents here"

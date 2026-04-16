@@ -11,6 +11,7 @@ from clearwing.data.memory.episodic_memory import Episode, EpisodicMemory
 from clearwing.data.memory.semantic_memory import Knowledge, SemanticMemory
 from clearwing.data.memory.session_store import SessionInfo, SessionStore
 from clearwing.data.memory.summarizer import ContextSummarizer
+from clearwing.llm import AIMessage, HumanMessage
 
 # =========================================================================
 # SessionStore
@@ -234,29 +235,21 @@ class TestContextSummarizer:
         self.summarizer = ContextSummarizer()
 
     def test_should_summarize_false_when_short(self):
-        from langchain_core.messages import HumanMessage
-
         messages = [HumanMessage(content="hello")]
         assert self.summarizer.should_summarize(messages) is False
 
     def test_should_summarize_true_when_long(self):
-        from langchain_core.messages import HumanMessage
-
         # 120000 tokens * 4 chars = 480000 chars needed to exceed 80% of 150000
         big_msg = HumanMessage(content="x" * 500000)
         assert self.summarizer.should_summarize([big_msg]) is True
 
     def test_should_summarize_custom_threshold(self):
-        from langchain_core.messages import HumanMessage
-
         msg = HumanMessage(content="x" * 1000)
         # 1000 chars / 4 = 250 tokens. 80% of 200 = 160. 250 > 160 → True
         assert self.summarizer.should_summarize([msg], max_tokens=200) is True
 
     @pytest.mark.asyncio
     async def test_summarize_preserves_flags(self):
-        from langchain_core.messages import AIMessage, HumanMessage
-
         messages = []
         for i in range(10):
             messages.append(HumanMessage(content=f"Message {i}"))
@@ -281,8 +274,6 @@ class TestContextSummarizer:
 
     @pytest.mark.asyncio
     async def test_summarize_keeps_recent_messages(self):
-        from langchain_core.messages import HumanMessage
-
         messages = [HumanMessage(content=f"Msg {i}") for i in range(10)]
 
         mock_llm = AsyncMock()

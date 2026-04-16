@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from clearwing.core.events import EventBus, EventType
+
 from .metrics import MetricsCollector
 from .tracer import ConsoleExporter, InMemoryExporter, Tracer
 
@@ -49,12 +51,6 @@ class ObservabilityIntegration:
         if self._connected:
             return
 
-        try:
-            from clearwing.core.events import EventBus, EventType
-        except ImportError:
-            logger.warning("EventBus not available; observability disabled")
-            return
-
         bus = EventBus()
         self._handlers = {
             EventType.TOOL_START: self._on_tool_start,
@@ -75,14 +71,9 @@ class ObservabilityIntegration:
         if not self._connected:
             return
 
-        try:
-            from clearwing.core.events import EventBus
-
-            bus = EventBus()
-            for event_type, handler in self._handlers.items():
-                bus.unsubscribe(event_type, handler)
-        except ImportError:
-            pass
+        bus = EventBus()
+        for event_type, handler in self._handlers.items():
+            bus.unsubscribe(event_type, handler)
 
         self.tracer.shutdown()
         self._connected = False

@@ -2,6 +2,8 @@
 
 from rich.table import Table
 
+from ...data.database import Database
+
 
 def add_parser(subparsers):
     parser = subparsers.add_parser("history", help="Show scan history")
@@ -11,8 +13,6 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Show scan history."""
-    from ...data.database import Database
-
     db = Database()
 
     if args.target:

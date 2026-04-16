@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from langchain_core.tools import tool
-
+from clearwing.llm import NativeToolSpec
 from clearwing.sourcehunt.state import Finding
 
 from .sandbox import HunterContext
@@ -21,7 +20,6 @@ from .sandbox import HunterContext
 def build_reporting_tools(ctx: HunterContext) -> list:
     """Build the single finding-reporter tool for a hunter session."""
 
-    @tool
     def record_finding(
         file: str,
         line_number: int,
@@ -80,4 +78,34 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             f"(severity={severity}, evidence_level={evidence_level})"
         )
 
-    return [record_finding]
+    return [
+        NativeToolSpec(
+            name="record_finding",
+            description="Record a verified or suspected finding into the hunter state.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string"},
+                    "line_number": {"type": "integer"},
+                    "finding_type": {"type": "string"},
+                    "severity": {"type": "string"},
+                    "cwe": {"type": "string"},
+                    "description": {"type": "string"},
+                    "code_snippet": {"type": "string", "default": ""},
+                    "crash_evidence": {"type": "string", "default": ""},
+                    "poc": {"type": "string", "default": ""},
+                    "confidence": {"type": "string", "default": "medium"},
+                    "evidence_level": {"type": "string", "default": "suspicion"},
+                },
+                "required": [
+                    "file",
+                    "line_number",
+                    "finding_type",
+                    "severity",
+                    "cwe",
+                    "description",
+                ],
+            },
+            handler=record_finding,
+        )
+    ]

@@ -14,13 +14,12 @@ Findings reaching patch_validated are the gold standard in reports.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Literal
 
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from clearwing.findings.types import Finding
+from clearwing.llm import BaseMessage
 
 # --- Evidence ladder ---------------------------------------------------------
 
@@ -133,14 +132,14 @@ class FileTarget(TypedDict, total=False):
 
 
 class SourceHuntState(TypedDict, total=False):
-    """LangGraph state for hunter/verifier/exploiter sub-graphs.
+    """State for hunter/verifier/exploiter sub-graphs.
 
     Every v0.2/v0.3 field is present from v0.1 with safe defaults so the
     schema is forward-compatible. v0.1 code paths simply don't read or
     write the future fields.
     """
 
-    messages: Annotated[list[BaseMessage], add_messages]
+    messages: list[BaseMessage]
     repo_url: str
     repo_path: str
     branch: str

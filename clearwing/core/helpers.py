@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import re
 from typing import Any
 
@@ -49,8 +50,6 @@ def format_output(data: dict[str, Any], format: str = "text") -> str:
         Formatted string
     """
     if format == "json":
-        import json
-
         return json.dumps(data, indent=2)
 
     elif format == "table":

@@ -11,11 +11,9 @@ These tests assert that:
 
 from __future__ import annotations
 
-from typing import Annotated
+import inspect
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from clearwing.agent.graph import (
@@ -24,12 +22,14 @@ from clearwing.agent.graph import (
     create_agent,
 )
 from clearwing.agent.state import AgentState
+from clearwing.agent.tooling import tool
+from clearwing.llm import BaseMessage
 
 
 class CustomState(TypedDict):
     """Module-level TypedDict so Python 3.14 lazy annotations resolve correctly."""
 
-    messages: Annotated[list[BaseMessage], add_messages]
+    messages: list[BaseMessage]
     custom_field: str
 
 
@@ -82,8 +82,6 @@ class TestBuildReactGraphSignature:
     """build_react_graph exposes the expected parameters."""
 
     def test_signature_has_required_kwargs(self):
-        import inspect
-
         sig = inspect.signature(build_react_graph)
         params = sig.parameters
         # Positional / required
@@ -100,8 +98,6 @@ class TestBuildReactGraphSignature:
         assert "output_guardrail_tool_names" in params
 
     def test_state_schema_default_is_agent_state(self):
-        import inspect
-
         sig = inspect.signature(build_react_graph)
         assert sig.parameters["state_schema"].default is AgentState
 
@@ -110,8 +106,6 @@ class TestBuildReactGraphMinimal:
     """Build a graph with a custom state schema, prompt, and tools — no LLM call."""
 
     def test_compiles_with_custom_state_and_tools(self):
-        from langchain_core.tools import tool
-
         @tool
         def custom_tool(x: str) -> str:
             """Echo the input."""
@@ -163,8 +157,6 @@ class TestCreateAgentDelegatesToBuildReactGraph:
             mock_create_llm.assert_called_once()
 
     def test_create_agent_passes_custom_tools(self):
-        from langchain_core.tools import tool
-
         @tool
         def my_extra_tool(x: int) -> int:
             """Doubler."""

@@ -16,14 +16,16 @@ total_spent, cancel, assign_tier) is preserved.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from clearwing.runners.parallel.executor import (
-    ParallelExecutor,
-    ParallelScanConfig,
+    TargetResult,
 )
 from clearwing.runners.parallel.executor import (
     TierBudget as _ExecutorTierBudget,
@@ -32,6 +34,7 @@ from clearwing.runners.parallel.executor import (
 from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
+_DEFAULT_HUNTER_FACTORY = None
 
 
 # Re-export so existing callers that import from pool.py still work
@@ -85,9 +88,10 @@ class HuntPoolConfig:
     cost_limit_per_file_a: float = 0.25
     cost_limit_per_file_b: float = 0.15
     cost_limit_per_file_c: float = 0.04
-    timeout_minutes_per_file: int = 15
+    timeout_minutes_per_file: int = 0
     on_finding: Callable | None = None
     session_id_prefix: str = "hunt"
+    sandbox_manager: Any = None
     # v0.2 seeded-crash lookup: {repo_relative_file_path: {report, target_function, ...}}
     seeded_crashes_by_file: dict = field(default_factory=dict)
     # v0.2 Semgrep hints: {repo_relative_file_path: [semgrep_finding_dicts]}
@@ -97,92 +101,64 @@ class HuntPoolConfig:
 # --- HunterPool -------------------------------------------------------------
 
 
-class _FileHunterRunner:
-    """CICDResult-shaped runner that executes one hunter over one FileTarget.
-
-    Used as the `runner_factory` payload for ParallelExecutor. Each
-    instance is created by HunterPool's factory closure and wraps the
-    logic that used to live in HunterPool._run_one_hunter.
-    """
-
-    def __init__(
-        self,
-        file_target: FileTarget,
-        hunter_pool: HunterPool,
-    ):
-        self.file_target = file_target
-        self._pool = hunter_pool
-
-    def run(self) -> Any:
-        findings, cost = self._pool._run_one_hunter(self.file_target, 0.0)
-        # Build a CICDResult-shaped result for ParallelExecutor to consume
-        from clearwing.runners.cicd.runner import CICDResult
-
-        return CICDResult(
-            exit_code=0,
-            target=self.file_target.get("path", ""),
-            depth="sourcehunt",
-            # CICDResult.findings is declared `list[dict]` but sourcehunt
-            # stashes real `Finding` dataclasses — the pool unpacks them
-            # back out at the boundary via the `cast(list[Finding], ...)`
-            # in HunterPool.run().
-            findings=cast(list, findings),
-            duration_seconds=0.0,
-            cost_usd=cost,
-            tokens_used=0,
-            output_path=None,
-        )
-
-
 class HunterPool:
-    """Tiered parallel hunter executor — v0.4 shim over ParallelExecutor.
-
-    Preserves the existing HunterPool API (run() → list[Finding],
-    spent_per_tier, total_spent, cancel) while delegating all the
-    scheduling/threading/budget logic to the generalized ParallelExecutor.
-
-    This means a single battle-tested parallel engine powers both the
-    network-pentest flat path and the sourcehunt tiered path.
-    """
+    """Tiered parallel hunter executor with native async LLM scheduling."""
 
     def __init__(self, config: HuntPoolConfig):
         self.config = config
-        # Pre-assign tiers (the executor reads this via item_tier_fn)
         for ft in self.config.files:
             ft["tier"] = assign_tier(ft)
-
-        # Build an R3-compatible runner_factory that closes over self so
-        # the inner runner can reach back into the pool for sandbox + llm
-        # configuration.
-        def factory(item: Any, pe_config: ParallelScanConfig) -> _FileHunterRunner:
-            return _FileHunterRunner(item, self)
-
-        # The executor's item_cost_limits replaces the per-tier caps.
-        self._parallel_config = ParallelScanConfig(
-            items=self.config.files,
-            runner_factory=factory,
-            max_parallel=self.config.max_parallel,
-            total_cost_limit=self.config.budget_usd,
-            timeout_minutes=self.config.timeout_minutes_per_file,
-            tier_budget=self.config.tier_budget,
-            item_tier_fn=lambda f: f.get("tier", "C"),
-            item_key_fn=lambda f: f.get("path", ""),
-            item_cost_limits={
-                "A": self.config.cost_limit_per_file_a,
-                "B": self.config.cost_limit_per_file_b,
-                "C": self.config.cost_limit_per_file_c,
-            },
-        )
-        self._executor = ParallelExecutor(self._parallel_config)
+        self._results: dict[str, TargetResult] = {}
+        self._spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
+        self._cancelled = False
 
     def run(self) -> list[Finding]:
-        """Run the full A → B → C pipeline. Returns merged findings.
+        return asyncio.run(self.arun())
 
-        Delegates to ParallelExecutor.run() which handles submission,
-        budget gating, rollover, and per-tier cost tracking. Extracts
-        Finding objects from the TargetResult.findings lists.
-        """
-        target_results = self._executor.run()
+    async def arun(self) -> list[Finding]:
+        """Run the full A → B → C pipeline. Returns merged findings."""
+        logger.info("HunterPool dispatching %d tiered file tasks", len(self.config.files))
+        by_tier: dict[str, list[FileTarget]] = {"A": [], "B": [], "C": []}
+        for item in self.config.files:
+            by_tier[item.get("tier", "C")].append(item)
+
+        total_budget = self.config.budget_usd
+        tb = self.config.tier_budget
+        budget_a = total_budget * tb.tier_a_fraction
+        budget_b = total_budget * tb.tier_b_fraction
+        budget_c = total_budget * tb.tier_c_fraction
+
+        spent_a = await self._run_tier_phase(
+            by_tier["A"],
+            "A",
+            budget_a,
+            self.config.cost_limit_per_file_a,
+        )
+        budget_b += max(0.0, budget_a - spent_a)
+
+        spent_b = await self._run_tier_phase(
+            by_tier["B"],
+            "B",
+            budget_b,
+            self.config.cost_limit_per_file_b,
+        )
+        budget_c += max(0.0, budget_b - spent_b)
+
+        if by_tier["C"] and tb.tier_c_fraction > 0:
+            await self._run_tier_phase(
+                by_tier["C"],
+                "C",
+                budget_c,
+                self.config.cost_limit_per_file_c,
+            )
+
+        target_results = list(self._results.values())
+        status_counts = Counter(tr.status for tr in target_results)
+        if status_counts:
+            logger.info("HunterPool result statuses: %s", dict(status_counts))
+        error_results = [tr for tr in target_results if tr.status == "error"]
+        for tr in error_results[:10]:
+            logger.warning("HunterPool error for %s: %s", tr.target, tr.error or "(no error text)")
         all_findings: list[Finding] = []
         for tr in target_results:
             if tr.status == "completed":
@@ -197,76 +173,198 @@ class HunterPool:
                             self.config.on_finding(f)
                         except Exception:
                             logger.debug("on_finding callback failed", exc_info=True)
+        logger.info(
+            "HunterPool finished: completed=%d findings=%d spent=%s",
+            sum(1 for tr in target_results if tr.status == "completed"),
+            len(all_findings),
+            self.spent_per_tier,
+        )
         return all_findings
 
     def cancel(self) -> None:
-        self._executor.cancel()
+        self._cancelled = True
 
     @property
     def spent_per_tier(self) -> dict[str, float]:
-        """Per-tier spend breakdown. Delegates to the underlying executor."""
-        return self._executor.spent_per_tier
+        return dict(self._spent_per_tier)
 
     @property
     def total_spent(self) -> float:
-        return sum(self._executor.spent_per_tier.values())
+        return sum(self._spent_per_tier.values())
+
+    async def _run_tier_phase(
+        self,
+        items: list[FileTarget],
+        tier: str,
+        budget: float,
+        cost_per_item: float,
+    ) -> float:
+        if not items or budget <= 0:
+            return 0.0
+
+        timeout = (
+            self.config.timeout_minutes_per_file * 60
+            if self.config.timeout_minutes_per_file > 0
+            else None
+        )
+        spent = 0.0
+        in_flight: dict[asyncio.Task[TargetResult], str] = {}
+        item_iter = iter(items)
+
+        def _submit_next() -> bool:
+            nonlocal spent
+            if self._cancelled or spent >= budget:
+                return False
+            try:
+                nxt = next(item_iter)
+            except StopIteration:
+                return False
+            key = nxt.get("path", "")
+            task = asyncio.create_task(
+                self._run_file_task(
+                    nxt,
+                    cost_limit=(cost_per_item or 0.0),
+                    tier=tier,
+                )
+            )
+            in_flight[task] = key
+            return True
+
+        for _ in range(max(1, self.config.max_parallel)):
+            if not _submit_next():
+                break
+
+        while in_flight:
+            done, _pending = await asyncio.wait(
+                list(in_flight.keys()),
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if timeout is not None and not done:
+                logger.warning(
+                    "tier %s had no completed hunters within %ss; marking %d in-flight items as timeout",
+                    tier,
+                    timeout,
+                    len(in_flight),
+                )
+                for task, key in list(in_flight.items()):
+                    task.cancel()
+                    self._results[key] = TargetResult(
+                        target=key,
+                        status="timeout",
+                        error=f"Hunter did not complete within {timeout}s",
+                        tier=tier,
+                    )
+                for pending_item in item_iter:
+                    pending_key = pending_item.get("path", "")
+                    self._results[pending_key] = TargetResult(
+                        target=pending_key,
+                        status="timeout",
+                        error=f"Tier {tier} aborted after no completions within {timeout}s",
+                        tier=tier,
+                    )
+                return spent
+
+            for task in done:
+                key = in_flight.pop(task)
+                try:
+                    result = await task
+                except asyncio.CancelledError:
+                    result = TargetResult(
+                        target=key,
+                        status="cancelled",
+                        tier=tier,
+                    )
+                except Exception as exc:
+                    logger.warning("tier %s hunter for %s failed: %s", tier, key, exc)
+                    result = TargetResult(
+                        target=key,
+                        status="error",
+                        error=str(exc),
+                        tier=tier,
+                    )
+                self._results[key] = result
+                self._spent_per_tier[tier] += result.cost_usd
+                spent += result.cost_usd
+                _submit_next()
+
+        return spent
 
     # --- Internals: hunter-specific logic the runner delegates back to ----
 
-    def _run_one_hunter(
+    async def _run_file_task(
         self,
         file_target: FileTarget,
         cost_limit: float,
-    ) -> tuple[list[Finding], float]:
-        """Run a single hunter agent. Returns (findings, cost_usd)."""
+        tier: str,
+    ) -> TargetResult:
+        findings, cost, tokens = await self._run_one_hunter(file_target, cost_limit)
+        return TargetResult(
+            target=file_target.get("path", ""),
+            status="completed",
+            findings=cast(list[dict], findings),
+            cost_usd=cost,
+            tokens_used=tokens,
+            tier=tier,
+        )
+
+    async def _run_one_hunter(
+        self,
+        file_target: FileTarget,
+        cost_limit: float,
+    ) -> tuple[list[Finding], float, int]:
+        """Run a single hunter. Returns (findings, cost_usd, tokens_used)."""
+        logger.info(
+            "Hunter starting for %s (tier=%s cost_limit=%.2f)",
+            file_target.get("path"),
+            file_target.get("tier"),
+            cost_limit,
+        )
 
         # Spawn a fresh sandbox if a factory is provided
         sandbox = None
         if self.config.sandbox_factory is not None:
             try:
-                sandbox = self.config.sandbox_factory()
+                sandbox = await asyncio.to_thread(self.config.sandbox_factory)
             except Exception as e:
                 logger.warning("sandbox_factory failed for %s: %s", file_target.get("path"), e)
 
         try:
-            graph, ctx = self._build_hunter_for_file(file_target, sandbox)
-            session_id = ctx.session_id
-            # Run the graph
-            initial_state = self._initial_state(file_target, session_id)
-            cfg = {"configurable": {"thread_id": f"{self.config.session_id_prefix}-{session_id}"}}
-            try:
-                for _event in graph.stream(initial_state, cfg, stream_mode="values"):
-                    pass
-            except Exception as e:
-                logger.warning("Hunter graph stream failed for %s: %s", file_target.get("path"), e)
+            hunter, ctx = self._build_hunter_for_file(file_target, sandbox)
+            findings, cost_used, tokens_used = await hunter.arun()
 
-            # Pull cost from the final state if available
-            try:
-                final_state = graph.get_state(cfg)
-                final_values = final_state.values if hasattr(final_state, "values") else {}
-                cost_used = float(final_values.get("total_cost_usd", 0.0))
-            except Exception:
-                cost_used = 0.0
-
-            return list(ctx.findings), cost_used
+            logger.info(
+                "Hunter completed for %s findings=%d cost=%.4f",
+                file_target.get("path"),
+                len(findings),
+                cost_used,
+            )
+            return list(findings), cost_used, tokens_used
         finally:
+            try:
+                if "ctx" in locals():
+                    ctx.cleanup_variants()
+            except Exception:
+                logger.debug("Variant sandbox cleanup failed", exc_info=True)
             if sandbox is not None:
                 try:
-                    sandbox.stop()
+                    await asyncio.to_thread(sandbox.stop)
                 except Exception:
                     pass
 
     def _build_hunter_for_file(self, file_target: FileTarget, sandbox: Any) -> Any:
         """Either invoke the user-supplied hunter_factory or import build_hunter_agent."""
-        import uuid
-
         session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
 
         if self.config.hunter_factory is not None:
             return self.config.hunter_factory(file_target, sandbox, session_id)
 
         # Default: use build_hunter_agent + the configured llm
-        from .hunter import build_hunter_agent
+        global _DEFAULT_HUNTER_FACTORY
+        if _DEFAULT_HUNTER_FACTORY is None:
+            from .hunter import build_hunter_agent
+
+            _DEFAULT_HUNTER_FACTORY = build_hunter_agent
 
         if self.config.llm is None:
             raise ValueError("HuntPoolConfig.llm is required when hunter_factory is None")
@@ -276,7 +374,7 @@ class HunterPool:
         seeded_crash = self.config.seeded_crashes_by_file.get(file_path)
         semgrep_hints = self.config.semgrep_hints_by_file.get(file_path)
 
-        return build_hunter_agent(
+        return _DEFAULT_HUNTER_FACTORY(
             file_target=file_target,
             repo_path=self.config.repo_path,
             sandbox=sandbox,
@@ -284,37 +382,5 @@ class HunterPool:
             session_id=session_id,
             seeded_crash=seeded_crash,
             semgrep_hints=semgrep_hints,
+            sandbox_manager=self.config.sandbox_manager,
         )
-
-    def _initial_state(self, file_target: FileTarget, session_id: str) -> dict:
-        from langchain_core.messages import HumanMessage
-
-        return {
-            "messages": [
-                HumanMessage(
-                    content=f"Hunt for vulnerabilities in {file_target.get('path', 'unknown')}.",
-                )
-            ],
-            "repo_url": "",
-            "repo_path": self.config.repo_path,
-            "branch": "",
-            "files": [file_target],
-            "files_scanned": [],
-            "current_file": file_target.get("path"),
-            "callgraph": None,
-            "semgrep_findings": [],
-            "fuzz_corpora": [],
-            "seeded_crashes": [],
-            "findings": [],
-            "verified_findings": [],
-            "variant_seeds": [],
-            "exploited_findings": [],
-            "patch_attempts": [],
-            "budget_usd": 0.0,
-            "spent_usd": 0.0,
-            "spent_per_tier": {},
-            "total_tokens": 0,
-            "phase": "hunt",
-            "session_id": session_id,
-            "flags_found": [],
-        }

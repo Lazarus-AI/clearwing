@@ -179,7 +179,10 @@ class ParallelExecutor:
 
             for key, future in self._futures.items():
                 try:
-                    result = future.result(timeout=self.config.timeout_minutes * 60)
+                    if self.config.timeout_minutes and self.config.timeout_minutes > 0:
+                        result = future.result(timeout=self.config.timeout_minutes * 60)
+                    else:
+                        result = future.result()
                     with self._lock:
                         self._results[key] = result
                 except TimeoutError:
@@ -269,10 +272,12 @@ class ParallelExecutor:
             return 0.0
 
         max_parallel = max(1, self.config.max_parallel)
-        timeout = self.config.timeout_minutes * 60
+        timeout = self.config.timeout_minutes * 60 if self.config.timeout_minutes > 0 else None
         spent = 0.0
 
-        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        pool = ThreadPoolExecutor(max_workers=max_parallel)
+        timed_out = False
+        try:
             in_flight: dict[Future, tuple[str, Any]] = {}
             item_iter = iter(items)
 
@@ -308,6 +313,34 @@ class ParallelExecutor:
                     timeout=timeout,
                     return_when=FIRST_COMPLETED,
                 )
+                if timeout is not None and not done:
+                    logger.warning(
+                        "tier %s had no completed runners within %ss; marking %d in-flight items as timeout",
+                        tier,
+                        timeout,
+                        len(in_flight),
+                    )
+                    with self._lock:
+                        for future, (key, _item) in list(in_flight.items()):
+                            future.cancel()
+                            self._results[key] = TargetResult(
+                                target=key,
+                                status="timeout",
+                                error=f"Runner did not complete within {timeout}s",
+                                tier=tier,
+                            )
+                        for pending_item in item_iter:
+                            pending_key = self._item_key(pending_item)
+                            self._results[pending_key] = TargetResult(
+                                target=pending_key,
+                                status="timeout",
+                                error=f"Tier {tier} aborted after no completions within {timeout}s",
+                                tier=tier,
+                            )
+                    in_flight.clear()
+                    timed_out = True
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    return spent
                 for future in done:
                     key, _item = in_flight.pop(future)
                     try:
@@ -324,12 +357,23 @@ class ParallelExecutor:
                         continue
                     # Stamp the tier onto the result
                     result.tier = tier
+                    if result.status != "completed":
+                        logger.warning(
+                            "tier %s runner for %s returned status=%s error=%s",
+                            tier,
+                            key,
+                            result.status,
+                            result.error or "(none)",
+                        )
                     with self._lock:
                         self._results[key] = result
                         self._spent_per_tier[tier] += result.cost_usd
                     spent += result.cost_usd
                     # Submit one more if there's room and budget
                     _submit_next()
+        finally:
+            if not timed_out:
+                pool.shutdown(wait=True, cancel_futures=False)
 
         return spent
 

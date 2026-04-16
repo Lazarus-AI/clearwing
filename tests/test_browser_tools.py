@@ -2,6 +2,8 @@
 
 from clearwing.agent.tools.recon.browser_tools import (
     _browser_state,
+    browser_close,
+    browser_list_tabs,
     get_browser_tools,
 )
 
@@ -41,23 +43,17 @@ class TestBrowserState:
 
 class TestBrowserListTabs:
     def test_empty_tabs(self):
-        from clearwing.agent.tools.recon.browser_tools import browser_list_tabs
-
         result = browser_list_tabs.invoke({})
         assert result == []
 
 
 class TestBrowserClose:
     def test_close_nonexistent_tab(self):
-        from clearwing.agent.tools.recon.browser_tools import browser_close
-
         result = browser_close.invoke({"tab_name": "nonexistent"})
         assert result["closed"] == "nonexistent"
         assert result["remaining_tabs"] == []
 
     def test_close_all_when_empty(self):
-        from clearwing.agent.tools.recon.browser_tools import browser_close
-
         result = browser_close.invoke({})
         assert result["closed"] == "all"
         assert result["remaining_tabs"] == []
