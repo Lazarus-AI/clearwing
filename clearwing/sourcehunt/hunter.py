@@ -20,6 +20,7 @@ from typing import Any
 
 from clearwing.agent.tools.hunt import (
     HunterContext,
+    build_deep_agent_tools,
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
@@ -802,6 +803,100 @@ def _build_propagation_prompt(file_target: FileTarget) -> str:
     )
 
 
+# --- Deep agent mode ----------------------------------------------------------
+
+DEEP_AGENT_PROMPT = """You are a security researcher with full shell access inside a sandboxed container.
+The source tree at /workspace is a writable copy — modify source, add debug printfs, recompile, and use `git diff` to track your changes.
+ASan is enabled by default. UBSan is also available.
+
+Tools:
+- execute(command): Run any shell command. gcc, gdb, strace, valgrind, make are all available.
+- read_file(path): Read a file from the container.
+- write_file(path, contents): Write a file in the container.
+- think(notes): Record your reasoning (visible in the audit trail).
+- record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
+
+Project: {project_name}
+File: {file_path}
+Language: {language}
+Tags: {tags}
+{seeded_crash_block}{semgrep_hints_block}{specialist_focus}
+When you find a vulnerability, call record_finding. Partial results are valuable — if you find a primitive but can't build a full exploit, record it anyway.
+If you find nothing after thorough analysis, say so explicitly.
+"""
+
+_DEEP_SPECIALIST_FOCUS = {
+    "general": "",
+    "memory_safety": (
+        "Focus: memory corruption — buffer overflows, integer overflow/truncation, "
+        "use-after-free, double-free, uninitialized reads, sentinel/counter collisions, "
+        "signed/unsigned confusion, width truncation at cast boundaries."
+    ),
+    "logic_auth": (
+        "Focus: logic and authorization bugs — boolean defaults, comparison semantics, "
+        "trust propagation across boundaries, bypass branches, fail-open patterns, "
+        "TOCTOU races, privilege escalation paths."
+    ),
+    "kernel_syscall": (
+        "Focus: kernel/syscall entry points — copy_from_user bounds, IOCTL cmd confusion, "
+        "reference count lifecycle, locking discipline, capability/permission checks, "
+        "user-controlled indices into kernel arrays."
+    ),
+    "crypto_primitive": (
+        "Focus: cryptographic implementations — timing side channels, IV/nonce reuse, "
+        "key lifecycle (zeroing, derivation), MAC-then-encrypt vs encrypt-then-MAC, "
+        "PRNG seeding, block cipher mode misuse, padding oracle potential."
+    ),
+    "web_framework": (
+        "Focus: web application vulnerabilities — injection at trust boundaries (SQL, "
+        "command, template), SSRF, authorization bypass, session management, CSRF, "
+        "file upload/path traversal, mass assignment, deserialization."
+    ),
+}
+
+
+def _build_deep_agent_prompt(
+    file_target: FileTarget,
+    project_name: str,
+    seeded_crash: dict | None,
+    semgrep_hints: list[dict] | None,
+    specialist: str = "general",
+) -> str:
+    """Render the deep agent prompt for this file."""
+    seeded_crash_block = ""
+    if seeded_crash:
+        report = seeded_crash.get("report", "")
+        seeded_crash_block = (
+            f"\nA fuzz harness produced this crash BEFORE you started:\n"
+            f"{report[:2000]}\n"
+            f"Explain the root cause and assess exploitability.\n"
+        )
+
+    semgrep_hints_block = ""
+    if semgrep_hints:
+        hint_lines = []
+        for h in semgrep_hints[:5]:
+            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+        semgrep_hints_block = (
+            "\nStatic analysis hints (NOT ground truth — starting points only):\n"
+            + "\n".join(hint_lines)
+            + "\n"
+        )
+
+    focus = _DEEP_SPECIALIST_FOCUS.get(specialist, "")
+    specialist_focus = f"\n{focus}\n" if focus else ""
+
+    return DEEP_AGENT_PROMPT.format(
+        project_name=project_name,
+        file_path=file_target.get("path", "unknown"),
+        language=file_target.get("language", "unknown"),
+        tags=", ".join(file_target.get("tags", [])) or "none",
+        seeded_crash_block=seeded_crash_block,
+        semgrep_hints_block=semgrep_hints_block,
+        specialist_focus=specialist_focus,
+    )
+
+
 # --- Public factory ----------------------------------------------------------
 
 
@@ -812,6 +907,19 @@ class NativeHunter:
     tools: list[NativeToolSpec]
     ctx: HunterContext
     max_steps: int = 20
+    agent_mode: str = "constrained"  # "constrained" | "deep"
+    budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
+
+    def _should_stop(self, step: int, cost_usd: float) -> str | None:
+        """Return a stop reason string, or None to continue."""
+        if self.agent_mode == "constrained" and step > self.max_steps:
+            return "max_steps"
+        if self.agent_mode == "deep":
+            if self.budget_usd > 0 and cost_usd >= self.budget_usd * 0.9:
+                return "budget_exhausted"
+            if step > self.max_steps:
+                return "max_steps"
+        return None
 
     async def arun(self) -> tuple[list[Finding], float, int]:
         messages: list[ChatMessage] = [
@@ -828,8 +936,31 @@ class NativeHunter:
         total_cost_usd = 0.0
         repeated_tool_calls: dict[tuple[str, str], int] = {}
         tools_by_name = {tool.name: tool for tool in self.tools}
+        throttle_repeats = self.agent_mode == "constrained"
 
-        for step in range(1, self.max_steps + 1):
+        step = 0
+        while True:
+            step += 1
+            stop_reason = self._should_stop(step, total_cost_usd)
+            if stop_reason:
+                logger.warning(
+                    "Hunter stopped for %s: %s (step=%d, cost=$%.4f, findings=%d)",
+                    self.ctx.file_path, stop_reason, step - 1,
+                    total_cost_usd, len(self.ctx.findings),
+                )
+                trajectory.log(
+                    "finish",
+                    {
+                        "step": step - 1,
+                        "status": stop_reason,
+                        "findings": [self._serialize_finding(f) for f in self.ctx.findings],
+                        "total_input_tokens": total_input_tokens,
+                        "total_output_tokens": total_output_tokens,
+                        "total_cost_usd": total_cost_usd,
+                    },
+                )
+                return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
+
             response = await self.llm.achat(
                 messages=messages,
                 system=self.prompt,
@@ -875,9 +1006,15 @@ class NativeHunter:
                     tool_arguments = tool_call.fn_arguments
                     if not isinstance(tool_arguments, dict):
                         tool_arguments = {}
-                    key = (tool_call.fn_name, tool_call.fn_arguments_json)
-                    repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
-                    if repeated_tool_calls[key] > 3:
+
+                    skipped = False
+                    if throttle_repeats:
+                        key = (tool_call.fn_name, tool_call.fn_arguments_json)
+                        repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
+                        if repeated_tool_calls[key] > 3:
+                            skipped = True
+
+                    if skipped:
                         tool_output = {
                             "error": (
                                 "tool call skipped because the assistant repeated the same "
@@ -960,24 +1097,6 @@ class NativeHunter:
                 },
             )
             return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
-
-        logger.warning(
-            "Hunter hit max steps for %s findings=%d",
-            self.ctx.file_path,
-            len(self.ctx.findings),
-        )
-        trajectory.log(
-            "finish",
-            {
-                "step": self.max_steps,
-                "status": "max_steps",
-                "findings": [self._serialize_finding(f) for f in self.ctx.findings],
-                "total_input_tokens": total_input_tokens,
-                "total_output_tokens": total_output_tokens,
-                "total_cost_usd": total_cost_usd,
-            },
-        )
-        return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
 
     async def _run_tool(
         self,
@@ -1116,6 +1235,8 @@ def build_hunter_agent(
     variant_seed: dict | None = None,
     sandbox_manager: Any = None,  # v0.4: HunterSandbox manager for variants
     default_sanitizers: tuple = ("asan", "ubsan"),  # v0.4: primary sanitizer combo
+    agent_mode: str = "constrained",  # "constrained" | "deep"
+    budget_usd: float = 0.0,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -1133,6 +1254,8 @@ def build_hunter_agent(
         seeded_crash: v0.2 — crash evidence from the harness generator.
         semgrep_hints: v0.2 — Semgrep findings to inject as hints.
         variant_seed: v0.3 — variant hunter loop seed.
+        agent_mode: "constrained" (legacy 9-tool) or "deep" (full-shell 4+1 tool).
+        budget_usd: Per-agent budget in USD (0 = unlimited, bounded by max_steps).
 
     Returns:
         (native_hunter, hunter_context). The caller owns the context and
@@ -1158,9 +1281,21 @@ def build_hunter_agent(
         default_sanitizers=tuple(default_sanitizers),
     )
 
-    if specialist == "propagation":
+    if agent_mode == "deep" and specialist != "propagation":
+        tools = build_deep_agent_tools(ctx)
+        combined_hints = list(semgrep_hints or [])
+        prompt = _build_deep_agent_prompt(
+            file_target,
+            project_name,
+            seeded_crash,
+            combined_hints,
+            specialist=specialist,
+        )
+        max_steps = 500
+    elif specialist == "propagation":
         tools = build_propagation_auditor_tools(ctx)
         prompt = _build_propagation_prompt(file_target)
+        max_steps = 20
     else:
         tools = build_hunter_tools(ctx)
         combined_hints = list(semgrep_hints or [])
@@ -1173,5 +1308,14 @@ def build_hunter_agent(
             combined_hints,
             specialist=specialist,
         )
+        max_steps = 20
 
-    return NativeHunter(llm=llm, prompt=prompt, tools=tools, ctx=ctx), ctx
+    return NativeHunter(
+        llm=llm,
+        prompt=prompt,
+        tools=tools,
+        ctx=ctx,
+        max_steps=max_steps,
+        agent_mode=agent_mode,
+        budget_usd=budget_usd,
+    ), ctx

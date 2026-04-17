@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import subprocess
 import tarfile
 import time
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ class SandboxConfig:
     # (host_path, container_path, "ro"|"rw")
     memory_mb: int = 2048
     cpu_shares: int = 1024
+    cpus: float = 0.0  # 0 = no limit; otherwise docker --cpus
     timeout_seconds: int = 300  # default per-exec timeout
     env: dict[str, str] = field(default_factory=dict)
     working_dir: str = "/workspace"
@@ -101,6 +103,8 @@ class SandboxContainer:
             "environment": self.config.env,
             "working_dir": self.config.working_dir,
         }
+        if self.config.cpus > 0:
+            kwargs["nano_cpus"] = int(self.config.cpus * 1e9)
         if self.config.name:
             kwargs["name"] = self.config.name
         # auto_remove conflicts with detached non-restart containers in some
@@ -221,6 +225,51 @@ class SandboxContainer:
                     if f is not None:
                         return f.read()
         return b""
+
+    def copy_tree_into(
+        self,
+        host_path: str,
+        container_path: str = "/workspace",
+    ) -> None:
+        """Copy a host directory tree into the container.
+
+        Uses streaming tar via subprocess to avoid holding large repos in
+        memory. The container must already be started.
+        """
+        if self._container is None:
+            raise RuntimeError("SandboxContainer.copy_tree_into called before start()")
+
+        start_time = time.monotonic()
+        cid = self._container.id
+
+        self.exec(["mkdir", "-p", container_path], timeout=10)
+
+        tar_proc = subprocess.Popen(
+            ["tar", "cf", "-", "-C", host_path, "."],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        docker_proc = subprocess.Popen(
+            ["docker", "exec", "-i", cid, "tar", "xf", "-", "-C", container_path],
+            stdin=tar_proc.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        tar_proc.stdout.close()
+        _, docker_stderr = docker_proc.communicate(timeout=600)
+        tar_proc.wait(timeout=10)
+
+        duration = time.monotonic() - start_time
+        if docker_proc.returncode != 0:
+            err = (docker_stderr or b"").decode("utf-8", errors="replace")
+            logger.warning(
+                "copy_tree_into failed (rc=%d): %s", docker_proc.returncode, err[:500]
+            )
+            raise RuntimeError(f"copy_tree_into failed: {err[:500]}")
+        logger.debug(
+            "copy_tree_into %s → %s completed in %.1fs",
+            host_path, container_path, duration,
+        )
 
     def stop(self) -> None:
         """Stop and remove the container. Idempotent."""

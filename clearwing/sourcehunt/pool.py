@@ -96,6 +96,7 @@ class HuntPoolConfig:
     seeded_crashes_by_file: dict = field(default_factory=dict)
     # v0.2 Semgrep hints: {repo_relative_file_path: [semgrep_finding_dicts]}
     semgrep_hints_by_file: dict = field(default_factory=dict)
+    agent_mode: str = "constrained"  # "constrained" | "deep"
 
 
 # --- HunterPool -------------------------------------------------------------
@@ -386,4 +387,5 @@ class HunterPool:
             seeded_crash=seeded_crash,
             semgrep_hints=semgrep_hints,
             sandbox_manager=self.config.sandbox_manager,
+            agent_mode=self.config.agent_mode,
         )

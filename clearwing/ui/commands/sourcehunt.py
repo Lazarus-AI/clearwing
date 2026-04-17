@@ -28,6 +28,14 @@ def add_parser(subparsers):
         help="Hunt depth (default: standard)",
     )
     parser.add_argument(
+        "--agent-mode",
+        choices=["auto", "constrained", "deep"],
+        default="auto",
+        dest="agent_mode",
+        help="Agent mode: 'auto' derives from --depth, 'constrained' forces legacy "
+        "9-tool hunter, 'deep' forces full-shell agent (default: auto)",
+    )
+    parser.add_argument(
         "--budget",
         type=float,
         default=0.0,
@@ -427,6 +435,7 @@ def handle(cli, args):
         disclosure_reporter_email=args.reporter_email,
         model_override=args.model,
         provider_manager=provider_manager,
+        agent_mode=args.agent_mode,
     )
 
     cli.console.print(

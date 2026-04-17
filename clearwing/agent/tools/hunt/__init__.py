@@ -41,6 +41,7 @@ from .discovery import (
     _parse_rg_output,
     build_discovery_tools,
 )
+from .deep_agent import build_deep_agent_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext, _parse_variant_arg
 
@@ -75,6 +76,7 @@ def build_propagation_auditor_tools(ctx: HunterContext) -> list:
 __all__ = [
     # Public API
     "HunterContext",
+    "build_deep_agent_tools",
     "build_hunter_tools",
     "build_propagation_auditor_tools",
     # Per-domain builders (for callers that want a narrower tool set)

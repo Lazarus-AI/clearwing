@@ -132,6 +132,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
+        agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -169,6 +170,15 @@ class SourceHuntRunner:
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._agent_mode_override = agent_mode
+
+    @property
+    def _agent_mode(self) -> str:
+        if self._agent_mode_override != "auto":
+            return self._agent_mode_override
+        if self.depth in ("standard", "deep"):
+            return "deep"
+        return "constrained"
 
     # --- Public API ---------------------------------------------------------
 
@@ -294,6 +304,7 @@ class SourceHuntRunner:
                         session_id_prefix=self._session_id,
                         seeded_crashes_by_file=seeded_by_file,
                         semgrep_hints_by_file=semgrep_hints_by_file,
+                        agent_mode=self._agent_mode,
                     )
                 )
                 try:
@@ -773,10 +784,12 @@ class SourceHuntRunner:
             repo_path,
             ",".join(languages) or "unknown",
         )
+        use_deep = self._agent_mode == "deep"
         try:
             manager = HunterSandbox(
                 repo_path=repo_path,
                 languages=languages,
+                deep_agent_mode=use_deep,
             )
             image_tag = manager.build_image()
         except Exception as exc:
@@ -790,7 +803,16 @@ class SourceHuntRunner:
 
         logger.info("HunterSandbox ready image=%s", image_tag)
         self._sandbox_manager = manager
-        self.sandbox_factory = manager.spawn
+        if use_deep:
+            self.sandbox_factory = lambda **kw: manager.spawn(
+                writable_workspace=True,
+                memory_mb=kw.pop("memory_mb", 16384),
+                cpus=kw.pop("cpus", 8.0),
+                timeout_seconds=kw.pop("timeout_seconds", 600),
+                **kw,
+            )
+        else:
+            self.sandbox_factory = manager.spawn
 
     def _build_quick_result(
         self,

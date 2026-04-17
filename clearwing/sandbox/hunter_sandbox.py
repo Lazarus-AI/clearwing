@@ -43,6 +43,8 @@ class HunterSandbox:
     # image, and spawn containers from either one by name.
     DEFAULT_EXTRA_VARIANTS: tuple[tuple[str, ...], ...] = ()
 
+    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git", "ltrace"]
+
     def __init__(
         self,
         repo_path: str,
@@ -51,6 +53,7 @@ class HunterSandbox:
         extra_variants: list[list[str]] | None = None,  # e.g. [["msan"]]
         extra_packages: list[str] | None = None,
         build_recipe: BuildRecipe | None = None,
+        deep_agent_mode: bool = False,
     ):
         self.repo_path = os.path.abspath(repo_path)
         self.languages = languages or []
@@ -63,7 +66,12 @@ class HunterSandbox:
         ]
         for v in self.extra_variants:
             validate_sanitizer_combo(v)
-        self.extra_packages = extra_packages or []
+        self.extra_packages = list(extra_packages or [])
+        self.deep_agent_mode = deep_agent_mode
+        if deep_agent_mode:
+            for pkg in self.DEEP_AGENT_PACKAGES:
+                if pkg not in self.extra_packages:
+                    self.extra_packages.append(pkg)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
         self._image_tag: str | None = None  # primary variant tag
@@ -150,11 +158,14 @@ class HunterSandbox:
         timeout_seconds: int = 300,
         scratch_mount: bool = True,
         variant: list[str] | None = None,
+        writable_workspace: bool = False,
+        cpus: float = 0.0,
     ) -> SandboxContainer:
         """Start a fresh container from one of the built variant images.
 
         The container has:
-            - /workspace mounted read-only from self.repo_path
+            - /workspace mounted read-only from self.repo_path (default),
+              or a writable copy of the source tree (writable_workspace=True)
             - /scratch as a writable tmpfs (if scratch_mount=True)
             - network_mode="none"
             - memory and CPU caps
@@ -165,6 +176,10 @@ class HunterSandbox:
                 self.sanitizers (the primary combo). Must have been built
                 via `build_image()` or listed in `extra_variants`. Pass e.g.
                 `variant=["msan"]` to spawn from the MSan image.
+            writable_workspace: If True, copy the source tree into the
+                container instead of bind-mounting it read-only. The agent
+                can then modify source, recompile, and use git diff.
+            cpus: CPU limit (0 = no limit). Passed to SandboxConfig.
 
         Returns a SandboxContainer ready for exec/write/read.
         """
@@ -184,10 +199,10 @@ class HunterSandbox:
             image_tag = self._build_variant_image(chosen)
             self._variant_images[key] = image_tag
 
-        # Build mounts list — workspace ro, scratch rw via host tmpdir
-        mounts: list[tuple[str, str, str]] = [
-            (self.repo_path, "/workspace", "ro"),
-        ]
+        # Build mounts list
+        mounts: list[tuple[str, str, str]] = []
+        if not writable_workspace:
+            mounts.append((self.repo_path, "/workspace", "ro"))
         scratch_host_dir = None
         if scratch_mount:
             scratch_host_dir = tempfile.mkdtemp(prefix="clearwing-scratch-")
@@ -206,6 +221,7 @@ class HunterSandbox:
             mounts=mounts,
             memory_mb=memory_mb,
             cpu_shares=1024,
+            cpus=cpus,
             timeout_seconds=timeout_seconds,
             env=env,
             working_dir="/workspace",
@@ -214,6 +230,17 @@ class HunterSandbox:
 
         sb = SandboxContainer(cfg)
         sb.start()
+
+        if writable_workspace:
+            sb.copy_tree_into(self.repo_path, "/workspace")
+            try:
+                sb.exec(
+                    "cd /workspace && git init -q && git add -A && git commit -m initial -q",
+                    timeout=120,
+                )
+            except Exception:
+                logger.warning("git init in writable workspace failed", exc_info=True)
+
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb._scratch_host_dir = scratch_host_dir  # type: ignore[attr-defined]
         sb._variant = chosen  # type: ignore[attr-defined]
