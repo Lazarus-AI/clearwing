@@ -83,7 +83,7 @@ source .venv/bin/activate  # fish: source .venv/bin/activate.fish
 clearwing --help
 ```
 
-Requirements: Python 3.10+, a recent Rust toolchain for the native
+Requirements: Python 3.11+, a recent Rust toolchain for the native
 `genai-pyo3` bridge, and optionally Docker for the Kali container and
 sanitizer-image sandbox features. If the install fails with a Rust version
 error, run `rustup update stable`.
@@ -94,10 +94,12 @@ error, run `rustup update stable`.
 # Network scan a single target
 clearwing scan 192.168.1.10 -p 22,80,443 --detect-services
 
-# Source-code hunt a repo (standard depth — sandboxed LLM hunters,
-# adversarial verifier, mechanism memory, variant loop)
+# Source-code hunt a remote repo
 clearwing sourcehunt https://github.com/example/project \
     --depth standard
+
+# Source-code hunt a local checkout
+clearwing sourcehunt --local-path ~/dev/my-project --depth standard
 
 # Interactive ReAct chat with the full tool set
 clearwing interactive
@@ -109,67 +111,34 @@ clearwing ci --config .clearwing.ci.yaml --sarif results.sarif
 See [`docs/quickstart.md`](docs/quickstart.md) for a fuller walkthrough
 including credentials, session resume, and mission-mode operation.
 
-## Running sourcehunt on a local repo (FFmpeg example)
+## Running sourcehunt on a local repo
 
-The `clearwing sourcehunt <url>` CLI clones a remote URL. To hunt an
-already-cloned tree (e.g. FFmpeg) with the native-async pipeline and a
-self-hosted OpenAI-compatible backend, drive `SourceHuntRunner` directly:
+Use `--local-path` to hunt an already-cloned tree without re-cloning:
 
 ```bash
-# 1. Clone the target once
 git clone https://github.com/FFmpeg/FFmpeg.git
-
-# 2. Run sourcehunt against the local checkout
-uv run python -u - <<'PY'
-import logging
-from clearwing.llm.native import AsyncLLMClient
-from clearwing.sourcehunt.runner import SourceHuntRunner
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
-
-REPO = './FFmpeg'
-RUN_DIR = './sourcehunt-results-ffmpeg'
-COMMON = dict(
-    provider_name='openai_resp',            # or 'openai' for /v1/chat/completions
-    api_key='YOUR_KEY',
-    base_url='http://localhost:8183/v1',    # any OpenAI-compatible endpoint
-    max_concurrency=15,
-)
-
-# One client per stage — routes each stage to a different model
-ranker_llm    = AsyncLLMClient(model_name='gpt-5.4-mini',  **COMMON)
-hunter_llm    = AsyncLLMClient(model_name='gpt-5.4',       **COMMON)
-verifier_llm  = AsyncLLMClient(model_name='gpt-5.4-mini',  **COMMON)
-exploiter_llm = AsyncLLMClient(model_name='gpt-5.3-codex', **COMMON)
-
-runner = SourceHuntRunner(
-    repo_url=REPO, local_path=REPO,
-    depth='standard',
-    budget_usd=1000.0,
-    max_parallel=15,
-    output_dir=RUN_DIR,
-    output_formats=['json', 'markdown'],
-    ranker_llm=ranker_llm,
-    hunter_llm=hunter_llm,
-    verifier_llm=verifier_llm,
-    exploiter_llm=exploiter_llm,
-    enable_patch_oracle=True,
-)
-
-print(runner.run())   # sync wrapper; internally drives SourceHuntRunner.arun()
-PY
+clearwing sourcehunt --local-path ./FFmpeg --depth standard
 ```
 
-Findings land in `./sourcehunt-results-ffmpeg/sh-<session-id>/` as JSON +
-markdown once the run completes. FFmpeg is ~10k source files, so expect the
-large-repo ranker to preselect candidates and the tier-A hunter pool to run for hours.
-Redirect stdout/stderr to a file if you plan to detach the process — the
-runner's own artifacts are only written at the end.
+You can also pass a local path as the positional argument directly:
 
-`AsyncLLMClient` accepts `provider_name` values `openai_resp` (the streaming
-`/v1/responses` shape) or `openai` (standard `/v1/chat/completions`); point
-`base_url` at any OpenAI-compatible server. See
-[`docs/providers.md`](docs/providers.md) for the managed-provider paths.
+```bash
+clearwing sourcehunt ./FFmpeg --depth standard
+```
+
+To point at a self-hosted OpenAI-compatible backend:
+
+```bash
+clearwing sourcehunt --local-path ./FFmpeg \
+    --base-url http://localhost:8183/v1 \
+    --api-key YOUR_KEY \
+    --model gpt-5.4 \
+    --depth standard
+```
+
+Findings land in `./sourcehunt-results/sh-<session-id>/` as JSON +
+markdown once the run completes. See
+[`docs/providers.md`](docs/providers.md) for provider-specific recipes.
 
 ## Architecture at a glance
 

@@ -16,7 +16,9 @@ def add_parser(subparsers):
         "sourcehunt",
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
-    parser.add_argument("repo", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "repo", nargs="?", default=None, help="Git URL or local path to a repository"
+    )
     parser.add_argument("--branch", default="main", help="Git branch to clone (default: main)")
     parser.add_argument(
         "--local-path", metavar="PATH", help="Use this local path instead of cloning"
@@ -260,6 +262,14 @@ def handle(cli, args):
     from ...sourcehunt.runner import SourceHuntRunner
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
+
+    # Allow `--local-path` without a positional repo argument.
+    if args.repo is None:
+        if args.local_path:
+            args.repo = args.local_path
+        else:
+            cli.console.print("[red]Error: either provide a repo argument or --local-path[/red]")
+            sys.exit(1)
 
     # Resolve the LLM endpoint once at the top of the command.
     # CLI > env > ~/.clearwing/config.yaml > ANTHROPIC_API_KEY default.
