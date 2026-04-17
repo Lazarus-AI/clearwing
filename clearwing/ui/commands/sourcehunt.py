@@ -36,6 +36,28 @@ def add_parser(subparsers):
         "9-tool hunter, 'deep' forces full-shell agent (default: auto)",
     )
     parser.add_argument(
+        "--prompt-mode",
+        choices=["unconstrained", "specialist"],
+        default="unconstrained",
+        dest="prompt_mode",
+        help="Prompt mode: 'unconstrained' uses a simple discovery prompt "
+        "(default), 'specialist' uses legacy prescriptive checklists",
+    )
+    parser.add_argument(
+        "--campaign-hint",
+        default=None,
+        dest="campaign_hint",
+        metavar="OBJECTIVE",
+        help="Campaign objective hint, e.g. 'bugs reachable from unauthenticated remote input'",
+    )
+    parser.add_argument(
+        "--exploit",
+        action="store_true",
+        default=False,
+        dest="exploit_mode",
+        help="Instruct hunters to write exploits for found vulnerabilities",
+    )
+    parser.add_argument(
         "--budget",
         type=float,
         default=0.0,
@@ -436,6 +458,9 @@ def handle(cli, args):
         model_override=args.model,
         provider_manager=provider_manager,
         agent_mode=args.agent_mode,
+        prompt_mode=args.prompt_mode,
+        campaign_hint=args.campaign_hint,
+        exploit_mode=args.exploit_mode,
     )
 
     cli.console.print(

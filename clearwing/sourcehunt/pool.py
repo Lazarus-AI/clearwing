@@ -97,6 +97,9 @@ class HuntPoolConfig:
     # v0.2 Semgrep hints: {repo_relative_file_path: [semgrep_finding_dicts]}
     semgrep_hints_by_file: dict = field(default_factory=dict)
     agent_mode: str = "constrained"  # "constrained" | "deep"
+    prompt_mode: str = "unconstrained"  # "unconstrained" | "specialist"
+    campaign_hint: str | None = None
+    exploit_mode: bool = False
 
 
 # --- HunterPool -------------------------------------------------------------
@@ -388,4 +391,7 @@ class HunterPool:
             semgrep_hints=semgrep_hints,
             sandbox_manager=self.config.sandbox_manager,
             agent_mode=self.config.agent_mode,
+            prompt_mode=self.config.prompt_mode,
+            campaign_hint=self.config.campaign_hint,
+            exploit_mode=self.config.exploit_mode,
         )

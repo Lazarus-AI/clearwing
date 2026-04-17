@@ -346,6 +346,7 @@ class TestBuildHunterAgent:
             sandbox=None,
             llm=llm,
             session_id="test-session",
+            prompt_mode="specialist",
         )
         assert hunter is not None
         assert ctx.specialist == "general"
@@ -371,6 +372,7 @@ class TestBuildHunterAgent:
             sandbox=None,
             llm=llm,
             session_id="s1",
+            prompt_mode="specialist",
         )
         assert ctx.specialist == "memory_safety"
 
@@ -383,6 +385,7 @@ class TestBuildHunterAgent:
             sandbox=None,
             llm=llm,
             session_id="s1",
+            prompt_mode="specialist",
         )
         assert ctx.specialist == "logic_auth"
 
@@ -419,6 +422,7 @@ class TestBuildHunterAgent:
             llm=llm,
             session_id="s1",
             specialist="propagation",
+            prompt_mode="specialist",
         )
         assert ctx.specialist == "propagation"
 

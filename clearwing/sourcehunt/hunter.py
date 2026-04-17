@@ -259,6 +259,47 @@ class HunterTrajectoryLogger:
 # --- System prompts ---------------------------------------------------------
 
 
+# --- Unconstrained prompt mode (spec 002) -----------------------------------
+
+DISCOVERY_PROMPT = """Please find a security vulnerability in this program.
+
+Your focus: {file_path} in {project_name}
+
+You have access to the full source tree and a sandboxed build/run environment
+with ASan, GDB, and standard development tools. Read the code, understand what
+it does, hypothesize vulnerabilities that might exist, and confirm or reject
+your hypotheses by running the actual project — adding debug logic, using
+debuggers, writing test inputs, whatever you need.
+
+If you find a vulnerability, call record_finding with a description, severity,
+CWE, and proof-of-concept. If you find nothing after thorough investigation,
+say so. Do not fabricate findings.
+{seed_context_block}"""
+
+EXPLOIT_EXTENSION = """In order to help us appropriately triage any bugs you
+find, please write exploits so we can submit the highest severity ones."""
+
+CAMPAIGN_HINT_TEMPLATE = """We are particularly interested in {objective}."""
+
+MITIGATION_REASONING = """When writing an exploit, explicitly consider each
+defensive mitigation that would normally prevent it, and verify whether the
+mitigation actually applies on this specific code path. Mitigations that exist
+in the binary's policy but do not apply on the path you are exploiting are your
+friend.
+
+Examples from real bugs:
+- Stack protector only instruments functions with char arrays; a buffer declared
+  as int32_t[] gets no canary.
+- KASLR is on, but a kernel pointer is deliberately exposed elsewhere.
+- HARDENED_USERCOPY is on, but per-CPU/vmalloc/special-mapping reads bypass it.
+- W^X is on, but JIT regions are writable by design."""
+
+SELF_CHECK = """Before you record a finding: sketch in 3-5 sentences how an
+attacker would actually trigger this and what they'd gain. If you can't,
+reconsider whether the bug is real or interesting."""
+
+# --- Specialist prompt mode (legacy) ----------------------------------------
+
 HUNTER_EXECUTION_RULES = """
 Execution rules:
 - This is a single-file hunt. Start with the target file, not a broad directory listing.
@@ -897,6 +938,52 @@ def _build_deep_agent_prompt(
     )
 
 
+def _build_unconstrained_prompt(
+    file_target: FileTarget,
+    project_name: str,
+    seeded_crash: dict | None,
+    semgrep_hints: list[dict] | None,
+    campaign_hint: str | None = None,
+    exploit_mode: bool = False,
+) -> str:
+    """Build the unconstrained discovery prompt for any agent mode."""
+    seed_parts: list[str] = []
+    if seeded_crash:
+        report = seeded_crash.get("report", "")
+        seed_parts.append(
+            f"\nA fuzz harness produced this crash BEFORE you started:\n"
+            f"{report[:2000]}\n"
+            f"Explain the root cause and assess exploitability.\n"
+        )
+    if semgrep_hints:
+        hint_lines = []
+        for h in semgrep_hints[:5]:
+            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+        seed_parts.append(
+            "\nStatic analysis hints (NOT ground truth — starting points only):\n"
+            + "\n".join(hint_lines)
+            + "\n"
+        )
+    seed_context_block = "".join(seed_parts)
+
+    prompt = DISCOVERY_PROMPT.format(
+        file_path=file_target.get("path", "unknown"),
+        project_name=project_name,
+        seed_context_block=seed_context_block,
+    )
+
+    if exploit_mode:
+        prompt += "\n" + EXPLOIT_EXTENSION
+        prompt += "\n" + MITIGATION_REASONING
+
+    if campaign_hint:
+        prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
+
+    prompt += "\n" + SELF_CHECK
+
+    return prompt
+
+
 # --- Public factory ----------------------------------------------------------
 
 
@@ -1237,6 +1324,9 @@ def build_hunter_agent(
     default_sanitizers: tuple = ("asan", "ubsan"),  # v0.4: primary sanitizer combo
     agent_mode: str = "constrained",  # "constrained" | "deep"
     budget_usd: float = 0.0,
+    prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
+    campaign_hint: str | None = None,
+    exploit_mode: bool = False,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -1256,12 +1346,17 @@ def build_hunter_agent(
         variant_seed: v0.3 — variant hunter loop seed.
         agent_mode: "constrained" (legacy 9-tool) or "deep" (full-shell 4+1 tool).
         budget_usd: Per-agent budget in USD (0 = unlimited, bounded by max_steps).
+        prompt_mode: "unconstrained" (simple discovery prompt) or "specialist"
+                     (legacy prescriptive checklists with execution rules).
+        campaign_hint: Optional campaign objective, e.g. "bugs reachable from
+                       unauthenticated remote input".
+        exploit_mode: When True, append exploit-writing and mitigation-reasoning
+                      instructions to the prompt.
 
     Returns:
         (native_hunter, hunter_context). The caller owns the context and
         reads ctx.findings after the run completes.
     """
-    # Decide which prompt + tool set to use
     tier = file_target.get("tier", "B")
     if specialist is None:
         if tier == "C":
@@ -1275,13 +1370,36 @@ def build_hunter_agent(
         findings=[],
         file_path=file_target.get("path"),
         session_id=session_id,
-        specialist=specialist,
+        specialist=(
+            specialist if prompt_mode == "specialist" or specialist == "propagation"
+            else "unconstrained"
+        ),
         seeded_crash=seeded_crash,
         sandbox_manager=sandbox_manager,
         default_sanitizers=tuple(default_sanitizers),
     )
 
-    if agent_mode == "deep" and specialist != "propagation":
+    if specialist == "propagation":
+        tools = build_propagation_auditor_tools(ctx)
+        prompt = _build_propagation_prompt(file_target)
+        max_steps = 20
+    elif prompt_mode == "unconstrained":
+        combined_hints = list(semgrep_hints or [])
+        prompt = _build_unconstrained_prompt(
+            file_target,
+            project_name,
+            seeded_crash,
+            combined_hints,
+            campaign_hint=campaign_hint,
+            exploit_mode=exploit_mode,
+        )
+        if agent_mode == "deep":
+            tools = build_deep_agent_tools(ctx)
+            max_steps = 500
+        else:
+            tools = build_hunter_tools(ctx)
+            max_steps = 20
+    elif agent_mode == "deep":
         tools = build_deep_agent_tools(ctx)
         combined_hints = list(semgrep_hints or [])
         prompt = _build_deep_agent_prompt(
@@ -1292,10 +1410,6 @@ def build_hunter_agent(
             specialist=specialist,
         )
         max_steps = 500
-    elif specialist == "propagation":
-        tools = build_propagation_auditor_tools(ctx)
-        prompt = _build_propagation_prompt(file_target)
-        max_steps = 20
     else:
         tools = build_hunter_tools(ctx)
         combined_hints = list(semgrep_hints or [])

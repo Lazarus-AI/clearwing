@@ -133,6 +133,9 @@ class SourceHuntRunner:
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
+        prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
+        campaign_hint: str | None = None,
+        exploit_mode: bool = False,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -171,6 +174,9 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
+        self._prompt_mode = prompt_mode
+        self._campaign_hint = campaign_hint
+        self._exploit_mode = exploit_mode
 
     @property
     def _agent_mode(self) -> str:
@@ -305,6 +311,9 @@ class SourceHuntRunner:
                         seeded_crashes_by_file=seeded_by_file,
                         semgrep_hints_by_file=semgrep_hints_by_file,
                         agent_mode=self._agent_mode,
+                        prompt_mode=self._prompt_mode,
+                        campaign_hint=self._campaign_hint,
+                        exploit_mode=self._exploit_mode,
                     )
                 )
                 try:
