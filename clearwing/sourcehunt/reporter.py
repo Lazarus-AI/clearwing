@@ -29,6 +29,7 @@ def write_sourcehunt_report(
     verified_findings: list[Finding],
     spent_per_tier: dict,
     formats: list[str] | None = None,
+    band_stats: dict | None = None,
 ) -> dict[str, str]:
     """Write the requested formats. Returns {format: filesystem_path}."""
     formats = formats or ["sarif", "markdown", "json"]
@@ -59,6 +60,7 @@ def write_sourcehunt_report(
             findings=findings,
             verified_findings=verified_findings,
             spent_per_tier=spent_per_tier,
+            band_stats=band_stats,
         )
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md)
@@ -66,19 +68,17 @@ def write_sourcehunt_report(
 
     if "json" in formats:
         json_path = session_dir / "findings.json"
+        json_data: dict[str, Any] = {
+            "session_id": session_id,
+            "repo_url": repo_url,
+            "spent_per_tier": spent_per_tier,
+            "findings": findings,
+            "verified_findings": verified_findings,
+        }
+        if band_stats:
+            json_data["band_stats"] = band_stats
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "session_id": session_id,
-                    "repo_url": repo_url,
-                    "spent_per_tier": spent_per_tier,
-                    "findings": findings,
-                    "verified_findings": verified_findings,
-                },
-                f,
-                indent=2,
-                default=_json_default,
-            )
+            json.dump(json_data, f, indent=2, default=_json_default)
         paths["json"] = str(json_path)
 
     # Always write a manifest
@@ -147,6 +147,7 @@ def _render_markdown(
     findings: list[Finding],
     verified_findings: list[Finding],
     spent_per_tier: dict,
+    band_stats: dict | None = None,
 ) -> str:
     lines = []
     lines.append(f"# Sourcehunt Report — {session_id}")
@@ -161,6 +162,22 @@ def _render_markdown(
     )
     lines.append(f"- **Total spend:** ${sum(spent_per_tier.values()):.4f}")
     lines.append("")
+
+    if band_stats:
+        lines.append("## Band Distribution")
+        for band in ("fast", "standard", "deep"):
+            runs = band_stats.get(f"{band}_runs", 0)
+            cost = band_stats.get(f"{band}_cost", 0.0)
+            avg = cost / runs if runs else 0.0
+            lines.append(
+                f"- **{band.title()}:** {runs} runs, ${cost:.2f} (avg ${avg:.2f}/run)"
+            )
+        promos = band_stats.get("promotions", {})
+        if promos:
+            promo_parts = ", ".join(f"{k}: {v}" for k, v in promos.items() if v)
+            if promo_parts:
+                lines.append(f"- **Promotions:** {promo_parts}")
+        lines.append("")
 
     # Severity histogram
     sev_counts: dict[str, int] = {}

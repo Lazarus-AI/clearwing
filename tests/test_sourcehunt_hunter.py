@@ -475,9 +475,9 @@ class TestHunterTrajectoryLogging:
             max_steps=1,
         )
 
-        findings, _, _ = asyncio.run(hunter.arun())
+        result = asyncio.run(hunter.arun())
 
-        assert findings == []
+        assert result.findings == []
 
         trajectory_path = (
             Path(os.environ["CLEARWING_HOME"])

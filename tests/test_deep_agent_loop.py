@@ -79,9 +79,10 @@ async def test_constrained_mode_stops_at_max_steps():
 
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_traj.for_hunter.return_value = MagicMock()
-        findings, cost, tokens = await hunter.arun()
+        result = await hunter.arun()
 
     assert llm.achat.call_count == 3
+    assert result.stop_reason == "max_steps"
 
 
 @pytest.mark.asyncio
@@ -96,10 +97,11 @@ async def test_deep_mode_terminates_on_budget():
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_traj.for_hunter.return_value = MagicMock()
         with patch("clearwing.sourcehunt.hunter._estimate_cost_usd", return_value=0.005):
-            findings, cost, tokens = await hunter.arun()
+            result = await hunter.arun()
 
     # Should stop after 2 steps: 0.005 + 0.005 = 0.01 >= 0.01 * 0.9
     assert llm.achat.call_count == 2
+    assert result.stop_reason == "budget_exhausted"
 
 
 @pytest.mark.asyncio
@@ -112,10 +114,11 @@ async def test_deep_mode_safety_cap():
 
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_traj.for_hunter.return_value = MagicMock()
-        findings, cost, tokens = await hunter.arun()
+        result = await hunter.arun()
 
     # With budget_usd=0 (unlimited), should stop at max_steps=5
     assert llm.achat.call_count == 5
+    assert result.stop_reason == "max_steps"
 
 
 @pytest.mark.asyncio
@@ -137,7 +140,7 @@ async def test_deep_mode_no_repeated_call_throttle():
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_logger = MagicMock()
         mock_traj.for_hunter.return_value = mock_logger
-        findings, cost, tokens = await hunter.arun()
+        result = await hunter.arun()
 
     # In deep mode, repeated calls should NOT be throttled
     logged = mock_logger.log.call_args_list
@@ -164,7 +167,7 @@ async def test_constrained_mode_throttles_repeated_calls():
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_logger = MagicMock()
         mock_traj.for_hunter.return_value = mock_logger
-        findings, cost, tokens = await hunter.arun()
+        result = await hunter.arun()
 
     # In constrained mode, after 3 identical calls the 4th+ should be skipped
     logged = mock_logger.log.call_args_list
@@ -185,7 +188,8 @@ async def test_hunter_completes_when_no_tool_calls():
 
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_traj.for_hunter.return_value = MagicMock()
-        findings, cost, tokens = await hunter.arun()
+        result = await hunter.arun()
 
     assert llm.achat.call_count == 1
-    assert len(findings) == 0
+    assert len(result.findings) == 0
+    assert result.stop_reason == "completed"

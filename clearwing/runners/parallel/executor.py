@@ -32,6 +32,8 @@ class TargetResult:
     # v0.4: which tier this result came from (A/B/C or "" for flat runs).
     # Used by tiered callers to build a spent_per_tier breakdown.
     tier: str = ""
+    band: str = ""  # "fast" | "standard" | "deep"
+    stop_reason: str = ""  # "completed" | "budget_exhausted" | "max_steps"
 
 
 @dataclass

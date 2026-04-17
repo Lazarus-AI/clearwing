@@ -58,6 +58,20 @@ def add_parser(subparsers):
         help="Instruct hunters to write exploits for found vulnerabilities",
     )
     parser.add_argument(
+        "--starting-band",
+        choices=["fast", "standard", "deep"],
+        default=None,
+        dest="starting_band",
+        help="Override starting band for all runs (default: auto from --depth)",
+    )
+    parser.add_argument(
+        "--redundancy",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override redundancy count for high-ranked files (default: auto from priority)",
+    )
+    parser.add_argument(
         "--budget",
         type=float,
         default=0.0,
@@ -461,6 +475,8 @@ def handle(cli, args):
         prompt_mode=args.prompt_mode,
         campaign_hint=args.campaign_hint,
         exploit_mode=args.exploit_mode,
+        starting_band=args.starting_band,
+        redundancy_override=args.redundancy,
     )
 
     cli.console.print(

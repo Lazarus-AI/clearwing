@@ -45,7 +45,7 @@ from .mechanism_memory import (
 )
 from .patcher import AutoPatcher, apply_patch_attempt
 from .poc_runner import build_rerun_poc_callback
-from .pool import HunterPool, HuntPoolConfig, TierBudget
+from .pool import BandBudget, HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
 from .state import EvidenceLevel, FileTarget, Finding, filter_by_evidence
@@ -136,6 +136,8 @@ class SourceHuntRunner:
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
         exploit_mode: bool = False,
+        starting_band: str | None = None,  # "fast" | "standard" | "deep" | None (auto)
+        redundancy_override: int | None = None,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -177,6 +179,8 @@ class SourceHuntRunner:
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
         self._exploit_mode = exploit_mode
+        self._starting_band_override = starting_band
+        self._redundancy_override = redundancy_override
 
     @property
     def _agent_mode(self) -> str:
@@ -185,6 +189,18 @@ class SourceHuntRunner:
         if self.depth in ("standard", "deep"):
             return "deep"
         return "constrained"
+
+    @property
+    def _starting_band(self) -> str:
+        if self._starting_band_override:
+            return self._starting_band_override
+        return {"standard": "fast", "deep": "standard"}.get(self.depth, "fast")
+
+    @property
+    def _max_band(self) -> str:
+        if self._starting_band_override:
+            return self._starting_band_override
+        return {"standard": "standard", "deep": "deep"}.get(self.depth, "standard")
 
     # --- Public API ---------------------------------------------------------
 
@@ -314,6 +330,9 @@ class SourceHuntRunner:
                         prompt_mode=self._prompt_mode,
                         campaign_hint=self._campaign_hint,
                         exploit_mode=self._exploit_mode,
+                        starting_band=self._starting_band,
+                        max_band=self._max_band,
+                        redundancy_override=self._redundancy_override,
                     )
                 )
                 try:
@@ -322,6 +341,15 @@ class SourceHuntRunner:
                 except Exception:
                     logger.warning("HunterPool run failed", exc_info=True)
                 spent_per_tier = pool.spent_per_tier
+                band_stats = {
+                    "fast_runs": pool.runs_per_band.get("fast", 0),
+                    "fast_cost": pool.spent_per_band.get("fast", 0.0),
+                    "standard_runs": pool.runs_per_band.get("standard", 0),
+                    "standard_cost": pool.spent_per_band.get("standard", 0.0),
+                    "deep_runs": pool.runs_per_band.get("deep", 0),
+                    "deep_cost": pool.spent_per_band.get("deep", 0.0),
+                    "promotions": pool.promotion_counts,
+                }
                 files_hunted = sum(
                     [
                         p.get("tier") in ("A", "B", "C")
@@ -332,6 +360,7 @@ class SourceHuntRunner:
             else:
                 logger.info("HunterPool skipped; no LLM available")
                 spent_per_tier = {"A": 0.0, "B": 0.0, "C": 0.0}
+                band_stats = None
 
             # Promote static findings into the all_findings list so depth=quick
             # output is still useful when no hunter llm is available
@@ -566,6 +595,7 @@ class SourceHuntRunner:
                 findings=all_findings,
                 verified=verified,
                 spent_per_tier=spent_per_tier,
+                band_stats=band_stats,
             )
 
             duration = time.monotonic() - start_time
@@ -1017,6 +1047,7 @@ class SourceHuntRunner:
         findings: list[Finding],
         verified: list[Finding],
         spent_per_tier: dict,
+        band_stats: dict | None = None,
     ) -> dict[str, str]:
         """Write SARIF / markdown / JSON outputs to the output directory.
 
@@ -1038,6 +1069,7 @@ class SourceHuntRunner:
                 verified_findings=verified,
                 spent_per_tier=spent_per_tier,
                 formats=self.output_formats,
+                band_stats=band_stats,
             )
         except Exception:
             logger.warning("Reporter failed", exc_info=True)

@@ -984,7 +984,22 @@ def _build_unconstrained_prompt(
     return prompt
 
 
+SEED_TRANSCRIPT_BLOCK = """
+A previous investigation of this file found the following:
+{transcript}
+Continue from where this left off. Do not repeat analysis already done."""
+
+
 # --- Public factory ----------------------------------------------------------
+
+
+@dataclass
+class HunterRunResult:
+    findings: list[Finding]
+    cost_usd: float
+    tokens_used: int
+    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps"
+    transcript_summary: str = ""
 
 
 @dataclass
@@ -999,16 +1014,13 @@ class NativeHunter:
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
         """Return a stop reason string, or None to continue."""
-        if self.agent_mode == "constrained" and step > self.max_steps:
+        if self.budget_usd > 0 and cost_usd >= self.budget_usd * 0.9:
+            return "budget_exhausted"
+        if step > self.max_steps:
             return "max_steps"
-        if self.agent_mode == "deep":
-            if self.budget_usd > 0 and cost_usd >= self.budget_usd * 0.9:
-                return "budget_exhausted"
-            if step > self.max_steps:
-                return "max_steps"
         return None
 
-    async def arun(self) -> tuple[list[Finding], float, int]:
+    async def arun(self) -> HunterRunResult:
         messages: list[ChatMessage] = [
             ChatMessage("user", f"Hunt for vulnerabilities in {self.ctx.file_path or 'unknown'}.")
         ]
@@ -1024,6 +1036,7 @@ class NativeHunter:
         repeated_tool_calls: dict[tuple[str, str], int] = {}
         tools_by_name = {tool.name: tool for tool in self.tools}
         throttle_repeats = self.agent_mode == "constrained"
+        last_assistant_text = ""
 
         step = 0
         while True:
@@ -1046,7 +1059,13 @@ class NativeHunter:
                         "total_cost_usd": total_cost_usd,
                     },
                 )
-                return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
+                return HunterRunResult(
+                    findings=list(self.ctx.findings),
+                    cost_usd=total_cost_usd,
+                    tokens_used=total_input_tokens + total_output_tokens,
+                    stop_reason=stop_reason,
+                    transcript_summary=last_assistant_text[-500:],
+                )
 
             response = await self.llm.achat(
                 messages=messages,
@@ -1080,6 +1099,7 @@ class NativeHunter:
                 self.llm.model_name,
             )
 
+            last_assistant_text = response.first_text() or ""
             tool_calls_in_response = response.tool_calls()
             if tool_calls_in_response:
                 messages.append(
@@ -1163,9 +1183,8 @@ class NativeHunter:
                     )
                 continue
 
-            response_text = response.first_text()
-            if response_text:
-                messages.append(ChatMessage("assistant", response_text))
+            if last_assistant_text:
+                messages.append(ChatMessage("assistant", last_assistant_text))
             logger.info(
                 "Hunter finished for %s after %d steps findings=%d",
                 self.ctx.file_path,
@@ -1183,7 +1202,13 @@ class NativeHunter:
                     "total_cost_usd": total_cost_usd,
                 },
             )
-            return list(self.ctx.findings), total_cost_usd, total_input_tokens + total_output_tokens
+            return HunterRunResult(
+                findings=list(self.ctx.findings),
+                cost_usd=total_cost_usd,
+                tokens_used=total_input_tokens + total_output_tokens,
+                stop_reason="completed",
+                transcript_summary=last_assistant_text[-500:],
+            )
 
     async def _run_tool(
         self,
@@ -1327,6 +1352,7 @@ def build_hunter_agent(
     prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
     campaign_hint: str | None = None,
     exploit_mode: bool = False,
+    seed_transcript: str | None = None,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -1352,6 +1378,8 @@ def build_hunter_agent(
                        unauthenticated remote input".
         exploit_mode: When True, append exploit-writing and mitigation-reasoning
                       instructions to the prompt.
+        seed_transcript: Summary from a prior run (band promotion). Appended
+                         to the prompt so the agent continues from prior work.
 
     Returns:
         (native_hunter, hunter_context). The caller owns the context and
@@ -1423,6 +1451,9 @@ def build_hunter_agent(
             specialist=specialist,
         )
         max_steps = 20
+
+    if seed_transcript:
+        prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)
 
     return NativeHunter(
         llm=llm,
