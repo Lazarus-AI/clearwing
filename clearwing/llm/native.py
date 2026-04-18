@@ -189,6 +189,60 @@ class AsyncLLMClient:
             )
         return response
 
+    async def achat_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system: str | None = None,
+        tools: list[NativeToolSpec] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        on_text_delta: Any = None,
+    ) -> ChatResponse:
+        """Like ``achat`` but streams text deltas via *on_text_delta*.
+
+        Uses genai-pyo3's native ``astream_chat``. Falls back to
+        non-streaming ``achat`` when no callback is given.
+        """
+        if on_text_delta is None:
+            return await self.achat(
+                messages=messages, system=system, tools=tools,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+
+        request_tools = None
+        if tools:
+            request_tools = [
+                Tool(tool.name, tool.description, json.dumps(tool.schema))
+                for tool in tools
+            ]
+        request = ChatRequest(
+            messages=list(messages),
+            system=system or self.default_system,
+            tools=request_tools,
+        )
+        options = ChatOptions(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            capture_content=True,
+            capture_usage=True,
+            capture_tool_calls=True,
+        )
+
+        async with self._semaphore:
+            client = self._build_client(Client)
+            stream = await client.astream_chat(self.model_name, request, options)
+            async for event in stream:
+                if event.content and on_text_delta is not None:
+                    on_text_delta(event.content)
+                if event.end is not None:
+                    return event.end
+        # Fallback if stream ends without an end event
+        return await self.achat(
+            messages=messages, system=system, tools=tools,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+
     def chat(self, **kwargs: Any) -> ChatResponse:
         return _run_coro_sync(self.achat(**kwargs))
 

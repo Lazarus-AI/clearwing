@@ -112,6 +112,7 @@ class NativeAgentGraph:
         self.knowledge_graph_populator_fn = knowledge_graph_populator_fn
         self.input_guardrail_tool_names = set(input_guardrail_tool_names)
         self.output_guardrail_tool_names = set(output_guardrail_tool_names)
+        self.on_text_delta: Any = None  # optional streaming callback
         self._state: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, _PendingToolResume | None] = {}
 
@@ -228,7 +229,9 @@ class NativeAgentGraph:
 
         sys_prompt = self.system_prompt_fn(state)
         full_messages: list[BaseMessage] = [SystemMessage(content=sys_prompt), *messages]
-        response = await self.llm_with_tools.ainvoke(full_messages)
+        response = await self.llm_with_tools.ainvoke(
+            full_messages, on_text_delta=self.on_text_delta
+        )
         state.setdefault("messages", []).append(response)
 
         usage = getattr(response, "response_metadata", {}).get("usage", {})

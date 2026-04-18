@@ -6,9 +6,12 @@ import logging
 import uuid
 from typing import Any
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 import clearwing.data.memory as memory_data
 import clearwing.observability.telemetry as telemetry
@@ -16,6 +19,7 @@ from clearwing.agent.graph import create_agent
 from clearwing.agent.operator import OperatorAgent, OperatorConfig
 from clearwing.agent.runtime import Command
 from clearwing.core.events import EventBus, EventType
+from clearwing.llm.native import strip_think_tags
 from clearwing.observability import MetricsCollector
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,15 @@ def create_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Serve the single-page frontend
+    _static_dir = Path(__file__).parent / "static"
+
+    @app.get("/")
+    async def index():
+        return FileResponse(_static_dir / "index.html")
+
+    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
     # In-memory session registry
     _sessions: dict[str, dict[str, Any]] = {}
@@ -323,12 +336,14 @@ def create_app():
                                     if c:
                                         last_content = c
                         if last_content:
-                            await websocket.send_json(
-                                {
-                                    "type": "agent_message",
-                                    "data": {"content": last_content},
-                                }
-                            )
+                            cleaned = strip_think_tags(last_content)
+                            if cleaned:
+                                await websocket.send_json(
+                                    {
+                                        "type": "agent_message",
+                                        "data": {"content": cleaned},
+                                    }
+                                )
                     except Exception as e:
                         await websocket.send_json(
                             {
