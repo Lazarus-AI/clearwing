@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -15,6 +16,8 @@ from .components.input_bar import InputBar
 from .components.status_bar import StatusBar
 from .screens.help_screen import HelpScreen
 from .screens.quit_screen import QuitScreen
+
+logger = logging.getLogger(__name__)
 
 
 class ClearwingApp(App):
@@ -29,6 +32,7 @@ class ClearwingApp(App):
     ActivityFeed {
         height: 1fr;
         border: solid $accent;
+        scrollbar-gutter: stable;
     }
     StatusBar {
         height: 3;
@@ -44,6 +48,12 @@ class ClearwingApp(App):
         Binding("ctrl+p", "toggle_pause", "Pause/Resume"),
         Binding("ctrl+q", "request_quit", "Quit"),
         Binding("f1", "show_help", "Help"),
+        Binding("up", "feed_scroll_up", "Scroll Up", show=False, priority=True),
+        Binding("down", "feed_scroll_down", "Scroll Down", show=False, priority=True),
+        Binding("pageup", "feed_page_up", "Page Up", show=False, priority=True),
+        Binding("pagedown", "feed_page_down", "Page Down", show=False, priority=True),
+        Binding("home", "feed_home", "Scroll Top", show=False, priority=True),
+        Binding("end", "feed_end", "Scroll Bottom", show=False, priority=True),
     ]
 
     def __init__(
@@ -58,6 +68,7 @@ class ClearwingApp(App):
         self.paused = False
         self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
         self._approval_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._agent_graph = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -67,40 +78,82 @@ class ClearwingApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Subscribe to EventBus events when the app is mounted."""
+        """Subscribe to EventBus events and start the agent loop."""
+        self._bus_mounted = True
+        self.query_one(InputBar).focus()
+
+        # Create the agent graph and start the background loop
+        from clearwing.agent.graph import create_agent
+
+        self._agent_graph = create_agent(
+            model_name=self.model,
+            session_id=self.session_id,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
+        self._agent_config = {"configurable": {"thread_id": self.session_id or "tui-session"}}
+
+        feed = self.query_one(ActivityFeed)
+        if self.target:
+            feed.add_message(f"Target: {self.target}", "info")
+        feed.add_message(f"Model: {self.model}", "info")
+        feed.add_message("Agent ready. Type a message to begin.", "success")
+
+        self.run_worker(self._agent_loop(), exclusive=True)
+
         bus = EventBus()
-        bus.subscribe(EventType.MESSAGE, self._on_message)
-        bus.subscribe(EventType.TOOL_START, self._on_tool_start)
-        bus.subscribe(EventType.TOOL_RESULT, self._on_tool_result)
-        bus.subscribe(EventType.FLAG_FOUND, self._on_flag_found)
-        bus.subscribe(EventType.COST_UPDATE, self._on_cost_update)
-        bus.subscribe(EventType.ERROR, self._on_error)
-        bus.subscribe(EventType.APPROVAL_NEEDED, self._on_approval_needed)
+        bus.subscribe(EventType.MESSAGE, self._on_bus_message)
+        bus.subscribe(EventType.TOOL_START, self._on_bus_tool_start)
+        bus.subscribe(EventType.TOOL_RESULT, self._on_bus_tool_result)
+        bus.subscribe(EventType.FLAG_FOUND, self._on_bus_flag_found)
+        bus.subscribe(EventType.COST_UPDATE, self._on_bus_cost_update)
+        bus.subscribe(EventType.ERROR, self._on_bus_error)
+        bus.subscribe(EventType.APPROVAL_NEEDED, self._on_bus_approval_needed)
+
+    def on_unmount(self) -> None:
+        """Unsubscribe from EventBus before the app tears down."""
+        self._bus_mounted = False
+        bus = EventBus()
+        bus.unsubscribe(EventType.MESSAGE, self._on_bus_message)
+        bus.unsubscribe(EventType.TOOL_START, self._on_bus_tool_start)
+        bus.unsubscribe(EventType.TOOL_RESULT, self._on_bus_tool_result)
+        bus.unsubscribe(EventType.FLAG_FOUND, self._on_bus_flag_found)
+        bus.unsubscribe(EventType.COST_UPDATE, self._on_bus_cost_update)
+        bus.unsubscribe(EventType.ERROR, self._on_bus_error)
+        bus.unsubscribe(EventType.APPROVAL_NEEDED, self._on_bus_approval_needed)
 
     # ------------------------------------------------------------------
     # Event handlers — bridge from background threads into the TUI
     # ------------------------------------------------------------------
 
-    def _on_message(self, data):
-        self.call_from_thread(self._handle_message, data)
+    def _safe_call_from_thread(self, callback, data):
+        if not getattr(self, "_bus_mounted", False):
+            return
+        try:
+            self.call_from_thread(callback, data)
+        except RuntimeError:
+            pass
 
-    def _on_tool_start(self, data):
-        self.call_from_thread(self._handle_tool_start, data)
+    def _on_bus_message(self, data):
+        self._safe_call_from_thread(self._handle_message, data)
 
-    def _on_tool_result(self, data):
-        self.call_from_thread(self._handle_tool_result, data)
+    def _on_bus_tool_start(self, data):
+        self._safe_call_from_thread(self._handle_tool_start, data)
 
-    def _on_flag_found(self, data):
-        self.call_from_thread(self._handle_flag_found, data)
+    def _on_bus_tool_result(self, data):
+        self._safe_call_from_thread(self._handle_tool_result, data)
 
-    def _on_cost_update(self, data):
-        self.call_from_thread(self._handle_cost_update, data)
+    def _on_bus_flag_found(self, data):
+        self._safe_call_from_thread(self._handle_flag_found, data)
 
-    def _on_error(self, data):
-        self.call_from_thread(self._handle_error, data)
+    def _on_bus_cost_update(self, data):
+        self._safe_call_from_thread(self._handle_cost_update, data)
 
-    def _on_approval_needed(self, data):
-        self.call_from_thread(self._handle_approval, data)
+    def _on_bus_error(self, data):
+        self._safe_call_from_thread(self._handle_error, data)
+
+    def _on_bus_approval_needed(self, data):
+        self._safe_call_from_thread(self._handle_approval, data)
 
     # ------------------------------------------------------------------
     # Actual UI update methods (run on the Textual event loop thread)
@@ -144,6 +197,89 @@ class ClearwingApp(App):
         feed.add_message(f"APPROVAL NEEDED: {prompt}", "warning")
 
     # ------------------------------------------------------------------
+    # Agent loop — runs as a Textual worker in the background
+    # ------------------------------------------------------------------
+
+    async def _agent_loop(self) -> None:
+        """Read from the input queue, drive the agent, display responses."""
+        from clearwing.agent.runtime import Command
+        from clearwing.llm.chat import extract_text_content
+        from clearwing.llm.native import strip_think_tags
+
+        initial_state: dict = {}
+        if self.target:
+            initial_state["target"] = self.target
+
+        while True:
+            user_text = await self._user_input_queue.get()
+
+            feed = self.query_one(ActivityFeed)
+            feed.add_message(f"You: {user_text}", "info")
+            feed.add_message("Thinking...", "warning")
+
+            input_msg: dict = {"messages": [{"role": "user", "content": user_text}]}
+            input_msg.update(initial_state)
+            initial_state = {}
+
+            try:
+                got_response = False
+                async for event in self._agent_graph.astream(
+                    input_msg, self._agent_config, stream_mode="values"
+                ):
+                    msgs = event.get("messages", [])
+                    if msgs:
+                        last = msgs[-1]
+                        if (
+                            hasattr(last, "content")
+                            and last.content
+                            and getattr(last, "type", None) == "ai"
+                            and not getattr(last, "tool_calls", None)
+                        ):
+                            text = strip_think_tags(extract_text_content(last.content))
+                            if text:
+                                feed.add_message(text, "success")
+                                got_response = True
+
+                if not got_response:
+                    feed.add_message("(no response from agent)", "warning")
+
+                # Check for approval interrupts
+                state = self._agent_graph.get_state(self._agent_config)
+                if state.next and state.tasks:
+                    for task in state.tasks:
+                        if hasattr(task, "interrupts") and task.interrupts:
+                            for intr in task.interrupts:
+                                prompt = str(intr.value)
+                                feed.add_message(
+                                    f"APPROVAL NEEDED: {prompt}  (type 'yes' or 'no')",
+                                    "warning",
+                                )
+                                answer = await self._user_input_queue.get()
+                                approved = answer.strip().lower() in ("yes", "y", "approve")
+                                resume_input = Command(resume=approved)
+                                async for ev in self._agent_graph.astream(
+                                    resume_input, self._agent_config
+                                ):
+                                    msgs = ev.get("messages", [])
+                                    if msgs:
+                                        last = msgs[-1]
+                                        if (
+                                            hasattr(last, "content")
+                                            and last.content
+                                            and getattr(last, "type", None) == "ai"
+                                            and not getattr(last, "tool_calls", None)
+                                        ):
+                                            text = strip_think_tags(
+                                                extract_text_content(last.content)
+                                            )
+                                            if text:
+                                                feed.add_message(text, "success")
+
+            except Exception as exc:
+                logger.exception("Agent loop error")
+                feed.add_message(f"Error: {exc}", "error")
+
+    # ------------------------------------------------------------------
     # Key binding actions
     # ------------------------------------------------------------------
 
@@ -156,6 +292,26 @@ class ClearwingApp(App):
             feed.add_message("Agent PAUSED. Type instructions or Ctrl+P to resume.", "warning")
         else:
             feed.add_message("Agent RESUMED.", "info")
+
+    def action_feed_scroll_up(self) -> None:
+        self.query_one(ActivityFeed).scroll_up(animate=False)
+
+    def action_feed_scroll_down(self) -> None:
+        self.query_one(ActivityFeed).scroll_down(animate=False)
+
+    def action_feed_page_up(self) -> None:
+        feed = self.query_one(ActivityFeed)
+        feed.scroll_relative(y=-feed.size.height, animate=False)
+
+    def action_feed_page_down(self) -> None:
+        feed = self.query_one(ActivityFeed)
+        feed.scroll_relative(y=feed.size.height, animate=False)
+
+    def action_feed_home(self) -> None:
+        self.query_one(ActivityFeed).scroll_home(animate=False)
+
+    def action_feed_end(self) -> None:
+        self.query_one(ActivityFeed).scroll_end(animate=False)
 
     def action_request_quit(self) -> None:
         self.push_screen(QuitScreen())

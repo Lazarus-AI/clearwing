@@ -12,6 +12,9 @@ from .tool_renderers import render_tool_result
 class ActivityFeed(RichLog):
     """Scrollable agent activity feed with color-coded messages."""
 
+    def __init__(self, **kwargs):
+        super().__init__(auto_scroll=True, wrap=True, **kwargs)
+
     def add_message(self, content: str, msg_type: str = "info") -> None:
         """Add a message with color based on type."""
         color_map = {
