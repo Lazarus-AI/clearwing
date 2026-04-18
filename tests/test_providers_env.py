@@ -235,6 +235,7 @@ class TestDefaultModelGuessing:
             ("https://api.groq.com/openai/v1", "llama"),
             ("https://api.openai.com/v1", "gpt-4o"),
             ("https://api.deepseek.com/v1", "deepseek"),
+            ("https://api.minimax.io/v1", "MiniMax"),
         ],
     )
     def test_known_hosts_get_sensible_defaults(self, clean_env, base_url, expected_substring):
@@ -261,6 +262,19 @@ class TestPlaceholderKey:
     def test_non_ollama_gets_not_needed_placeholder(self, clean_env):
         ep = resolve_llm_endpoint(cli_base_url="http://localhost:1234/v1", config_provider={})
         assert ep.api_key == "not-needed"
+
+    def test_minimax_with_cli_key(self, clean_env):
+        ep = resolve_llm_endpoint(
+            cli_base_url="https://api.minimax.io/v1",
+            cli_api_key="sk-minimax-test",
+            cli_model="MiniMax-M2.7",
+            config_provider={},
+        )
+        assert ep.provider == "openai_compat"
+        assert ep.base_url == "https://api.minimax.io/v1"
+        assert ep.api_key == "sk-minimax-test"
+        assert ep.model == "MiniMax-M2.7"
+        assert ep.source == "cli"
 
 
 # --- LLMEndpoint.describe / is_* helpers ---------------------------------

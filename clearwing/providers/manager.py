@@ -52,6 +52,11 @@ PROVIDER_PRESETS = {
         "models": [],  # dynamic
         "default_base_url": "http://localhost:11434",
     },
+    "minimax": {
+        "env_key": "MINIMAX_API_KEY",
+        "models": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+        "default_base_url": "https://api.minimax.io/v1",
+    },
 }
 
 DEFAULT_ROUTES = [
@@ -388,6 +393,19 @@ class ProviderManager:
                 provider_name="ollama",
             )
 
+        elif provider == "minimax":
+            base_url = (
+                config.base_url
+                if config and config.base_url
+                else "https://api.minimax.io/v1"
+            )
+            return ChatModel(
+                model_name=model,
+                base_url=base_url,
+                api_key=config.api_key if config else os.environ.get("MINIMAX_API_KEY", ""),
+                provider_name="openai",
+            )
+
         else:
             if config and config.base_url:
                 return ChatModel(
@@ -440,6 +458,20 @@ class ProviderManager:
                 api_key=config.api_key if config else "",
                 provider_name="ollama",
                 max_concurrency=_native_concurrency_for_task(task, "ollama"),
+            )
+
+        if provider == "minimax":
+            base_url = (
+                config.base_url
+                if config and config.base_url
+                else "https://api.minimax.io/v1"
+            )
+            return AsyncLLMClient(
+                model_name=model,
+                base_url=base_url,
+                api_key=config.api_key if config else os.environ.get("MINIMAX_API_KEY", ""),
+                provider_name="openai",
+                max_concurrency=_native_concurrency_for_task(task, "openai"),
             )
 
         if config and config.base_url:
