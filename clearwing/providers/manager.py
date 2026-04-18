@@ -536,6 +536,11 @@ def _adapter_for_base_url(base_url: str | None, model: str) -> str:
         return "anthropic"
     if model.startswith("gemini-"):
         return "gemini"
+    # genai-pyo3's "openai" adapter ignores custom base_url overrides.
+    # Use our own aiohttp-based adapter for any custom OpenAI-compat
+    # endpoint (MiniMax, OpenRouter, Together, Groq, DeepSeek, vLLM, …).
+    if base_url:
+        return "openai_compat"
     return "openai"
 
 

@@ -338,7 +338,7 @@ class TestProviderManagerForEndpoint:
         assert got.base_url == "https://openrouter.ai/api/v1"
         assert got.api_key == "sk-or-test"
         assert got.model_name == "anthropic/claude-opus-4"
-        assert got.provider_name == "openai"
+        assert got.provider_name == "openai_compat"
 
     def test_for_endpoint_get_route_info_shows_global(self, clean_env):
         endpoint = LLMEndpoint(
