@@ -340,6 +340,8 @@ def _default_openai_compat_model(base_url: str) -> str:
         return "gpt-4o"
     if "api.deepseek.com" in host:
         return "deepseek-chat"
+    if "minimax.io" in host:
+        return "MiniMax-M2.7"
     # Catch-all
     return "default"
 

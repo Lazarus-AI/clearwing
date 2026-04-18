@@ -11,6 +11,7 @@ from rich.prompt import Confirm, Prompt
 
 from clearwing.agent.graph import create_agent
 from clearwing.agent.runtime import Command
+from clearwing.llm.native import strip_think_tags
 from clearwing.agent.tools.ops.dynamic_tool_creator import get_custom_tools
 from clearwing.agent.tools.ops.kali_docker_tool import kali_cleanup
 from clearwing.data.memory import SessionStore
@@ -213,10 +214,14 @@ def _run_interactive_legacy(cli, args, session=None):
                 events = asyncio.run(_collect_events(graph, input_msg))
                 interrupted = False
 
+                shown_ids: set[int] = set()
                 for event in events:
                     msgs = event.get("messages", [])
                     if msgs:
                         last = msgs[-1]
+                        msg_id = id(last)
+                        if msg_id in shown_ids:
+                            continue
                         if hasattr(last, "content") and last.content and last.type == "ai":
                             content = last.content
                             if isinstance(content, list):
@@ -226,7 +231,9 @@ def _run_interactive_legacy(cli, args, session=None):
                                     if isinstance(c, dict) and c.get("type") == "text"
                                 ]
                                 content = "\n".join(text_parts)
+                            content = strip_think_tags(content)
                             if content:
+                                shown_ids.add(msg_id)
                                 cli.console.print(
                                     Panel(
                                         content,
