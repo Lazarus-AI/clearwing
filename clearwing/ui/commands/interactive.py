@@ -11,6 +11,7 @@ from rich.prompt import Confirm, Prompt
 
 from clearwing.agent.graph import create_agent
 from clearwing.agent.runtime import Command
+from clearwing.llm.native import strip_think_tags
 from clearwing.agent.tools.ops.dynamic_tool_creator import get_custom_tools
 from clearwing.agent.tools.ops.kali_docker_tool import kali_cleanup
 from clearwing.data.memory import SessionStore
@@ -187,6 +188,66 @@ def _run_interactive_legacy(cli, args, session=None):
     if args.target:
         cli.console.print(f"[blue]Target set to: {args.target}[/blue]")
 
+    class _StreamPrinter:
+        def __init__(self, console):
+            self._console = console
+            self._in_think = False
+            self._buf = ""
+            self._started = False
+
+        def reset(self):
+            self._in_think = False
+            self._buf = ""
+            self._started = False
+
+        def __call__(self, delta: str):
+            self._buf += delta
+            while True:
+                if self._in_think:
+                    end = self._buf.find("</think>")
+                    if end == -1:
+                        self._buf = self._buf[-8:]
+                        return
+                    self._buf = self._buf[end + 8:]
+                    self._in_think = False
+                    continue
+                start = self._buf.find("<think>")
+                if start == -1:
+                    safe = len(self._buf)
+                    for i in range(1, min(7, len(self._buf) + 1)):
+                        if self._buf.endswith("<think>"[:i]):
+                            safe = len(self._buf) - i
+                            break
+                    if safe > 0:
+                        text = self._buf[:safe]
+                        self._buf = self._buf[safe:]
+                        if text:
+                            if not self._started:
+                                self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
+                                self._started = True
+                            self._console.print(text, end="", highlight=False)
+                    return
+                if start > 0:
+                    if not self._started:
+                        self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
+                        self._started = True
+                    self._console.print(self._buf[:start], end="", highlight=False)
+                self._buf = self._buf[start + 7:]
+                self._in_think = True
+
+        def finish(self):
+            if self._buf and not self._in_think:
+                if not self._started:
+                    self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
+                    self._started = True
+                self._console.print(self._buf, end="", highlight=False)
+                self._buf = ""
+            if self._started:
+                self._console.print()
+
+    stream_printer = _StreamPrinter(cli.console)
+    graph.on_text_delta = stream_printer
+
     known_custom_tools = set()
 
     while True:
@@ -201,6 +262,8 @@ def _run_interactive_legacy(cli, args, session=None):
         if not user_input.strip():
             continue
 
+        stream_printer.reset()
+
         input_msg = {"messages": [{"role": "user", "content": user_input}]}
         input_msg.update(initial_state)
         initial_state = {}
@@ -213,27 +276,9 @@ def _run_interactive_legacy(cli, args, session=None):
                 events = asyncio.run(_collect_events(graph, input_msg))
                 interrupted = False
 
-                for event in events:
-                    msgs = event.get("messages", [])
-                    if msgs:
-                        last = msgs[-1]
-                        if hasattr(last, "content") and last.content and last.type == "ai":
-                            content = last.content
-                            if isinstance(content, list):
-                                text_parts = [
-                                    c["text"]
-                                    for c in content
-                                    if isinstance(c, dict) and c.get("type") == "text"
-                                ]
-                                content = "\n".join(text_parts)
-                            if content:
-                                cli.console.print(
-                                    Panel(
-                                        content,
-                                        title="[bold cyan]Agent[/bold cyan]",
-                                        border_style="cyan",
-                                    )
-                                )
+                stream_printer.finish()
+                for _event in events:
+                    pass  # streaming callback already printed text
 
                 # Check for interrupt
                 state = graph.get_state(config)

@@ -234,13 +234,21 @@ class ChatModel:
             },
         )
 
-    async def ainvoke(self, messages: Any) -> AIMessage:
+    async def ainvoke(self, messages: Any, on_text_delta: Any = None) -> AIMessage:
         system, chat_messages = _coerce_chat_messages(messages)
-        response = await self._client.achat(
-            messages=chat_messages,
-            system=system or self.default_system,
-            tools=self.bound_tools or None,
-        )
+        if on_text_delta is not None:
+            response = await self._client.achat_stream(
+                messages=chat_messages,
+                system=system or self.default_system,
+                tools=self.bound_tools or None,
+                on_text_delta=on_text_delta,
+            )
+        else:
+            response = await self._client.achat(
+                messages=chat_messages,
+                system=system or self.default_system,
+                tools=self.bound_tools or None,
+            )
         return AIMessage(
             content=response.first_text() or "",
             tool_calls=[
