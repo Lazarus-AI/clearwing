@@ -447,6 +447,7 @@ class TestBuildHunterAgent:
 class TestHunterTrajectoryLogging:
     def test_trajectory_is_append_log_of_turns(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLEARWING_HOME", str(tmp_path))
+        monkeypatch.delenv("CLEARWING_SOURCEHUNT_TRACE_DIR", raising=False)
 
         class _StubLLM:
             model_name = "stub-model"
