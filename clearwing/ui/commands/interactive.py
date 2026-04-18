@@ -115,7 +115,12 @@ def _preflight_check(cli, args) -> bool:
     # custom endpoint — we have no way to know what models OpenRouter /
     # Ollama / LM Studio / vLLM serve.
     if not has_cli_endpoint and not has_clearwing_env:
-        valid_models = ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]
+        valid_models = [
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-haiku-4-5",
+        ]
         if args.model not in valid_models:
             cli.console.print(
                 f"[yellow]Warning: Model '{args.model}' is not a recognized Anthropic "

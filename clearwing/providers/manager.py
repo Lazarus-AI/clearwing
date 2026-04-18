@@ -37,7 +37,12 @@ class ModelRoute:
 PROVIDER_PRESETS = {
     "anthropic": {
         "env_key": "ANTHROPIC_API_KEY",
-        "models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+        "models": [
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ],
     },
     "openai": {
         "env_key": "OPENAI_API_KEY",

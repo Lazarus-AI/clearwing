@@ -79,7 +79,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="claude-sonnet-4-6",
         api_key_env_var="ANTHROPIC_API_KEY",
         is_openai_compat=False,
-        alt_models=("claude-opus-4-6", "claude-haiku-4-5-20251001"),
+        alt_models=("claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"),
     ),
     ProviderPreset(
         key="openrouter",
@@ -91,6 +91,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="anthropic/claude-opus-4",
         api_key_env_var="OPENROUTER_API_KEY",
         alt_models=(
+            "anthropic/claude-opus-4.7",
             "anthropic/claude-sonnet-4",
             "anthropic/claude-haiku-4-5",
             "openai/gpt-4o",

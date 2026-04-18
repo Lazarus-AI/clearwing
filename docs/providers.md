@@ -307,7 +307,7 @@ Clearwing's agents REQUIRE the backing model to support:
 
 Models that definitely work (tested during Phase 5):
 
-- Anthropic: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
+- Anthropic: `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
 - OpenRouter: any `anthropic/*`, `openai/gpt-4o`, `openai/gpt-4o-mini`
 - OpenAI direct: `gpt-4o`, `gpt-4o-mini`, `o1-preview` (no tool calling on o1)
 - Ollama (qwen2.5-coder:32b, llama3.3:70b with function-calling prompts)
