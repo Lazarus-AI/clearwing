@@ -372,6 +372,36 @@ def add_parser(subparsers):
         "(defaults to the retro-hunt target repo)",
     )
     parser.add_argument(
+        "--nday", action="store_true", default=False,
+        help="N-day exploit pipeline mode",
+    )
+    parser.add_argument(
+        "--cve-list", metavar="PATH", default=None,
+        help="File with CVE IDs for --nday (one per line: CVE-ID [commit_sha])",
+    )
+    parser.add_argument(
+        "--cve", metavar="CVE_ID", default=None,
+        help="Single CVE to exploit in --nday mode",
+    )
+    parser.add_argument(
+        "--patch-commit", metavar="SHA", default=None,
+        help="Git SHA of the patch commit for --nday --cve",
+    )
+    parser.add_argument(
+        "--recent-cves", action="store_true", default=False,
+        help="Auto-discover recent CVEs from git history for --nday",
+    )
+    parser.add_argument(
+        "--nday-days", type=int, default=90,
+        help="Days to look back for --recent-cves (default: 90)",
+    )
+    parser.add_argument(
+        "--nday-budget",
+        choices=["standard", "deep", "campaign"],
+        default="deep",
+        help="Budget band per CVE in --nday mode (default: deep)",
+    )
+    parser.add_argument(
         "--model", default=None, help="Override all role models with one model name"
     )
     parser.add_argument(
@@ -491,6 +521,75 @@ def handle(cli, args):
                 f"  [{f['severity'].upper()}] {f['file']}:{f['line_number']} "
                 f"— {f['description'][:80]}"
             )
+        sys.exit(0)
+
+    # N-day exploit pipeline
+    if args.nday:
+        import asyncio
+
+        from ...sourcehunt.nday import NdayPipeline
+        from ...sourcehunt.nday_filter import NdayCandidate, fetch_recent_cves, parse_cve_list
+
+        candidates: list[NdayCandidate] = []
+        if args.cve:
+            candidates = [NdayCandidate(
+                cve_id=args.cve, patch_source=args.patch_commit or "",
+            )]
+        elif args.cve_list:
+            candidates = parse_cve_list(args.cve_list)
+        elif args.recent_cves:
+            candidates = fetch_recent_cves(
+                args.local_path or args.repo, args.nday_days,
+            )
+        else:
+            cli.console.print(
+                "[red]Error: --nday requires --cve, --cve-list, or --recent-cves[/red]"
+            )
+            sys.exit(1)
+
+        if not candidates:
+            cli.console.print("[yellow]No CVE candidates found.[/yellow]")
+            sys.exit(0)
+
+        try:
+            llm = provider_manager.get_llm("default")
+        except Exception as e:
+            cli.console.print(f"[red]Could not build LLM: {e}[/red]")
+            sys.exit(1)
+
+        cli.console.print(
+            f"[bold blue]N-day pipeline: {len(candidates)} CVEs "
+            f"(budget={args.nday_budget})[/bold blue]"
+        )
+
+        pipeline = NdayPipeline(
+            llm=llm,
+            repo_path=args.local_path or args.repo,
+            budget_band=args.nday_budget,
+            project=args.repo,
+            output_dir=args.output_dir,
+        )
+        result = asyncio.run(pipeline.arun(candidates))
+
+        cli.console.print("\n[bold]N-day pipeline complete[/bold]")
+        cli.console.print(f"  Total CVEs: {result.total_cves}")
+        cli.console.print(f"  Filtered: {result.filtered_cves}")
+        cli.console.print(f"  Attempted: {result.attempted}")
+        cli.console.print(f"  Exploited: {result.exploited}")
+        cli.console.print(f"  Partial: {result.partial}")
+        cli.console.print(f"  Failed: {result.failed}")
+        cli.console.print(f"  Build failed: {result.build_failed}")
+        cli.console.print(f"  Cost: ${result.total_cost_usd:.2f}")
+        cli.console.print(f"  Duration: {result.duration_seconds:.1f}s")
+
+        for r in result.results:
+            if r.status == "exploited":
+                cli.console.print(f"  [green]✓ {r.cve_id} — exploited[/green]")
+            elif r.status == "partial":
+                cli.console.print(f"  [yellow]~ {r.cve_id} — partial[/yellow]")
+            elif r.status == "filtered":
+                cli.console.print(f"  [dim]- {r.cve_id} — filtered[/dim]")
+
         sys.exit(0)
 
     # Elaborate mode: interactive HITL or autonomous agent
