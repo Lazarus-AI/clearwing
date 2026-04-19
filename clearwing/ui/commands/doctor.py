@@ -232,8 +232,19 @@ def _check_llm_provider(cli, *, skip_invoke: bool) -> DoctorSection:
     return section
 
 
+_INVOKE_TIMEOUT_SECONDS = 30
+
+
 def _invoke_test(endpoint) -> DoctorCheck:
-    """Fire a 1-token prompt at the endpoint to confirm it actually works."""
+    """Fire a 1-token prompt at the endpoint to confirm it actually works.
+
+    Runs the invoke on a worker thread so a stalled native call (hung
+    TLS handshake, unresponsive proxy, etc.) can't block doctor forever.
+    The worker thread is daemonized and abandoned on timeout — fine for
+    a CLI that exits right after.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
     from clearwing.providers import ProviderManager
 
     try:
@@ -246,18 +257,34 @@ def _invoke_test(endpoint) -> DoctorCheck:
             hint="Check that the provider SDK is installed (pip install clearwing[all]).",
         )
 
+    start = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-invoke")
     try:
-        start = time.monotonic()
-        response = llm.invoke("Reply with exactly the word PONG.")
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-    except Exception as exc:
-        return DoctorCheck(
-            "Test invoke",
-            STATUS_ERR,
-            f"Invoke failed: {type(exc).__name__}: {exc}",
-            hint="Check your API key, base URL, and that the model exists on this provider.",
-        )
+        future = executor.submit(llm.invoke, "Reply with exactly the word PONG.")
+        try:
+            response = future.result(timeout=_INVOKE_TIMEOUT_SECONDS)
+        except FuturesTimeout:
+            return DoctorCheck(
+                "Test invoke",
+                STATUS_ERR,
+                f"No response within {_INVOKE_TIMEOUT_SECONDS}s — endpoint appears stalled",
+                hint=(
+                    "Re-run with --skip-llm-invoke to bypass this check, then verify "
+                    "network reachability, API key, and that the model name is valid "
+                    "for this provider."
+                ),
+            )
+        except Exception as exc:
+            return DoctorCheck(
+                "Test invoke",
+                STATUS_ERR,
+                f"Invoke failed: {type(exc).__name__}: {exc}",
+                hint="Check your API key, base URL, and that the model exists on this provider.",
+            )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
+    elapsed_ms = int((time.monotonic() - start) * 1000)
     content = getattr(response, "content", str(response))
     if isinstance(content, list):
         content = " ".join(str(p) for p in content)
