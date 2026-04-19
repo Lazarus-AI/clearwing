@@ -142,10 +142,13 @@ class CoreEngine:
     async def _vulnerability_scan(self, target: str, config: ScanConfig) -> None:
         """Perform vulnerability scanning."""
         scanner = VulnerabilityScanner()
-        vulnerabilities = await scanner.scan(target, self.scan_result.services)
-        self.scan_result.vulnerabilities = vulnerabilities
-        for vuln in vulnerabilities:
-            self._trigger_callback("on_vulnerability_found", target, vuln)
+        try:
+            vulnerabilities = await scanner.scan(target, self.scan_result.services)
+            self.scan_result.vulnerabilities = vulnerabilities
+            for vuln in vulnerabilities:
+                self._trigger_callback("on_vulnerability_found", target, vuln)
+        finally:
+            await scanner.close()
 
     async def _exploit(self, target: str, config: ScanConfig) -> None:
         """Perform exploitation."""
