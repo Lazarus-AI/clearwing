@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.sourcehunt.hunter import HunterRunResult
 from clearwing.sourcehunt.pool import (
     HunterPool,
     HuntPoolConfig,
@@ -67,7 +68,12 @@ def _stub_hunter_factory(per_call_cost: float, finding_per_file: bool = True):
 
         class _StubHunter:
             async def arun(self):
-                return list(ctx.findings), per_call_cost, 0
+                return HunterRunResult(
+                    findings=list(ctx.findings),
+                    cost_usd=per_call_cost,
+                    tokens_used=0,
+                    stop_reason="completed",
+                )
 
         return _StubHunter(), ctx
 
@@ -86,6 +92,12 @@ def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05), per_call_cost=0
         cost_limit_per_file_a=10.0,  # disable per-file caps for these tests
         cost_limit_per_file_b=10.0,
         cost_limit_per_file_c=10.0,
+        # Single band + single redundancy so budget tests are deterministic.
+        # Band promotion and redundancy multiply costs/findings, which these
+        # unit tests don't account for.
+        starting_band="fast",
+        max_band="fast",
+        redundancy_override=1,
     )
     return HunterPool(config)
 
@@ -138,6 +150,9 @@ class TestUnlimitedBudget:
             sandbox_factory=None,
             hunter_factory=_stub_hunter_factory(1.0),
             max_parallel=1,
+            starting_band="fast",
+            max_band="fast",
+            redundancy_override=1,
         )
         pool = HunterPool(config)
 

@@ -32,17 +32,38 @@ def _run_coro_sync(coro):
     raise RuntimeError("Synchronous wrapper called from a running event loop")
 
 
+_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>\s*", re.DOTALL)
+
+
+def strip_think_tags(text: str) -> str:
+    """Remove ``<think>…</think>`` blocks emitted by reasoning models.
+
+    MiniMax M2.7 (and similar reasoning models using the OpenAI-compat
+    API) wrap their chain-of-thought in ``<think>`` XML tags within the
+    ``content`` field.  The raw tags must be preserved in conversation
+    history so the model can continue its reasoning chain, but they need
+    to be stripped before parsing the response as JSON or presenting it
+    as final output.
+    """
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
 def response_text(response: ChatResponse) -> str:
     """Coalesce a :class:`ChatResponse`'s text segments into a single string.
 
     Prefers ``first_text()`` when it is non-empty; falls back to joining
     every non-empty segment in ``texts()``. Returns ``""`` when the
     response carries no text at all (e.g. a pure tool-call response).
+
+    Any ``<think>…</think>`` blocks (emitted by reasoning models like
+    MiniMax M2.7) are stripped so that downstream JSON parsing and
+    display are not polluted by chain-of-thought content.
     """
     first = response.first_text()
     if first:
-        return first
-    return "\n".join(segment for segment in response.texts() if segment)
+        return strip_think_tags(first)
+    joined = "\n".join(segment for segment in response.texts() if segment)
+    return strip_think_tags(joined)
 
 
 def _is_root_model_type(schema_model: type[BaseModel]) -> bool:
@@ -143,6 +164,23 @@ class AsyncLLMClient:
                         messages=list(messages),
                         system=system or self.default_system,
                         tools=tools or None,
+                    )
+                )
+
+        if self.provider_name == "openai_compat":
+            async with self._semaphore:
+                return await self._with_rate_limit_retries(
+                    lambda: _openai_compat_chat(
+                        model=self.model_name,
+                        base_url=self.base_url or "https://api.openai.com/v1",
+                        api_key=self.api_key,
+                        messages=list(messages),
+                        system=system or self.default_system,
+                        tools=tools or None,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_schema=response_schema,
+                        response_schema_name=response_schema_name,
                     )
                 )
 
@@ -446,6 +484,194 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+# --- OpenAI-compatible HTTP adapter -------------------------------------------
+#
+# genai-pyo3's "openai" adapter ignores custom base_url overrides and always
+# routes to its hardcoded endpoints.  This adapter uses aiohttp to call any
+# OpenAI-compatible /v1/chat/completions endpoint directly — MiniMax, OpenRouter,
+# Together, Groq, DeepSeek, or any vLLM/SGLang server.
+
+
+def _resolve_chat_completions_url(base_url: str) -> str:
+    """Normalise a base URL to a full ``/chat/completions`` endpoint."""
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
+
+
+def _chat_messages_to_openai(
+    messages: list[ChatMessage],
+    system: str | None,
+) -> list[dict[str, Any]]:
+    """Convert ``ChatMessage`` list to OpenAI ``messages`` format."""
+    out: list[dict[str, Any]] = []
+    if system:
+        out.append({"role": "system", "content": system})
+    for msg in messages:
+        role = str(getattr(msg, "role", "") or "user")
+        content = str(getattr(msg, "content", "") or "")
+        entry: dict[str, Any] = {"role": role, "content": content}
+
+        # Tool-call results
+        call_id = getattr(msg, "tool_response_call_id", None)
+        if call_id:
+            entry["tool_call_id"] = call_id
+
+        # Assistant tool calls
+        raw_tool_calls = getattr(msg, "tool_calls", None) or []
+        if raw_tool_calls:
+            tc_list = []
+            for tc in raw_tool_calls:
+                tc_id = str(getattr(tc, "call_id", "") or "")
+                fn_name = str(getattr(tc, "fn_name", "") or "")
+                fn_args = getattr(tc, "fn_arguments_json", None)
+                if not fn_args:
+                    fn_args = json.dumps(getattr(tc, "fn_arguments", {}) or {})
+                tc_list.append(
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {"name": fn_name, "arguments": fn_args},
+                    }
+                )
+            entry["tool_calls"] = tc_list
+
+        out.append(entry)
+    return out
+
+
+def _native_tools_to_openai_tools(tools: list[NativeToolSpec] | None) -> list[dict[str, Any]]:
+    """Convert ``NativeToolSpec`` list to OpenAI ``tools`` format."""
+    if not tools:
+        return []
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.schema or {"type": "object", "properties": {}},
+            },
+        }
+        for tool in tools
+    ]
+
+
+async def _openai_compat_chat(
+    *,
+    model: str,
+    base_url: str,
+    api_key: str,
+    messages: list[ChatMessage],
+    system: str | None,
+    tools: list[NativeToolSpec] | None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    response_schema: type[BaseModel] | None = None,
+    response_schema_name: str | None = None,
+) -> ChatResponse:
+    """Call an OpenAI-compatible ``/v1/chat/completions`` endpoint via aiohttp.
+
+    Returns a ``ChatResponse`` that matches the shape the rest of Clearwing
+    expects, including text content, tool calls, and usage.
+    """
+    url = _resolve_chat_completions_url(base_url)
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _chat_messages_to_openai(messages, system),
+        "stream": False,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+
+    openai_tools = _native_tools_to_openai_tools(tools)
+    if openai_tools:
+        payload["tools"] = openai_tools
+        payload["tool_choice"] = "auto"
+
+    if response_schema is not None:
+        schema = response_schema.model_json_schema()
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_schema_name or _schema_name_for_model(response_schema),
+                "schema": schema,
+                "strict": True,
+            },
+        }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    timeout = aiohttp.ClientTimeout(total=300, connect=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            body = await resp.text()
+            if resp.status < 200 or resp.status >= 300:
+                raise RuntimeError(
+                    f"OpenAI-compat request failed: HTTP {resp.status}: {body[:500]}"
+                )
+            data = json.loads(body)
+
+    choice = data.get("choices", [{}])[0]
+    message = choice.get("message", {})
+
+    raw_content = message.get("content") or ""
+    content: list[dict[str, Any]] = []
+    if raw_content:
+        content.append({"text": raw_content})
+
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function", {})
+        args_str = fn.get("arguments", "")
+        try:
+            args = json.loads(args_str) if args_str else {}
+        except json.JSONDecodeError:
+            logger.debug("Failed to parse tool arguments: %r", args_str[:200])
+            args = {}
+        content.append(
+            {
+                "tool_call": {
+                    "call_id": tc.get("id", ""),
+                    "fn_name": fn.get("name", ""),
+                    "fn_arguments": args,
+                    "fn_arguments_json": args_str,
+                }
+            }
+        )
+
+    usage_data = data.get("usage", {})
+    prompt_tokens = _int_or_none(usage_data.get("prompt_tokens"))
+    completion_tokens = _int_or_none(usage_data.get("completion_tokens"))
+    total_tokens = _int_or_none(usage_data.get("total_tokens"))
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+
+    return ChatResponse(
+        content=content,
+        usage=Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        ),
+        model_name=model,
+        provider_model_name=data.get("model", model),
+        model_adapter_kind="openai_compat",
+        provider_model_adapter_kind="openai_compat",
+    )
+
+
+# --- Codex responses adapter ------------------------------------------------
 
 
 def _resolve_codex_responses_url(base_url: str) -> str:
