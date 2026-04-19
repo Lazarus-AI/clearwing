@@ -440,8 +440,22 @@ def _check_external_tools() -> DoctorSection:
     optional = [
         ("gh", "Optional: needed for `sourcehunt --auto-pr` and `--github-checks` modes."),
         ("gdb", "Optional: useful inside the hunter sandbox for debugging."),
-        ("strace", "Optional: syscall tracing inside the hunter sandbox."),
     ]
+    if platform.system() == "Darwin":
+        # strace is Linux-only (uses ptrace); on macOS the equivalent is
+        # dtruss, a DTrace wrapper that ships with the OS but normally
+        # requires sudo and an SIP configuration that allows DTrace.
+        optional.append(
+            (
+                "dtruss",
+                "Optional: macOS syscall tracer (DTrace wrapper); equivalent to strace. "
+                "Usually requires sudo; SIP must allow DTrace.",
+            )
+        )
+    else:
+        optional.append(
+            ("strace", "Optional: syscall tracing inside the hunter sandbox.")
+        )
 
     for tool, required_flag, hint in required:
         path = shutil.which(tool)

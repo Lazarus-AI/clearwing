@@ -450,7 +450,7 @@ Runs ~25 checks across: Python version, clearwing version, LLM
 provider resolution (with an optional live test-invoke), filesystem
 (`~/.clearwing/` writable, `config.yaml` valid, `clearwing.log`
 writable), Docker daemon reachability, external CLI tools (git, rg,
-gh, gdb, strace), optional Python extras (langchain-ollama,
+gh, gdb, strace — or dtruss on macOS), optional Python extras (langchain-ollama,
 langchain-google-genai, playwright, sentence-transformers, fastapi,
 pymetasploit3, chromadb), and network reachability to the configured
 LLM endpoint. Prints a per-section summary with green-yellow-red

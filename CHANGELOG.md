@@ -105,6 +105,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`clearwing doctor` external-tool probe is now host-OS aware**: on
+  macOS it checks for `dtruss` (the DTrace-based syscall tracer that
+  ships with the OS) instead of `strace`, which is Linux-only. The
+  Linux sandbox container still ships `strace` unchanged; this only
+  removes the spurious "strace not on PATH" warning on Darwin hosts.
 - **`langchain-openai` is now a runtime dependency**, not a lazy
   `try/except ImportError` import. Every OpenAI-compatible endpoint
   works out of the box after `pip install clearwing` — no extra
