@@ -85,6 +85,14 @@ class TestProviderPresets:
         preset = PROVIDER_PRESETS["ollama"]
         assert preset["default_base_url"] == "http://localhost:11434"
 
+    def test_minimax_preset(self):
+        assert "minimax" in PROVIDER_PRESETS
+        preset = PROVIDER_PRESETS["minimax"]
+        assert preset["env_key"] == "MINIMAX_API_KEY"
+        assert "MiniMax-M2.7" in preset["models"]
+        assert "MiniMax-M2.7-highspeed" in preset["models"]
+        assert preset["default_base_url"] == "https://api.minimax.io/v1"
+
 
 # --- DEFAULT_ROUTES ---
 
@@ -239,3 +247,19 @@ class TestCreateLlmErrors:
         assert isinstance(llm, ChatModel)
         assert llm.provider_name == "ollama"
         assert llm.base_url == "http://localhost:11434"
+
+    def test_minimax_provider_uses_openai_compat(self):
+        mgr = ProviderManager()
+        llm = mgr._create_llm("minimax", "MiniMax-M2.7")
+        assert isinstance(llm, ChatModel)
+        assert llm.provider_name == "openai"
+        assert llm.model_name == "MiniMax-M2.7"
+        assert llm.base_url == "https://api.minimax.io/v1"
+
+    def test_minimax_highspeed_model(self):
+        mgr = ProviderManager()
+        llm = mgr._create_llm("minimax", "MiniMax-M2.7-highspeed")
+        assert isinstance(llm, ChatModel)
+        assert llm.provider_name == "openai"
+        assert llm.model_name == "MiniMax-M2.7-highspeed"
+        assert llm.base_url == "https://api.minimax.io/v1"

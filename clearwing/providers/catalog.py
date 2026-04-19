@@ -188,6 +188,16 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         alt_models=("deepseek-coder",),
     ),
     ProviderPreset(
+        key="minimax",
+        display_name="MiniMax",
+        description="MiniMax-M2.7 — peak performance and value via api.minimax.io.",
+        docs_url="https://platform.minimax.io/",
+        default_base_url="https://api.minimax.io/v1",
+        default_model="MiniMax-M2.7",
+        api_key_env_var="MINIMAX_API_KEY",
+        alt_models=("MiniMax-M2.7-highspeed",),
+    ),
+    ProviderPreset(
         key="custom",
         display_name="Custom OpenAI-compatible endpoint",
         description="Any service that speaks /v1/chat/completions — vLLM, SGLang, "
