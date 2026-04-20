@@ -97,7 +97,8 @@ class ReportGenerator:
         if scan_result.services:
             for service in scan_result.services:
                 lines.append(
-                    f"  Port {service['port']}: {service['service']} v{service.get('version', 'Unknown')}"
+                    f"  Port {service['port']}: "
+                    f"{_format_service_label(service['service'], service.get('version'))}"
                 )
                 if service.get("banner"):
                     lines.append(f"    Banner: {service['banner'][:100]}...")
@@ -253,3 +254,25 @@ class ReportGenerator:
             md += f"| {exploit.get('exploit_name', 'N/A')} | {exploit.get('cve', 'N/A')} | {exploit.get('success', False)} | {exploit.get('message', exploit.get('error', 'N/A'))} |\n"
 
         return md
+
+
+def _format_service_label(service: str, version: Any) -> str:
+    """Render `service` + `version` for the human-readable scan report.
+
+    The previous `f"{service} v{version}"` produced ugly output like
+    `HTTP vNone` (when version was missing) and `HTTP vVercel` (when the
+    version-pattern regex captured a server name from a `Server:` header
+    instead of a real version string). Disambiguate:
+
+      - missing/blank version       -> just the service name
+      - looks like a version (1.x)  -> `service v<version>`
+      - anything else (server name) -> `service (<version>)`
+    """
+    if version is None:
+        return service
+    label = str(version).strip()
+    if not label or label.lower() in ("none", "unknown"):
+        return service
+    if label[0].isdigit():
+        return f"{service} v{label}"
+    return f"{service} ({label})"

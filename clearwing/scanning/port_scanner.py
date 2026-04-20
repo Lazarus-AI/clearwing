@@ -1,10 +1,27 @@
 import asyncio
 import logging
+import os
 from typing import Any
 
 from scapy.all import IP, TCP, sr1
 
 logger = logging.getLogger(__name__)
+
+
+def _has_raw_socket_privilege() -> bool:
+    """Best-effort check that the current process can open raw sockets / BPF.
+
+    True when running as root on Unix (covers macOS and the common Linux
+    case). On Linux a non-root user with `CAP_NET_RAW` would also work,
+    but we don't try to probe capabilities — a false negative just means
+    the user gets a warning that's actually wrong, which is recoverable.
+    On Windows / platforms without ``os.geteuid`` we return True and let
+    scapy decide; we don't want to false-positive a warning there.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return True
+    return geteuid() == 0
 
 
 COMMON_PORTS = [
@@ -95,6 +112,20 @@ class PortScanner:
         """
         ports = ports or COMMON_PORTS
         open_ports = []
+
+        # Surface the most common silent-failure mode: scan_type='syn'
+        # uses scapy raw sockets, which on macOS/Linux require root
+        # (or CAP_NET_RAW). Without privilege scapy drops every probe
+        # silently and the report looks like "0 open ports". Warn once
+        # per scan so the user can re-run with sudo or scan_type='connect'.
+        if scan_type in ("syn", "fin", "ack", "xmas", "null") and not _has_raw_socket_privilege():
+            logger.warning(
+                "scan_type=%r needs raw-socket privileges; this process is "
+                "not root so probes will likely fail silently and the report "
+                "will show no open ports. Re-run with sudo, or use "
+                "scan_type='connect' (CLI default) for a userland TCP scan.",
+                scan_type,
+            )
 
         # Create semaphore for limiting concurrent connections
         semaphore = asyncio.Semaphore(threads)

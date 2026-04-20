@@ -94,6 +94,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`clearwing scan` returned 0 open ports for unprivileged users**.
+  `ScanConfig.scan_type` defaulted to `"syn"`, which routed every
+  probe through scapy's raw-socket SYN scan in
+  `clearwing/scanning/port_scanner.py`. Without root (or `CAP_NET_RAW`)
+  scapy silently dropped every packet ("No route found for IPv4
+  destination ...") and the report showed a blank port list in
+  ~80 ms even when the target had ports open. Default is now
+  `"connect"` (TCP connect, equivalent to `nmap -sT`); SYN remains
+  available by explicit opt-in. `PortScanner.scan` also emits a
+  one-shot WARNING when a raw-socket scan type is requested by an
+  unprivileged process so the failure is no longer silent.
+- **`VulnerabilityScanner` NVD timeouts dumped multi-frame
+  tracebacks** to the user terminal. The previous
+  `logger.warning(..., exc_info=True)` in `_query_nvd` rendered the
+  full aiohttp call stack on every routine network timeout. Replaced
+  with a single-line WARNING (`"NVD API query timed out for 'HTTP'"`
+  for `asyncio.TimeoutError`; class + message for other exceptions);
+  full traceback is now emitted at DEBUG only.
+- **`Unclosed client session` aiohttp warning at end of every scan**.
+  `VulnerabilityScanner` lazily allocated an `aiohttp.ClientSession`
+  but `CoreEngine._vulnerability_scan` never called the scanner's
+  `close()`. Wrapped the scanner usage in `try/finally:
+  await scanner.close()` so the session is reliably cleaned up.
+- **Scan report rendered service versions as `vNone` / `vVercel`**.
+  `ReportGenerator._generate_text` formatted versions with a naive
+  `f"{service} v{version}"`, producing `HTTP vNone` when no version
+  was captured and `HTTP vVercel` when the regex pulled a server
+  name out of a `Server:` header instead of a real version. New
+  `_format_service_label` helper omits the version when missing,
+  prefixes with `v` only when the value starts with a digit, and
+  parenthesises non-version labels (e.g. `HTTP (Vercel)`,
+  `HTTP v2.4.41`).
 - **`clearwing config --set-provider` config.yaml bloat regression**.
   The prior `cli.config.save()` path dumped the full merged default
   config (including the 1024-port scanning defaults) into
