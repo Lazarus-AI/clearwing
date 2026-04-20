@@ -330,13 +330,13 @@ class AsyncLLMClient:
         request: ChatRequest,
         options: ChatOptions,
     ) -> ChatResponse:
-        # openai_resp backends that require `stream=true` (e.g. our local
-        # gateway) reject `exec_chat`. genai-pyo3's `achat_via_stream`
-        # streams internally and hands back a fully-collected ChatResponse,
-        # so callers never see chunk events.
-        if self.provider_name == "openai_resp":
-            return await client.achat_via_stream(self.model_name, request, options)
-        return await client.achat(self.model_name, request, options)
+        # Always go through `achat_via_stream`: it streams internally and
+        # returns a fully-collected ChatResponse, so callers never see
+        # chunk events. Necessary for backends that require `stream=true`
+        # on the wire (our local openai_resp gateway, OpenAI's Responses
+        # API with certain models), harmless for everyone else — every
+        # adapter genai-pyo3 supports speaks SSE.
+        return await client.achat_via_stream(self.model_name, request, options)
 
     async def _achat_openai_codex(
         self,
