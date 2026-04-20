@@ -256,9 +256,13 @@ def _prompt_api_key(
                 )
                 return ""
             except Exception as exc:
-                console.print(f"[yellow]Stored OpenAI OAuth credentials need renewal: {exc}[/yellow]")
+                console.print(
+                    f"[yellow]Stored OpenAI OAuth credentials need renewal: {exc}[/yellow]"
+                )
 
-        console.print("[dim]Starting OpenAI browser OAuth. Credentials are stored under ~/.clearwing/auth/.[/dim]")
+        console.print(
+            "[dim]Starting OpenAI browser OAuth. Credentials are stored under ~/.clearwing/auth/.[/dim]"
+        )
         creds = login_openai_oauth(
             no_open=no_open,
             timeout_seconds=timeout_seconds,
@@ -376,6 +380,11 @@ def _write_config(
         provider_section["api_key"] = api_key_literal
     if model:
         provider_section["model"] = model
+    if preset.provider_adapter:
+        # Presets like `openai-responses` that target a specific
+        # genai-pyo3 adapter persist the name so the provider manager
+        # doesn't have to guess from the base URL.
+        provider_section["adapter"] = preset.provider_adapter
 
     path = cli.config.DEFAULT_CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,11 @@ class ProviderConfig:
     base_url: str = ""  # for custom endpoints (Ollama, etc.)
     max_tokens: int = 4096
     temperature: float = 0.0
+    # Optional explicit genai-pyo3 adapter name. When set, overrides the
+    # base-URL heuristic in _adapter_for_base_url. Expected values:
+    # "openai", "openai_resp", "openai_codex", "anthropic", "gemini",
+    # "ollama". Left empty for the default behavior (heuristic).
+    adapter: str = ""
 
 
 @dataclass
@@ -238,6 +243,7 @@ class ProviderManager:
                     model=pcfg.get("model", ""),
                     api_key=api_key,
                     base_url=base_url,
+                    adapter=pcfg.get("adapter", ""),
                 )
             )
 
@@ -505,6 +511,10 @@ def _expand_env(value: Any) -> str:
 
 
 def _adapter_for_endpoint(endpoint: LLMEndpoint) -> str:
+    # Explicit `adapter:` on the endpoint (propagated from the
+    # `provider:` config block) wins over every other rule.
+    if endpoint.adapter:
+        return endpoint.adapter.strip()
     if endpoint.provider == "anthropic":
         return "anthropic"
     if endpoint.provider == "openai_codex":
@@ -513,6 +523,11 @@ def _adapter_for_endpoint(endpoint: LLMEndpoint) -> str:
 
 
 def _adapter_for_provider_config(provider: str, config: ProviderConfig | None) -> str:
+    # Explicit `adapter:` on the provider config wins over every heuristic.
+    # Setup wizard writes this for presets that carry `provider_adapter`
+    # (e.g. the `openai-responses` preset → `adapter: openai_resp`).
+    if config is not None and config.adapter:
+        return config.adapter.strip()
     explicit = provider.lower().strip()
     if explicit == "anthropic":
         return "anthropic"
@@ -522,19 +537,20 @@ def _adapter_for_provider_config(provider: str, config: ProviderConfig | None) -
         return "gemini"
     if explicit == "ollama":
         return "ollama"
-    if explicit == "openai":
-        return _adapter_for_base_url(
-            config.base_url if config else None, config.model if config else ""
-        )
     return _adapter_for_base_url(
         config.base_url if config else None, config.model if config else ""
     )
 
 
 def _adapter_for_base_url(base_url: str | None, model: str) -> str:
+    """Fallback adapter resolution when no explicit `adapter:` is set.
+
+    Pure URL / model-name heuristics — no per-host hardcoded special
+    cases. Users on endpoints that aren't disambiguated by URL should
+    set `adapter:` on their provider config (the `openai-responses`
+    preset does this automatically).
+    """
     host = (base_url or "").lower()
-    if "localhost:8183" in host or "127.0.0.1:8183" in host:
-        return "openai_resp"
     if "11434" in host:
         return "ollama"
     if "generativelanguage.googleapis.com" in host or "googleapis.com" in host:

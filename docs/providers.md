@@ -1,15 +1,31 @@
 # LLM providers
 
-Clearwing talks to any of five LLM backends:
+Clearwing runs on `genai-pyo3` (native Rust bindings to `rust-genai`),
+which speaks every major provider directly. The wizard
+(`clearwing setup`) exposes a menu of the known backends, each
+carrying an explicit **adapter** name that decides the wire
+protocol — `anthropic`, `openai` (chat completions), `openai_resp`
+(responses API), `openai_codex` (ChatGPT OAuth), `ollama`, or
+`gemini`. There's no heuristic guessing: the preset you pick in
+the wizard persists `adapter:` into `~/.clearwing/config.yaml`
+alongside `base_url`, `api_key`, and `model`.
 
-- **Anthropic direct** — default, via `ANTHROPIC_API_KEY`
-- **OpenAI-compatible endpoints** — the same `/v1/chat/completions`
-  wire format used by OpenRouter, Ollama, LM Studio, vLLM, Together,
-  Groq, DeepSeek, and OpenAI itself
-- **Native Ollama** — via `pip install clearwing[ollama]`
-- **Google Gemini** — via `pip install clearwing[google]`
-- **Custom routing** — per-task provider selection via
-  `~/.clearwing/config.yaml`
+Backends covered below:
+
+- **Anthropic direct** — Claude via `api.anthropic.com` (`anthropic` adapter).
+- **OpenAI (Chat Completions)** — GPT-4o / GPT-4o-mini via
+  `/v1/chat/completions` (`openai` adapter).
+- **OpenAI (Responses API)** — GPT-5.x / o-series via `/v1/responses`
+  (`openai_resp` adapter). Required for GPT-5.x and o-series.
+- **OpenAI OAuth (ChatGPT)** — Plus/Pro login via Codex backend (`openai_codex`).
+- **OpenRouter, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
+  anything that speaks `/v1/chat/completions` (`openai` adapter).
+- **MiniMax** — M2.7 / M2.5 via the Anthropic-compatible endpoint
+  (`anthropic` adapter at `api.minimax.io/anthropic`).
+- **Ollama** — local models via the native rust-genai Ollama adapter
+  (`ollama` adapter at `http://localhost:11434`, no `/v1` suffix).
+- **Gemini** — reserved for when a Gemini preset is added; adapter
+  name is `gemini`.
 
 This page walks through each backend with copy-paste snippets.
 
@@ -83,6 +99,66 @@ clearwing interactive --model claude-sonnet-4-6
 clearwing sourcehunt /path/to/repo
 ```
 
+Adapter: `anthropic` (the wizard writes this automatically; no
+heuristic is involved).
+
+## OpenAI (Chat Completions API)
+
+The classic OpenAI API. Use this for GPT-4o / GPT-4o-mini. For
+GPT-5.x and the o-series (o1, o3) use the Responses API preset
+below — those models require it.
+
+```bash
+clearwing setup --provider openai
+# or explicitly
+export CLEARWING_BASE_URL=https://api.openai.com/v1
+export CLEARWING_API_KEY=$OPENAI_API_KEY
+export CLEARWING_MODEL=gpt-4o
+```
+
+`~/.clearwing/config.yaml`:
+
+```yaml
+provider:
+  base_url: https://api.openai.com/v1
+  api_key: ${OPENAI_API_KEY}
+  model: gpt-4o
+  adapter: openai
+```
+
+## OpenAI (Responses API)
+
+Required for GPT-5.x and o-series models — those only speak the
+newer `/v1/responses` streaming protocol. Works for GPT-4o as well,
+but chat-completions is slightly cheaper for older models so pick
+the preset that matches your model generation.
+
+```bash
+clearwing setup --provider openai-responses
+# or explicitly
+export CLEARWING_BASE_URL=https://api.openai.com/v1
+export CLEARWING_API_KEY=$OPENAI_API_KEY
+export CLEARWING_MODEL=gpt-5.4
+```
+
+`~/.clearwing/config.yaml`:
+
+```yaml
+provider:
+  base_url: https://api.openai.com/v1
+  api_key: ${OPENAI_API_KEY}
+  model: gpt-5.4
+  adapter: openai_resp
+```
+
+The `adapter: openai_resp` line is what switches the wire protocol
+from chat-completions to responses. Leave it out and the request
+will 404 against GPT-5.x models. The wizard writes it automatically
+when you pick the `openai-responses` preset.
+
+Any `/v1/responses` proxy works — point `base_url` at your proxy
+host, keep `adapter: openai_resp`.
+
 ## OpenRouter
 
 OpenRouter routes your request to the specific model you name.
@@ -127,6 +203,7 @@ provider:
   base_url: https://openrouter.ai/api/v1
   api_key: ${OPENROUTER_API_KEY}
   model: anthropic/claude-opus-4
+  adapter: openai
 ```
 
 The `${OPENROUTER_API_KEY}` literal is expanded from the environment
@@ -158,14 +235,10 @@ clearwing sourcehunt /path/to/repo --depth standard
 Or pin it explicitly in `~/.clearwing/config.yaml`:
 
 ```yaml
-providers:
-  local_ollama:
-    provider: ollama
-    base_url: http://localhost:11434
-    model: qwen2.5-coder:32b
-
-routes:
-  default: local_ollama
+provider:
+  base_url: http://localhost:11434
+  model: qwen2.5-coder:32b
+  adapter: ollama
 ```
 
 ### OpenAI-compat endpoint (alternative)
@@ -218,7 +291,9 @@ clearwing sourcehunt /path/to/repo
 
 ## Together, Groq, Fireworks, Anyscale, SiliconFlow, DeepSeek
 
-All OpenAI-compatible — same pattern, different base URL.
+All `/v1/chat/completions` endpoints — same pattern, different base
+URL, `adapter: openai`. The wizard handles them directly; the env-var
+paths are here for scripting.
 
 ```bash
 # Together
@@ -240,11 +315,32 @@ export CLEARWING_MODEL=accounts/fireworks/models/qwen2p5-coder-32b-instruct
 export CLEARWING_BASE_URL=https://api.deepseek.com/v1
 export CLEARWING_API_KEY=$DEEPSEEK_API_KEY
 export CLEARWING_MODEL=deepseek-chat
+```
 
-# OpenAI direct
-export CLEARWING_BASE_URL=https://api.openai.com/v1
-export CLEARWING_API_KEY=$OPENAI_API_KEY
-export CLEARWING_MODEL=gpt-4o
+For OpenAI itself, use the [Chat Completions](#openai-chat-completions-api)
+or [Responses](#openai-responses-api) section above — the model
+generation decides which.
+
+## MiniMax
+
+MiniMax's M-series reasoning models are served via an
+Anthropic-compatible endpoint at `https://api.minimax.io/anthropic`
+(not an OpenAI-compat one). The wizard picks the right adapter
+automatically.
+
+```bash
+clearwing setup --provider minimax
+# writes adapter: anthropic + base_url: https://api.minimax.io/anthropic
+```
+
+`~/.clearwing/config.yaml`:
+
+```yaml
+provider:
+  base_url: https://api.minimax.io/anthropic
+  api_key: ${MINIMAX_API_KEY}
+  model: MiniMax-M2.7
+  adapter: anthropic
 ```
 
 ## Per-task routing (advanced)

@@ -77,6 +77,11 @@ class LLMEndpoint:
     base_url: str | None = None
     api_key: str | None = None
     source: str = "default"
+    #: Optional explicit genai-pyo3 adapter override. When set, the
+    #: ProviderManager uses it instead of the base-URL heuristic. Set
+    #: via `adapter:` in the `provider:` config block (e.g. the
+    #: `openai-responses` preset writes `adapter: openai_resp`).
+    adapter: str | None = None
 
     @property
     def is_openai_compat(self) -> bool:
@@ -219,6 +224,7 @@ def resolve_llm_endpoint(
         cfg_base_url = config_provider.get("base_url")
         cfg_model = config_provider.get("model")
         cfg_api_key = _resolve_config_secret(config_provider.get("api_key"))
+        cfg_adapter = config_provider.get("adapter")  # None if unset
         if cfg_base_url:
             if _is_anthropic_compat_base_url(cfg_base_url):
                 return LLMEndpoint(
@@ -227,6 +233,7 @@ def resolve_llm_endpoint(
                     base_url=cfg_base_url,
                     api_key=cfg_api_key or os.environ.get(ENV_ANTHROPIC_KEY),
                     source="config",
+                    adapter=cfg_adapter,
                 )
             return LLMEndpoint(
                 provider="openai_compat",
@@ -234,6 +241,7 @@ def resolve_llm_endpoint(
                 base_url=cfg_base_url,
                 api_key=cfg_api_key or _placeholder_for(cfg_base_url),
                 source="config",
+                adapter=cfg_adapter,
             )
         if cfg_model or cfg_api_key:
             return LLMEndpoint(
@@ -242,6 +250,7 @@ def resolve_llm_endpoint(
                 base_url=None,
                 api_key=cfg_api_key or os.environ.get(ENV_ANTHROPIC_KEY),
                 source="config",
+                adapter=cfg_adapter,
             )
 
     # 4. Default — Anthropic direct via ANTHROPIC_API_KEY

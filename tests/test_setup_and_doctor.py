@@ -79,6 +79,49 @@ class TestProviderCatalog:
         assert preset.auth_flow == "openai_codex"
         assert not preset.is_openai_compat
 
+    def test_every_preset_declares_a_provider_adapter(self):
+        """Rule: every preset in the catalog must set
+        `provider_adapter` to one of the known genai-pyo3 adapter
+        names. No None, no empty string — the wizard refuses to
+        persist a config without an explicit adapter, so the
+        catalog can't ship a preset that lacks one.
+        """
+        valid_adapters = {
+            "anthropic",
+            "openai",
+            "openai_resp",
+            "openai_codex",
+            "ollama",
+            "gemini",
+        }
+        for preset in KNOWN_PROVIDERS:
+            assert preset.provider_adapter, (
+                f"{preset.key!r} must set provider_adapter to one of {sorted(valid_adapters)}"
+            )
+            assert preset.provider_adapter in valid_adapters, (
+                f"{preset.key!r} has unknown adapter "
+                f"{preset.provider_adapter!r}; valid={sorted(valid_adapters)}"
+            )
+
+    def test_openai_responses_preset_exists(self):
+        """The Responses API (used by GPT-5.x and o-series) must be
+        discoverable from the setup wizard — it's not enough to bolt
+        it on via the `custom` preset."""
+        preset = preset_by_key("openai-responses")
+        assert preset is not None
+        assert preset.provider_adapter == "openai_resp"
+        assert preset.default_base_url == "https://api.openai.com/v1"
+        assert preset.api_key_env_var == "OPENAI_API_KEY"
+
+    def test_openai_chat_and_responses_both_present(self):
+        """Both OpenAI API dialects have catalog entries."""
+        chat = preset_by_key("openai")
+        resp = preset_by_key("openai-responses")
+        assert chat is not None and chat.provider_adapter == "openai"
+        assert resp is not None and resp.provider_adapter == "openai_resp"
+        # Same API key env var, different wire shape
+        assert chat.api_key_env_var == resp.api_key_env_var == "OPENAI_API_KEY"
+
 
 # --- Setup wizard: _mask_secret -------------------------------------------
 
@@ -164,6 +207,7 @@ class TestWriteConfig:
                 "base_url": "https://openrouter.ai/api/v1",
                 "api_key": "${OPENROUTER_API_KEY}",
                 "model": "anthropic/claude-opus-4",
+                "adapter": "openai",
             }
         }
 
@@ -250,6 +294,7 @@ class TestWriteConfig:
                 "auth": "openai_codex",
                 "base_url": "https://chatgpt.com/backend-api",
                 "model": "gpt-5.2",
+                "adapter": "openai_codex",
             }
         }
 

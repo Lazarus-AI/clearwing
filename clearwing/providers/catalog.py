@@ -58,6 +58,14 @@ class ProviderPreset:
     #: setup wizard ("Common models: ..." hint).
     alt_models: tuple[str, ...] = field(default_factory=tuple)
 
+    #: Required genai-pyo3 adapter name. Every preset in the catalog
+    #: declares exactly one of: `anthropic`, `openai`, `openai_resp`,
+    #: `openai_codex`, `ollama`, `gemini`. The wizard persists this as
+    #: `adapter:` under `provider:` in `~/.clearwing/config.yaml` and
+    #: the provider manager routes by it — no base-URL guessing on
+    #: preset-driven configs.
+    provider_adapter: str = ""
+
     #: Optional named auth flow. OAuth providers use this to skip API-key
     #: prompts and write an auth marker into config.yaml.
     auth_flow: str | None = None
@@ -80,6 +88,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         api_key_env_var="ANTHROPIC_API_KEY",
         is_openai_compat=False,
         alt_models=("claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"),
+        provider_adapter="anthropic",
     ),
     ProviderPreset(
         key="openrouter",
@@ -99,18 +108,20 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "qwen/qwen-2.5-coder-32b-instruct",
             "google/gemini-2.0-flash",
         ),
+        provider_adapter="openai",
     ),
     ProviderPreset(
         key="ollama",
-        display_name="Ollama (local)",
-        description="Local models, free, no API key. Uses the OpenAI-compatible "
-        "endpoint at http://localhost:11434/v1.",
+        display_name="Ollama (local, native adapter)",
+        description="Local models, free, no API key. Uses the native "
+        "rust-genai Ollama adapter at http://localhost:11434.",
         docs_url="https://ollama.com/download",
-        default_base_url="http://localhost:11434/v1",
+        default_base_url="http://localhost:11434",
         default_model="qwen2.5-coder:32b",
         api_key_env_var=None,
         is_local=True,
         alt_models=("qwen2.5:72b", "llama3.3:70b", "mistral-small3:24b"),
+        provider_adapter="ollama",
     ),
     ProviderPreset(
         key="lmstudio",
@@ -122,16 +133,33 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="local-model",
         api_key_env_var=None,
         is_local=True,
+        provider_adapter="openai",
     ),
     ProviderPreset(
         key="openai",
-        display_name="OpenAI direct",
-        description="GPT-4o / GPT-4o-mini / o1 via api.openai.com.",
+        display_name="OpenAI (Chat Completions API)",
+        description="GPT-4o / GPT-4o-mini via `/v1/chat/completions` on "
+        "api.openai.com. Use `openai-responses` for GPT-5.x and o-series "
+        "reasoning models.",
         docs_url="https://platform.openai.com/api-keys",
         default_base_url="https://api.openai.com/v1",
         default_model="gpt-4o",
         api_key_env_var="OPENAI_API_KEY",
-        alt_models=("gpt-4o-mini", "o1-preview", "o1-mini"),
+        alt_models=("gpt-4o-mini",),
+        provider_adapter="openai",
+    ),
+    ProviderPreset(
+        key="openai-responses",
+        display_name="OpenAI (Responses API)",
+        description="GPT-5.x / o-series / current reasoning models via "
+        "`/v1/responses` on api.openai.com. Required for GPT-5.x and "
+        "the o-series; works for GPT-4o too. Streams by default.",
+        docs_url="https://platform.openai.com/api-keys",
+        default_base_url="https://api.openai.com/v1",
+        default_model="gpt-5.4",
+        api_key_env_var="OPENAI_API_KEY",
+        alt_models=("gpt-5.4-mini", "gpt-5.3-codex", "o3", "o3-mini", "gpt-4o"),
+        provider_adapter="openai_resp",
     ),
     ProviderPreset(
         key="openai-oauth",
@@ -143,6 +171,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         api_key_env_var=None,
         is_openai_compat=False,
         alt_models=("gpt-5.4", "gpt-5.4-mini", "gpt-5.2"),
+        provider_adapter="openai_codex",
         auth_flow="openai_codex",
     ),
     ProviderPreset(
@@ -158,6 +187,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "deepseek-ai/DeepSeek-V3",
             "mistralai/Mixtral-8x22B-Instruct-v0.1",
         ),
+        provider_adapter="openai",
     ),
     ProviderPreset(
         key="groq",
@@ -168,6 +198,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="llama-3.3-70b-versatile",
         api_key_env_var="GROQ_API_KEY",
         alt_models=("qwen-2.5-coder-32b", "mixtral-8x7b-32768"),
+        provider_adapter="openai",
     ),
     ProviderPreset(
         key="fireworks",
@@ -177,6 +208,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_base_url="https://api.fireworks.ai/inference/v1",
         default_model="accounts/fireworks/models/qwen2p5-coder-32b-instruct",
         api_key_env_var="FIREWORKS_API_KEY",
+        provider_adapter="openai",
     ),
     ProviderPreset(
         key="deepseek",
@@ -187,6 +219,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="deepseek-chat",
         api_key_env_var="DEEPSEEK_API_KEY",
         alt_models=("deepseek-coder",),
+        provider_adapter="openai",
     ),
     ProviderPreset(
         key="minimax",
@@ -204,16 +237,19 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "MiniMax-M2.5-highspeed",
             "MiniMax-M2.1",
         ),
+        provider_adapter="anthropic",
     ),
     ProviderPreset(
         key="custom",
-        display_name="Custom OpenAI-compatible endpoint",
-        description="Any service that speaks /v1/chat/completions — vLLM, SGLang, "
-        "SiliconFlow, Anyscale, Fireworks, a reverse proxy, ...",
+        display_name="Custom OpenAI-compatible endpoint (/v1/chat/completions)",
+        description="Any service that speaks `/v1/chat/completions` — vLLM, "
+        "SGLang, SiliconFlow, Anyscale, a reverse proxy, etc. Use "
+        "`openai-responses` for `/v1/responses` endpoints instead.",
         docs_url="https://docs.anthropic.com/en/api/openai-sdk",  # generic reference
         default_base_url="",
         default_model="",
         api_key_env_var=None,
+        provider_adapter="openai",
     ),
 )
 
