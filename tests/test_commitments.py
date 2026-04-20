@@ -6,8 +6,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from clearwing.sourcehunt.commitment import (
     Commitment,
     CommitmentLog,
@@ -15,7 +13,6 @@ from clearwing.sourcehunt.commitment import (
     generate_commitment,
     verify_commitment,
 )
-
 
 # --- Commitment generation tests ---------------------------------------------
 
@@ -39,7 +36,8 @@ class TestGenerateCommitment:
 
     def test_includes_metadata(self):
         c = generate_commitment(
-            "f1", "doc",
+            "f1",
+            "doc",
             project="https://github.com/test/repo",
             severity="critical",
             cwe="CWE-787",
@@ -62,23 +60,75 @@ class TestGenerateCommitment:
 
 
 class TestVerifyCommitment:
-    def test_matching_document(self):
+    def test_round_trip_matches(self):
+        """Regression: commit then verify must MATCH for the same document.
+
+        Previously failed — `generate_commitment` hashed
+        `{finding_id, document, type, generated_at}` while
+        `verify_commitment` hashed only the document. Two different
+        hash functions, no round-trip possible.
+        """
         doc = "the exact original document"
-        import hashlib
-        digest = hashlib.sha3_224(doc.encode()).hexdigest()
-        assert verify_commitment(doc, digest) is True
+        c = generate_commitment("finding-001", doc)
+        assert verify_commitment(doc, c) is True
 
-    def test_mismatched_document(self):
-        import hashlib
-        doc = "original"
-        digest = hashlib.sha3_224(doc.encode()).hexdigest()
-        assert verify_commitment("different document", digest) is False
+    def test_mismatched_document_fails(self):
+        c = generate_commitment("finding-001", "original")
+        assert verify_commitment("different document", c) is False
 
-    def test_empty_document(self):
-        import hashlib
-        doc = ""
-        digest = hashlib.sha3_224(doc.encode()).hexdigest()
-        assert verify_commitment("", digest) is True
+    def test_empty_document_round_trip(self):
+        c = generate_commitment("finding-001", "")
+        assert verify_commitment("", c) is True
+
+    def test_mismatched_finding_id_fails(self):
+        """Commitment's finding_id is part of the hashed canonical form
+        — a commitment for finding-001 must not verify under a
+        commitment claiming to be for finding-002 even if the document
+        text is identical."""
+        doc = "report body"
+        c1 = generate_commitment("finding-001", doc)
+        c2 = Commitment(
+            finding_id="finding-002",
+            digest=c1.digest,
+            algorithm=c1.algorithm,
+            commitment_type=c1.commitment_type,
+            committed_at=c1.committed_at,
+        )
+        assert verify_commitment(doc, c2) is False
+
+    def test_mismatched_type_fails(self):
+        """commitment_type is part of the canonical form."""
+        doc = "report body"
+        c1 = generate_commitment("f1", doc, commitment_type=CommitmentType.REPORT)
+        c2 = Commitment(
+            finding_id=c1.finding_id,
+            digest=c1.digest,
+            algorithm=c1.algorithm,
+            commitment_type="poc",
+            committed_at=c1.committed_at,
+        )
+        assert verify_commitment(doc, c2) is False
+
+    def test_stored_timestamp_matches_hashed_timestamp(self):
+        """Regression: `generate_commitment` used to call
+        `datetime.now()` twice — once for the hash input's
+        `generated_at`, once for the stored `committed_at`. Those two
+        calls happened microseconds apart and produced different
+        timestamps, so the stored timestamp was NEVER the one that
+        was hashed, making verification impossible. A single `now()`
+        call shared between the two ensures round-trip.
+        """
+        doc = "anything"
+        c = generate_commitment("f1", doc)
+        assert verify_commitment(doc, c) is True
+        # Re-load from a jsonl-style round-trip to be sure the stored
+        # timestamp survives serialization without drift.
+        with tempfile.TemporaryDirectory() as td:
+            log = CommitmentLog(log_path=Path(td) / "commitments.jsonl")
+            log.commit(c)
+            loaded = log.get_commitments(finding_id="f1")[0]
+        assert loaded.committed_at == c.committed_at
+        assert verify_commitment(doc, loaded) is True
 
 
 # --- CommitmentLog tests -----------------------------------------------------
@@ -171,7 +221,8 @@ class TestCommitmentLog:
             log = CommitmentLog(log_path=Path(td) / "commitments.jsonl")
             finding = {"id": "f1", "description": "test", "severity": "high"}
             commitments = log.commit_finding(
-                finding, project="https://github.com/test/repo",
+                finding,
+                project="https://github.com/test/repo",
             )
             assert commitments[0].project == "https://github.com/test/repo"
 
@@ -183,11 +234,15 @@ class TestFormatPublicTable:
     def test_markdown_table(self):
         with tempfile.TemporaryDirectory() as td:
             log = CommitmentLog(log_path=Path(td) / "commitments.jsonl")
-            log.commit(generate_commitment(
-                "f1", "doc",
-                project="https://github.com/test/repo",
-                severity="critical", cwe="CWE-787",
-            ))
+            log.commit(
+                generate_commitment(
+                    "f1",
+                    "doc",
+                    project="https://github.com/test/repo",
+                    severity="critical",
+                    cwe="CWE-787",
+                )
+            )
             output = log.format_public_table(fmt="markdown")
             assert "| Date |" in output
             assert "SHA-3-224" in output
@@ -224,6 +279,7 @@ class TestFormatPublicTable:
 class TestCLIRegistration:
     def test_verify_subcommand(self):
         import argparse
+
         from clearwing.ui.commands import disclose
 
         parser = argparse.ArgumentParser()
@@ -238,6 +294,7 @@ class TestCLIRegistration:
 
     def test_commitments_subcommand(self):
         import argparse
+
         from clearwing.ui.commands import disclose
 
         parser = argparse.ArgumentParser()
@@ -248,6 +305,7 @@ class TestCLIRegistration:
 
     def test_commitments_format_flag(self):
         import argparse
+
         from clearwing.ui.commands import disclose
 
         parser = argparse.ArgumentParser()
