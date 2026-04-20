@@ -1,9 +1,17 @@
-"""Deep agent mode tools: execute, read_file, write_file, think.
+"""Deep agent mode tools: execute, read_file, write_file.
 
-Replaces the constrained 9-tool hunter set with 4 primitives that give
-the model full-shell access inside the sandbox container.  The model
+Replaces the constrained 9-tool hunter set with 3 primitives that give
+the model full-shell access inside the sandbox container. The model
 uses the same tools a human researcher would — gcc, gdb, strace, make,
 etc. — all via ``execute()``.
+
+Model-side reasoning is captured natively via rust-genai's
+`capture_reasoning_content=True` on every chat request; the hunter
+transcript logs `ChatResponse.reasoning_content` alongside the
+visible text, so there's no need for an explicit `think()`
+scratchpad tool (and one doesn't exist here — it was removed after
+verifying native reasoning is strictly richer than a model-callable
+no-op).
 
 See docs/spec/001_deep_agent_mode.md for the design rationale.
 """
@@ -31,9 +39,8 @@ def _cap_output(text: str, label: str = "output") -> str:
 
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
-    """Build the 4+1 deep agent tool set.
-
-    Returns tools: execute, read_file, write_file, think, record_finding.
+    """Build the deep agent tool set: execute, read_file, write_file,
+    plus the shared reporting + findings-pool tools.
     """
 
     def execute(command: str, timeout: int = 300) -> dict:
@@ -53,7 +60,16 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             return "error: no sandbox available"
         start = offset + 1
         end = offset + limit
-        cmd = f"sed -n '{start},{end}p' {shlex.quote(path)} | cat -n"
+        # Previously this was `sed ... | cat -n`, which numbers output
+        # starting from 1 regardless of offset — a hunter asking for
+        # lines 101-150 got back "line 1..line 50" and then reasoned
+        # about the wrong line numbers when reporting findings. Use awk
+        # with NR directly so the emitted line numbers match the file.
+        cmd = (
+            f"awk -v s={start} -v e={end} "
+            f"'NR>=s && NR<=e {{ printf \"%6d\\t%s\\n\", NR, $0 }}' "
+            f"{shlex.quote(path)}"
+        )
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
             return f"error reading {path}: {result.stderr.strip()}"
@@ -62,14 +78,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     def write_file(path: str, contents: str) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
-        ctx.sandbox.exec(
-            f"mkdir -p $(dirname {shlex.quote(path)})", timeout=10
-        )
+        ctx.sandbox.exec(f"mkdir -p $(dirname {shlex.quote(path)})", timeout=10)
         ctx.sandbox.write_file(path, contents.encode("utf-8"))
         return f"Wrote {len(contents)} bytes to {path}"
-
-    def think(notes: str) -> str:
-        return "Noted."
 
     reporting_tools = build_reporting_tools(ctx)
 
@@ -140,24 +151,6 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "required": ["path", "contents"],
             },
             handler=write_file,
-        ),
-        NativeToolSpec(
-            name="think",
-            description=(
-                "Record your reasoning. Use this to think through hypotheses, "
-                "plan next steps, or note observations. Appears in the audit trail."
-            ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "notes": {
-                        "type": "string",
-                        "description": "Your reasoning or observations.",
-                    },
-                },
-                "required": ["notes"],
-            },
-            handler=think,
         ),
         *reporting_tools,
         *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),

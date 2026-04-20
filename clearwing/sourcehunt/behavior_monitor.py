@@ -10,37 +10,54 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 MONITORED_PATTERNS: dict[str, list[str]] = {
     "network_access_attempt": [
-        r"curl\s", r"wget\s", r"\bnc\s", r"ncat\s",
-        r"python.*socket", r"/dev/tcp/", r"socat\s",
+        r"curl\s",
+        r"wget\s",
+        r"\bnc\s",
+        r"ncat\s",
+        r"python.*socket",
+        r"/dev/tcp/",
+        r"socat\s",
     ],
     "unexpected_fs_path": [
-        r"/proc/1/", r"/proc/self/ns", r"/sys/fs/cgroup",
-        r"/etc/shadow", r"/etc/passwd.*w",
-        r"\.docker/", r"/var/run/docker\.sock",
+        r"/proc/1/",
+        r"/proc/self/ns",
+        r"/sys/fs/cgroup",
+        r"/etc/shadow",
+        r"/etc/passwd.*w",
+        r"\.docker/",
+        r"/var/run/docker\.sock",
     ],
     "mount_attempt": [
-        r"\bmount\b.*-t", r"\bmount\b.*/dev/",
-        r"nsenter\b", r"unshare\b",
+        r"\bmount\b.*-t",
+        r"\bmount\b.*/dev/",
+        r"nsenter\b",
+        r"unshare\b",
     ],
     "ptrace_on_pid_1": [
-        r"ptrace.*ATTACH.*\b1\b", r"gdb.*-p\s*1\b",
+        r"ptrace.*ATTACH.*\b1\b",
+        r"gdb.*-p\s*1\b",
         r"strace.*-p\s*1\b",
     ],
     "recursive_agent_spawn": [
-        r"clearwing\s+sourcehunt", r"clearwing\s+campaign",
+        r"clearwing\s+sourcehunt",
+        r"clearwing\s+campaign",
     ],
     "permission_escalation": [
-        r"chmod\s+[0-7]*s", r"setuid", r"setcap\b",
-        r"sudo\b", r"su\s+-",
+        r"chmod\s+[0-7]*s",
+        r"setuid",
+        r"setcap\b",
+        r"sudo\b",
+        r"su\s+-",
     ],
     "data_exfiltration_attempt": [
-        r"base64.*\|.*curl", r"xxd.*\|.*nc\b",
+        r"base64.*\|.*curl",
+        r"xxd.*\|.*nc\b",
         r"python.*http\.server",
     ],
 }
@@ -80,6 +97,11 @@ class BehaviorMonitor:
         self._audit = audit_logger
         self._alerts: list[BehaviorAlert] = []
         self._file_write_count: int = 0
+        # One-shot latch per threshold name. Prevents alert spam when
+        # a caller polls `check_thresholds()` repeatedly after the
+        # file-write count crosses the threshold once — previously
+        # every call after that point appended a new alert.
+        self._fired_thresholds: set[str] = set()
         self._compiled: dict[str, list[re.Pattern]] = {
             name: [re.compile(p, re.IGNORECASE) for p in patterns]
             for name, patterns in MONITORED_PATTERNS.items()
@@ -107,7 +129,9 @@ class BehaviorMonitor:
                     self._alerts.append(alert)
                     logger.warning(
                         "Behavior alert [%s]: %s matched '%s'",
-                        alert.severity, name, match.group(),
+                        alert.severity,
+                        name,
+                        match.group(),
                     )
                     break
         return new_alerts
@@ -127,8 +151,14 @@ class BehaviorMonitor:
             self._alerts.append(alert)
 
     def check_thresholds(self) -> list[BehaviorAlert]:
+        """Emit new threshold alerts. Each threshold is one-shot —
+        repeat calls after the threshold has fired return empty.
+        """
         new_alerts: list[BehaviorAlert] = []
-        if self._file_write_count > FILE_WRITE_THRESHOLD:
+        if (
+            self._file_write_count > FILE_WRITE_THRESHOLD
+            and "excessive_file_writes" not in self._fired_thresholds
+        ):
             alert = BehaviorAlert(
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 session_id=self._session_id,
@@ -140,6 +170,7 @@ class BehaviorMonitor:
             )
             new_alerts.append(alert)
             self._alerts.append(alert)
+            self._fired_thresholds.add("excessive_file_writes")
         return new_alerts
 
     def get_alerts(self) -> list[BehaviorAlert]:

@@ -11,10 +11,31 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
+from clearwing.sourcehunt.disclosure_db import DisclosureDB
+from clearwing.sourcehunt.state import DisclosureState
+
 logger = logging.getLogger(__name__)
+
+# Disclosure states that should keep tied artifacts alive through purge.
+# Anything not in this set (DISCLOSED, CLOSED, REJECTED) is terminal and
+# the artifact is eligible for retention-based deletion.
+_ACTIVE_DISCLOSURE_STATES: frozenset[str] = frozenset(
+    {
+        DisclosureState.PENDING_REVIEW.value,
+        DisclosureState.IN_REVIEW.value,
+        DisclosureState.VALIDATED.value,
+        DisclosureState.PENDING_DISCLOSURE.value,
+    }
+)
+
+
+class ArtifactExportDenied(Exception):
+    """Raised by `retrieve()` when `export_requires_approval=True` but no
+    `approved_by` was supplied. The policy flag used to be silently
+    ignored — now it actually gates the call."""
 
 
 @dataclass
@@ -76,7 +97,14 @@ class ArtifactStore:
         nonce, ct = blob[:12], blob[12:]
         return AESGCM(self._key).decrypt(nonce, ct, None)
 
-    def _log_access(self, action: str, finding_id: str, path: str, operator: str) -> None:
+    def _log_access(
+        self,
+        action: str,
+        finding_id: str,
+        path: str,
+        operator: str,
+        approved_by: str | None = None,
+    ) -> None:
         if not self._policy.access_logged:
             return
         entry = {
@@ -85,6 +113,7 @@ class ArtifactStore:
             "finding_id": finding_id,
             "path": path,
             "operator": operator,
+            "approved_by": approved_by,
         }
         audit_path = self._base_dir / "audit.log"
         with open(audit_path, "a", encoding="utf-8") as f:
@@ -106,11 +135,50 @@ class ArtifactStore:
     def store_transcript(self, finding_id: str, data: bytes, operator: str = "system") -> Path:
         return self._store("transcripts", finding_id, data, operator)
 
-    def retrieve(self, artifact_path: Path, operator: str = "system") -> bytes:
+    def retrieve(
+        self,
+        artifact_path: Path,
+        operator: str = "system",
+        approved_by: str | None = None,
+    ) -> bytes:
+        """Read and decrypt an artifact.
+
+        `export_requires_approval` (default `True`) now gates this call:
+        retrieve fails with `ArtifactExportDenied` unless `approved_by`
+        is non-empty. Previously the policy flag was declared but never
+        read — setting `export_requires_approval=True` did nothing.
+
+        Also enforces path containment: `artifact_path` must resolve
+        inside `self._base_dir` so an unvalidated caller can't feed
+        `retrieve()` an arbitrary filesystem path (the decrypt would
+        fail under GCM, but we shouldn't read the bytes at all).
+        """
         artifact_path = Path(artifact_path)
+        # Path containment — compare resolved forms so symlinks and
+        # `..` components can't escape the artifact root.
+        try:
+            artifact_path.resolve().relative_to(self._base_dir.resolve())
+        except ValueError:
+            raise ArtifactExportDenied(
+                f"artifact path outside artifact store: {artifact_path}"
+            ) from None
+
+        if self._policy.export_requires_approval and not approved_by:
+            raise ArtifactExportDenied(
+                "retrieve() requires `approved_by` when "
+                "ArtifactPolicy.export_requires_approval is True. "
+                "Pass the approver's identity or set the policy to False."
+            )
+
         data = self._decrypt(artifact_path.read_bytes())
         finding_id = artifact_path.stem
-        self._log_access("retrieve", finding_id, str(artifact_path), operator)
+        self._log_access(
+            "retrieve",
+            finding_id,
+            str(artifact_path),
+            operator,
+            approved_by=approved_by,
+        )
         return data
 
     def list_artifacts(self, finding_id: str) -> list[dict]:
@@ -120,23 +188,71 @@ class ArtifactStore:
             p = self._base_dir / category / f"{safe_id}.enc"
             if p.exists():
                 stat = p.stat()
-                results.append({
-                    "category": category,
-                    "path": str(p),
-                    "size_bytes": stat.st_size,
-                    "modified": stat.st_mtime,
-                })
+                results.append(
+                    {
+                        "category": category,
+                        "path": str(p),
+                        "size_bytes": stat.st_size,
+                        "modified": stat.st_mtime,
+                    }
+                )
         return results
 
     def purge_expired(self) -> int:
+        """Delete artifacts whose mtime exceeds `retention_days`.
+
+        When `tied_to_disclosure=True` (default), artifacts belonging
+        to a finding that is still active in the disclosure DB
+        (pending_review / in_review / pending_disclosure — anything
+        not yet DISCLOSED, CLOSED, or REJECTED) are kept regardless
+        of age. Previously this flag was silent config — purge
+        deleted by mtime only and could wipe artifacts tied to an
+        in-flight disclosure.
+        """
         cutoff = time.time() - (self._policy.retention_days * 86400)
+        open_finding_ids = (
+            self._open_disclosure_finding_ids() if self._policy.tied_to_disclosure else set()
+        )
+
         removed = 0
         for category in ("exploits", "transcripts", "poc"):
             cat_dir = self._base_dir / category
             if not cat_dir.exists():
                 continue
             for f in cat_dir.iterdir():
-                if f.is_file() and f.stat().st_mtime < cutoff:
-                    f.unlink()
-                    removed += 1
+                if not (f.is_file() and f.stat().st_mtime < cutoff):
+                    continue
+                # `stem` is the sanitized finding_id we stored under.
+                if f.stem in open_finding_ids:
+                    logger.debug(
+                        "purge skipped %s — finding still in active disclosure",
+                        f.name,
+                    )
+                    continue
+                f.unlink()
+                removed += 1
         return removed
+
+    def _open_disclosure_finding_ids(self) -> set[str]:
+        """Return finding ids still in a non-terminal disclosure state.
+
+        Defensive: if the DB query fails (fresh install with no
+        schema, sqlite locked, ...), `tied_to_disclosure` degrades to
+        "no protection" rather than aborting purge. Logged at DEBUG.
+        """
+        try:
+            db = DisclosureDB()
+        except Exception:
+            logger.debug(
+                "tied_to_disclosure check unavailable; purge will not protect",
+                exc_info=True,
+            )
+            return set()
+        try:
+            rows = db.get_queue()
+            return {r["id"] for r in rows if r.get("state") in _ACTIVE_DISCLOSURE_STATES}
+        except Exception:
+            logger.debug("disclosure_db.get_queue failed", exc_info=True)
+            return set()
+        finally:
+            db.close()

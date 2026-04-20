@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import json
 import tempfile
-import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 from clearwing.sandbox.container import SandboxConfig
 from clearwing.sandbox.seccomp_profiles import (
-    EXPLOIT_SECCOMP,
     HUNTER_SECCOMP,
     get_seccomp_profile,
     write_seccomp_profile,
@@ -22,7 +19,6 @@ from clearwing.sourcehunt.behavior_monitor import (
     FILE_WRITE_THRESHOLD,
     BehaviorMonitor,
 )
-
 
 # --- SandboxConfig hardening tests -------------------------------------------
 
@@ -108,7 +104,7 @@ class TestArtifactStore:
             data = b"exploit payload here"
             path = store.store_exploit("finding-001", data, operator="test")
             assert path.exists()
-            retrieved = store.retrieve(path, operator="test")
+            retrieved = store.retrieve(path, operator="test", approved_by="reviewer-1")
             assert retrieved == data
 
     def test_access_logged(self):
@@ -133,7 +129,7 @@ class TestArtifactStore:
             store = ArtifactStore(base_dir=Path(td))
             path = store.store_poc("f1", b"poc data")
             assert "poc" in str(path)
-            assert store.retrieve(path) == b"poc data"
+            assert store.retrieve(path, approved_by="reviewer-1") == b"poc data"
 
     def test_store_transcript(self):
         from clearwing.sourcehunt.artifact_store import ArtifactStore
@@ -142,7 +138,85 @@ class TestArtifactStore:
             store = ArtifactStore(base_dir=Path(td))
             path = store.store_transcript("f1", b"transcript")
             assert "transcripts" in str(path)
-            assert store.retrieve(path) == b"transcript"
+            assert store.retrieve(path, approved_by="reviewer-1") == b"transcript"
+
+    def test_retrieve_without_approval_raises(self):
+        """Regression: `export_requires_approval=True` was silent config.
+        retrieve() must refuse the call when no `approved_by` is given."""
+        from clearwing.sourcehunt.artifact_store import (
+            ArtifactExportDenied,
+            ArtifactStore,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = ArtifactStore(base_dir=Path(td))
+            path = store.store_exploit("f1", b"payload")
+            with pytest.raises(ArtifactExportDenied):
+                store.retrieve(path)  # no approved_by — must deny
+
+    def test_retrieve_with_approval_disabled_skips_check(self):
+        from clearwing.sourcehunt.artifact_store import (
+            ArtifactPolicy,
+            ArtifactStore,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = ArtifactStore(
+                base_dir=Path(td),
+                policy=ArtifactPolicy(export_requires_approval=False),
+            )
+            path = store.store_exploit("f1", b"payload")
+            assert store.retrieve(path) == b"payload"  # no approver, ok
+
+    def test_retrieve_rejects_path_outside_base_dir(self):
+        """Regression: retrieve() used to read and decrypt any Path,
+        even one pointing outside the artifact store."""
+        from clearwing.sourcehunt.artifact_store import (
+            ArtifactExportDenied,
+            ArtifactPolicy,
+            ArtifactStore,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = ArtifactStore(
+                base_dir=Path(td) / "store",
+                policy=ArtifactPolicy(export_requires_approval=False),
+            )
+            # Write a rogue file outside the store
+            rogue = Path(td) / "rogue.enc"
+            rogue.write_bytes(b"not a real artifact")
+            with pytest.raises(ArtifactExportDenied):
+                store.retrieve(rogue)
+
+    def test_purge_skips_artifacts_tied_to_open_disclosure(self, monkeypatch):
+        """Regression: `tied_to_disclosure=True` was silent config.
+        purge_expired must skip artifacts whose finding is still in an
+        active disclosure state."""
+        from clearwing.sourcehunt.artifact_store import (
+            ArtifactPolicy,
+            ArtifactStore,
+        )
+
+        # Fake the DisclosureDB lookup so the test doesn't need the
+        # real disclosure schema.
+        monkeypatch.setattr(
+            ArtifactStore,
+            "_open_disclosure_finding_ids",
+            lambda self: {"finding-protected"},
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            store = ArtifactStore(
+                base_dir=Path(td),
+                policy=ArtifactPolicy(retention_days=0),  # everything expired
+            )
+            kept = store.store_exploit("finding-protected", b"p1")
+            dropped = store.store_exploit("finding-closed", b"p2")
+
+            removed = store.purge_expired()
+            assert removed == 1
+            assert kept.exists()
+            assert not dropped.exists()
 
     def test_list_artifacts(self):
         from clearwing.sourcehunt.artifact_store import ArtifactStore
@@ -211,6 +285,24 @@ class TestBehaviorMonitor:
         alerts = mon.check_thresholds()
         assert len(alerts) >= 1
         assert alerts[0].pattern == "excessive_file_writes"
+
+    def test_file_write_threshold_is_one_shot(self):
+        """Regression: repeat calls to check_thresholds() after the
+        threshold fires used to keep appending new alerts on every
+        call, producing unbounded alert spam in long-running sessions.
+        The threshold must latch and only fire once per session."""
+        mon = BehaviorMonitor(session_id="test-latch")
+        for i in range(FILE_WRITE_THRESHOLD + 1):
+            mon.record_file_write(f"/scratch/f_{i}")
+        first = mon.check_thresholds()
+        second = mon.check_thresholds()
+        third = mon.check_thresholds()
+        assert len(first) == 1
+        assert second == []  # latched — no spam
+        assert third == []
+        # Still exactly one alert on the object, not N
+        alerts = [a for a in mon.get_alerts() if a.pattern == "excessive_file_writes"]
+        assert len(alerts) == 1
 
     def test_large_binary_detection(self):
         mon = BehaviorMonitor(session_id="test-7")
@@ -301,7 +393,9 @@ class TestRunnerSecurityOptions:
         from clearwing.sourcehunt.runner import SourceHuntRunner
 
         runner = SourceHuntRunner(
-            repo_url="test", depth="standard", gvisor_runtime="runsc",
+            repo_url="test",
+            depth="standard",
+            gvisor_runtime="runsc",
         )
         assert runner._gvisor_runtime == "runsc"
 
@@ -312,6 +406,7 @@ class TestRunnerSecurityOptions:
 class TestCLIFlags:
     def test_gvisor_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -322,6 +417,7 @@ class TestCLIFlags:
 
     def test_encrypt_artifacts_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -332,6 +428,7 @@ class TestCLIFlags:
 
     def test_no_behavior_monitor_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()

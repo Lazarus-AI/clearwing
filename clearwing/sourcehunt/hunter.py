@@ -1117,8 +1117,7 @@ def _build_subsystem_prompt(
                 break
         if edges:
             cross_file_calls = (
-                "\nCross-file call edges within this subsystem:\n"
-                + "\n".join(edges) + "\n"
+                "\nCross-file call edges within this subsystem:\n" + "\n".join(edges) + "\n"
             )
 
     existing_findings_block = ""
@@ -1128,8 +1127,7 @@ def _build_subsystem_prompt(
             pool_findings.extend(findings_pool.query(file_path=fp))
         if pool_findings:
             lines = [
-                f"\nPer-file hunters already found {len(pool_findings)} findings "
-                f"in this subsystem:"
+                f"\nPer-file hunters already found {len(pool_findings)} findings in this subsystem:"
             ]
             for f in pool_findings[:10]:
                 lines.append(
@@ -1198,7 +1196,8 @@ def build_subsystem_hunter_agent(
 
     tools = build_deep_agent_tools(ctx)
     prompt = _build_subsystem_prompt(
-        subsystem, project_name,
+        subsystem,
+        project_name,
         findings_pool=findings_pool,
         callgraph=callgraph,
     )
@@ -1253,10 +1252,11 @@ class NativeHunter:
         return None
 
     async def arun(self) -> HunterRunResult:
-        user_msg = self.initial_user_message or f"Hunt for vulnerabilities in {self.ctx.file_path or 'unknown'}."
-        messages: list[ChatMessage] = [
-            ChatMessage("user", user_msg)
-        ]
+        user_msg = (
+            self.initial_user_message
+            or f"Hunt for vulnerabilities in {self.ctx.file_path or 'unknown'}."
+        )
+        messages: list[ChatMessage] = [ChatMessage("user", user_msg)]
         trajectory = HunterTrajectoryLogger.for_hunter(
             self.ctx,
             prompt=self.prompt,
@@ -1278,8 +1278,11 @@ class NativeHunter:
             if stop_reason:
                 logger.warning(
                     "Hunter stopped for %s: %s (step=%d, cost=$%.4f, findings=%d)",
-                    self.ctx.file_path, stop_reason, step - 1,
-                    total_cost_usd, len(self.ctx.findings),
+                    self.ctx.file_path,
+                    stop_reason,
+                    step - 1,
+                    total_cost_usd,
+                    len(self.ctx.findings),
                 )
                 trajectory.log(
                     "finish",
@@ -1305,6 +1308,13 @@ class NativeHunter:
                 system=self.prompt,
                 tools=self.tools,
             )
+            # Preserve the provider's reasoning_content alongside the
+            # visible text. `response.first_text()` only returns the
+            # first Text part — reasoning/thinking blocks are separate
+            # and used to be dropped, which silently hid the most useful
+            # part of the trace for reasoning models (GPT-5.x, o-series,
+            # Claude thinking). The hunter's old `think()` scratchpad
+            # tool tried to compensate; native reasoning obsoletes it.
             trajectory.log(
                 "message",
                 {
@@ -1316,6 +1326,7 @@ class NativeHunter:
                             tool_calls=response.tool_calls(),
                         )
                     ),
+                    "reasoning_content": response.reasoning_content,
                     "usage": {
                         "input_tokens": response.usage.prompt_tokens or 0,
                         "output_tokens": response.usage.completion_tokens or 0,
@@ -1636,7 +1647,8 @@ def build_hunter_agent(
         file_path=file_target.get("path"),
         session_id=session_id,
         specialist=(
-            specialist if prompt_mode == "specialist" or specialist == "propagation"
+            specialist
+            if prompt_mode == "specialist" or specialist == "propagation"
             else "unconstrained"
         ),
         seeded_crash=seeded_crash,

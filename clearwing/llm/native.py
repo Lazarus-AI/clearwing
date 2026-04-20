@@ -100,12 +100,19 @@ class AsyncLLMClient:
         rate_limit_max_retries: int = 6,
         rate_limit_initial_backoff_seconds: float = 1.0,
         rate_limit_max_backoff_seconds: float = 60.0,
+        reasoning_effort: str | None = "medium",
     ) -> None:
         self.model_name = model_name
         self.provider_name = provider_name
         self.api_key = api_key
         self.base_url = base_url
         self.default_system = default_system
+        # `reasoning_effort` controls how much reasoning the provider
+        # runs (for models that support it). "medium" is a sensible
+        # default — higher for deeper-reasoning tasks, "none"/None to
+        # opt out entirely. Accepted values: "none" | "minimal" | "low"
+        # | "medium" | "high" | "xhigh" | "max" | "budget:<n>".
+        self.reasoning_effort = reasoning_effort
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
@@ -158,6 +165,21 @@ class AsyncLLMClient:
             capture_content=True,
             capture_usage=True,
             capture_tool_calls=True,
+            # Ask genai-pyo3 to surface the provider's reasoning output
+            # (OpenAI Responses `reasoning.summary`, Anthropic thinking
+            # blocks, etc.). `normalize_reasoning_content` unifies the
+            # varied provider shapes into ChatResponse.reasoning_content,
+            # so hunter transcripts see a single string regardless of
+            # backend. `reasoning_effort="medium"` is required alongside
+            # `capture_reasoning_content` to make the Responses adapter
+            # actually emit `reasoning.summary="detailed"` on the request
+            # (rust-genai ropoctl fork patched this to not require both,
+            # but "medium" is a sensible active choice independent of
+            # that — it's a reasonable default effort tier and lets us
+            # still get summaries on older upstreams).
+            capture_reasoning_content=True,
+            normalize_reasoning_content=True,
+            reasoning_effort=self.reasoning_effort,
             response_json_spec=(
                 _json_spec_from_model(
                     response_schema,
@@ -193,15 +215,17 @@ class AsyncLLMClient:
         """
         if on_text_delta is None:
             return await self.achat(
-                messages=messages, system=system, tools=tools,
-                temperature=temperature, max_tokens=max_tokens,
+                messages=messages,
+                system=system,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
 
         request_tools = None
         if tools:
             request_tools = [
-                Tool(tool.name, tool.description, json.dumps(tool.schema))
-                for tool in tools
+                Tool(tool.name, tool.description, json.dumps(tool.schema)) for tool in tools
             ]
         request = ChatRequest(
             messages=list(messages),
@@ -214,6 +238,9 @@ class AsyncLLMClient:
             capture_content=True,
             capture_usage=True,
             capture_tool_calls=True,
+            capture_reasoning_content=True,
+            normalize_reasoning_content=True,
+            reasoning_effort=self.reasoning_effort,
         )
 
         async with self._semaphore:
@@ -226,8 +253,11 @@ class AsyncLLMClient:
                     return event.end
         # Fallback if stream ends without an end event
         return await self.achat(
-            messages=messages, system=system, tools=tools,
-            temperature=temperature, max_tokens=max_tokens,
+            messages=messages,
+            system=system,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     def chat(self, **kwargs: Any) -> ChatResponse:
@@ -371,7 +401,9 @@ class AsyncLLMClient:
             )
 
         usage_data = result.get("usage") or {}
-        prompt_tokens = _int_or_none(usage_data.get("input_tokens") or usage_data.get("prompt_tokens"))
+        prompt_tokens = _int_or_none(
+            usage_data.get("input_tokens") or usage_data.get("prompt_tokens")
+        )
         completion_tokens = _int_or_none(
             usage_data.get("output_tokens") or usage_data.get("completion_tokens")
         )
@@ -714,7 +746,9 @@ async def _openai_codex_responses_chat(
                     name = item.get("name") or (current_fc or {}).get("name")
                     args_str = item.get("arguments") or (current_fc or {}).get("args_buf") or ""
                     try:
-                        args = json.loads(args_str) if isinstance(args_str, str) and args_str else {}
+                        args = (
+                            json.loads(args_str) if isinstance(args_str, str) and args_str else {}
+                        )
                     except json.JSONDecodeError:
                         logger.debug("Failed to parse tool arguments: %r", str(args_str)[:200])
                         args = {}
@@ -730,7 +764,9 @@ async def _openai_codex_responses_chat(
 
                 if event_type in {"response.done", "response.completed"}:
                     response_obj = event.get("response")
-                    if isinstance(response_obj, dict) and isinstance(response_obj.get("usage"), dict):
+                    if isinstance(response_obj, dict) and isinstance(
+                        response_obj.get("usage"), dict
+                    ):
                         usage = response_obj["usage"]
                     break
 

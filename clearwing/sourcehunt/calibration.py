@@ -6,27 +6,74 @@ assessments over time. Target: 89% exact match (Glasswing reference).
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
-import tempfile
-from dataclasses import asdict, dataclass, field
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
+
+# Module-level lock so concurrent in-process CalibrationStore instances
+# (e.g. CLI + test + another thread) serialize against each other even
+# when they point at the same file via different instances.
+_STORE_LOCK = threading.Lock()
+
+#: Severity values accepted across calibration. Validated by the
+#: pydantic model — a typo writes a loud ValidationError instead of
+#: silently corrupting the exact-match / within-one ratio math.
+Severity = Literal["critical", "high", "medium", "low", "info"]
+
+
+@contextlib.contextmanager
+def _calibration_lock(path: Path):
+    """Serialize calibration-log reads/writes.
+
+    Acquires the module-level threading lock (in-process) and an
+    exclusive `flock` on a sidecar `.lock` file (cross-process).
+    Any code that reads-then-writes the calibration JSONL must hold
+    this — otherwise a concurrent `append` between load and write
+    silently drops records (the bug this fix addresses).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _STORE_LOCK:
+        with open(lock_path, "a+") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
 
-@dataclass(frozen=True)
-class CalibrationRecord:
+class CalibrationRecord(BaseModel):
+    """One row in the severity-calibration JSONL.
+
+    Immutable after construction (`frozen=True`) so callers can't
+    mutate in-place and desync with the on-disk representation —
+    updates go through `model_copy(update=...)`.
+
+    `extra="ignore"` lets us load historical rows that predate newer
+    fields without blowing up; the discarded keys are logged by the
+    reader if useful.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
     finding_id: str
     session_id: str
     cwe: str
-    discoverer_severity: str
-    validator_severity: str | None = None
-    human_severity: str | None = None
-    axes: dict[str, bool] = field(default_factory=dict)
+    discoverer_severity: Severity
+    validator_severity: Severity | None = None
+    human_severity: Severity | None = None
+    axes: dict[str, bool] = Field(default_factory=dict)
     timestamp: str = ""
     exact_match: bool | None = None
     within_one: bool | None = None
@@ -45,12 +92,11 @@ class CalibrationStore:
         self._path = Path(path) if path else self._default_path()
 
     def append(self, record: CalibrationRecord) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(asdict(record), default=str) + "\n"
-        # Atomic append: write to temp file, then append
+        line = record.model_dump_json() + "\n"
         try:
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(line)
+            with _calibration_lock(self._path):
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write(line)
         except OSError:
             logger.warning("Failed to write calibration record", exc_info=True)
 
@@ -58,26 +104,37 @@ class CalibrationStore:
         self,
         finding_id: str,
         session_id: str,
-        human_severity: str,
+        human_severity: Severity,
     ) -> None:
-        records = self.load_all()
-        updated = []
-        for r in records:
-            if r.finding_id == finding_id and r.session_id == session_id:
-                d = asdict(r)
-                d["human_severity"] = human_severity
-                # Compute match metrics
-                if r.validator_severity:
-                    d["exact_match"] = r.validator_severity == human_severity
-                    d_rank = _SEVERITY_RANK.get(r.validator_severity, 0)
-                    h_rank = _SEVERITY_RANK.get(human_severity, 0)
-                    d["within_one"] = abs(d_rank - h_rank) <= 1
-                updated.append(CalibrationRecord(**d))
-            else:
-                updated.append(r)
-        self._write_all(updated)
+        # Hold the lock across the whole read-modify-write. Without this,
+        # any concurrent `append()` landing between the load and the
+        # rewrite is silently dropped when the temp file is renamed
+        # over the data file.
+        with _calibration_lock(self._path):
+            records = self._load_all_unlocked()
+            updated = []
+            for r in records:
+                if r.finding_id == finding_id and r.session_id == session_id:
+                    patch: dict[str, Any] = {"human_severity": human_severity}
+                    if r.validator_severity:
+                        patch["exact_match"] = r.validator_severity == human_severity
+                        v_rank = _SEVERITY_RANK[r.validator_severity]
+                        h_rank = _SEVERITY_RANK[human_severity]
+                        patch["within_one"] = abs(v_rank - h_rank) <= 1
+                    updated.append(r.model_copy(update=patch))
+                else:
+                    updated.append(r)
+            self._write_all_unlocked(updated)
 
     def load_all(self) -> list[CalibrationRecord]:
+        # Public read: acquires the lock so a caller iterating results
+        # doesn't race against concurrent writes. For the
+        # read-modify-write internal path, `_load_all_unlocked` is used
+        # while the caller already holds the lock.
+        with _calibration_lock(self._path):
+            return self._load_all_unlocked()
+
+    def _load_all_unlocked(self) -> list[CalibrationRecord]:
         if not self._path.exists():
             return []
         records = []
@@ -85,12 +142,13 @@ class CalibrationStore:
             if not line.strip():
                 continue
             try:
-                data = json.loads(line)
-                records.append(CalibrationRecord(**{
-                    k: v for k, v in data.items()
-                    if k in CalibrationRecord.__dataclass_fields__
-                }))
-            except (json.JSONDecodeError, TypeError):
+                # `extra="ignore"` on the model lets historical rows with
+                # retired fields still load; a schema addition won't
+                # break the whole file.
+                records.append(CalibrationRecord.model_validate_json(line))
+            except (ValueError, json.JSONDecodeError):
+                # `ValueError` covers pydantic `ValidationError`.
+                logger.warning("Skipping malformed calibration row: %r", line[:80])
                 continue
         return records
 
@@ -113,10 +171,10 @@ class CalibrationStore:
             "within_one_rate": within / len(with_human),
         }
 
-    def _write_all(self, records: list[CalibrationRecord]) -> None:
+    def _write_all_unlocked(self, records: list[CalibrationRecord]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             for r in records:
-                f.write(json.dumps(asdict(r), default=str) + "\n")
+                f.write(r.model_dump_json() + "\n")
         tmp.replace(self._path)
