@@ -181,14 +181,38 @@ class SandboxContainer:
         if env:
             merged_env.update(env)
 
-        try:
-            exec_result = self._container.exec_run(
+        # docker-py's demux_adaptor intermittently raises `ValueError: N
+        # is not a valid stream` when the socket header read gets
+        # corrupted mid-stream (see docker/docker-py#3160 — spontaneous
+        # Unix socket hiccup, not a Docker wire-format issue). The
+        # command already ran; only the response parser choked. Treat
+        # it as a transient and retry once with the same params — the
+        # community-reported pattern is that subsequent attempts
+        # succeed.
+        def _do_exec_run():
+            return self._container.exec_run(
                 argv,
                 tty=False,
                 demux=True,
                 environment=merged_env,
                 workdir=workdir or self.config.working_dir,
             )
+
+        try:
+            exec_result = _do_exec_run()
+        except ValueError as demux_err:
+            logger.debug("exec_run demux race (%s); retrying once", demux_err)
+            try:
+                exec_result = _do_exec_run()
+            except Exception as e:
+                logger.warning("Sandbox exec failed (retry)", exc_info=True)
+                return ExecResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr=str(e),
+                    duration_seconds=time.monotonic() - start_time,
+                    timed_out=False,
+                )
         except Exception as e:
             logger.warning("Sandbox exec failed", exc_info=True)
             return ExecResult(

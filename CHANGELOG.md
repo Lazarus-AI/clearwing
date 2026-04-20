@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Sandbox exec crashed on `docker-py` demux race**. Known
+  intermittent `docker-py` issue (see
+  [docker/docker-py#3160](https://github.com/docker/docker-py/issues/3160)):
+  the socket header read occasionally gets corrupted mid-stream, so
+  the demux adaptor reads a payload byte as the frame's stream_id
+  field and raises `ValueError: N is not a valid stream`. The command
+  already ran; only the response parser choked. The old `exec()`
+  wrapped the whole call in `except Exception` with
+  `exc_info=True`, producing a full traceback per failure and
+  returning `ExecResult(exit_code=-1)` with no output — so the
+  Hunter saw a failed tool call and moved on. Now we narrow the
+  catch to `ValueError`, log once at DEBUG, and retry with the same
+  params (community reports confirm subsequent attempts succeed).
 - **Sourcehunt sandboxes could not start** on current Docker versions
   because of two regressions introduced by the spec-013 container
   hardening commit. Every `HunterPool` file failed with
