@@ -104,6 +104,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   known hosts, api_key placeholder behavior, `LLMEndpoint` helper
   properties, and both `ProviderManager.for_endpoint` /
   `from_config` factories.
+- **Event-driven progress streaming for sourcehunt, disclosure,
+  ossfuzz bench, eval preprocessing, and the TUI + web UI**. An
+  internal `EventBus` now publishes structured progress/stage events
+  from the long-running pipelines so user-facing surfaces can render
+  live updates without polling or parsing stdout. Wired emitters:
+  sourcehunt pool worker progress (`clearwing/sourcehunt/pool.py`),
+  sourcehunt stage transitions (`clearwing/sourcehunt/runner.py`),
+  sourcehunt campaign progress (`clearwing/sourcehunt/campaign.py`),
+  sourcehunt validator results (`clearwing/sourcehunt/validator.py`),
+  disclosure state updates (`clearwing/ui/commands/disclose.py`),
+  ossfuzz bench progress (`clearwing/bench/ossfuzz.py`), and eval
+  preprocessing progress (`clearwing/eval/preprocessing.py`).
+  Consumers: the TUI streaming-parser subscription
+  (`clearwing/ui/tui/streaming_parser.py`, `clearwing/ui/tui/app.py`)
+  and the web UI WebSocket bridge (`clearwing/ui/web/app.py`). Scope
+  note: this is not yet wired into `CoreEngine` (still uses the
+  legacy `_trigger_callback` pattern) or the network-scan, vuln-scan,
+  exploiter, patcher, ranker, or verifier paths — those continue to
+  run without EventBus emissions.
 
 ### Fixed
 
