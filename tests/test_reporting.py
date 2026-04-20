@@ -4,6 +4,7 @@ import pytest
 
 from clearwing.core.engine import ScanResult, ScanState
 from clearwing.reporting import ReportGenerator
+from clearwing.reporting.report_generator import _format_service_label
 
 
 class TestReportGenerator:
@@ -98,3 +99,39 @@ class TestReportGenerator:
         generator.save(sample_result, str(html_path))
         content = html_path.read_text()
         assert "<html>" in content
+
+
+class TestFormatServiceLabel:
+    """Regression tests for the `_format_service_label` helper that
+    cleaned up `HTTP vNone` / `HTTP vVercel` ugliness in text reports
+    (see PR #20).
+    """
+
+    def test_version_none_returns_service_alone(self):
+        """`version=None` should drop the version segment entirely, not
+        render `HTTP vNone`."""
+        assert _format_service_label("HTTP", None) == "HTTP"
+
+    @pytest.mark.parametrize("blank", ["", "   ", "none", "None", "NONE", "Unknown", "unknown"])
+    def test_blank_or_placeholder_version_returns_service_alone(self, blank):
+        """Empty, whitespace, or the common placeholder strings ('none',
+        'Unknown', any case) should be treated as 'no version known' and
+        produce just the service name."""
+        assert _format_service_label("HTTP", blank) == "HTTP"
+
+    def test_numeric_version_gets_v_prefix(self):
+        """Version strings that start with a digit are real versions and
+        should be rendered as `service v<version>`."""
+        assert _format_service_label("SSH", "1.2.3") == "SSH v1.2.3"
+
+    def test_non_numeric_version_parenthesised(self):
+        """Non-numeric server/banner labels (e.g. `Vercel` captured from a
+        `Server:` header) should be parenthesised so they don't masquerade
+        as a version number."""
+        assert _format_service_label("HTTP", "Vercel") == "HTTP (Vercel)"
+
+    def test_version_with_trailing_distro_tag(self):
+        """Versions like Apache's `2.4.41 (Ubuntu)` start with a digit and
+        should keep the `v` prefix even though they contain non-version
+        characters after the numeric portion."""
+        assert _format_service_label("HTTP", "2.4.41 (Ubuntu)") == "HTTP v2.4.41 (Ubuntu)"

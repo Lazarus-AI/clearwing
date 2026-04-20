@@ -155,6 +155,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reasoning from response content at the protocol level. This replaces
   the previous OpenAI-compat path that required in-band
   `<think>...</think>` tag stripping in every response handler.
+- **`ScanConfig.scan_type` default flipped from `"syn"` to `"connect"`**
+  (BREAKING for callers that relied on the old default). `clearwing scan`
+  now works out of the box for unprivileged users — the TCP-connect
+  scanner doesn't need raw-socket capability, so you no longer get an
+  empty "0 open ports" report when running without `sudo` /
+  `CAP_NET_RAW`. Callers that depended on the stealthier SYN scan must
+  now opt in explicitly with `scan_type="syn"` (or `ScanConfig(scan_type=
+  "syn")`), and the scan must still run as root for the raw sockets to
+  work.
 - **`clearwing doctor` external-tool probe is now host-OS aware**: on
   macOS it checks for `dtruss` (the DTrace-based syscall tracer that
   ships with the OS) instead of `strace`, which is Linux-only. The
