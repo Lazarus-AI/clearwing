@@ -191,12 +191,13 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
         key="minimax",
         display_name="MiniMax",
-        description="MiniMax M2.7 / M2.5 reasoning models via api.minimax.io. "
-        "OpenAI-compatible, 200K context.",
+        description="MiniMax M2.7 / M2.5 reasoning models via the Anthropic-compatible "
+        "endpoint at api.minimax.io/anthropic. 200K context.",
         docs_url="https://platform.minimax.io/",
-        default_base_url="https://api.minimax.io/v1",
+        default_base_url="https://api.minimax.io/anthropic",
         default_model="MiniMax-M2.7",
         api_key_env_var="MINIMAX_API_KEY",
+        is_openai_compat=False,
         alt_models=(
             "MiniMax-M2.7-highspeed",
             "MiniMax-M2.5",

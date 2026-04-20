@@ -143,6 +143,14 @@ def resolve_llm_endpoint(
     if cli_base_url or cli_model or cli_api_key:
         base_url = cli_base_url
         if base_url:
+            if _is_anthropic_compat_base_url(base_url):
+                return LLMEndpoint(
+                    provider="anthropic",
+                    model=cli_model or _default_anthropic_compat_model(base_url),
+                    base_url=base_url,
+                    api_key=cli_api_key or os.environ.get(ENV_API_KEY),
+                    source="cli",
+                )
             provider = "openai_compat"
             model = cli_model or _default_openai_compat_model(base_url)
             api_key = cli_api_key or os.environ.get(ENV_API_KEY) or _placeholder_for(base_url)
@@ -169,6 +177,14 @@ def resolve_llm_endpoint(
     env_model = os.environ.get(ENV_MODEL)
     if env_base_url or env_model:
         if env_base_url:
+            if _is_anthropic_compat_base_url(env_base_url):
+                return LLMEndpoint(
+                    provider="anthropic",
+                    model=env_model or _default_anthropic_compat_model(env_base_url),
+                    base_url=env_base_url,
+                    api_key=env_api_key or os.environ.get(ENV_ANTHROPIC_KEY),
+                    source="env",
+                )
             return LLMEndpoint(
                 provider="openai_compat",
                 model=env_model or _default_openai_compat_model(env_base_url),
@@ -204,6 +220,14 @@ def resolve_llm_endpoint(
         cfg_model = config_provider.get("model")
         cfg_api_key = _resolve_config_secret(config_provider.get("api_key"))
         if cfg_base_url:
+            if _is_anthropic_compat_base_url(cfg_base_url):
+                return LLMEndpoint(
+                    provider="anthropic",
+                    model=cfg_model or _default_anthropic_compat_model(cfg_base_url),
+                    base_url=cfg_base_url,
+                    api_key=cfg_api_key or os.environ.get(ENV_ANTHROPIC_KEY),
+                    source="config",
+                )
             return LLMEndpoint(
                 provider="openai_compat",
                 model=cfg_model or _default_openai_compat_model(cfg_base_url),
@@ -317,6 +341,29 @@ def _openai_oauth_access_token() -> str | None:
         return None
 
 
+def _is_anthropic_compat_base_url(base_url: str) -> bool:
+    """Return True if *base_url* speaks Anthropic's Messages API.
+
+    Used by `resolve_llm_endpoint` to route a custom base_url through
+    the Anthropic adapter instead of OpenAI-compat. Covers MiniMax's
+    `api.minimax.io/anthropic` endpoint and anthropic.com itself.
+    """
+    host = base_url.lower().rstrip("/")
+    if "anthropic.com" in host:
+        return True
+    if "minimax.io" in host and host.endswith("/anthropic"):
+        return True
+    return False
+
+
+def _default_anthropic_compat_model(base_url: str) -> str:
+    """Pick a default model for an Anthropic-compat base_url."""
+    host = base_url.lower()
+    if "minimax.io" in host:
+        return "MiniMax-M2.7"
+    return DEFAULT_ANTHROPIC_MODEL
+
+
 def _default_openai_compat_model(base_url: str) -> str:
     """Pick a sensible default model when only the base_url is given.
 
@@ -342,8 +389,6 @@ def _default_openai_compat_model(base_url: str) -> str:
         return "gpt-4o"
     if "api.deepseek.com" in host:
         return "deepseek-chat"
-    if "minimax.io" in host:
-        return "MiniMax-M2.7"
     # Catch-all
     return "default"
 

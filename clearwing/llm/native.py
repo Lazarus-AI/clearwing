@@ -33,20 +33,6 @@ def _run_coro_sync(coro):
     raise RuntimeError("Synchronous wrapper called from a running event loop")
 
 
-_THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>\s*", re.DOTALL)
-
-
-def strip_think_tags(text: str) -> str:
-    """Remove ``<think>...</think>`` blocks emitted by reasoning models.
-
-    Models like MiniMax M2.7 wrap chain-of-thought in ``<think>`` tags
-    within the ``content`` field.  The raw tags must be preserved in
-    conversation history for multi-turn reasoning continuity, but they
-    need to be stripped before parsing JSON or presenting final output.
-    """
-    return _THINK_TAG_RE.sub("", text).strip()
-
-
 def response_text(response: ChatResponse) -> str:
     """Coalesce a :class:`ChatResponse`'s text segments into a single string.
 
@@ -289,7 +275,7 @@ class AsyncLLMClient:
             response_schema_name=schema_name,
             response_schema_description=schema_description,
         )
-        text = strip_think_tags(response_text(response))
+        text = response_text(response)
         if schema_model is not None:
             parsed_model = _validate_schema_response(schema_model, text)
             if _is_root_model_type(schema_model):

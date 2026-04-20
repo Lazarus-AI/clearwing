@@ -16,7 +16,6 @@ from clearwing.core.events import EventBus, EventType
 from clearwing.data.knowledge import KnowledgeGraph
 from clearwing.data.memory import ContextSummarizer, EpisodicMemory
 from clearwing.llm.chat import BaseMessage, SystemMessage, ToolMessage, extract_text_content
-from clearwing.llm.native import strip_think_tags
 from clearwing.observability.telemetry import CostTracker
 from clearwing.safety.audit import AuditLogger
 from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
@@ -260,7 +259,7 @@ class NativeAgentGraph:
                 )
 
         if self.event_bus:
-            self.event_bus.emit_message(strip_think_tags(response.text)[:200], "agent")
+            self.event_bus.emit_message(response.text[:200], "agent")
 
         response_text = extract_text_content(response.content)
         if response_text:

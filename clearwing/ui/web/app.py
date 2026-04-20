@@ -19,7 +19,6 @@ from clearwing.agent.graph import create_agent
 from clearwing.agent.operator import OperatorAgent, OperatorConfig
 from clearwing.agent.runtime import Command
 from clearwing.core.events import EventBus, EventType
-from clearwing.llm.native import strip_think_tags
 from clearwing.observability import MetricsCollector
 
 logger = logging.getLogger(__name__)
@@ -413,14 +412,12 @@ def create_app():
                                     if c:
                                         last_content = c
                         if last_content:
-                            cleaned = strip_think_tags(last_content)
-                            if cleaned:
-                                await websocket.send_json(
-                                    {
-                                        "type": "agent_message",
-                                        "data": {"content": cleaned},
-                                    }
-                                )
+                            await websocket.send_json(
+                                {
+                                    "type": "agent_message",
+                                    "data": {"content": last_content},
+                                }
+                            )
                     except Exception as e:
                         await websocket.send_json(
                             {

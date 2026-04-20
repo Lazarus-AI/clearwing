@@ -279,7 +279,6 @@ class ClearwingApp(App):
         """Read from the input queue, drive the agent, display responses."""
         from clearwing.agent.runtime import Command
         from clearwing.llm.chat import extract_text_content
-        from clearwing.llm.native import strip_think_tags
 
         initial_state: dict = {}
         if self.target:
@@ -313,7 +312,7 @@ class ClearwingApp(App):
                         and getattr(last, "type", None) == "ai"
                         and not getattr(last, "tool_calls", None)
                     ):
-                        text = strip_think_tags(extract_text_content(last.content))
+                        text = extract_text_content(last.content)
                         if text:
                             feed.add_message(text, "success")
                             got_response = True
@@ -350,9 +349,7 @@ class ClearwingApp(App):
                                         and getattr(last, "type", None) == "ai"
                                         and not getattr(last, "tool_calls", None)
                                     ):
-                                        text = strip_think_tags(
-                                            extract_text_content(last.content)
-                                        )
+                                        text = extract_text_content(last.content)
                                         if text:
                                             feed.add_message(text, "success")
 

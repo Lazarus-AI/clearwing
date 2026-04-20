@@ -465,10 +465,12 @@ def _run_test_invoke(
             source="cli",
         )
     else:
+        # Anthropic direct (base_url=None) or an Anthropic-compatible gateway
+        # like MiniMax (base_url set, provider still "anthropic").
         endpoint = LLMEndpoint(
             provider="anthropic",
             model=model,
-            base_url=None,
+            base_url=base_url or None,
             api_key=resolved_key or None,
             source="cli",
         )

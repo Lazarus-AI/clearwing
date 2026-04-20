@@ -312,9 +312,11 @@ class ProviderManager:
                 provider_name=_adapter_for_endpoint(endpoint),
             )
 
-        # Anthropic direct (the default fallback path)
+        # Anthropic direct, or an Anthropic-compatible gateway (e.g. MiniMax's
+        # api.minimax.io/anthropic). base_url is None for the direct case.
         return ChatModel(
             model_name=endpoint.model,
+            base_url=endpoint.base_url,
             api_key=endpoint.api_key or "",
             provider_name=_adapter_for_endpoint(endpoint),
         )
@@ -538,6 +540,8 @@ def _adapter_for_base_url(base_url: str | None, model: str) -> str:
     if "generativelanguage.googleapis.com" in host or "googleapis.com" in host:
         return "gemini"
     if "anthropic.com" in host:
+        return "anthropic"
+    if "minimax.io" in host and host.rstrip("/").endswith("/anthropic"):
         return "anthropic"
     if model.startswith("gemini-"):
         return "gemini"

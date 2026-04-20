@@ -1,79 +1,83 @@
-"""Tests for MiniMax M2.7 compatibility: think-tag stripping and catalog entry."""
+"""Tests for the MiniMax provider preset and endpoint resolution.
+
+MiniMax is routed through its Anthropic-compatible endpoint at
+``https://api.minimax.io/anthropic``. That separates reasoning from
+content at the protocol level (via ``reasoning_content``), so we don't
+need in-band ``<think>`` tag handling.
+"""
 
 from __future__ import annotations
 
-from clearwing.llm.native import strip_think_tags, extract_json_object
 from clearwing.providers.catalog import preset_by_key
-from clearwing.providers.env import _default_openai_compat_model
-
-
-class TestStripThinkTags:
-    def test_no_tags(self):
-        assert strip_think_tags("Hello, world!") == "Hello, world!"
-
-    def test_simple_think_block(self):
-        text = "<think>Let me think about this...</think>\nHere is the answer."
-        assert strip_think_tags(text) == "Here is the answer."
-
-    def test_multiline_think_block(self):
-        text = (
-            "<think>\nI need to consider:\n1. First thing\n"
-            "2. Second thing\n</think>\n\nThe result is 42."
-        )
-        assert strip_think_tags(text) == "The result is 42."
-
-    def test_think_block_with_json_inside(self):
-        text = (
-            '<think>\nI need to structure this like {"key": "value"} format.\n'
-            'The result should have {"results": []} with entries.\n</think>\n\n'
-            '{"results": [{"file": "foo.py", "score": 0.8}]}'
-        )
-        result = strip_think_tags(text)
-        assert result == '{"results": [{"file": "foo.py", "score": 0.8}]}'
-
-    def test_preserves_content_without_tags(self):
-        text = '{"results": [{"file": "bar.py"}]}'
-        assert strip_think_tags(text) == text
-
-    def test_empty_think_block(self):
-        assert strip_think_tags("<think></think>answer") == "answer"
-
-    def test_multiple_think_blocks(self):
-        text = "<think>first</think>hello <think>second</think>world"
-        assert strip_think_tags(text) == "hello world"
-
-    def test_empty_string(self):
-        assert strip_think_tags("") == ""
-
-    def test_only_think_block(self):
-        assert strip_think_tags("<think>just thinking</think>") == ""
-
-
-class TestResponseTextWithThinkTags:
-    def test_json_extraction_after_think_strip(self):
-        raw = (
-            "<think>\nLet me analyze these files...\n"
-            'Should I use {"results": []}?\n</think>\n\n'
-            '{"results": [{"file": "a.py", "score": 0.9}]}'
-        )
-        cleaned = strip_think_tags(raw)
-        parsed = extract_json_object(cleaned)
-        assert parsed["results"][0]["file"] == "a.py"
+from clearwing.providers.env import (
+    _default_anthropic_compat_model,
+    _is_anthropic_compat_base_url,
+    resolve_llm_endpoint,
+)
 
 
 class TestMiniMaxCatalog:
     def test_preset_exists(self):
         preset = preset_by_key("minimax")
         assert preset is not None
-        assert preset.default_base_url == "https://api.minimax.io/v1"
+        assert preset.default_base_url == "https://api.minimax.io/anthropic"
         assert preset.default_model == "MiniMax-M2.7"
         assert preset.api_key_env_var == "MINIMAX_API_KEY"
 
+    def test_is_anthropic_compat(self):
+        preset = preset_by_key("minimax")
+        assert preset is not None
+        assert preset.is_openai_compat is False
+
     def test_alt_models(self):
         preset = preset_by_key("minimax")
+        assert preset is not None
         assert "MiniMax-M2.7-highspeed" in preset.alt_models
 
 
+class TestAnthropicCompatBaseUrl:
+    def test_minimax_anthropic_endpoint(self):
+        assert _is_anthropic_compat_base_url("https://api.minimax.io/anthropic")
+        assert _is_anthropic_compat_base_url("https://api.minimax.io/anthropic/")
+
+    def test_minimax_openai_endpoint_is_not_anthropic(self):
+        assert not _is_anthropic_compat_base_url("https://api.minimax.io/v1")
+
+    def test_anthropic_direct(self):
+        assert _is_anthropic_compat_base_url("https://api.anthropic.com")
+
+    def test_other_providers_are_not_anthropic(self):
+        assert not _is_anthropic_compat_base_url("https://openrouter.ai/api/v1")
+        assert not _is_anthropic_compat_base_url("https://api.openai.com/v1")
+
+
 class TestMiniMaxDefaultModel:
-    def test_minimax_io_url(self):
-        assert _default_openai_compat_model("https://api.minimax.io/v1") == "MiniMax-M2.7"
+    def test_minimax_anthropic_url(self):
+        assert _default_anthropic_compat_model("https://api.minimax.io/anthropic") == "MiniMax-M2.7"
+
+
+class TestMiniMaxEndpointResolution:
+    def test_cli_flags_route_to_anthropic_adapter(self):
+        endpoint = resolve_llm_endpoint(
+            cli_base_url="https://api.minimax.io/anthropic",
+            cli_api_key="test-key",
+            config_provider={},
+        )
+        assert endpoint.provider == "anthropic"
+        assert endpoint.base_url == "https://api.minimax.io/anthropic"
+        assert endpoint.model == "MiniMax-M2.7"
+        assert endpoint.api_key == "test-key"
+        assert not endpoint.is_anthropic_direct
+        assert not endpoint.is_openai_compat
+
+    def test_config_routes_to_anthropic_adapter(self):
+        endpoint = resolve_llm_endpoint(
+            config_provider={
+                "base_url": "https://api.minimax.io/anthropic",
+                "api_key": "test-key",
+                "model": "MiniMax-M2.5",
+            },
+        )
+        assert endpoint.provider == "anthropic"
+        assert endpoint.base_url == "https://api.minimax.io/anthropic"
+        assert endpoint.model == "MiniMax-M2.5"

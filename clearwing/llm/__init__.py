@@ -14,7 +14,6 @@ from .native import (
     NativeToolSpec,
     extract_json_array,
     extract_json_object,
-    strip_think_tags,
 )
 
 __all__ = [
@@ -33,5 +32,4 @@ __all__ = [
     "extract_json_array",
     "extract_json_object",
     "extract_text_content",
-    "strip_think_tags",
 ]

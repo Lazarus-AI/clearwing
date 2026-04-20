@@ -143,6 +143,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **MiniMax provider now routes through the Anthropic-compatible
+  endpoint** at `https://api.minimax.io/anthropic`, which separates
+  reasoning from response content at the protocol level. This replaces
+  the previous OpenAI-compat path that required in-band
+  `<think>...</think>` tag stripping in every response handler.
 - **`clearwing doctor` external-tool probe is now host-OS aware**: on
   macOS it checks for `dtruss` (the DTrace-based syscall tracer that
   ships with the OS) instead of `strace`, which is Linux-only. The

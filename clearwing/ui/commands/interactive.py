@@ -11,7 +11,6 @@ from rich.prompt import Confirm, Prompt
 
 from clearwing.agent.graph import create_agent
 from clearwing.agent.runtime import Command
-from clearwing.llm.native import strip_think_tags
 from clearwing.agent.tools.ops.dynamic_tool_creator import get_custom_tools
 from clearwing.agent.tools.ops.kali_docker_tool import kali_cleanup
 from clearwing.data.memory import SessionStore
@@ -194,59 +193,24 @@ def _run_interactive_legacy(cli, args, session=None):
         cli.console.print(f"[blue]Target set to: {args.target}[/blue]")
 
     class _StreamPrinter:
+        """Print streaming text deltas, emitting the ``Agent:`` label once."""
+
         def __init__(self, console):
             self._console = console
-            self._in_think = False
-            self._buf = ""
             self._started = False
 
         def reset(self):
-            self._in_think = False
-            self._buf = ""
             self._started = False
 
         def __call__(self, delta: str):
-            self._buf += delta
-            while True:
-                if self._in_think:
-                    end = self._buf.find("</think>")
-                    if end == -1:
-                        self._buf = self._buf[-8:]
-                        return
-                    self._buf = self._buf[end + 8:]
-                    self._in_think = False
-                    continue
-                start = self._buf.find("<think>")
-                if start == -1:
-                    safe = len(self._buf)
-                    for i in range(1, min(7, len(self._buf) + 1)):
-                        if self._buf.endswith("<think>"[:i]):
-                            safe = len(self._buf) - i
-                            break
-                    if safe > 0:
-                        text = self._buf[:safe]
-                        self._buf = self._buf[safe:]
-                        if text:
-                            if not self._started:
-                                self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
-                                self._started = True
-                            self._console.print(text, end="", highlight=False)
-                    return
-                if start > 0:
-                    if not self._started:
-                        self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
-                        self._started = True
-                    self._console.print(self._buf[:start], end="", highlight=False)
-                self._buf = self._buf[start + 7:]
-                self._in_think = True
+            if not delta:
+                return
+            if not self._started:
+                self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
+                self._started = True
+            self._console.print(delta, end="", highlight=False)
 
         def finish(self):
-            if self._buf and not self._in_think:
-                if not self._started:
-                    self._console.print("\n[bold cyan]Agent:[/bold cyan] ", end="")
-                    self._started = True
-                self._console.print(self._buf, end="", highlight=False)
-                self._buf = ""
             if self._started:
                 self._console.print()
 
