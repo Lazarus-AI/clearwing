@@ -100,11 +100,17 @@ class SandboxContainer:
             volumes[host_path] = {"bind": container_path, "mode": mode}
 
         # Build kwargs
+        # No `tty: True` here. The container runs `sleep infinity`, which
+        # doesn't need a PTY, and a TTY on the container can leak into
+        # the exec stream format — when docker-py reads back exec output
+        # with `demux=True`, the daemon's TTY path strips the 8-byte
+        # multiplex header and docker-py's `demux_adaptor` blows up with
+        # `ValueError: N is not a valid stream` (first byte of payload
+        # read as stream_id). Keep TTY off and exec stays multiplexed.
         kwargs = {
             "image": self.config.image,
             "command": "sleep infinity",
             "detach": True,
-            "tty": True,
             "network_mode": self.config.network_mode,
             "mem_limit": f"{self.config.memory_mb}m",
             "cpu_shares": self.config.cpu_shares,
