@@ -311,7 +311,7 @@ def _handle_verify(cli, args, db, workflow):
         f"for {args.finding_id}:[/bold]",
     )
     for c in commitments:
-        match = verify_commitment(document, c.digest)
+        match = verify_commitment(document, c)
         status = "[green]MATCH[/green]" if match else "[red]MISMATCH[/red]"
         cli.console.print(
             f"  {c.commitment_type}: {c.digest[:16]}... {status}",
