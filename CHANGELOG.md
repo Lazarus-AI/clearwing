@@ -8,21 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **Sandbox exec crashed on `docker-py` demux edge case**. With
-  `tty=True` on the sandbox container, exec output came back without
-  the 8-byte multiplex header the daemon normally prepends, and
-  `docker-py`'s `demux_adaptor` blew up with `ValueError: N is not a
-  valid stream` (first byte of payload mis-read as stream_id). A full
-  traceback per failure, and the Hunter saw `exit_code=-1` with no
-  output. Root-cause fix: drop `tty=True` from `SandboxContainer.start`
-  — the container runs `sleep infinity`, it doesn't need a PTY, and a
-  container-level TTY setting leaks into exec attach behavior in some
-  Docker versions. Defensive fallback: `exec()` now catches that
-  specific `ValueError`, logs once at DEBUG, and retries with
-  `demux=False` so even if some future edge case produces
-  non-multiplexed output the Hunter still gets the combined stream as
-  `stdout`. Regression test asserts the retry path uses `demux=False`
-  and the combined stream reaches `ExecResult.stdout`.
+- **Simplified sandbox exec retry to same-params** after follow-up
+  analysis. PR #31 retried the exec with `demux=False` on a
+  `docker-py` demux `ValueError`, which worked but lost stderr/stdout
+  separation on the retry path and pushed the decode branch into two
+  cases. docker/docker-py#3160 and related reports consistently
+  describe the underlying `ValueError` as a transient Unix-socket
+  race where a second attempt with the same params succeeds. Switch
+  to that pattern — one code path, stdout/stderr separation preserved
+  on success, and if the retry also fails we fall through to the
+  existing `ExecResult(exit_code=-1)` with a WARNING. Supersedes the
+  demux-fallback path from PR #31.
 - **Sourcehunt sandboxes could not start** on current Docker versions
   because of two regressions introduced by the spec-013 container
   hardening commit. Every `HunterPool` file failed with

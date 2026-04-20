@@ -97,26 +97,27 @@ class TestCopyTreeInto:
         )
 
     @patch("docker.from_env")
-    def test_exec_falls_back_to_non_demux_on_demux_valueerror(self, mock_from_env):
+    def test_exec_retries_on_demux_valueerror(self, mock_from_env):
         """Regression: docker-py's demux_adaptor raises
-        `ValueError: N is not a valid stream` on non-multiplexed output.
-        Exec must retry with demux=False so the hunter still gets output.
-        See clearwing/sandbox/container.py.
+        `ValueError: N is not a valid stream` when the socket header read
+        gets corrupted mid-stream (docker/docker-py#3160). Treat as a
+        transient and retry once with the same params — community
+        reports confirm the second attempt succeeds.
         """
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "cid-demux"
         mock_container.short_id = "cid-demux"
 
-        first_result = MagicMock(exit_code=0, output=b"hello world\n")
+        success = MagicMock(exit_code=0, output=(b"hello world\n", b""))
 
         call_count = {"n": 0}
 
         def exec_side_effect(*args, **kwargs):
             call_count["n"] += 1
-            if kwargs.get("demux") is True:
+            if call_count["n"] == 1:
                 raise ValueError("48 is not a valid stream")
-            return first_result
+            return success
 
         mock_container.exec_run.side_effect = exec_side_effect
         mock_client.containers.run.return_value = mock_container
@@ -127,12 +128,12 @@ class TestCopyTreeInto:
         sb.start()
         result = sb.exec(["echo", "hello world"])
 
-        # Retry happened
+        # Retried once
         assert call_count["n"] == 2
-        # Second call used demux=False
+        # Both attempts used the same params (demux=True)
         demux_values = [call.kwargs.get("demux") for call in mock_container.exec_run.call_args_list]
-        assert demux_values == [True, False]
-        # Combined stream came back as stdout
+        assert demux_values == [True, True]
+        # Demuxed output preserved (stdout/stderr separation intact)
         assert result.exit_code == 0
         assert "hello world" in result.stdout
         assert result.stderr == ""
