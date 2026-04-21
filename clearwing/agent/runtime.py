@@ -303,6 +303,9 @@ class NativeAgentGraph:
                 try:
                     content = await self._ainvoke_tool(tool, tool_args, resume_decision)
                 except InterruptRequest as exc:
+                    if result_messages:  # preserve earlier parallel tool_results so their tool_use blocks aren't orphaned in history
+                        state.setdefault("messages", []).extend(result_messages)
+                        events.append(dict(state))
                     self._pending[self._find_thread_id_for_state(state)] = _PendingToolResume(
                         tool_calls=tool_calls[index:],
                         prompt=exc.prompt,
