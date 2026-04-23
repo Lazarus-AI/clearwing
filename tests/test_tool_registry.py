@@ -20,7 +20,7 @@ from clearwing.agent.tools import get_all_tools
 
 # Locked baseline as of Phase 4 start. Update this only when deliberately
 # adding or removing a tool from the network-agent registry.
-EXPECTED_TOOL_COUNT = 75
+EXPECTED_TOOL_COUNT = 80
 
 
 EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
