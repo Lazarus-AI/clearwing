@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import shutil
 import tempfile
 
@@ -152,7 +153,7 @@ class HunterSandbox:
                 ",".join(sanitizers),
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True)
+                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64")
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
