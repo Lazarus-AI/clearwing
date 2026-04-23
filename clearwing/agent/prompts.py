@@ -66,7 +66,7 @@ Follow standard pentest methodology:
 
 ## Skills System
 You can load detailed knowledge about specific vulnerability types using the `load_skills` tool.
-Available skills: sql_injection, xss, ssrf, idor, xxe, auth_bypass, privesc_linux, privesc_windows, command_injection, file_upload
+Available skills: sql_injection, xss, ssrf, idor, xxe, auth_bypass, privesc_linux, privesc_windows, command_injection, file_upload, srp_attacks, kdf_analysis, padding_oracle, aead_misuse, key_hierarchy, tls_assessment, timing_attacks
 """
 
 
