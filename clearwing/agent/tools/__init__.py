@@ -77,6 +77,15 @@ def _get_timing_tools() -> list[Any]:
         return []
 
 
+def _get_kdf_tools() -> list[Any]:
+    try:
+        from .crypto.kdf_tools import get_kdf_tools
+
+        return get_kdf_tools()
+    except ImportError:
+        return []
+
+
 def _get_tls_tools() -> list[Any]:
     try:
         from .scan.tls_tools import get_tls_tools
@@ -159,6 +168,7 @@ def get_all_tools() -> list[Any]:
     tools.extend(_get_mitm_tools())
     tools.extend(_get_crypto_tools())
     tools.extend(_get_timing_tools())
+    tools.extend(_get_kdf_tools())
     tools.extend(_get_tls_tools())
     tools.extend(_get_analysis_tools())
     tools.extend(get_mcp_tools())
