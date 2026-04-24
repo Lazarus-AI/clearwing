@@ -649,3 +649,156 @@ The browser's native crypto layer is the correct choice over JS polyfills.
 4. **Investigate CVE-2022-32550 residual** — the SRP connection validation
    deviation was patched, but understand exactly what deviated to look for
    similar issues in the current implementation
+
+
+## Phase 2: Protocol Analysis
+
+### Step 2.1-2.2 — Auth Flow Discovery & SRP Parameter Extraction
+
+**Date:** 2026-04-24
+
+### Auth Endpoint Discovery
+
+The web client JS bundle (`webapi-d3ad37f206b68333b768.min.js`) reveals a
+**three-step SRP auth flow** not previously documented:
+
+1. **`POST /api/v3/auth/start`** — SRP init (v3, not v1/v2!)
+   - Request: `{email, skFormat, skid, deviceUuid, userUuid}`
+   - Response: `{status, sessionID, accountKeyFormat, accountKeyUuid, userAuth: {method, alg, iterations, salt}}`
+   - `encrypted: false` — no MAC needed
+2. **`POST /api/v2/auth`** — SRP key exchange
+   - Request: `{userA: <client_ephemeral_hex>}`
+   - Response: `{userB: <server_ephemeral_hex>}`
+   - `encrypted: false`
+3. **`POST /api/v2/auth/confirm-key`** — SRP verification
+   - Request: `{clientVerifyHash: <M1>}`
+   - Response: `{serverVerifyHash: <M2>}`
+   - `encrypted: false`
+
+After successful auth, a `complete` call registers the device and receives
+server config. All subsequent requests are encrypted with the session key.
+
+### Critical Finding: `X-AgileBits-Client` Header Required
+
+All API endpoints return `403` (text/plain) without the correct
+`X-AgileBits-Client` header. The correct value is:
+
+```
+X-AgileBits-Client: 1Password for Web/2248
+```
+
+Format: `{clientName}/{clientVersion}` where:
+- `clientName` = `"1Password for Web"` (set in `setDevice()`)
+- `clientVersion` = build version from `data-version` HTML attribute (currently `2248`)
+
+Without this header, all v2/v3 endpoints return `403` with empty body and
+`text/plain` content-type. With the header, endpoints return proper JSON
+responses with CORS, HSTS, CSP, and `x-request-id` headers.
+
+**This was the key to unlocking API access.** Earlier reconnaissance (Step 1.4)
+was testing v1 endpoints which don't require this header, but v2/v3 do.
+
+### `skFormat` Validation
+
+The `skFormat` field must be `"A3"` (string). Sending `"3"` (numeric format)
+returns `400 {"reason":"invalid_sk_prefix_format"}` — the only descriptive
+error message the server returns. All other invalid payloads return `400 {}`.
+
+This confirms:
+- The server validates Secret Key format before processing
+- `"A3"` is the expected format prefix
+- Only the format check produces a descriptive error; all subsequent
+  validation failures return empty `{}`
+
+### No User Enumeration
+
+Tested 7 different email addresses plus empty string against
+`/api/v3/auth/start` with valid headers and `skFormat: "A3"`:
+
+| Email | Status | Body | Time |
+|-------|--------|------|------|
+| test@example.com | 400 | {} | 193ms |
+| admin@1password.com | 400 | {} | 150ms |
+| ctf@1password.com | 400 | {} | 170ms |
+| bugbounty@agilebits.com | 400 | {} | 155ms |
+| jeff@1password.com | 400 | {} | 171ms |
+| security@1password.com | 400 | {} | 166ms |
+| (empty) | 400 | {} | — |
+
+All return identical `400 {}`. Timing variance is within network jitter
+(~40ms range). **No user enumeration via this endpoint.**
+
+### Auth Flow Requirements
+
+The `_startAuth` JS function reveals:
+- **Secret Key is mandatory** — throws `"Missing Secret Key"` before any
+  network request
+- `skid` = UUID extracted from the Secret Key itself (first segment)
+- `userUuid` = the account's user UUID (stored locally from prior signin)
+- `deviceUuid` = browser-generated UUID (persisted in localStorage)
+- If startAuth returns `status: "device-not-registered"`, the client calls
+  `registerDevice()` (which requires the session) and retries
+
+**Implication:** Without a valid `(email, skid, userUuid)` tuple, we cannot
+get SRP parameters (salt, iterations, B) from the server. The server does
+not return these for unknown accounts — it returns `400 {}` with no
+distinguishing information.
+
+### Device Registration Flow
+
+From the JS bundle:
+```
+if ("device-not-registered" === status) {
+    setSessionUuid(sessionID);
+    await registerDevice(session, device);
+    // retry startAuth
+}
+```
+
+Device registration happens AFTER receiving a sessionID from startAuth,
+which requires valid credentials. **Cannot register a device without first
+authenticating.**
+
+### `auth/methods` Endpoint
+
+`POST /api/v2/auth/methods` with body `{email, userUuid}`:
+- Returns `{authMethods: [{type: "PASSWORD+SK"}], signInAddress: "..."}`
+- Previously worked without `X-AgileBits-Client` header (Step 1.4)
+- Confirms pure 2SKD auth, no SSO, no passkey-only path
+
+### Recovery Flow Status
+
+All recovery endpoints (`/api/v2/recovery-keys/*`) return `403` even with
+the correct `X-AgileBits-Client` header. These endpoints likely require
+an authenticated session or a different client identifier. **Cannot probe
+recovery flow without credentials.**
+
+### Assessment
+
+The auth flow is tighter than initially estimated:
+
+1. **v3 auth endpoint** was not known until JS analysis — v1/v2 probing in
+   Step 1.4 was hitting wrong endpoints
+2. **`X-AgileBits-Client` header** acts as a soft gatekeeper — without it,
+   all modern endpoints are inaccessible
+3. **SRP parameters are not exposed** without valid account identifiers —
+   cannot extract salt, iterations, or server ephemeral B for unknown accounts
+4. **The three-step auth flow** means SRP init and key exchange are separate
+   requests, which may create opportunities for state manipulation
+5. **Recovery endpoints require more than just the client header** — likely
+   need an authenticated session
+
+### What We Need to Proceed
+
+Phase 2 (Protocol Analysis) and Phase 3 (Attack Execution) both require
+SRP parameters that we can only get with valid account identifiers. Options:
+
+1. **Obtain a test account** — if the CTF rules allow creating or using a
+   provided account on `bugbounty-ctf.1password.com`
+2. **Find the CTF account email/UUID** — the challenge description says
+   "bad poetry" is stored in a "dedicated 1Password Bug Bounty CTF account"
+   but doesn't provide login details
+3. **Focus on client-side attacks** — JS bundle analysis, WASM bypass, CSP
+   weaknesses (Step 3.9) don't require authentication
+4. **Brute force account identifiers** — infeasible given the `(email, skid,
+   userUuid)` tuple requirement with identical 400 responses
