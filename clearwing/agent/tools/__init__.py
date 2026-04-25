@@ -104,6 +104,51 @@ def _get_credential_tools() -> list[Any]:
         return []
 
 
+def _get_mycelium_tools() -> list[Any]:
+    try:
+        from .crypto.mycelium_tools import get_mycelium_tools
+
+        return get_mycelium_tools()
+    except ImportError:
+        return []
+
+
+def _get_recovery_tools() -> list[Any]:
+    try:
+        from .crypto.recovery_tools import get_recovery_tools
+
+        return get_recovery_tools()
+    except ImportError:
+        return []
+
+
+def _get_session_tools() -> list[Any]:
+    try:
+        from .recon.session_tools import get_session_tools
+
+        return get_session_tools()
+    except ImportError:
+        return []
+
+
+def _get_bundle_tools() -> list[Any]:
+    try:
+        from .recon.bundle_tools import get_bundle_tools
+
+        return get_bundle_tools()
+    except ImportError:
+        return []
+
+
+def _get_cc_tools() -> list[Any]:
+    try:
+        from .recon.cc_tools import get_cc_tools
+
+        return get_cc_tools()
+    except ImportError:
+        return []
+
+
 def _get_tls_tools() -> list[Any]:
     try:
         from .scan.tls_tools import get_tls_tools
@@ -198,6 +243,11 @@ def get_all_tools() -> list[Any]:
     tools.extend(_get_kdf_tools())
     tools.extend(_get_vault_tools())
     tools.extend(_get_credential_tools())
+    tools.extend(_get_mycelium_tools())
+    tools.extend(_get_recovery_tools())
+    tools.extend(_get_session_tools())
+    tools.extend(_get_bundle_tools())
+    tools.extend(_get_cc_tools())
     tools.extend(_get_tls_tools())
     tools.extend(_get_cve_tools())
     tools.extend(_get_analysis_tools())

@@ -638,6 +638,101 @@ def populate_knowledge_graph(
                 if feasibility:
                     entity.properties["cracking_feasibility"] = feasibility
 
+        # v0.4: Mycelium tools
+        elif tool_name == "mycelium_create_channel" and isinstance(data, dict):
+            kg.add_protocol("Mycelium")
+            ch_type = data.get("channel_type", "u")
+            ch_uuid = data.get("channel_uuid", "")
+            if ch_uuid and target:
+                eid = f"channel:{ch_type}:{ch_uuid[:8]}"
+                kg.add_entity("channel", eid, channel_type=ch_type, target=target)
+                kg.add_relationship(target, eid, "HAS_CHANNEL")
+
+        elif tool_name == "mycelium_fuzz_auth" and isinstance(data, dict):
+            kg.add_protocol("Mycelium")
+            for bypass in data.get("bypasses", []):
+                desc = bypass.get("description", "Mycelium auth bypass")
+                eid = f"vuln:mycelium_auth:{bypass.get('vector', 'unknown')}"
+                kg.add_entity("exploit", eid, description=desc)
+                if target:
+                    kg.add_relationship(target, eid, "VULNERABLE_TO")
+
+        elif tool_name == "mycelium_test_race" and isinstance(data, dict):
+            kg.add_protocol("Mycelium")
+            if data.get("successful_writes", 0) > 1 or data.get("successful_reads", 0) > 0:
+                eid = "vuln:mycelium_race_condition"
+                desc = "; ".join(data.get("findings", []))
+                kg.add_entity("exploit", eid, description=desc)
+                if target:
+                    kg.add_relationship(target, eid, "VULNERABLE_TO")
+
+        # v0.4: Recovery tools
+        elif tool_name == "test_recovery_acceptance" and isinstance(data, dict):
+            if data.get("accepted_count", 0) > 0:
+                eid = "vuln:recovery_code_acceptance"
+                desc = f"{data['accepted_count']} recovery code(s) accepted"
+                kg.add_entity("exploit", eid, description=desc)
+                if target:
+                    kg.add_relationship(target, eid, "VULNERABLE_TO")
+
+        elif tool_name == "analyze_recovery_entropy" and isinstance(data, dict):
+            bits = data.get("total_entropy_bits", 0)
+            if bits and target:
+                km = kg.add_key_material("recovery_code", target, entropy_bits=bits)
+                km.properties["assessment"] = data.get("assessment", "")
+
+        # v0.4: Session tools
+        elif tool_name == "replay_with_mutations" and isinstance(data, dict):
+            for finding in data.get("findings", []):
+                if "WARNING" in finding:
+                    eid = "vuln:weak_token_validation"
+                    kg.add_entity("exploit", eid, description=finding)
+                    if target:
+                        kg.add_relationship(target, eid, "VULNERABLE_TO")
+
+        elif tool_name == "test_session_fixation" and isinstance(data, dict):
+            if data.get("fixation_risk"):
+                eid = "vuln:session_fixation"
+                cookies = data.get("session_like_unchanged", [])
+                desc = f"Session fixation risk: cookies unchanged after auth: {', '.join(cookies)}"
+                kg.add_entity("exploit", eid, description=desc)
+                if target:
+                    kg.add_relationship(target, eid, "VULNERABLE_TO")
+
+        # v0.4: Bundle tools
+        elif tool_name == "search_bundle_patterns" and isinstance(data, dict):
+            for match in data.get("matches", []):
+                pat = match.get("pattern", "")
+                if pat in ("hardcoded_secret", "private_key", "aws_key", "flag_format"):
+                    eid = f"vuln:bundle_leak:{pat}"
+                    kg.add_entity("exploit", eid, description=f"JS bundle contains {pat}: {match.get('match', '')[:100]}")
+                    if target:
+                        kg.add_relationship(target, eid, "VULNERABLE_TO")
+
+        elif tool_name == "extract_api_routes" and isinstance(data, dict):
+            for route in data.get("routes", []):
+                path = route.get("path", "")
+                if path and target:
+                    eid = f"endpoint:{target}:{path}"
+                    kg.add_entity("endpoint", eid, path=path, methods=route.get("methods", []))
+
+        # v0.4: CC tools
+        elif tool_name == "cc_discover_schema" and isinstance(data, dict):
+            if data.get("schema_complete"):
+                eid = f"endpoint:{target}:{data.get('endpoint', '/cc')}"
+                kg.add_entity("endpoint", eid, schema=data.get("discovered_fields", {}))
+            for field_info in data.get("discovered_fields", {}).values():
+                if field_info.get("type") == "uuid":
+                    kg.add_entity("parameter", f"param:{field_info.get('value', '')}", type="uuid")
+
+        elif tool_name == "cc_fuzz_fields" and isinstance(data, dict):
+            for finding in data.get("interesting_findings", []):
+                if finding.get("severity") == "HIGH":
+                    eid = f"vuln:cc_field:{finding.get('field', 'unknown')}"
+                    kg.add_entity("exploit", eid, description=finding.get("description", ""))
+                    if target:
+                        kg.add_relationship(target, eid, "VULNERABLE_TO")
+
         kg.save()
         return nx.node_link_data(kg._graph)
     except Exception:

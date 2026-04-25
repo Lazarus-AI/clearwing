@@ -6,7 +6,6 @@ from typing import Any
 
 from genai_pyo3 import ChatMessage
 
-from clearwing.agent.tooling import ensure_agent_tool
 from clearwing.llm.native import AsyncLLMClient
 
 
@@ -195,6 +194,8 @@ class ChatModel:
         tool_choice: str | None = None,
         **_: Any,
     ) -> ChatModel:
+        from clearwing.agent.tooling import ensure_agent_tool
+
         native_tools = [ensure_agent_tool(tool) for tool in tools]
         return ChatModel(
             model_name=self.model_name,
