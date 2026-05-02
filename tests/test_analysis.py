@@ -215,6 +215,23 @@ class TestSourceAnalyzerPatterns:
             result = analyzer.analyze()
             assert result.files_analyzed == 0
 
+    def test_respect_gitignore_skips_ignored_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(os.path.join(tmp, ".gitignore")).write_text(".next/\npublic/sw.js\n")
+            next_dir = os.path.join(tmp, ".next", "server")
+            os.makedirs(next_dir)
+            Path(os.path.join(next_dir, "webpack.js")).write_text("eval(userCode);")
+            public_dir = os.path.join(tmp, "public")
+            os.makedirs(public_dir)
+            Path(os.path.join(public_dir, "sw.js")).write_text("eval(userCode);")
+            Path(os.path.join(tmp, "src.js")).write_text("eval(userCode);")
+
+            analyzer = SourceAnalyzer(repo_path=tmp, respect_gitignore=True)
+            result = analyzer.analyze()
+
+            assert result.files_analyzed == 1
+            assert [Path(f.file_path).name for f in result.findings] == ["src.js"]
+
     def test_deduplication(self):
         # Same pattern matched twice at same location should be deduped
         result = self._analyze_code(

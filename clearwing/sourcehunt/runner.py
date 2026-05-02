@@ -218,6 +218,7 @@ class SourceHuntRunner:
         gvisor_runtime: str | None = None,
         preprocessing: bool = True,
         seed_harness_crashes: bool = False,
+        respect_gitignore: bool = False,
         *,
         config: SourceHuntConfig | None = None,
     ):
@@ -439,6 +440,7 @@ class SourceHuntRunner:
         self._gvisor_runtime = gvisor_runtime
         self._preprocessing = preprocessing
         self._seed_harness_crashes = seed_harness_crashes
+        self._respect_gitignore = respect_gitignore
 
     def _inject_campaign_pool(
         self,
@@ -1636,6 +1638,7 @@ class SourceHuntRunner:
             propagate_reachability=(self.depth != "quick" and self._preprocessing),
             run_semgrep=(self.depth != "quick" and self._preprocessing),
             run_taint=(self.depth != "quick" and self._preprocessing),
+            respect_gitignore=self._respect_gitignore,
         )
         return pp.run()
 
