@@ -126,6 +126,12 @@ def add_parser(subparsers):
         help="Auto-extract CVE history from git log as seed context",
     )
     parser.add_argument(
+        "--respect-gitignore",
+        action="store_true",
+        default=False,
+        help="Exclude files and directories matched by the target repo's root .gitignore",
+    )
+    parser.add_argument(
         "--budget",
         type=float,
         default=0.0,
@@ -901,6 +907,7 @@ def handle(cli, args):
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
+        respect_gitignore=args.respect_gitignore,
     )
 
     cli.console.print(

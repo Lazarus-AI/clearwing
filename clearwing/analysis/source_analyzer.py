@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pathspec
+
 
 @dataclass
 class AnalyzerFinding:
@@ -490,9 +492,16 @@ class SourceAnalyzer:
     SKIP_FILES = {".min.js", ".min.css", ".map", ".lock"}
     MAX_FILE_SIZE = 1_000_000  # 1MB — class default; overridable per-instance
 
-    def __init__(self, repo_path: str | None = None, *, max_file_size: int | None = None):
+    def __init__(
+        self,
+        repo_path: str | None = None,
+        *,
+        max_file_size: int | None = None,
+        respect_gitignore: bool = False,
+    ):
         self.repo_path = repo_path
         self._temp_dir: tempfile.TemporaryDirectory | None = None
+        self.respect_gitignore = respect_gitignore
         if max_file_size is not None:
             self.MAX_FILE_SIZE = max_file_size
 
@@ -582,14 +591,22 @@ class SourceAnalyzer:
 
     def _iter_source_files(self, root: str):
         """Yield source file paths, skipping irrelevant directories."""
+        gitignore = _GitignoreMatcher.from_repo(root) if self.respect_gitignore else None
         for dirpath, dirnames, filenames in os.walk(root):
             # Prune skip directories
-            dirnames[:] = [d for d in dirnames if d not in self.SKIP_DIRS]
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in self.SKIP_DIRS
+                and not (gitignore and gitignore.matches_dir(os.path.join(dirpath, d)))
+            ]
 
             for fname in filenames:
                 if any(fname.endswith(skip) for skip in self.SKIP_FILES):
                     continue
                 full_path = os.path.join(dirpath, fname)
+                if gitignore and gitignore.matches_file(full_path):
+                    continue
                 try:
                     if os.path.getsize(full_path) > self.MAX_FILE_SIZE:
                         continue
@@ -733,3 +750,31 @@ class SourceAnalyzer:
 
     def __exit__(self, *args):
         self.cleanup()
+
+
+class _GitignoreMatcher:
+    """Repo-root .gitignore matcher for source enumeration."""
+
+    def __init__(self, root: str, spec: pathspec.PathSpec):
+        self.root = os.path.abspath(root)
+        self.spec = spec
+
+    @classmethod
+    def from_repo(cls, root: str) -> _GitignoreMatcher | None:
+        gitignore_path = os.path.join(root, ".gitignore")
+        try:
+            with open(gitignore_path, encoding="utf-8") as handle:
+                spec = pathspec.PathSpec.from_lines("gitignore", handle)
+        except FileNotFoundError:
+            return None
+        return cls(root, spec)
+
+    def _rel(self, path: str) -> str:
+        return Path(os.path.relpath(path, self.root)).as_posix()
+
+    def matches_file(self, path: str) -> bool:
+        return self.spec.match_file(self._rel(path))
+
+    def matches_dir(self, path: str) -> bool:
+        rel = self._rel(path)
+        return self.spec.match_file(f"{rel}/") or self.spec.match_file(rel)

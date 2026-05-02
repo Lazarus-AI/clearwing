@@ -42,6 +42,7 @@ dependencies = [
     "reportlab>=4.0.0",
     "genai-pyo3>=0.1.16",
     "pydantic>=2.0.0",
+    "pathspec>=0.10.0",
     "docker>=7.0.0",
     # TUI
     "textual>=0.47.0",
