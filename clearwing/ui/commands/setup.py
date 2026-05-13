@@ -20,8 +20,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, IntPrompt, Prompt
-from rich.table import Table
+from rich.prompt import Confirm, Prompt
 
 from clearwing import __version__
 
@@ -174,29 +173,42 @@ def _print_welcome(console: Console, cli) -> None:
     console.print()
 
 
+def _flush_stdin_after_menu() -> None:
+    """Drain leftover escape bytes after simple_term_menu returns."""
+    import sys
+
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def _prompt_provider_choice(
     console: Console, presets: tuple[ProviderPreset, ...]
 ) -> ProviderPreset | None:
-    """Menu-driven provider selection."""
-    table = Table(title="Choose a provider", title_style="bold", show_lines=False)
-    table.add_column("#", justify="right", style="cyan", no_wrap=True)
-    table.add_column("Name", style="bold")
-    table.add_column("Description")
+    """Arrow-key navigable provider selection."""
+    from simple_term_menu import TerminalMenu
 
-    for i, preset in enumerate(presets, start=1):
-        table.add_row(str(i), preset.display_name, preset.description)
-    table.add_row("0", "[dim]Cancel[/dim]", "")
+    entries = [f"{p.display_name}  —  {p.description}" for p in presets]
+    entries.append("Cancel")
 
-    console.print(table)
-    choice = IntPrompt.ask(
-        "\nSelection",
-        default=1,
-        choices=[str(i) for i in range(0, len(presets) + 1)],
-        show_choices=False,
+    console.print("[bold]Choose a provider[/bold]  (↑↓ to move, Enter to select)\n")
+    menu = TerminalMenu(
+        entries,
+        cursor_index=0,
+        menu_highlight_style=("bg_cyan", "fg_black", "bold"),
+        status_bar_style=("dim",),
     )
-    if choice == 0:
+    idx = menu.show()
+    _flush_stdin_after_menu()
+
+    if idx is None or idx == len(presets):
         return None
-    return presets[choice - 1]
+    return presets[idx]
 
 
 def _prompt_base_url(console: Console, preset: ProviderPreset) -> str:
@@ -337,17 +349,30 @@ def _prompt_api_key(
 
 
 def _prompt_model(console: Console, preset: ProviderPreset) -> str:
-    """Prompt for the default model identifier."""
-    if preset.alt_models:
-        console.print("\n[dim]Common models for this provider:[/dim]")
-        console.print(f"[dim]  {preset.default_model} (default)[/dim]")
-        for alt in preset.alt_models:
-            console.print(f"[dim]  {alt}[/dim]")
+    """Arrow-key model selection, with an option to type a custom name."""
+    if not preset.alt_models:
+        return Prompt.ask("\nModel", default=preset.default_model).strip()
 
-    return Prompt.ask(
-        "\nModel",
-        default=preset.default_model,
-    ).strip()
+    from simple_term_menu import TerminalMenu
+
+    models = [preset.default_model, *preset.alt_models]
+    entries = [f"{m}  (default)" if m == preset.default_model else m for m in models]
+    entries.append("Other (type manually)")
+
+    console.print("\n[bold]Select model[/bold]  (↑↓ to move, Enter to select)\n")
+    menu = TerminalMenu(
+        entries,
+        cursor_index=0,
+        menu_highlight_style=("bg_cyan", "fg_black", "bold"),
+    )
+    idx = menu.show()
+    _flush_stdin_after_menu()
+
+    if idx is None:
+        return preset.default_model
+    if idx == len(models):
+        return Prompt.ask("Model name", default=preset.default_model).strip()
+    return models[idx]
 
 
 def _print_config_preview(

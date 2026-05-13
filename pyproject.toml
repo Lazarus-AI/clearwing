@@ -40,7 +40,8 @@ dependencies = [
     # Reporting
     "jinja2>=3.1.0",
     "reportlab>=4.0.0",
-    "genai-pyo3>=0.1.16",
+    "genai-pyo3>=0.5.0",
+    "simple-term-menu>=1.6.0",
     "pydantic>=2.0.0",
     "docker>=7.0.0",
     # TUI
