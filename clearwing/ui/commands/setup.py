@@ -501,7 +501,6 @@ def _run_test_invoke(
             resp = asyncio.run(
                 client.achat(
                     messages=[ChatMessage("user", "Reply with exactly the word PONG.")],
-                    max_tokens=16,
                 )
             )
             elapsed_ms = int((time.monotonic() - start) * 1000)
