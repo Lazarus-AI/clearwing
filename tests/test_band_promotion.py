@@ -230,10 +230,13 @@ class TestHunterRunResult:
             def __init__(self):
                 self.usage = FakeUsage()
                 self.provider_model_name = "test-model"
+                self.reasoning_content = None
 
+            @property
             def first_text(self):
                 return "No vulnerabilities found."
 
+            @property
             def tool_calls(self):
                 return []
 
@@ -287,10 +290,13 @@ class TestBudgetEnforcement:
             def __init__(self):
                 self.usage = FakeUsage()
                 self.provider_model_name = "test-model"
+                self.reasoning_content = None
 
+            @property
             def first_text(self):
                 return ""
 
+            @property
             def tool_calls(self):
                 return [ToolCall("call_1", "think", '{"notes": "thinking"}')]
 

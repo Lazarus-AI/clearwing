@@ -24,9 +24,6 @@ from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.native import AsyncLLMClient
 from clearwing.providers import (
-    ENV_ANTHROPIC_KEY,
-    ENV_API_KEY,
-    ENV_BASE_URL,
     ProviderManager,
     resolve_llm_endpoint,
 )
@@ -528,11 +525,12 @@ class SourceHuntRunner:
                     if not self._preprocessing:
                         ranker_config.include_static_hints = False
                         ranker_config.include_imports_by = False
-                    if ranker_llm.provider_name == "openai_resp":
+                    if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
                         ranker_config.chunk_size = 30
                         ranker_config.max_inflight_chunks = self.max_parallel
                         logger.info(
-                            "Ranker tuned for openai_resp backend: chunk_size=%d max_inflight_chunks=%d",
+                            "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
+                            ranker_llm.provider_name,
                             ranker_config.chunk_size,
                             ranker_config.max_inflight_chunks,
                         )
@@ -1785,86 +1783,57 @@ class SourceHuntRunner:
 
         Resolution order:
           1. Explicit kwarg override (ranker_llm=, hunter_llm=, etc.)
-          2. self.provider_manager (injected by the sourcehunt CLI
-             command, which builds one from `resolve_llm_endpoint()`)
-          3. self.model_override (single model for all tasks,
-             resolved through the endpoint layer)
-          4. A default `ProviderManager.for_endpoint(resolve_llm_endpoint())`
-             — which picks up CLEARWING_BASE_URL / CLEARWING_API_KEY /
-             CLEARWING_MODEL env vars or falls through to Anthropic
-             direct via ANTHROPIC_API_KEY.
+          2. self.provider_manager — the centralized source of truth.
+             When set, ALL tasks use the same configured provider.
+             Failures propagate (no silent fallthrough to defaults).
+          3. self.model_override → resolve_llm_endpoint(cli_model=...)
+          4. resolve_llm_endpoint() from env/config
           5. None — caller falls back to a no-LLM path
         """
         if override is not None:
             return override
 
-        # Inject-via-constructor wins (sourcehunt CLI command + tests)
         if self.provider_manager is not None:
-            try:
-                return self.provider_manager.get_llm(task)
-            except Exception:
-                logger.debug("Injected ProviderManager failed for task=%s", task, exc_info=True)
+            return self.provider_manager.get_llm(task)
 
-        # Preflight: does *any* credential / endpoint exist? If not,
-        # skip the LLM entirely so we don't throw a noisy stack trace
-        # at first .invoke().
-        has_creds = any(
-            os.environ.get(name)
-            for name in (ENV_BASE_URL, ENV_API_KEY, ENV_ANTHROPIC_KEY, "OPENAI_API_KEY")
-        )
-        if not has_creds:
-            logger.debug("No API key / endpoint in environment; skipping LLM for task=%s", task)
-            return None
+        if self.model_override:
+            return self._build_llm_from_model_string(self.model_override)
+
+        try:
+            endpoint = resolve_llm_endpoint()
+            if endpoint.api_key:
+                return ProviderManager.for_endpoint(endpoint).get_llm(task)
+        except Exception:
+            logger.debug("Default endpoint resolution failed for task=%s", task, exc_info=True)
+        return None
 
     def _get_native_client(
         self,
         task: str,
         override: AsyncLLMClient | None,
     ) -> AsyncLLMClient | None:
-        """Return a native async LLM client for sourcehunt tasks."""
+        """Return a native async LLM client for sourcehunt tasks.
+
+        When a provider_manager is injected (the normal CLI path), it is
+        the single source of truth — failures propagate instead of
+        silently falling through to a different provider/model.
+        """
         if override is not None:
             return override
 
         if self.provider_manager is not None:
-            try:
-                return self.provider_manager.get_native_client(task)
-            except Exception:
-                logger.debug(
-                    "Injected ProviderManager native client failed for task=%s", task, exc_info=True
-                )
-
-        has_creds = any(
-            os.environ.get(name)
-            for name in (ENV_BASE_URL, ENV_API_KEY, ENV_ANTHROPIC_KEY, "OPENAI_API_KEY")
-        )
-        if not has_creds:
-            logger.debug(
-                "No API key / endpoint in environment; skipping native client for task=%s", task
-            )
-            return None
+            return self.provider_manager.get_native_client(task)
 
         if self.model_override:
             return self._build_native_from_model_string(self.model_override)
 
         try:
             endpoint = resolve_llm_endpoint()
-            return ProviderManager.for_endpoint(endpoint).get_native_client(task)
+            if endpoint.api_key:
+                return ProviderManager.for_endpoint(endpoint).get_native_client(task)
         except Exception:
-            logger.debug("Default endpoint native resolution failed", exc_info=True)
-            return None
-
-        # --model override (single model string, routed through the
-        # same endpoint resolution as --base-url)
-        if self.model_override:
-            return self._build_llm_from_model_string(self.model_override)
-
-        # Last resort — build a default manager from the env triple
-        try:
-            endpoint = resolve_llm_endpoint()
-            return ProviderManager.for_endpoint(endpoint).get_llm(task)
-        except Exception:
-            logger.debug("Default endpoint resolution failed", exc_info=True)
-            return None
+            logger.debug("Default endpoint native resolution failed for task=%s", task, exc_info=True)
+        return None
 
     def _build_llm_from_model_string(self, model: str) -> Any:
         """Build a single LLM from a model string. Used by --model override.
