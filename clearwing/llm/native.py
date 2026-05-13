@@ -8,7 +8,9 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin
 
+import aiohttp
 from genai_pyo3 import (
     ChatMessage,
     ChatOptions,
@@ -17,6 +19,7 @@ from genai_pyo3 import (
     Client,
     JsonSpec,
     Tool,
+    Usage,
 )
 from pydantic import BaseModel, RootModel
 
@@ -150,11 +153,32 @@ class AsyncLLMClient:
             # aiohttp version used to hit.
             self.base_url = self.base_url or f"{OPENAI_CODEX_DEFAULT_BASE_URL}/codex/"
             self._default_headers = {
-                "chatgpt-account-id": account_id,
-                "OpenAI-Beta": "responses=experimental",
-                "originator": "pi",
-                "user-agent": "clearwing (python)",
+                "ChatGPT-Account-ID": account_id,
+                "originator": "codex_cli_rs",
+                "User-Agent": "codex_cli_rs/0.0.0 (clearwing)",
             }
+
+        if provider_name == "anthropic_oauth":
+            from clearwing.providers.openai_oauth import (
+                anthropic_oauth_headers,
+                ensure_fresh_anthropic_oauth_credentials,
+            )
+
+            try:
+                creds = ensure_fresh_anthropic_oauth_credentials()
+                self.api_key = creds.token
+            except Exception:
+                if not self.api_key:
+                    raise
+
+            if not self.api_key:
+                raise RuntimeError(
+                    "Missing Anthropic OAuth token. "
+                    "Run: `clearwing setup --provider anthropic-oauth`"
+                )
+
+            self._default_headers = anthropic_oauth_headers(self.api_key)
+            self._anthropic_oauth_url = "https://api.anthropic.com/v1/messages"
 
         self.default_system = default_system
         # `reasoning_effort` controls how much reasoning the provider
@@ -278,13 +302,32 @@ class AsyncLLMClient:
         )
 
         async with self._semaphore:
+            if self.provider_name == "openai_codex":
+                return await self._codex_responses_via_aiohttp(
+                    request, options, on_text_delta=on_text_delta
+                )
+
             client = self._build_client(Client)
-            stream = await client.astream_chat(self.model_name, request, options)
-            async for event in stream:
-                if event.content:
-                    on_text_delta(event.content)
-                if event.end is not None:
-                    return event.end
+            try:
+                stream = await client.astream_chat(self.model_name, request, options)
+                async for event in stream:
+                    if event.content:
+                        on_text_delta(event.content)
+                    if event.end is not None:
+                        return event.end
+            except Exception as exc:
+                if not self._should_try_openai_http_fallback(exc):
+                    raise
+                logger.debug(
+                    "Native OpenAI async stream failed for model=%s base_url=%s; "
+                    "falling back to aiohttp chat/completions: %s",
+                    self.model_name,
+                    self.base_url,
+                    exc,
+                )
+                return await self._openai_chat_http_fallback(
+                    request, options, on_text_delta=on_text_delta
+                )
         # Fallback if stream ends without an end event
         return await self.achat(
             messages=messages,
@@ -350,6 +393,16 @@ class AsyncLLMClient:
         return extract_json_object(text), response
 
     def _build_client(self, client_cls):
+        # anthropic_oauth bypasses the normal auth resolver entirely —
+        # with_request_override sends only our explicit headers (Bearer
+        # token + beta flags), avoiding the ANTHROPIC_API_KEY env lookup.
+        if self.provider_name == "anthropic_oauth":
+            return client_cls.with_request_override(
+                "anthropic",
+                self._anthropic_oauth_url,
+                self._default_headers or {},
+            )
+
         # openai_codex is not a rust-genai adapter — it's the openai_resp
         # adapter plus the extra headers __init__ stashed on
         # `self._default_headers`. Map the name here so genai-pyo3's
@@ -383,13 +436,497 @@ class AsyncLLMClient:
         request: ChatRequest,
         options: ChatOptions,
     ) -> ChatResponse:
+        # openai_codex (ChatGPT OAuth) requires aiohttp: genai-pyo3's
+        # reqwest/HTTP2 transport gets 404'd by Cloudflare's edge proxy.
+        if self.provider_name == "openai_codex":
+            return await self._codex_responses_via_aiohttp(request, options)
+
         # Always go through `achat_via_stream`: it streams internally and
         # returns a fully-collected ChatResponse, so callers never see
         # chunk events. Necessary for backends that require `stream=true`
         # on the wire (our local openai_resp gateway, OpenAI's Responses
         # API with certain models), harmless for everyone else — every
-        # adapter genai-pyo3 supports speaks SSE.
-        return await client.achat_via_stream(self.model_name, request, options)
+        # adapter genai-pyo3 supports speaks SSE. Some OpenAI-compatible
+        # gateways are only compatible at the JSON shape level and fail on
+        # reqwest/HTTP2/SSE details, so OpenAI chat-completions gets an
+        # aiohttp fallback below.
+        try:
+            return await client.achat_via_stream(self.model_name, request, options)
+        except Exception as exc:
+            if not self._should_try_openai_http_fallback(exc):
+                raise
+            logger.debug(
+                "Native OpenAI streaming transport failed for model=%s base_url=%s; "
+                "falling back to aiohttp chat/completions: %s",
+                self.model_name,
+                self.base_url,
+                exc,
+            )
+            return await self._openai_chat_http_fallback(request, options)
+
+    async def _codex_responses_via_aiohttp(
+        self,
+        request: ChatRequest,
+        options: ChatOptions,
+        *,
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        """OpenAI Codex Responses API transport using aiohttp.
+
+        genai-pyo3's reqwest/HTTP2 transport is 404'd by Cloudflare's
+        edge proxy in front of chatgpt.com. This method speaks the
+        Responses API wire format over HTTP/1.1 via aiohttp.
+        """
+        input_msgs: list[dict[str, Any]] = []
+        for msg in request.messages():
+            input_msgs.append({"role": msg.role, "content": msg.content})
+
+        body: dict[str, Any] = {
+            "model": self.model_name,
+            "instructions": request.system or self.default_system or "",
+            "input": input_msgs,
+            "stream": True,
+            "store": False,
+        }
+        if options.temperature is not None:
+            body["temperature"] = options.temperature
+        if options.max_tokens is not None:
+            body["max_output_tokens"] = options.max_tokens
+        if options.reasoning_effort:
+            body["reasoning"] = {"effort": options.reasoning_effort, "summary": "detailed"}
+        if request.tools:
+            body["tools"] = [self._openai_tool_body(tool) for tool in request.tools]
+        if options.response_json_spec is not None:
+            body["text"] = {"format": self._openai_response_format(options.response_json_spec)}
+
+        base = self.base_url or "https://chatgpt.com/backend-api/codex/"
+        url = urljoin(
+            base if base.endswith("/") else f"{base}/",
+            "responses",
+        )
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self._default_headers:
+            headers.update(self._default_headers)
+
+        timeout = aiohttp.ClientTimeout(total=600, sock_connect=30, sock_read=300)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=body, headers=headers) as resp:
+                if resp.status >= 400:
+                    detail = (await resp.text())[:1000]
+                    raise RuntimeError(
+                        f"Codex Responses API failed with HTTP {resp.status}: {detail}"
+                    )
+                return await self._collect_codex_sse_response(resp, on_text_delta)
+
+    async def _collect_codex_sse_response(
+        self,
+        resp: aiohttp.ClientResponse,
+        on_text_delta: Callable[[str], None] | None,
+    ) -> ChatResponse:
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+        usage: dict[str, Any] | None = None
+        provider_model = self.model_name
+
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type", "")
+
+            if etype == "response.output_text.delta":
+                delta = event.get("delta", "")
+                if delta:
+                    content_parts.append(delta)
+                    if on_text_delta:
+                        on_text_delta(delta)
+
+            elif etype == "response.reasoning.delta":
+                delta = event.get("delta", "")
+                if delta:
+                    reasoning_parts.append(delta)
+
+            elif etype == "response.function_call_arguments.delta":
+                idx = event.get("output_index", 0)
+                acc = tool_call_parts.setdefault(idx, {"arguments": ""})
+                acc["arguments"] += event.get("delta", "")
+                if event.get("call_id"):
+                    acc["id"] = event["call_id"]
+                if event.get("name"):
+                    acc["name"] = event["name"]
+
+            elif etype == "response.output_item.done":
+                item = event.get("item", {})
+                if item.get("type") == "function_call":
+                    idx = event.get("output_index", 0)
+                    acc = tool_call_parts.setdefault(idx, {"arguments": ""})
+                    acc.setdefault("id", item.get("call_id", ""))
+                    acc.setdefault("name", item.get("name", ""))
+                    if item.get("arguments"):
+                        acc["arguments"] = item["arguments"]
+
+            elif etype == "response.completed":
+                r = event.get("response", {})
+                provider_model = r.get("model") or provider_model
+                usage = r.get("usage")
+
+        text = "".join(content_parts)
+        reasoning = "".join(reasoning_parts) or None
+        tool_calls = self._finalize_openai_tool_calls(tool_call_parts)
+
+        return self._chat_response_from_parts(
+            text=text,
+            reasoning_content=reasoning,
+            tool_calls=tool_calls,
+            usage=usage,
+            provider_model=provider_model,
+        )
+
+    def _should_try_openai_http_fallback(self, exc: Exception) -> bool:
+        if self.provider_name != "openai" or not self.base_url:
+            return False
+
+        text = str(exc).lower()
+        return (
+            "web stream error" in text
+            or "web call failed" in text
+            or "error sending request" in text
+            or "http2" in text
+            or "http/2" in text
+            or "stream" in text
+            or "reqwest error" in text
+        )
+
+    async def _openai_chat_http_fallback(
+        self,
+        request: ChatRequest,
+        options: ChatOptions,
+        *,
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
+        """Fallback OpenAI chat-completions transport using aiohttp.
+
+        This keeps Clearwing usable with OpenAI-compatible gateways that are
+        correct enough for ordinary HTTP/1.1 clients but brittle with
+        reqwest/HTTP2/SSE streaming. The fallback still returns genai-pyo3's
+        ChatResponse so callers do not need provider-specific branches.
+        """
+        body = self._openai_chat_request_body(request, options, stream=on_text_delta is not None)
+        headers = {
+            "accept": "text/event-stream" if body.get("stream") else "application/json",
+            "content-type": "application/json",
+            "user-agent": "clearwing (aiohttp openai fallback)",
+        }
+        if self.api_key:
+            headers["authorization"] = f"Bearer {self.api_key}"
+        if self._default_headers:
+            headers.update(self._default_headers)
+
+        url = urljoin(
+            self.base_url if self.base_url.endswith("/") else f"{self.base_url}/",
+            "chat/completions",
+        )
+        timeout = aiohttp.ClientTimeout(total=600, sock_connect=30, sock_read=300)
+        if body.get("stream"):
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=body, headers=headers) as resp:
+                    if resp.status >= 400:
+                        detail = (await resp.text())[:1000]
+                        raise RuntimeError(
+                            f"OpenAI-compatible fallback failed with HTTP {resp.status}: {detail}"
+                        )
+                    try:
+                        return await self._collect_openai_sse_response(resp, on_text_delta)
+                    except Exception:
+                        logger.debug(
+                            "OpenAI-compatible SSE fallback failed; retrying without streaming",
+                            exc_info=True,
+                        )
+
+        body = self._openai_chat_request_body(request, options, stream=False)
+        headers["accept"] = "application/json"
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=body, headers=headers) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise RuntimeError(
+                        f"OpenAI-compatible fallback failed with HTTP {resp.status}: {text[:1000]}"
+                    )
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"OpenAI-compatible fallback returned non-JSON response: {text[:1000]}"
+                    ) from exc
+        response = self._chat_response_from_openai_payload(payload)
+        if on_text_delta:
+            visible = response.first_text() or ""
+            if visible:
+                on_text_delta(visible)
+        return response
+
+    def _openai_chat_request_body(
+        self,
+        request: ChatRequest,
+        options: ChatOptions,
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
+        messages: list[dict[str, Any]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        for message in request.messages():
+            messages.append(self._openai_message_body(message))
+
+        body: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": stream,
+        }
+        if stream and options.capture_usage:
+            body["stream_options"] = {"include_usage": True}
+        if options.temperature is not None:
+            body["temperature"] = options.temperature
+        if options.top_p is not None:
+            body["top_p"] = options.top_p
+        if options.max_tokens is not None:
+            body["max_tokens"] = options.max_tokens
+        if options.stop_sequences:
+            body["stop"] = list(options.stop_sequences)
+        if options.seed is not None:
+            body["seed"] = options.seed
+        if options.reasoning_effort:
+            body["reasoning_effort"] = options.reasoning_effort
+        if request.tools:
+            body["tools"] = [self._openai_tool_body(tool) for tool in request.tools]
+        if options.response_json_spec is not None:
+            body["response_format"] = self._openai_response_format(options.response_json_spec)
+        elif options.response_json_mode:
+            body["response_format"] = {"type": options.response_json_mode}
+        return body
+
+    def _openai_message_body(self, message: ChatMessage) -> dict[str, Any]:
+        body: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.tool_response_call_id:
+            body["tool_call_id"] = message.tool_response_call_id
+        if message.tool_calls:
+            body["tool_calls"] = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.fn_name,
+                        "arguments": json.dumps(call.fn_arguments),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        return body
+
+    def _openai_tool_body(self, tool: Tool) -> dict[str, Any]:
+        try:
+            parameters = json.loads(tool.schema_json or "{}")
+        except json.JSONDecodeError:
+            parameters = {"type": "object", "properties": {}}
+        return {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": parameters,
+            },
+        }
+
+    def _openai_response_format(self, spec: JsonSpec) -> dict[str, Any]:
+        try:
+            schema = json.loads(spec.schema_json)
+        except json.JSONDecodeError:
+            schema = {"type": "object"}
+        json_schema: dict[str, Any] = {"name": spec.name, "schema": schema}
+        if spec.description:
+            json_schema["description"] = spec.description
+        return {"type": "json_schema", "json_schema": json_schema}
+
+    async def _collect_openai_sse_response(
+        self,
+        resp: aiohttp.ClientResponse,
+        on_text_delta: Callable[[str], None] | None,
+    ) -> ChatResponse:
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+        usage: dict[str, Any] | None = None
+        provider_model = self.model_name
+
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                logger.debug("Skipping malformed OpenAI SSE chunk: %r", data)
+                continue
+
+            provider_model = chunk.get("model") or provider_model
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                text = delta.get("content")
+                if text:
+                    content_parts.append(text)
+                    if on_text_delta:
+                        on_text_delta(text)
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                self._merge_openai_tool_call_deltas(tool_call_parts, delta.get("tool_calls"))
+
+        return self._chat_response_from_parts(
+            text="".join(content_parts),
+            reasoning_content="".join(reasoning_parts) or None,
+            tool_calls=self._finalize_openai_tool_calls(tool_call_parts),
+            usage=usage,
+            provider_model=provider_model,
+        )
+
+    def _chat_response_from_openai_payload(self, payload: dict[str, Any]) -> ChatResponse:
+        choice = (payload.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        text = self._extract_openai_message_text(message.get("content"))
+        reasoning_content = message.get("reasoning_content") or message.get("reasoning")
+        tool_calls = self._openai_tool_calls_from_message(message.get("tool_calls") or [])
+        return self._chat_response_from_parts(
+            text=text,
+            reasoning_content=reasoning_content,
+            tool_calls=tool_calls,
+            usage=payload.get("usage"),
+            provider_model=payload.get("model") or self.model_name,
+        )
+
+    def _extract_openai_message_text(self, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return str(content)
+
+    def _openai_tool_calls_from_message(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        parsed: list[dict[str, Any]] = []
+        for call in tool_calls:
+            fn = call.get("function") or {}
+            parsed.append(
+                {
+                    "call_id": call.get("id") or "",
+                    "fn_name": fn.get("name") or call.get("name") or "",
+                    "fn_arguments": self._parse_openai_tool_arguments(
+                        fn.get("arguments") if "arguments" in fn else call.get("arguments")
+                    ),
+                }
+            )
+        return parsed
+
+    def _merge_openai_tool_call_deltas(
+        self,
+        tool_call_parts: dict[int, dict[str, Any]],
+        deltas: list[dict[str, Any]] | None,
+    ) -> None:
+        for delta in deltas or []:
+            index = int(delta.get("index") or 0)
+            acc = tool_call_parts.setdefault(index, {"arguments": ""})
+            if delta.get("id"):
+                acc["id"] = delta["id"]
+            fn = delta.get("function") or {}
+            if fn.get("name"):
+                acc["name"] = fn["name"]
+            if fn.get("arguments"):
+                acc["arguments"] += fn["arguments"]
+
+    def _finalize_openai_tool_calls(
+        self,
+        tool_call_parts: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "call_id": part.get("id") or "",
+                "fn_name": part.get("name") or "",
+                "fn_arguments": self._parse_openai_tool_arguments(part.get("arguments")),
+            }
+            for _, part in sorted(tool_call_parts.items())
+        ]
+
+    def _parse_openai_tool_arguments(self, value: Any) -> Any:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            if not value:
+                return {}
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    def _chat_response_from_parts(
+        self,
+        *,
+        text: str,
+        reasoning_content: str | None,
+        tool_calls: list[dict[str, Any]],
+        usage: dict[str, Any] | None,
+        provider_model: str,
+    ) -> ChatResponse:
+        content: list[dict[str, Any]] = []
+        if text:
+            content.append({"text": text})
+        for call in tool_calls:
+            if call["call_id"] and call["fn_name"]:
+                content.append({"tool_call": call})
+        return ChatResponse(
+            content=content or None,
+            reasoning_content=reasoning_content,
+            model_adapter_kind="openai",
+            model_name=self.model_name,
+            provider_model_adapter_kind="openai",
+            provider_model_name=provider_model,
+            usage=self._usage_from_openai_payload(usage),
+        )
+
+    def _usage_from_openai_payload(self, usage: dict[str, Any] | None) -> Usage:
+        usage = usage or {}
+        return Usage(
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+        )
 
     async def _with_rate_limit_retries(self, op) -> ChatResponse:
         attempt = 0
@@ -492,4 +1029,3 @@ def _schema_name_for_model(schema_model: type[BaseModel]) -> str:
     raw_name = getattr(schema_model, "__name__", "response_schema")
     normalized = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_name).strip("_")
     return normalized or "response_schema"
-

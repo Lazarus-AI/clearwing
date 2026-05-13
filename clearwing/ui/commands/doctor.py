@@ -706,4 +706,5 @@ def _print_json(console: Console, sections: list[DoctorSection]) -> None:
             for section in sections
         ],
     }
-    console.print(json.dumps(payload, indent=2))
+    console.file.write(json.dumps(payload, indent=2))
+    console.file.write("\n")

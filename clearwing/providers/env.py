@@ -220,6 +220,15 @@ def resolve_llm_endpoint(
                 api_key=_openai_oauth_access_token(),
                 source="config",
             )
+        if cfg_auth == "anthropic_oauth":
+            cfg_model = config_provider.get("model") or DEFAULT_ANTHROPIC_MODEL
+            return LLMEndpoint(
+                provider="anthropic_oauth",
+                model=str(cfg_model),
+                base_url=None,
+                api_key=_anthropic_oauth_access_token(),
+                source="config",
+            )
 
         cfg_base_url = config_provider.get("base_url")
         cfg_model = config_provider.get("model")
@@ -318,6 +327,10 @@ def _normalize_auth_flow(value: Any) -> str:
         "openai-codex": "openai_codex",
         "openai_codex": "openai_codex",
         "codex": "openai_codex",
+        "anthropic-oauth": "anthropic_oauth",
+        "anthropic_oauth": "anthropic_oauth",
+        "claude-code": "anthropic_oauth",
+        "claude_code": "anthropic_oauth",
     }
     return aliases.get(raw, raw)
 
@@ -347,6 +360,16 @@ def _openai_oauth_access_token() -> str | None:
         return ensure_fresh_openai_oauth_credentials().access
     except Exception:
         logger.debug("OpenAI OAuth credentials unavailable", exc_info=True)
+        return None
+
+
+def _anthropic_oauth_access_token() -> str | None:
+    try:
+        from clearwing.providers.openai_oauth import ensure_fresh_anthropic_oauth_credentials
+
+        return ensure_fresh_anthropic_oauth_credentials().token
+    except Exception:
+        logger.debug("Anthropic OAuth credentials unavailable", exc_info=True)
         return None
 
 

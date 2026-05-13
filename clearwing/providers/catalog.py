@@ -75,13 +75,39 @@ class ProviderPreset:
 
 
 #: Ordered list — the order here is the order they appear in the setup menu.
-#: Anthropic is first because it's the default Clearwing install path; the
-#: rest follow in rough order of user familiarity.
+#: OAuth providers first (no API key needed); then Anthropic direct, then
+#: the rest in rough order of user familiarity.
 PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
+        key="anthropic-oauth",
+        display_name="Anthropic OAuth (Claude Code)",
+        description="Claude via browser OAuth, no API key. Uses your claude.ai account.",
+        docs_url="https://claude.ai/",
+        default_base_url=None,
+        default_model="claude-sonnet-4-6",
+        api_key_env_var=None,
+        is_openai_compat=False,
+        alt_models=("claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"),
+        provider_adapter="anthropic",
+        auth_flow="anthropic_oauth",
+    ),
+    ProviderPreset(
+        key="openai-oauth",
+        display_name="OpenAI OAuth (ChatGPT)",
+        description="ChatGPT Plus/Pro browser OAuth, no Platform API key. Uses the Codex backend.",
+        docs_url="https://chatgpt.com/",
+        default_base_url="https://chatgpt.com/backend-api",
+        default_model="gpt-5.2",
+        api_key_env_var=None,
+        is_openai_compat=False,
+        alt_models=("gpt-5.4", "gpt-5.4-mini", "gpt-5.2"),
+        provider_adapter="openai_codex",
+        auth_flow="openai_codex",
+    ),
+    ProviderPreset(
         key="anthropic",
-        display_name="Anthropic direct",
-        description="Claude via claude.ai — Clearwing's default install path.",
+        display_name="Anthropic direct (API key)",
+        description="Claude via API key from console.anthropic.com.",
         docs_url="https://console.anthropic.com/",
         default_base_url=None,
         default_model="claude-sonnet-4-6",
@@ -160,19 +186,6 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         api_key_env_var="OPENAI_API_KEY",
         alt_models=("gpt-5.4-mini", "gpt-5.3-codex", "o3", "o3-mini", "gpt-4o"),
         provider_adapter="openai_resp",
-    ),
-    ProviderPreset(
-        key="openai-oauth",
-        display_name="OpenAI OAuth (ChatGPT)",
-        description="ChatGPT Plus/Pro browser OAuth, no Platform API key. Uses the Codex backend.",
-        docs_url="https://chatgpt.com/",
-        default_base_url="https://chatgpt.com/backend-api",
-        default_model="gpt-5.2",
-        api_key_env_var=None,
-        is_openai_compat=False,
-        alt_models=("gpt-5.4", "gpt-5.4-mini", "gpt-5.2"),
-        provider_adapter="openai_codex",
-        auth_flow="openai_codex",
     ),
     ProviderPreset(
         key="together",
@@ -261,6 +274,9 @@ def preset_by_key(key: str) -> ProviderPreset | None:
         "openai_oauth": "openai-oauth",
         "openai-codex": "openai-oauth",
         "openai_codex": "openai-oauth",
+        "anthropic_oauth": "anthropic-oauth",
+        "claude-code": "anthropic-oauth",
+        "claude_code": "anthropic-oauth",
     }
     key_lower = aliases.get(key_lower, key_lower)
     for preset in PROVIDER_PRESETS:
