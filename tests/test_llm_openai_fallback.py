@@ -79,10 +79,10 @@ def test_openai_fallback_parses_reasoning_content_usage_and_tool_calls():
 
     response = client._chat_response_from_openai_payload(payload)
 
-    assert response.first_text() == "visible answer"
+    assert response.first_text == "visible answer"
     assert response.reasoning_content == "private reasoning"
     assert response.usage.prompt_tokens == 3
-    [tool_call] = response.tool_calls()
+    [tool_call] = response.tool_calls
     assert tool_call.call_id == "call_1"
     assert tool_call.fn_name == "lookup"
     assert tool_call.fn_arguments == {"q": "abc"}
@@ -111,7 +111,7 @@ async def test_achat_falls_back_when_native_openai_streaming_transport_fails(mon
 
     response = await client.achat(messages=[ChatMessage("user", "hello")])
 
-    assert response.first_text() == "fallback ok"
+    assert response.first_text == "fallback ok"
 
 
 @pytest.mark.asyncio
@@ -142,5 +142,5 @@ async def test_achat_stream_falls_back_and_preserves_delta_callback(monkeypatch)
         on_text_delta=deltas.append,
     )
 
-    assert response.first_text() == "fallback"
+    assert response.first_text == "fallback"
     assert deltas == ["fall", "back"]

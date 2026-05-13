@@ -175,7 +175,7 @@ class CrashClassifier:
         response = await self._llm.aask(
             user_msg, system=CLASSIFIER_SYSTEM_PROMPT,
         )
-        text = response.first_text() if hasattr(response, "first_text") else str(response)
+        text = response.first_text if hasattr(response, "first_text") else str(response)
         cost = getattr(response, "cost_usd", 0.0) or 0.0
 
         tier, rationale = self._parse_llm_response(text)

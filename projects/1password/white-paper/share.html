@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+<head>
+
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>7 How items are shared with anyone | 1Password Security Design White Paper</title>
+  <meta name="description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="generator" content="bookdown 0.46 and GitBook 2.6.7" />
+
+  <meta property="og:title" content="7 How items are shared with anyone | 1Password Security Design White Paper" />
+  <meta property="og:type" content="book" />
+  <meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+  <meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="github-repo" content="https://github.com/agilebits/security-design/" />
+
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="7 How items are shared with anyone | 1Password Security Design White Paper" />
+  
+  <meta name="twitter:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="twitter:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  
+  <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+<link rel="prev" href="sharedVaults.html"/>
+<link rel="next" href="deepKeys.html"/>
+<script src="libs/jquery-3.6.0/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@6.4.6/dist/fuse.min.js"></script>
+<link href="libs/gitbook-2.6.7/css/style.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-table.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-bookdown.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-highlight.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-search.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-fontsettings.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-clipboard.css" rel="stylesheet" />
+
+
+
+
+
+
+
+
+<link href="libs/anchor-sections-1.1.0/anchor-sections.css" rel="stylesheet" />
+<link href="libs/anchor-sections-1.1.0/anchor-sections-hash.css" rel="stylesheet" />
+<script src="libs/anchor-sections-1.1.0/anchor-sections.js"></script>
+<script>
+// Fix glossary tooltips: create tooltip span and remove title to prevent browser's native delayed tooltip
+function fixGlossaryTooltips() {
+  document.querySelectorAll('a.glossary[title]').forEach(function(el) {
+    // Skip if already processed
+    if (el.querySelector('.glossary-tooltip')) return;
+    
+    var definition = el.getAttribute('title');
+    if (definition) {
+      // Create tooltip span
+      var tooltip = document.createElement('span');
+      tooltip.className = 'glossary-tooltip';
+      tooltip.textContent = definition;
+      el.appendChild(tooltip);
+      
+      // Remove title to prevent browser's native tooltip
+      el.removeAttribute('title');
+    }
+  });
+}
+
+// Run on initial load
+document.addEventListener('DOMContentLoaded', fixGlossaryTooltips);
+
+// Also run when gitbook navigates to a new page (handles AJAX page loads)
+document.addEventListener('DOMContentLoaded', function() {
+  if (typeof gitbook !== 'undefined' && gitbook.events) {
+    gitbook.events.bind('page.change', fixGlossaryTooltips);
+  }
+});
+
+// Fallback: watch for DOM changes and fix any new glossary elements
+var glossaryObserver = new MutationObserver(function(mutations) {
+  var shouldFix = false;
+  mutations.forEach(function(mutation) {
+    if (mutation.addedNodes.length) shouldFix = true;
+  });
+  if (shouldFix) fixGlossaryTooltips();
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  glossaryObserver.observe(document.body, { childList: true, subtree: true });
+});
+</script>
+<link rel="canonical" href="https://1pw.ca/whitepaper/" />
+
+<meta property="og:url" content="https://1pw.ca/whitepaper/" />
+<meta property="og:title" content="7 How items are shared with anyone | 1Password Security Design White Paper" />
+<meta property="og:site_name" content="1password.com" />
+<meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+<meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+<style type="text/css">
+  
+  div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+</style>
+<style type="text/css">
+/* Used with Pandoc 2.11+ new --citeproc when CSL is used */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}
+</style>
+
+<link rel="stylesheet" href="assets/style.css" type="text/css" />
+</head>
+
+<body>
+
+
+
+  <div class="book without-animation with-summary font-size-2 font-family-1" data-basepath=".">
+
+    <div class="book-summary">
+      <nav role="navigation">
+
+<ul class="summary">
+<li class="chapter" data-level="" data-path="index.html"><a href="index.html"><i class="fa fa-check"></i>1Password Memberships</a></li>
+<li class="chapter" data-level="1" data-path="key-security-features.html"><a href="key-security-features.html"><i class="fa fa-check"></i><b>1</b> Key security features</a></li>
+<li class="chapter" data-level="2" data-path="principles.html"><a href="principles.html"><i class="fa fa-check"></i><b>2</b> Principles</a></li>
+<li class="chapter" data-level="3" data-path="apsk.html"><a href="apsk.html"><i class="fa fa-check"></i><b>3</b> Account password and Secret Key</a>
+<ul>
+<li class="chapter" data-level="3.1" data-path="apsk.html"><a href="apsk.html#account-password"><i class="fa fa-check"></i><b>3.1</b> Account password</a></li>
+<li class="chapter" data-level="3.2" data-path="apsk.html"><a href="apsk.html#sec:sk"><i class="fa fa-check"></i><b>3.2</b> Secret Key</a></li>
+<li class="chapter" data-level="3.3" data-path="apsk.html"><a href="apsk.html#emergency-kit"><i class="fa fa-check"></i><b>3.3</b> Emergency Kit</a></li>
+</ul></li>
+<li class="chapter" data-level="4" data-path="modernauth.html"><a href="modernauth.html"><i class="fa fa-check"></i><b>4</b> A modern approach to authentication</a>
+<ul>
+<li class="chapter" data-level="4.1" data-path="modernauth.html"><a href="modernauth.html#what-we-want-from-authentication"><i class="fa fa-check"></i><b>4.1</b> What we want from authentication</a>
+<ul>
+<li class="chapter" data-level="4.1.1" data-path="modernauth.html"><a href="modernauth.html#traditional-authentication"><i class="fa fa-check"></i><b>4.1.1</b> Traditional authentication</a></li>
+<li class="chapter" data-level="4.1.2" data-path="modernauth.html"><a href="modernauth.html#password-authenticated-key-exchange"><i class="fa fa-check"></i><b>4.1.2</b> Password-Authenticated Key Exchange</a></li>
+<li class="chapter" data-level="4.1.3" data-path="modernauth.html"><a href="modernauth.html#sec:2SKD"><i class="fa fa-check"></i><b>4.1.3</b> Making verifiers uncrackable with 2SKD</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="5" data-path="secureItems.html"><a href="secureItems.html"><i class="fa fa-check"></i><b>5</b> How vault items are secured</a>
+<ul>
+<li class="chapter" data-level="5.1" data-path="secureItems.html"><a href="secureItems.html#key-derivation-overview"><i class="fa fa-check"></i><b>5.1</b> Key derivation overview</a></li>
+<li class="chapter" data-level="5.2" data-path="secureItems.html"><a href="secureItems.html#a-first-look-at-key-sets"><i class="fa fa-check"></i><b>5.2</b> A first look at key sets</a>
+<ul>
+<li class="chapter" data-level="5.2.1" data-path="secureItems.html"><a href="secureItems.html#flexible-yet-firm"><i class="fa fa-check"></i><b>5.2.1</b> Flexible, yet firm</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="6" data-path="sharedVaults.html"><a href="sharedVaults.html"><i class="fa fa-check"></i><b>6</b> How vaults are shared securely</a>
+<ul>
+<li class="chapter" data-level="6.1" data-path="sharedVaults.html"><a href="sharedVaults.html#getting-the-message-to-the-right-people"><i class="fa fa-check"></i><b>6.1</b> Getting the message (to the right people)</a></li>
+</ul></li>
+<li class="chapter" data-level="7" data-path="share.html"><a href="share.html"><i class="fa fa-check"></i><b>7</b> How items are shared with anyone</a>
+<ul>
+<li class="chapter" data-level="7.1" data-path="share.html"><a href="share.html#overview"><i class="fa fa-check"></i><b>7.1</b> Overview</a></li>
+<li class="chapter" data-level="7.2" data-path="share.html"><a href="share.html#password-client"><i class="fa fa-check"></i><b>7.2</b> 1Password client</a>
+<ul>
+<li class="chapter" data-level="7.2.1" data-path="share.html"><a href="share.html#making-a-share-link"><i class="fa fa-check"></i><b>7.2.1</b> Making a share link</a></li>
+<li class="chapter" data-level="7.2.2" data-path="share.html"><a href="share.html#clients-first-steps"><i class="fa fa-check"></i><b>7.2.2</b> Client’s first steps</a></li>
+<li class="chapter" data-level="7.2.3" data-path="share.html"><a href="share.html#encryption-and-key-generation"><i class="fa fa-check"></i><b>7.2.3</b> Encryption and key generation</a></li>
+<li class="chapter" data-level="7.2.4" data-path="share.html"><a href="share.html#uploading-the-share"><i class="fa fa-check"></i><b>7.2.4</b> Uploading the share</a></li>
+<li class="chapter" data-level="7.2.5" data-path="share.html"><a href="share.html#sharing-the-share-link"><i class="fa fa-check"></i><b>7.2.5</b> Sharing the share link</a></li>
+</ul></li>
+<li class="chapter" data-level="7.3" data-path="share.html"><a href="share.html#server-to-server"><i class="fa fa-check"></i><b>7.3</b> Server to server</a>
+<ul>
+<li class="chapter" data-level="7.3.1" data-path="share.html"><a href="share.html#audit-and-status-queries"><i class="fa fa-check"></i><b>7.3.1</b> Audit and status queries</a></li>
+</ul></li>
+<li class="chapter" data-level="7.4" data-path="share.html"><a href="share.html#share-pickup"><i class="fa fa-check"></i><b>7.4</b> Share pickup</a>
+<ul>
+<li class="chapter" data-level="7.4.1" data-path="share.html"><a href="share.html#additional-authentication"><i class="fa fa-check"></i><b>7.4.1</b> Additional authentication</a></li>
+<li class="chapter" data-level="7.4.2" data-path="share.html"><a href="share.html#client-analytics"><i class="fa fa-check"></i><b>7.4.2</b> Client analytics</a></li>
+</ul></li>
+<li class="chapter" data-level="7.5" data-path="share.html"><a href="share.html#caveats"><i class="fa fa-check"></i><b>7.5</b> Caveats</a></li>
+</ul></li>
+<li class="chapter" data-level="8" data-path="deepKeys.html"><a href="deepKeys.html"><i class="fa fa-check"></i><b>8</b> A deeper look at keys</a>
+<ul>
+<li class="chapter" data-level="8.1" data-path="deepKeys.html"><a href="deepKeys.html#key-creation"><i class="fa fa-check"></i><b>8.1</b> Key creation</a></li>
+<li class="chapter" data-level="8.2" data-path="deepKeys.html"><a href="deepKeys.html#sec:keyderiv"><i class="fa fa-check"></i><b>8.2</b> Key derivation</a>
+<ul>
+<li class="chapter" data-level="8.2.1" data-path="deepKeys.html"><a href="deepKeys.html#deriving-two-keys-from-two-secrets"><i class="fa fa-check"></i><b>8.2.1</b> Deriving two keys from two secrets</a></li>
+<li class="chapter" data-level="8.2.2" data-path="deepKeys.html"><a href="deepKeys.html#preprocessing-the-account-password"><i class="fa fa-check"></i><b>8.2.2</b> Preprocessing the account password</a></li>
+<li class="chapter" data-level="8.2.3" data-path="deepKeys.html"><a href="deepKeys.html#preparing-the-salt"><i class="fa fa-check"></i><b>8.2.3</b> Preparing the salt</a></li>
+<li class="chapter" data-level="8.2.4" data-path="deepKeys.html"><a href="deepKeys.html#slow-hashing"><i class="fa fa-check"></i><b>8.2.4</b> Slow hashing</a></li>
+<li class="chapter" data-level="8.2.5" data-path="deepKeys.html"><a href="deepKeys.html#combining-with-the-secret-key"><i class="fa fa-check"></i><b>8.2.5</b> Combining with the Secret Key</a></li>
+<li class="chapter" data-level="8.2.6" data-path="deepKeys.html"><a href="deepKeys.html#deriving-the-authentication-key"><i class="fa fa-check"></i><b>8.2.6</b> Deriving the authentication key</a></li>
+</ul></li>
+<li class="chapter" data-level="8.3" data-path="deepKeys.html"><a href="deepKeys.html#initial-sign-up"><i class="fa fa-check"></i><b>8.3</b> Initial sign-up</a>
+<ul>
+<li class="chapter" data-level="8.3.1" data-path="deepKeys.html"><a href="deepKeys.html#protecting-email-invitations"><i class="fa fa-check"></i><b>8.3.1</b> Protecting email invitations</a></li>
+</ul></li>
+<li class="chapter" data-level="8.4" data-path="deepKeys.html"><a href="deepKeys.html#enrolling-a-new-client"><i class="fa fa-check"></i><b>8.4</b> Enrolling a new client</a></li>
+<li class="chapter" data-level="8.5" data-path="deepKeys.html"><a href="deepKeys.html#normal-unlock-and-sign-in"><i class="fa fa-check"></i><b>8.5</b> Normal unlock and sign-in</a></li>
+</ul></li>
+<li class="chapter" data-level="9" data-path="passkeySSO.html"><a href="passkeySSO.html"><i class="fa fa-check"></i><b>9</b> Unlock with a passkey or single sign-on</a>
+<ul>
+<li class="chapter" data-level="9.1" data-path="passkeySSO.html"><a href="passkeySSO.html#unlocking-without-an-account-password"><i class="fa fa-check"></i><b>9.1</b> Unlocking without an account password</a>
+<ul>
+<li class="chapter" data-level="9.1.1" data-path="passkeySSO.html"><a href="passkeySSO.html#sec:authCred"><i class="fa fa-check"></i><b>9.1.1</b> Authorization and the credential bundle</a></li>
+</ul></li>
+<li class="chapter" data-level="9.2" data-path="passkeySSO.html"><a href="passkeySSO.html#linked-apps-and-browsers"><i class="fa fa-check"></i><b>9.2</b> Linked apps and browsers</a></li>
+<li class="chapter" data-level="9.3" data-path="passkeySSO.html"><a href="passkeySSO.html#linking-other-devices"><i class="fa fa-check"></i><b>9.3</b> Linking other devices</a></li>
+<li class="chapter" data-level="9.4" data-path="passkeySSO.html"><a href="passkeySSO.html#quick-on-device-access-with-biometrics"><i class="fa fa-check"></i><b>9.4</b> Quick on-device access with biometrics</a></li>
+</ul></li>
+<li class="chapter" data-level="10" data-path="revoke-access.html"><a href="revoke-access.html"><i class="fa fa-check"></i><b>10</b> Revoking access</a></li>
+<li class="chapter" data-level="11" data-path="access-control.html"><a href="access-control.html"><i class="fa fa-check"></i><b>11</b> Access control enforcement</a>
+<ul>
+<li class="chapter" data-level="11.1" data-path="access-control.html"><a href="access-control.html#cryptographically-enforced-controls"><i class="fa fa-check"></i><b>11.1</b> Cryptographically enforced controls</a></li>
+<li class="chapter" data-level="11.2" data-path="access-control.html"><a href="access-control.html#server-enforced-controls"><i class="fa fa-check"></i><b>11.2</b> Server-enforced controls</a></li>
+<li class="chapter" data-level="11.3" data-path="access-control.html"><a href="access-control.html#client-enforced-controls"><i class="fa fa-check"></i><b>11.3</b> Client-enforced controls</a>
+<ul>
+<li class="chapter" data-level="11.3.1" data-path="access-control.html"><a href="access-control.html#controls-enforced-by-client-policy"><i class="fa fa-check"></i><b>11.3.1</b> Controls enforced by client policy</a></li>
+</ul></li>
+<li class="chapter" data-level="11.4" data-path="access-control.html"><a href="access-control.html#multiple-layers-of-enforcement"><i class="fa fa-check"></i><b>11.4</b> Multiple layers of enforcement</a></li>
+</ul></li>
+<li class="chapter" data-level="12" data-path="restore.html"><a href="restore.html"><i class="fa fa-check"></i><b>12</b> Restoring a user’s access to a vault</a>
+<ul>
+<li class="chapter" data-level="12.1" data-path="restore.html"><a href="restore.html#overview-of-groups"><i class="fa fa-check"></i><b>12.1</b> Overview of groups</a></li>
+<li class="chapter" data-level="12.2" data-path="restore.html"><a href="restore.html#recovery-groups"><i class="fa fa-check"></i><b>12.2</b> Recovery groups</a></li>
+<li class="chapter" data-level="12.3" data-path="restore.html"><a href="restore.html#implicit-sharing"><i class="fa fa-check"></i><b>12.3</b> Implicit sharing</a></li>
+<li class="chapter" data-level="12.4" data-path="restore.html"><a href="restore.html#protecting-vaults-from-recovery-group-members"><i class="fa fa-check"></i><b>12.4</b> Protecting vaults from recovery group members</a></li>
+<li class="chapter" data-level="12.5" data-path="restore.html"><a href="restore.html#recovery-risks"><i class="fa fa-check"></i><b>12.5</b> Recovery risks</a></li>
+<li class="chapter" data-level="12.6" data-path="restore.html"><a href="restore.html#recovery-keys"><i class="fa fa-check"></i><b>12.6</b> Recovery keys</a>
+<ul>
+<li class="chapter" data-level="12.6.1" data-path="restore.html"><a href="restore.html#recovery-key-generation"><i class="fa fa-check"></i><b>12.6.1</b> Recovery key generation</a></li>
+<li class="chapter" data-level="12.6.2" data-path="restore.html"><a href="restore.html#recovery-key-authentication"><i class="fa fa-check"></i><b>12.6.2</b> Recovery key authentication</a></li>
+<li class="chapter" data-level="12.6.3" data-path="restore.html"><a href="restore.html#recovery-key-policies"><i class="fa fa-check"></i><b>12.6.3</b> Recovery key policies</a></li>
+<li class="chapter" data-level="12.6.4" data-path="restore.html"><a href="restore.html#recovery-key-use"><i class="fa fa-check"></i><b>12.6.4</b> Recovery key use</a></li>
+<li class="chapter" data-level="12.6.5" data-path="restore.html"><a href="restore.html#recovery-codes"><i class="fa fa-check"></i><b>12.6.5</b> Recovery codes</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="13" data-path="secrets.html"><a href="secrets.html"><i class="fa fa-check"></i><b>13</b> Secrets Automation</a>
+<ul>
+<li class="chapter" data-level="13.1" data-path="secrets.html"><a href="secrets.html#the-connect-server"><i class="fa fa-check"></i><b>13.1</b> The Connect server</a>
+<ul>
+<li class="chapter" data-level="13.1.1" data-path="secrets.html"><a href="secrets.html#service-account"><i class="fa fa-check"></i><b>13.1.1</b> Service account</a></li>
+<li class="chapter" data-level="13.1.2" data-path="secrets.html"><a href="secrets.html#local-deployment"><i class="fa fa-check"></i><b>13.1.2</b> Local deployment</a></li>
+<li class="chapter" data-level="13.1.3" data-path="secrets.html"><a href="secrets.html#credential-store"><i class="fa fa-check"></i><b>13.1.3</b> Credential store</a></li>
+<li class="chapter" data-level="13.1.4" data-path="secrets.html"><a href="secrets.html#the-credentials-file"><i class="fa fa-check"></i><b>13.1.4</b> The credentials file</a></li>
+<li class="chapter" data-level="13.1.5" data-path="secrets.html"><a href="secrets.html#encrypted-credentials"><i class="fa fa-check"></i><b>13.1.5</b> Encrypted credentials</a></li>
+<li class="chapter" data-level="13.1.6" data-path="secrets.html"><a href="secrets.html#verifier"><i class="fa fa-check"></i><b>13.1.6</b> Verifier</a></li>
+<li class="chapter" data-level="13.1.7" data-path="secrets.html"><a href="secrets.html#interprocess-key"><i class="fa fa-check"></i><b>13.1.7</b> Interprocess key</a></li>
+</ul></li>
+<li class="chapter" data-level="13.2" data-path="secrets.html"><a href="secrets.html#bearer-token"><i class="fa fa-check"></i><b>13.2</b> Bearer token</a></li>
+<li class="chapter" data-level="13.3" data-path="secrets.html"><a href="secrets.html#header"><i class="fa fa-check"></i><b>13.3</b> Header</a>
+<ul>
+<li class="chapter" data-level="13.3.1" data-path="secrets.html"><a href="secrets.html#payload"><i class="fa fa-check"></i><b>13.3.1</b> Payload</a></li>
+<li class="chapter" data-level="13.3.2" data-path="secrets.html"><a href="secrets.html#signature"><i class="fa fa-check"></i><b>13.3.2</b> Signature</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="14" data-path="transport.html"><a href="transport.html"><i class="fa fa-check"></i><b>14</b> Transport security</a>
+<ul>
+<li class="chapter" data-level="14.1" data-path="transport.html"><a href="transport.html#data-at-rest"><i class="fa fa-check"></i><b>14.1</b> Data at rest</a></li>
+<li class="chapter" data-level="14.2" data-path="transport.html"><a href="transport.html#tls"><i class="fa fa-check"></i><b>14.2</b> TLS</a></li>
+<li class="chapter" data-level="14.3" data-path="transport.html"><a href="transport.html#our-transport-security"><i class="fa fa-check"></i><b>14.3</b> Our transport security</a>
+<ul>
+<li class="chapter" data-level="14.3.1" data-path="transport.html"><a href="transport.html#client-delivery"><i class="fa fa-check"></i><b>14.3.1</b> Client delivery</a></li>
+<li class="chapter" data-level="14.3.2" data-path="transport.html"><a href="transport.html#passkey-and-single-sign-on-unlock-caveats"><i class="fa fa-check"></i><b>14.3.2</b> Passkey and single sign-on unlock caveats</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="15" data-path="infra.html"><a href="infra.html"><i class="fa fa-check"></i><b>15</b> Server infrastructure</a>
+<ul>
+<li class="chapter" data-level="15.1" data-path="infra.html"><a href="infra.html#what-the-server-stores"><i class="fa fa-check"></i><b>15.1</b> What the server stores</a></li>
+<li class="chapter" data-level="15.2" data-path="infra.html"><a href="infra.html#how-your-data-is-stored"><i class="fa fa-check"></i><b>15.2</b> How your data is stored</a></li>
+</ul></li>
+<li class="appendix"><span><b>Appendix</b></span></li>
+<li class="chapter" data-level="A" data-path="leopard.html"><a href="leopard.html"><i class="fa fa-check"></i><b>A</b> Appendix A: Beware of the leopard</a>
+<ul>
+<li class="chapter" data-level="A.1" data-path="leopard.html"><a href="leopard.html#sec:cryptoHTTPS"><i class="fa fa-check"></i><b>A.1</b> Crypto over HTTPS</a>
+<ul>
+<li class="chapter" data-level="A.1.1" data-path="leopard.html"><a href="leopard.html#crypto-in-the-browser"><i class="fa fa-check"></i><b>A.1.1</b> Crypto in the browser</a></li>
+</ul></li>
+<li class="chapter" data-level="A.2" data-path="leopard.html"><a href="leopard.html#recovery-group-powers"><i class="fa fa-check"></i><b>A.2</b> Recovery Group powers</a></li>
+<li class="chapter" data-level="A.3" data-path="leopard.html"><a href="leopard.html#no-public-key-verification"><i class="fa fa-check"></i><b>A.3</b> No public key verification</a></li>
+<li class="chapter" data-level="A.4" data-path="leopard.html"><a href="leopard.html#limited-re-encryption-secrecy"><i class="fa fa-check"></i><b>A.4</b> Limited re-encryption secrecy</a>
+<ul>
+<li class="chapter" data-level="A.4.1" data-path="leopard.html"><a href="leopard.html#revocation"><i class="fa fa-check"></i><b>A.4.1</b> Revocation</a></li>
+<li class="chapter" data-level="A.4.2" data-path="leopard.html"><a href="leopard.html#your-mitigations"><i class="fa fa-check"></i><b>A.4.2</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.5" data-path="leopard.html"><a href="leopard.html#account-password-changes-dont-change-keysets"><i class="fa fa-check"></i><b>A.5</b> Account password changes don’t change keysets</a>
+<ul>
+<li class="chapter" data-level="A.5.1" data-path="leopard.html"><a href="leopard.html#your-mitigations-1"><i class="fa fa-check"></i><b>A.5.1</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.6" data-path="leopard.html"><a href="leopard.html#local-client-account-password-has-control-of-other-account-passwords"><i class="fa fa-check"></i><b>A.6</b> Local client account password has control of other account passwords</a>
+<ul>
+<li class="chapter" data-level="A.6.1" data-path="leopard.html"><a href="leopard.html#mitigations"><i class="fa fa-check"></i><b>A.6.1</b> Mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.7" data-path="leopard.html"><a href="leopard.html#policy-enforcement-mechanisms-not-always-clear-to-user"><i class="fa fa-check"></i><b>A.7</b> Policy enforcement mechanisms not always clear to user</a></li>
+<li class="chapter" data-level="A.8" data-path="leopard.html"><a href="leopard.html#malicious-client"><i class="fa fa-check"></i><b>A.8</b> Malicious client</a></li>
+<li class="chapter" data-level="A.9" data-path="leopard.html"><a href="leopard.html#vulnerability-of-server-data"><i class="fa fa-check"></i><b>A.9</b> Vulnerability of server data</a></li>
+<li class="chapter" data-level="A.10" data-path="leopard.html"><a href="leopard.html#malicious-processes-on-your-devices"><i class="fa fa-check"></i><b>A.10</b> Malicious processes on your devices</a>
+<ul>
+<li class="chapter" data-level="A.10.1" data-path="leopard.html"><a href="leopard.html#malicious-or-undesired-browser-components"><i class="fa fa-check"></i><b>A.10.1</b> Malicious or undesired browser components</a></li>
+<li class="chapter" data-level="A.10.2" data-path="leopard.html"><a href="leopard.html#sec:localKeys"><i class="fa fa-check"></i><b>A.10.2</b> Locally exposed Secret Keys</a></li>
+<li class="chapter" data-level="A.10.3" data-path="leopard.html"><a href="leopard.html#sec:deviceKeys"><i class="fa fa-check"></i><b>A.10.3</b> Device keys used with passkey and single sign-on unlock</a></li>
+</ul></li>
+<li class="chapter" data-level="A.11" data-path="leopard.html"><a href="leopard.html#revealing-who-is-registered"><i class="fa fa-check"></i><b>A.11</b> Revealing who is registered</a></li>
+<li class="chapter" data-level="A.12" data-path="leopard.html"><a href="leopard.html#use-of-email"><i class="fa fa-check"></i><b>A.12</b> Use of email</a></li>
+</ul></li>
+<li class="chapter" data-level="B" data-path="srp.html"><a href="srp.html"><i class="fa fa-check"></i><b>B</b> Appendix B: Secure Remote Password</a>
+<ul>
+<li class="chapter" data-level="B.0.1" data-path="srp.html"><a href="srp.html#registration"><i class="fa fa-check"></i><b>B.0.1</b> Registration</a></li>
+<li class="chapter" data-level="B.0.2" data-path="srp.html"><a href="srp.html#sign-in"><i class="fa fa-check"></i><b>B.0.2</b> Sign-in</a></li>
+<li class="chapter" data-level="B.0.3" data-path="srp.html"><a href="srp.html#sec:strongKDF"><i class="fa fa-check"></i><b>B.0.3</b> With a strong KDF</a></li>
+<li class="chapter" data-level="B.1" data-path="srp.html"><a href="srp.html#srpmath"><i class="fa fa-check"></i><b>B.1</b> The math of SRP</a>
+<ul>
+<li class="chapter" data-level="B.1.1" data-path="srp.html"><a href="srp.html#math-background"><i class="fa fa-check"></i><b>B.1.1</b> Math background</a></li>
+<li class="chapter" data-level="B.1.2" data-path="srp.html"><a href="srp.html#sec:dhe"><i class="fa fa-check"></i><b>B.1.2</b> Diffie-Hellman key exchange</a></li>
+<li class="chapter" data-level="B.1.3" data-path="srp.html"><a href="srp.html#authenticated-key-exchange"><i class="fa fa-check"></i><b>B.1.3</b> Authenticated key exchange</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="C" data-path="mitm.html"><a href="mitm.html"><i class="fa fa-check"></i><b>C</b> Appendix C: Verifying public keys</a>
+<ul>
+<li class="chapter" data-level="C.1" data-path="mitm.html"><a href="mitm.html#types-of-defenses"><i class="fa fa-check"></i><b>C.1</b> Types of defenses</a>
+<ul>
+<li class="chapter" data-level="C.1.1" data-path="mitm.html"><a href="mitm.html#trust-hierarchy"><i class="fa fa-check"></i><b>C.1.1</b> Trust hierarchy</a></li>
+<li class="chapter" data-level="C.1.2" data-path="mitm.html"><a href="mitm.html#user-to-user-verification"><i class="fa fa-check"></i><b>C.1.2</b> User-to-user verification</a></li>
+</ul></li>
+<li class="chapter" data-level="C.2" data-path="mitm.html"><a href="mitm.html#the-problem-remains"><i class="fa fa-check"></i><b>C.2</b> The problem remains</a></li>
+</ul></li>
+<li class="chapter" data-level="" data-path="glossary.html"><a href="glossary.html"><i class="fa fa-check"></i>Glossary</a></li>
+<li class="chapter" data-level="" data-path="changelog.html"><a href="changelog.html"><i class="fa fa-check"></i>Changelog</a></li>
+<li class="chapter" data-level="" data-path="bibliography.html"><a href="bibliography.html"><i class="fa fa-check"></i>Bibliography</a></li>
+<li class="chapter" data-level="" data-path="acknowledgments.html"><a href="acknowledgments.html"><i class="fa fa-check"></i>Acknowledgments</a></li>
+</ul>
+
+      </nav>
+    </div>
+
+    <div class="book-body">
+      <div class="body-inner">
+        <div class="book-header" role="navigation">
+          <h1>
+            <i class="fa fa-circle-o-notch fa-spin"></i><a href="./">1Password Security Design White Paper</a>
+          </h1>
+        </div>
+
+        <div class="page-wrapper" tabindex="-1" role="main">
+          <div class="page-inner">
+
+            <section class="normal" id="section-">
+<div id="share" class="section level1 hasAnchor" number="7">
+<h1><span class="header-section-number">7</span> How items are shared with anyone<a href="share.html#share" class="anchor-section" aria-label="Anchor link to header"></a></h1>
+<p>As described in <a href="sharedVaults.html#sharedVaults">“How vaults are shared securely,”</a> sharing items among members of the same 1Password account happens at the vault level But it’s also possible to securely share a copy of individual items with individuals who are not members of the same 1Password account or even 1Password users at all. The mechanism, however, is entirely different, largely because the recipient can’t be expected to <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authenticate</a> in the same way as a 1Password user would, and the recipient doesn’t have a public key the sender can use.</p>
+<p>The 1Password item sharing service allows a 1Password user to make a copy of an item available to anyone, whether the recipient is a 1Password user or not. In this section we’ll often follow user documentation and the user interface in calling this “sharing,” but we we’ll also write in terms of sending and receiving to help accentuate the distinction between this mechanism and the sharing of vaults.</p>
+<div id="overview" class="section level2 hasAnchor" number="7.1">
+<h2><span class="header-section-number">7.1</span> Overview<a href="share.html#overview" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>There are six components to the overall picture.</p>
+<p><strong><em>1Password client</em></strong> The 1Pasword application with which users directly interact. This includes not only applications such as the 1Password iOS app, but also the web client and browser extensions acting as a client. We we’ll sometimes refer to this as “the sender’s client.”</p>
+<p><strong><em>1Password service</em></strong> The principle 1Password service.</p>
+<p><strong><em>Item sharing servive</em></strong> The share service which, among other things, will store the encrypted shared copies.</p>
+<p><strong><em>Item sharing client</em></strong> The share web client. It operates in the recipient’s browser and is downloaded from the item sharing service. We’ll sometimes refer to this as “the recipient’s client.”</p>
+<p><strong><em>Sender</em></strong> The human interacting with their 1Password client.</p>
+<p><strong><em>Recipient</em></strong> The human interacting with the item sharing client.</p>
+<p>Figure <a href="share.html#fig:psst">7.1</a> illustrates which components talk to which. In particular, the 1Password client communicates only with the sending user and 1Password service. The 1Password server communicates with the item sharing service. Item sharing client communicates only with the receiving user and the item sharing service. And the sender will communicate directly with the recipient outside of 1Password using a communication channel of their choice. Additionally, the figure shows the encrypted copy of the item and key, and that their decryptions follow different paths.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:psst"></span>
+<img src="images/psst-net.png" alt="Item sharing, key, and token flow. The solid purple arrows show the flow of the encrypted item, solid red arrows show the flow of the encryption key, and dashed green arrows show the flow to the retrieval token. “IS Server” and “IS Client” refer to the item sharing server and client. Item encryption and decryption can only occur where the key and the item are together, which is at the clients. The share token is used for authenticating a download of the encrypted item by the item sharing server.The 1Password and item sharing servers never have access to the share key. This figure doesn't include flow of audit and share status information." width="75%" />
+<p class="caption">
+Figure 7.1: Item sharing, key, and token flow. The solid purple arrows show the flow of the encrypted item, solid red arrows show the flow of the encryption key, and dashed green arrows show the flow to the retrieval token. “IS Server” and “IS Client” refer to the item sharing server and client. Item encryption and decryption can only occur where the key and the item are together, which is at the clients. The share token is used for authenticating a download of the encrypted item by the item sharing server.The 1Password and item sharing servers never have access to the share key. This figure doesn’t include flow of audit and share status information.
+</p>
+</div>
+</div>
+</div>
+<div id="password-client" class="section level2 hasAnchor" number="7.2">
+<h2><span class="header-section-number">7.2</span> 1Password client<a href="share.html#password-client" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>The sender’s client needs to do two things: create a share link and upload an encrypted copy of the shared item to the 1Password service. The sender also needs to transmit the share link to the recipient independently of 1Password services.</p>
+<div id="making-a-share-link" class="section level3 hasAnchor" number="7.2.1">
+<h3><span class="header-section-number">7.2.1</span> Making a share link<a href="share.html#making-a-share-link" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The share link looks something like what is shown in Figure <a href="share.html#fig:psst-link">7.2</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:psst-link"></span>
+<img src="images/psst-share-link.png" alt="A share link is a URL that contains in its fragment information required to identify the shared item, along with the key necessary to decrypt it." width="75%" />
+<p class="caption">
+Figure 7.2: A share link is a URL that contains in its fragment information required to identify the shared item, along with the key necessary to decrypt it.
+</p>
+</div>
+</div>
+<p>At a high level creating the share link involves five steps performed by the sender’s client.</p>
+<ol style="list-style-type: decimal">
+<li>Obtain the user item to be shared and decrypt it. The item must be something the sender can read and decrypt, and the sender must also have other appropriate permissions for the vault.</li>
+<li>Create a public unique identifier, a retrieval token, and an encryption key for this share.</li>
+<li>Encrypt a copy of the item with the share key.</li>
+<li>Upload the encrypted data to the share service along with the identifier and sender chosen access options.</li>
+<li>Present the sender with the share link.</li>
+</ol>
+<p>As always, the key generation, encryption, and creation of the share link are performed entirely on the sender’s client. The 1Password service never has access to the decryption keys nor the decrypted item.</p>
+</div>
+<div id="clients-first-steps" class="section level3 hasAnchor" number="7.2.2">
+<h3><span class="header-section-number">7.2.2</span> Client’s first steps<a href="share.html#clients-first-steps" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The requirements of step 1 involve a number of mechanisms. The requirement that the sender be able to decrypt the item is cryptographically enforced, as they would never be able to re-encrypt anything they cannot decrypt. Additionally, the client will only present the user the option to share if the sender has the appropriate vault permission (detailed in the description of the upload step).</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:unnamed-chunk-4"></span>
+<img src="images/1password-com-get-link.png" alt="1Password client gets information from sender" width="75%" />
+<p class="caption">
+Figure 7.3: 1Password client gets information from sender
+</p>
+</div>
+</div>
+<p>The sender is presented with certain configuration options including whether recipients need to demonstrate control of certain email addresses, the required email addresses if any, the amount of time the shared item should be available, and how many times the recipient can retrieve the item. These options will play a role in the retrieval process. The client will check whether the options are consistent with account policy at this time.</p>
+</div>
+<div id="encryption-and-key-generation" class="section level3 hasAnchor" number="7.2.3">
+<h3><span class="header-section-number">7.2.3</span> Encryption and key generation<a href="share.html#encryption-and-key-generation" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>In step 2, the client generates 32 random bytes to be the share secret. The 32-byte encryption key, the 16-byte public <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>Universally Unique Identifier (UUID)</a>, and the 16-byte retrieval token are derived from the share secret using <a class='glossary' title='A key derivation function that uses HMAC for key extraction and expansion. Unlike PBKDF2, it’s not designed for password strengthening.'>hash-based key derivation function (HKDF)</a> as detailed in Figure <a href="share.html#fig:shared">7.4</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:shared"></span>
+<img src="images/figure_13_share_IDs_secrets.png" alt="Creating shared IDs and secrets. The client generates a share secret, from which it derives an encryption key, a public UUID, and a retrieval token." width="75%" />
+<p class="caption">
+Figure 7.4: Creating shared IDs and secrets. The client generates a share secret, from which it derives an encryption key, a public UUID, and a retrieval token.
+</p>
+</div>
+</div>
+<p>The first part of step 3 involves making a copy of the item to be shared. The copy is identical to the one remaining in the vault except that attachments and password history are removed. The existence of attachments and password history in an item may not always be salient to the sender, and so those are excluded from the copy. The copy is then encrypted using the identical methods used for encrypting items in vaults.</p>
+</div>
+<div id="uploading-the-share" class="section level3 hasAnchor" number="7.2.4">
+<h3><span class="header-section-number">7.2.4</span> Uploading the share<a href="share.html#uploading-the-share" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>In step 4, the client uploads the encrypted item along with the public <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a> and the retrieval token to the 1Password service. The service will reject the request unless sending items is allowed by account policy; the recipient specification is consistent with account policy; and the sender has read, reveal password, and send item permissions for the vault containing the original item. The share secret, which contains the the share key, is never passed to the service. Additionally, the UUID of the vault and specific item are uploaded, along with the version number of the vault. This metadata allows the user and vault administrators to manage shares. Account policies can specify whether share retrievals must be tied to recipient email addresses and whether those are limited to specific email domains.</p>
+<p>The configuration options selected by the sender are also part of this upload. The server will check whether they’re consistent with account policy (whether retrieval is restricted to people with particular email addresses) and whether the email addresses conform to that policy. Additionally, the server will ensure the availability time requested by the client doesn’t exceed server or account policy. Upon success, the server responds with the non-fragment part of the share link. In current configurations, this is <code>https://share.1password.com/s</code>.</p>
+<p>After a successful upload, the client will present the user with the share link (step 5).</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:unnamed-chunk-5"></span>
+<img src="images/1password-com-copy-link.png" alt="1Password client presents item sharing share link." width="75%" />
+<p class="caption">
+Figure 7.5: 1Password client presents item sharing share link.
+</p>
+</div>
+</div>
+<p>The client appends the share secret (base64 encoded) as a fragment to the URL returned by the server. The fragment in the share link contains the share secret from which the retrieval token and encryption key are derived, and therefore must not be transmitted to intended recipients via the 1Password service.</p>
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>The share link places the identifier and the decryption key within a URL fragment. In general fragments are never transmitted and are used solely by the clients as additional information on handling the retrieved resource. By putting the share secret in the fragment, we not only prevent ways in which the secret could be exposed, but we also make it clear this is a purely local secret.</p>
+</div>
+<div class="divDiscuss">
+Discussion 1: Fragment abuse?
+</div>
+<div class="infobox">
+<p>At a superficial level, it may appear that placing the item identifier within a fragment is a minor abuse of the standards defining URLs. The non-fragment part of a URL is supposed to fully identify the resource to be retrieved, while that portion of our share links only identifies the 1Password share service. Fragments, however, are also intended to provide information to the client about handling or further processing the retrieved resource, and this is exactly how we use the fragment. Thus our fragment, even with its inclusion of a resource identifier, may be closer to the spirit of the standards than would be including it within the path or a query string. In any event, we don’t anticipate the IETF to send an enforcement squad to our door for our use of fragments.</p>
+</div>
+</div>
+<div id="sharing-the-share-link" class="section level3 hasAnchor" number="7.2.5">
+<h3><span class="header-section-number">7.2.5</span> Sharing the share link<a href="share.html#sharing-the-share-link" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The sender needs to communicate the share link to the recipient, and this has to happen out of band. That is, the unencrypted share link – with its secrets – must never be made available to either the 1Password or item sharing services. This ensures the servers never have access to both encrypted user data and the keys needed to decrypt them.</p>
+<p>This leaves it to the sender to choose how to get the share link to the intended recipients. The 1Password client may provide as a convenience a way to launch a variety of sharing mechanisms, such as email or messaging tool, on the sender’s system.</p>
+</div>
+</div>
+<div id="server-to-server" class="section level2 hasAnchor" number="7.3">
+<h2><span class="header-section-number">7.3</span> Server to server<a href="share.html#server-to-server" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>The 1Password service is responsible for passing the share to the item sharing service. The 1Password service communicates with the item sharing service using our inter-service communication architecture;<a href="#fn10" class="footnote-ref" id="fnref10"><sup>10</sup></a> the item sharing service is hosted at <code>share.1password.com</code> and is a separate service despite being in a subdomain of <code>1password.com</code>.</p>
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>The item sharing server itself is hosted in the European Union, despite the .com top-level domain. This same EU-based service is used by all 1Password servers, including those in the United States and Canada. This way, recipient email addresses – as they are passed from 1Password server to item sharing server – never leave the European Union.</p>
+</div>
+<p>The 1Passsword server passes to the item sharing service what it received from the sender’s client, along with information about the <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authenticated</a> user and account, it adds its own timestamp, and the number of seconds the item is to be available to the current time to create an expiry time.</p>
+<div id="audit-and-status-queries" class="section level3 hasAnchor" number="7.3.1">
+<h3><span class="header-section-number">7.3.1</span> Audit and status queries<a href="share.html#audit-and-status-queries" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The 1Passsword server has the ability to query the item sharing service about the state of existing shares. The queries identify items by their account, vault, and item <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a>. As discussed in far too much detail in <a href="share.html#discuss2">Discussion 2,</a> UUIDs are never expected to be secret, so guaranteeing the requests are authorized cannot depend on knowledge of those UUIDs. To ensure only authorized individuals are able to see the status or audit events regarding a share:</p>
+<ul>
+<li>These queries are performed over the same mutually authenticated channel (not yet documented).</li>
+<li>The 1Passsword server ensures the account identifier in the query is honest.</li>
+<li>The 1Passsword server has the responsibility to ensure the authenticated user creating the request is authorized to make such requests for that account.</li>
+</ul>
+</div>
+</div>
+<div id="share-pickup" class="section level2 hasAnchor" number="7.4">
+<h2><span class="header-section-number">7.4</span> Share pickup<a href="share.html#share-pickup" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>When the recipient follows a share link, their browser will fetch the page at <code>https://share.1password.com/s</code>. The browser won’t transmit the fragment containing the share secret. The page contains a item sharing web client, software that will run within the user’s browser on their own device. The item sharing client running within the user’s browser is, however, able to see and make use of the fragment portion of the share link, and thus will have the share secret.</p>
+<p>The client uses the share secret as detailed in Figure <a href="share.html#fig:shared">7.4</a> to derive three things:</p>
+<p><strong><em>Share key</em></strong> The share key is the symmetric key that was used to encrypt the item and is necessary to decrypt it. This key is never made available to any 1Passsword service.</p>
+<p><strong><em>Share token</em></strong> The share retrieval token is a secret that is shared between the user and the share service.</p>
+<p><strong><em>Share UUID</em></strong> The share <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a> is a non-secret record locator used by the share service to locate the item in its data store.</p>
+<p>The item sharing client will send a request to the share service requesting the share by UUID. The share token is passed to the item sharing server in an HTTP header <code>OP-Share-Token</code>, as is the norm for bearer tokens. Neither the share secret nor the share key are ever sent to the service.</p>
+<div id="discuss2" class="divDiscuss">
+Discussion 2: Knowledge of identifiers should never prove anything
+</div>
+<div class="infobox">
+<p>There’s some duplication between the UUID and the share token. The share token is sufficient to uniquely identify the share, and knowledge of the UUID offers the same proof of receipt of the share link as knowledge of the share token does. The fact that we don’t combine both of those functions into a single value provides an opportunity to explain a design principle throughout 1Passsword.</p>
+<p>In the United States, Social Security Numbers (SSNs) were never designed to be secrets they were unique identifiers. But in the second half of the 20th century, banks offering services by telephone began to take knowledge of a caller’s SSN as proof of identity. Most systems continued to treat SSNs as non-secrets for a very long time, and changing those systems has proved to be enormously difficult. Credit card numbers followed a similar story with the advent of telephone shopping.</p>
+<p>Co-opting knowledge of account or personal identifiers for authentication must have seemed like an easy strategy at the time. We’re still plagued with the consequences half a century later.</p>
+<p>Throughout the design of 1Passsword we have insisted that knowledge of a UUID must never be used as an authentication mechanism. This not only gives us the freedom to design protocols in which UUIDs never have to be kept secret, it also means we don’t have to worry about future uses. At the moment, share tokens and share UUIDs pass through the same hands and over the same channels, but there may be a time when we use or log UUIDs in ways that would be inappropriate for share tokens or require new security properties of share tokens. By holding ourselves to our design pattern now, we prevent a substantial category of security bug in the future.</p>
+</div>
+<p>The item sharing service will first check the validity and existence of the <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a>. A malformed or unknown UUID will result in an error response to the item sharing client. If the UUID is valid, it then compares<a href="#fn11" class="footnote-ref" id="fnref11"><sup>11</sup></a> the share token with what it has stored. If no further <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> is required, it returns the encrypted item to the item sharing client, which can then use the share key to decrypt the item and render it for the recipient.</p>
+<p>The item sharing server creates and stores an audit event record for a successful access. The audit record includes identifiers for the share and the accessor as well as the IP address and HTTP user agent of the and item sharing client. For business accounts, audit events are available to the mangers of the account from which the item was sent.</p>
+<div id="additional-authentication" class="section level3 hasAnchor" number="7.4.1">
+<h3><span class="header-section-number">7.4.1</span> Additional authentication<a href="share.html#additional-authentication" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>In all cases, the item sharing client needs to provide the server with the share token and will need have the share key to be able to decrypt the share, but there may be additional authentication requirements. At the present time, additional <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> is based on control of email addresses.</p>
+<div class="right-figure" style="float: right; width: 50%;">
+<div class="figure"><span style="display:block;" id="fig:view-shared"></span>
+<img src="images/view-shared-item.png" alt="Item sharing client item view." style="padding:10px" />
+<p class="caption">
+Figure 7.6: Item sharing client item view.
+</p>
+</div>
+</div>
+<p>In the case that email <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> is required, the share recipient (or their client) needs to either prove they can read email sent to the specified email address or prove it has previously offered such proof. In the first case, the share recipient is offered to have a verification email sent to the address associated with the share by the sender. The email will contain a randomly chosen six-digit verifier the user can enter into the item sharing client, which will send the item to the item sharing server.</p>
+<p>After successful email verification, the server will issue an accessor token to the client, which the client will write to its local storage. For future share retrievals, the client can provide this access token to show that it has previously succeeded with email verification.</p>
+</div>
+<div id="client-analytics" class="section level3 hasAnchor" number="7.4.2">
+<h3><span class="header-section-number">7.4.2</span> Client analytics<a href="share.html#client-analytics" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The item sharing client may offer its user buttons for signing up for 1Password, saving the item in 1Password, or accepting an invite to join the team from which the item was sent. Clicking those buttons will trigger a request to the item sharing server which is used to keep count of such clicks. Only overall and aggregate counts of the triggering events are saved server side.</p>
+</div>
+</div>
+<div id="caveats" class="section level2 hasAnchor" number="7.5">
+<h2><span class="header-section-number">7.5</span> Caveats<a href="share.html#caveats" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>The item sharing service is intended to share copies of items with individuals who are not members of the 1Passsword family or team in which the original item resides. Within team or family accounts, sharing offers security properties which sharing via item sharing cannot.</p>
+<p>Within an account, a relationship can be established between the personal <a class='glossary' title='How collections of keys and their metadata are organized within 1Password.'>key sets</a> of the members of accounts. But when sharing outside of an account, there’s no preestablished relationship that can be used to identify the sender or the recipient. For this reason, item sharing senders and recipients need to take more care to verify independently that the other party is who they say they are.</p>
+<p>When the recipient is given a share link through some channel, 1Passsword can’t tell them whether the person sending the share link is the person who created the share link. Similarly, email <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> only proves the recipient had the ability to read an email message sent to that address at some time. Without the shared item remaining a single item shared within an account, there’s far less ability to manage, control, or monitor use of that item as there would be within a team.</p>
+<p>The identification of the item shared is entirely under the control of the sending client and can’t be enforced by the 1Passsword server. A sender can evade the policy controls about which items they are allowed to send in much the same way a user can evade other client enforced permissions, such as having the ability to reveal a password. Thus a malicious user with the skills to modify their own client can share any item they’re capable of decrypting by telling the 1Passsword server that some other permissible item was shared.</p>
+<p>In practice, the channels over which the share link is transmitted lack the ideal security properties but they may well be sufficient for the needs at the time. Item sharing is safer and more convenient than the practical alternatives available to most users. In particular sharing with item sharing offers the ability to:</p>
+<ul>
+<li>Set an expiry time on the share.</li>
+<li>Limit the number of times it can be retrieved from the 1Passsword server</li>
+<li>Restrict retrieval to holders of a specific email address.</li>
+<li>Track what has been shared.</li>
+<li>Have policies stating what’s allowed to be shared.</li>
+</ul>
+<p>These abilities create a substantial security improvement against the practice of simply sharing unencrypted data over the same channels one would use for sending the share link.</p>
+<p>We offer the item sharing service because it’s enormously more secure than other ways people find to share 1Passsword items outside their family or team. After all, any 1Passsword user in a position to decrypt an item already has the ability to make a copy of its data and transmit that in any form of their choosing. Item sharing can’t prevent insecure sharing, but it makes it easier for people and organizations to share copies of secrets in a more secure manner than they may otherwise.</p>
+
+</div>
+</div>
+<div class="footnotes">
+<hr />
+<ol start="10">
+<li id="fn10"><p>As yet undocumented, but it involves mutual authentication independent of TLS.<a href="share.html#fnref10" class="footnote-back">↩︎</a></p></li>
+<li id="fn11"><p>All comparisons of secrets, including this one, are performed using constant time comparison methods.<a href="share.html#fnref11" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+<a href="sharedVaults.html" class="navigation navigation-prev " aria-label="Previous page"><i class="fa fa-angle-left"></i></a>
+<a href="deepKeys.html" class="navigation navigation-next " aria-label="Next page"><i class="fa fa-angle-right"></i></a>
+    </div>
+  </div>
+<script src="libs/gitbook-2.6.7/js/app.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/clipboard.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-search.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-sharing.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-fontsettings.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-bookdown.js"></script>
+<script src="libs/gitbook-2.6.7/js/jquery.highlight.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-clipboard.js"></script>
+<script>
+gitbook.require(["gitbook"], function(gitbook) {
+gitbook.start({
+  "sharing": {
+    "github": false,
+    "facebook": false,
+    "twitter": false,
+    "linkedin": false,
+    "weibo": false,
+    "instapaper": false,
+    "vk": false,
+    "whatsapp": false,
+    "all": ["facebook", "twitter", "linkedin", "weibo", "instapaper"]
+  },
+  "fontsettings": {
+    "theme": "white",
+    "family": "sans",
+    "size": 2
+  },
+  "edit": {
+    "link": null,
+    "text": null
+  },
+  "history": {
+    "link": null,
+    "text": null
+  },
+  "view": {
+    "link": null,
+    "text": null
+  },
+  "download": ["1Password_Security_Design.pdf"],
+  "search": {
+    "engine": "fuse",
+    "options": null
+  },
+  "toc": {
+    "collapse": "none"
+  }
+});
+});
+</script>
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    var src = "true";
+    if (src === "" || src === "true") src = "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/latest.js?config=TeX-MML-AM_CHTML";
+    if (location.protocol !== "file:")
+      if (/^https?:/.test(src))
+        src = src.replace(/^https?:/, '');
+    script.src = src;
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+</body>
+
+</html>

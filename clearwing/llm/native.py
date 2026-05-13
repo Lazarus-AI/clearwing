@@ -41,10 +41,10 @@ def response_text(response: ChatResponse) -> str:
     every non-empty segment in ``texts()``. Returns ``""`` when the
     response carries no text at all (e.g. a pure tool-call response).
     """
-    first = response.first_text()
+    first = response.first_text
     if first:
         return first
-    return "\n".join(segment for segment in response.texts() if segment)
+    return "\n".join(segment for segment in response.texts if segment)
 
 
 def _is_root_model_type(schema_model: type[BaseModel]) -> bool:
@@ -674,7 +674,7 @@ class AsyncLLMClient:
                     ) from exc
         response = self._chat_response_from_openai_payload(payload)
         if on_text_delta:
-            visible = response.first_text() or ""
+            visible = response.first_text or ""
             if visible:
                 on_text_delta(visible)
         return response
