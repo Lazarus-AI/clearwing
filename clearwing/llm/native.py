@@ -485,7 +485,23 @@ class AsyncLLMClient:
         """
         input_msgs: list[dict[str, Any]] = []
         for msg in request.messages():
-            input_msgs.append({"role": msg.role, "content": msg.content})
+            if msg.role == "tool":
+                input_msgs.append({
+                    "type": "function_call_output",
+                    "call_id": msg.tool_response_call_id or "",
+                    "output": msg.content or "",
+                })
+            elif msg.role == "assistant" and msg.tool_calls:
+                input_msgs.append({"role": "assistant", "content": msg.content or ""})
+                for call in msg.tool_calls:
+                    input_msgs.append({
+                        "type": "function_call",
+                        "call_id": call.call_id,
+                        "name": call.fn_name,
+                        "arguments": json.dumps(call.fn_arguments) if isinstance(call.fn_arguments, dict) else (call.fn_arguments or "{}"),
+                    })
+            else:
+                input_msgs.append({"role": msg.role, "content": msg.content or ""})
 
         body: dict[str, Any] = {
             "model": self.model_name,
