@@ -196,6 +196,16 @@ def _check_llm_provider(cli, *, skip_invoke: bool) -> DoctorSection:
             )
         )
         return section
+    if endpoint.provider == "anthropic_oauth" and not endpoint.api_key:
+        section.add(
+            DoctorCheck(
+                "Credentials",
+                STATUS_ERR,
+                "Anthropic OAuth credentials are not available",
+                hint="Run `clearwing setup --provider anthropic-oauth` and complete browser login.",
+            )
+        )
+        return section
     if not endpoint.api_key and endpoint.source == "default":
         section.add(
             DoctorCheck(
@@ -232,14 +242,10 @@ def _check_llm_provider(cli, *, skip_invoke: bool) -> DoctorSection:
 
 
 def _invoke_test(endpoint) -> DoctorCheck:
-    """Fire a 1-token prompt at the endpoint to confirm it actually works.
+    """Fire a 1-token prompt at the endpoint to confirm it actually works."""
+    if endpoint.provider in ("openai_codex", "anthropic_oauth"):
+        return _invoke_test_native(endpoint)
 
-    The hung-TLS-handshake failure mode that used to require a worker
-    thread + timeout is now caught at the HTTP layer by genai-pyo3's
-    default 30 s ``connect_timeout`` (0.1.11+), so a stalled endpoint
-    surfaces as an ordinary reqwest error here — no special plumbing
-    needed.
-    """
     from clearwing.providers import ProviderManager
 
     try:
@@ -273,6 +279,49 @@ def _invoke_test(endpoint) -> DoctorCheck:
         STATUS_OK,
         f"{elapsed_ms}ms — reply: {snippet!r}",
     )
+
+
+def _invoke_test_native(endpoint) -> DoctorCheck:
+    """Test invoke via AsyncLLMClient (needed for Codex/Anthropic OAuth)."""
+    import asyncio
+
+    from clearwing.llm.native import AsyncLLMClient, response_text
+
+    try:
+        client = AsyncLLMClient(
+            model_name=endpoint.model,
+            provider_name=endpoint.provider,
+            api_key=endpoint.api_key or "",
+            base_url=endpoint.base_url or None,
+        )
+    except Exception as exc:
+        return DoctorCheck(
+            "Test invoke",
+            STATUS_ERR,
+            f"Could not build client: {exc}",
+        )
+
+    start = time.monotonic()
+    try:
+        from genai_pyo3 import ChatMessage
+
+        resp = asyncio.run(
+            client.achat(
+                messages=[ChatMessage("user", "Reply with exactly the word PONG.")],
+                max_tokens=16,
+            )
+        )
+    except Exception as exc:
+        return DoctorCheck(
+            "Test invoke",
+            STATUS_ERR,
+            f"Invoke failed: {type(exc).__name__}: {exc}",
+            hint="Check your credentials and that the model exists on this provider.",
+        )
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    snippet = response_text(resp).strip()[:60]
+    return DoctorCheck("Test invoke", STATUS_OK, f"{elapsed_ms}ms — reply: {snippet!r}")
 
 
 # --- Section: Filesystem -------------------------------------------------

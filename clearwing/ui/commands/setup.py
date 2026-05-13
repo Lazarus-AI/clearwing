@@ -482,19 +482,28 @@ def _run_test_invoke(
     from clearwing.providers import LLMEndpoint, ProviderManager
 
     if preset.auth_flow in ("openai_codex", "anthropic_oauth"):
+        import asyncio
+
+        from clearwing.llm.native import AsyncLLMClient, response_text
+
         provider_name = "openai_codex" if preset.auth_flow == "openai_codex" else "anthropic_oauth"
-        endpoint = LLMEndpoint(
-            provider=provider_name,
-            model=model,
-            base_url=base_url or None,
-            api_key=None,
-            source="cli",
-        )
         console.print("\n[dim]Testing endpoint...[/dim]", end=" ")
         try:
-            llm = ProviderManager.for_endpoint(endpoint).get_llm("default")
+            client = AsyncLLMClient(
+                model_name=model,
+                provider_name=provider_name,
+                api_key="",
+                base_url=base_url or None,
+            )
+            from genai_pyo3 import ChatMessage
+
             start = time.monotonic()
-            response = llm.invoke("Reply with exactly the word PONG.")
+            resp = asyncio.run(
+                client.achat(
+                    messages=[ChatMessage("user", "Reply with exactly the word PONG.")],
+                    max_tokens=16,
+                )
+            )
             elapsed_ms = int((time.monotonic() - start) * 1000)
         except Exception as exc:
             console.print(f"\n[red]Test failed: {exc}[/red]")
@@ -504,10 +513,7 @@ def _run_test_invoke(
             )
             return
 
-        content = getattr(response, "content", str(response))
-        if isinstance(content, list):
-            content = " ".join(str(p) for p in content)
-        snippet = str(content).strip()[:60]
+        snippet = response_text(resp).strip()[:60]
         console.print(f"[green]ok[/green] ({elapsed_ms}ms, reply: {snippet!r})")
         return
 
