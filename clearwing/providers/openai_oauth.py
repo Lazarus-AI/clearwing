@@ -49,7 +49,7 @@ OPENAI_CODEX_CALLBACK_PATH = "/auth/callback"
 OPENAI_CODEX_SCOPE = "openid profile email offline_access"
 OPENAI_CODEX_ORIGINATOR = "pi"
 OPENAI_CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api"
-OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.2"
+OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.5"
 OPENAI_CODEX_OAUTH_CONFIG_KEY = "oauth.openai_codex"
 OPENAI_AUTH_JWT_CLAIM_PATH = "https://api.openai.com/auth"
 
