@@ -453,13 +453,48 @@ h2{color:#16a34a}
 </div></body></html>"""
 
 
-def _cancel_existing_server(port: int) -> None:
-    """Send /cancel to a stale callback server occupying our port."""
+def _kill_port_holder(port: int) -> None:
+    """Forcibly free a port held by a stale process.
+
+    First tries a polite /cancel HTTP request.  If the port is still
+    occupied, finds and kills the owning process.
+    """
+    import signal
+    import subprocess
+
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{port}/cancel")
         urllib.request.urlopen(req, timeout=2)
+        time.sleep(0.3)
     except Exception:
         pass
+
+    try:
+        import socket as _sock
+
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+        return
+    except OSError:
+        pass
+
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f":{port}"],
+            text=True,
+            timeout=3,
+        ).strip()
+        for pid_str in out.splitlines():
+            pid = int(pid_str)
+            if pid != os.getpid():
+                os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+
+class _ReuseAddrTCPServer(TCPServer):
+    allow_reuse_address = True
 
 
 def run_callback_server(
@@ -482,7 +517,10 @@ def run_callback_server(
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"cancelled")
-                result_queue.put_nowait({})
+                try:
+                    result_queue.put_nowait({})
+                except queue.Full:
+                    pass
                 return
 
             if parsed.path != callback_path:
@@ -511,18 +549,18 @@ def run_callback_server(
             self.wfile.write(_CALLBACK_SUCCESS_HTML)
             try:
                 result_queue.put_nowait({"code": code, "state": state})
-            except Exception:
+            except queue.Full:
                 pass
 
-    server: TCPServer | None = None
+    _kill_port_holder(port)
+
+    server: _ReuseAddrTCPServer | None = None
     for attempt in range(3):
         try:
-            server = TCPServer(("127.0.0.1", port), Handler)
+            server = _ReuseAddrTCPServer(("127.0.0.1", port), Handler)
             break
         except OSError:
-            if attempt == 0:
-                _cancel_existing_server(port)
-            time.sleep(0.3)
+            time.sleep(0.5 * (attempt + 1))
     if server is None:
         return None
 
