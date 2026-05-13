@@ -141,12 +141,23 @@ class Config:
     #: they persist across sessions.
     DEFAULT_CONFIG_PATH = clearwing_home() / "config.yaml"
 
+    #: The user's personal config in ~/.clearwing/, which always holds
+    #: provider credentials regardless of CLEARWING_HOME overrides.
+    _USER_CONFIG_PATH = Path.home() / ".clearwing" / "config.yaml"
+
     def __init__(self, config_file: str | None = None):
         self.config = self.DEFAULT_CONFIG.copy()
-        # Always try the default path first — users expect
-        # `~/.clearwing/config.yaml` to be auto-discovered.
+        # Load from CLEARWING_HOME (or ~/.clearwing) first.
         if self.DEFAULT_CONFIG_PATH.exists():
             self.load(str(self.DEFAULT_CONFIG_PATH))
+        # When CLEARWING_HOME points elsewhere (e.g. a blind-test
+        # sandbox), still load the user's personal config for provider
+        # credentials — scan isolation shouldn't lock out LLM access.
+        if (
+            self.DEFAULT_CONFIG_PATH != self._USER_CONFIG_PATH
+            and self._USER_CONFIG_PATH.exists()
+        ):
+            self.load(str(self._USER_CONFIG_PATH))
         if config_file:
             self.load(config_file)
 

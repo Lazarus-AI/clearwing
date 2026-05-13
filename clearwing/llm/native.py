@@ -149,9 +149,11 @@ class AsyncLLMClient:
 
             # rust-genai's openai_resp adapter joins "responses" onto the
             # base_url, so set base to `.../codex/` and let it produce
-            # `.../codex/responses`. Matches the path the hand-rolled
-            # aiohttp version used to hit.
-            self.base_url = self.base_url or f"{OPENAI_CODEX_DEFAULT_BASE_URL}/codex/"
+            # `.../codex/responses`.
+            if not self.base_url:
+                self.base_url = f"{OPENAI_CODEX_DEFAULT_BASE_URL}/codex/"
+            elif not self.base_url.rstrip("/").endswith("/codex"):
+                self.base_url = self.base_url.rstrip("/") + "/codex/"
             self._default_headers = {
                 "ChatGPT-Account-ID": account_id,
                 "originator": "codex_cli_rs",
@@ -428,7 +430,11 @@ class AsyncLLMClient:
             return client_cls.with_api_key(
                 rust_provider, self.api_key, default_headers=default_headers
             )
-        return client_cls()
+        raise RuntimeError(
+            f"Cannot build LLM client for model={self.model_name} "
+            f"provider={self.provider_name}: no API key or base URL configured. "
+            f"Run `clearwing setup` or set ANTHROPIC_API_KEY / CLEARWING_BASE_URL."
+        )
 
     async def _achat_with_provider_policy(
         self,
@@ -497,9 +503,11 @@ class AsyncLLMClient:
         if request.tools:
             body["tools"] = [self._openai_tool_body(tool) for tool in request.tools]
         if options.response_json_spec is not None:
-            body["text"] = {"format": self._openai_response_format(options.response_json_spec)}
+            body["text"] = {"format": self._responses_api_text_format(options.response_json_spec)}
 
-        base = self.base_url or "https://chatgpt.com/backend-api/codex/"
+        base = self.base_url or "https://chatgpt.com/backend-api"
+        if not base.rstrip("/").endswith("/codex"):
+            base = base.rstrip("/") + "/codex"
         url = urljoin(
             base if base.endswith("/") else f"{base}/",
             "responses",
@@ -760,6 +768,26 @@ class AsyncLLMClient:
         if spec.description:
             json_schema["description"] = spec.description
         return {"type": "json_schema", "json_schema": json_schema}
+
+    def _responses_api_text_format(self, spec: JsonSpec) -> dict[str, Any]:
+        """Build the Responses API `text.format` object.
+
+        The Responses API puts `name` at the top level of the format
+        object, unlike Chat Completions which nests it inside
+        `json_schema`.
+        """
+        try:
+            schema = json.loads(spec.schema_json)
+        except json.JSONDecodeError:
+            schema = {"type": "object"}
+        fmt: dict[str, Any] = {
+            "type": "json_schema",
+            "name": spec.name,
+            "schema": schema,
+        }
+        if spec.description:
+            fmt["description"] = spec.description
+        return fmt
 
     async def _collect_openai_sse_response(
         self,

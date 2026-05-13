@@ -28,10 +28,13 @@ class FakeResponse:
         self._tool_calls = tool_calls_list or []
         self.usage = usage or FakeUsage()
         self.provider_model_name = "test-model"
+        self.reasoning_content = None
 
+    @property
     def first_text(self):
         return self._text
 
+    @property
     def tool_calls(self):
         return self._tool_calls
 

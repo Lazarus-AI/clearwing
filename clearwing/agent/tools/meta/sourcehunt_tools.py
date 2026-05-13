@@ -49,6 +49,7 @@ def hunt_source_code(
         written to {output_dir}/{session_id}/.
     """
     try:
+        from clearwing.providers import ProviderManager, resolve_llm_endpoint
         from clearwing.sourcehunt.runner import SourceHuntRunner
     except ImportError as e:
         return f"sourcehunt module unavailable: {e}"
@@ -57,6 +58,9 @@ def hunt_source_code(
     if os.path.isdir(repo_url_or_path):
         local_path = repo_url_or_path
 
+    endpoint = resolve_llm_endpoint()
+    provider_manager = ProviderManager.for_endpoint(endpoint)
+
     runner = SourceHuntRunner(
         repo_url=repo_url_or_path,
         branch=branch,
@@ -64,6 +68,7 @@ def hunt_source_code(
         depth=depth,
         budget_usd=budget_usd,
         output_dir=output_dir,
+        provider_manager=provider_manager,
     )
 
     try:

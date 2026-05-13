@@ -86,8 +86,11 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --shard-entry-points \
   --seed-cves \
   --elaborate-pipeline \
+  --exploit \
+  --campaign-hint "integer overflows and type mismatches in media codec parsers" \
   --no-mechanism-memory \
   --gvisor \
+  --encrypt-artifacts \
   --output-dir "$CASE_DIR/results" \
   --format all
 ```
@@ -97,27 +100,47 @@ Why these flags:
 - `--depth deep` enables the full sourcehunt pipeline: callgraph,
   reachability, Semgrep sidecar if available, taint analysis, sandboxed
   hunters, crash-first harness generation (libFuzzer, 30s per file),
-  verifier, patch oracle, and report generation.
+  verifier, patch oracle, and report generation. At `--depth deep`,
+  `--agent-mode deep` and `--shard-entry-points` are auto-derived, so
+  passing them explicitly is optional but makes intent clear.
 - `--agent-mode deep` forces the full-shell agent (execute/read_file/
   write_file/think tools) regardless of the depth-derived default. This
   gives hunters maximum flexibility to compile test harnesses and inspect
-  memory layouts.
+  memory layouts. The `auto` default (new in v1.0) derives this from
+  `--depth`, so `--depth deep` already implies `--agent-mode deep`.
 - `--shard-entry-points` splits high-ranked files into per-function shards
   instead of whole-file analysis. FFmpeg's codec files have many entry
   points; sharding lets each agent focus on one parser, decoder, or fuzz
-  target.
+  target. Auto-enabled at `--depth deep`. Use `--min-shard-rank N` to
+  control the minimum file rank for sharding (default: 4).
 - `--seed-cves` extracts CVE history from FFmpeg's git log and injects it
   as seed context for hunters. Past CVE patterns (integer overflows in
   codec parsers, etc.) help hunters recognize similar shapes.
 - `--elaborate-pipeline` enables Stage 1.5 autonomous elaboration, which
   upgrades the top 10% of verified findings to higher-impact primitives
   (e.g. promoting a heap overflow to arbitrary write or code execution).
+- `--exploit` instructs hunters to write working exploits for discovered
+  vulnerabilities. Combine with `--exploit-budget deep` (default: auto
+  from `--depth`) for more resources per exploit attempt.
+- `--campaign-hint` provides a natural-language objective that steers
+  hunters toward a specific class of bugs. For FFmpeg, focusing on codec
+  parser integer overflows and type mismatches improves signal-to-noise.
 - `--no-mechanism-memory` prevents prior runs from influencing the hunter.
   The fresh `CLEARWING_HOME` is a second isolation layer.
 - `--gvisor` uses the gVisor runtime for container isolation, adding an
   extra security layer when running untrusted PoC code inside sandboxes.
+- `--encrypt-artifacts` enables encrypted storage for findings and PoC
+  artifacts.
 - Budget is unlimited by default. Add `--budget 50` to cap spend for a local
   recreation, or pass `--budget 0` explicitly to keep the unlimited default.
+
+### Prompt Mode
+
+The default `--prompt-mode unconstrained` gives hunters a simple open-ended
+discovery prompt. The alternative `--prompt-mode specialist` uses legacy
+prescriptive checklists. For FFmpeg blind hunts, `unconstrained` (the
+default) produces better results because hunters explore freely rather than
+following a fixed checklist.
 
 ### Tuning Band Promotion
 
@@ -127,6 +150,7 @@ files when signals are detected. For a targeted deep dive you can override:
 ```bash
   --starting-band standard   # skip the fast band, start at standard
   --redundancy 3             # run 3 independent agents per high-ranked file
+  --min-shard-rank 2         # shard files at rank 2+ instead of default 4+
 ```
 
 Higher redundancy increases the chance of finding non-deterministic bugs
@@ -140,6 +164,7 @@ Consider:
 
 ```bash
   --tier-split 60/35/5       # shift budget toward Tier B propagation files
+  --skip-tier-c              # skip Tier C entirely (faster, but misses root-cause-in-boring-files bugs)
 ```
 
 Unused budget rolls forward: A → B → C.
@@ -200,8 +225,11 @@ for i in 1 2 3 4 5; do
     --shard-entry-points \
     --seed-cves \
     --elaborate-pipeline \
+    --exploit \
+    --campaign-hint "integer overflows and type mismatches in media codec parsers" \
     --no-mechanism-memory \
     --gvisor \
+    --encrypt-artifacts \
     --output-dir "$RUN_OUT" \
     --format all
 done
@@ -323,7 +351,7 @@ tools to upgrade the finding and prepare for responsible disclosure.
 ### Elaborate a Finding
 
 Upgrade a partial finding (e.g., heap overflow → arbitrary write → code
-execution) using the interactive elaboration agent:
+execution) using the interactive (HITL) elaboration agent:
 
 ```bash
 clearwing sourcehunt "$FFMPEG_DIR" \
@@ -332,14 +360,28 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --output-dir "$CASE_DIR/results"
 ```
 
-Or run autonomous elaboration on the top findings:
+Or run autonomous elaboration (no human guidance) on a single finding:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --elaborate <finding_id> \
+  --elaborate-auto \
+  --elaborate-session <session_id> \
+  --output-dir "$CASE_DIR/results"
+```
+
+Or run autonomous elaboration on the top findings by severity:
 
 ```bash
 clearwing sourcehunt "$FFMPEG_DIR" \
   --elaborate-top 3 \
+  --elaborate-auto \
   --elaborate-session <session_id> \
   --output-dir "$CASE_DIR/results"
 ```
+
+Use `--elaborate-cap 10%` (default) or `--elaborate-cap 5` to limit
+how many findings are elaborated.
 
 ### Generate Disclosure Templates
 
@@ -361,15 +403,38 @@ verified findings into the session directory.
 Queue findings for human review and track disclosure timelines:
 
 ```bash
-clearwing disclose queue "$CASE_DIR/results/<session_id>"
-clearwing disclose review
-clearwing disclose validate <finding_id>
-clearwing disclose send <finding_id>
-clearwing disclose status
+clearwing disclose queue                          # list all pending findings
+clearwing disclose queue --state in_review        # filter by disclosure state
+clearwing disclose review <finding_id>            # show full review context
+clearwing disclose validate <finding_id>          # mark as human-validated
+clearwing disclose reject <finding_id> --reason "false positive"
+clearwing disclose send <finding_id> \
+  --reporter-name "Your Name" \
+  --reporter-affiliation "Your Org" \
+  --reporter-email "you@example.com"
+clearwing disclose status                         # dashboard of all states
+clearwing disclose timeline --days 30             # approaching deadlines
+clearwing disclose verify <finding_id> --document report.json
+clearwing disclose commitments --format markdown  # export commitment log
 ```
 
-The disclosure system tracks 60/75/90-day timelines and creates SHA-3
+The disclosure system tracks 90-day CVD timelines and creates SHA-3
 cryptographic commitments to prove discovery priority.
+
+### Auto-Patch
+
+After discovery, Clearwing can generate and propose patches automatically:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --auto-patch \
+  --auto-pr \
+  --elaborate-session <session_id> \
+  --output-dir "$CASE_DIR/results"
+```
+
+`--auto-patch` generates fix patches for validated findings. `--auto-pr`
+opens draft pull requests via the `gh` CLI (requires `gh auth login`).
 
 ## N-Day Exploit Pipeline (Post-Fix)
 
@@ -385,12 +450,32 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --cve CVE-2025-XXXXX \
   --patch-commit 39e1969303a0b9ec5fb5f5eb643bf7a5b69c0a89 \
   --nday-budget deep \
+  --exploit-budget deep \
   --output-dir "$CASE_DIR/results-nday"
 ```
 
 The N-day pipeline builds the vulnerable version, develops a working
 exploit using the agentic exploiter with sanitizer instrumentation, and
 validates against the patched version.
+
+Budget bands for `--nday-budget` and `--exploit-budget`:
+- `standard` — $25 / 1 hour per CVE
+- `deep` — $200 / 4 hours per CVE (default)
+- `campaign` — $2000 / 12 hours per CVE
+
+For batch N-day runs across multiple CVEs:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --nday \
+  --cve-list cves.txt \
+  --nday-budget deep \
+  --output-dir "$CASE_DIR/results-nday-batch"
+```
+
+The `--cve-list` file has one entry per line: `CVE-ID [commit_sha]`.
+Or use `--recent-cves --nday-days 90` to auto-discover CVEs from git
+history.
 
 ## Retro-Hunt (Non-Blind Control)
 
@@ -409,6 +494,70 @@ clearwing sourcehunt "$FFMPEG_DIR" \
 Retro-hunt generates Semgrep rules from the fix and searches for variant
 patterns across the codebase. Do not mix retro-hunt results with
 blind-discovery claims.
+
+## CI Integration: Watch and Webhook Modes
+
+For continuous scanning of a repository, Clearwing supports two modes:
+
+### Poll-based (Watch)
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --depth standard \
+  --watch \
+  --poll-interval 300 \
+  --github-checks \
+  --output-dir "$CASE_DIR/results-ci"
+```
+
+Watch mode polls git for new commits every `--poll-interval` seconds
+(default: 300) and re-scans the blast radius. `--github-checks` posts
+findings as GitHub check runs via the `gh` CLI. Use
+`--max-watch-iterations N` to cap the number of poll cycles (0 = infinite).
+
+### Event-driven (Webhook)
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --depth standard \
+  --webhook \
+  --webhook-port 8787 \
+  --webhook-secret "$GITHUB_WEBHOOK_SECRET" \
+  --webhook-allowed-repo FFmpeg/FFmpeg \
+  --github-checks \
+  --output-dir "$CASE_DIR/results-ci"
+```
+
+Webhook mode starts an HTTP server that receives GitHub push events and
+runs sourcehunt on each commit. Use `--webhook-allowed-branch main` to
+restrict which branches trigger scans.
+
+## Model Override
+
+By default, sourcehunt uses the provider configured via `clearwing setup`.
+Override for a single run with:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --depth deep \
+  --model claude-sonnet-4-6 \
+  --output-dir "$CASE_DIR/results"
+```
+
+Or point at a local/alternative endpoint:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --depth deep \
+  --base-url http://localhost:11434/v1 \
+  --api-key unused \
+  --model llama3 \
+  --output-dir "$CASE_DIR/results"
+```
+
+`--base-url` accepts any OpenAI-compatible API (OpenRouter, Ollama,
+LM Studio, vLLM, Together, Groq, etc.). Also settable via the
+`CLEARWING_BASE_URL` and `CLEARWING_API_KEY` environment variables.
 
 ## Optional Local ASan Build
 
@@ -447,10 +596,13 @@ confirm the same input no longer reaches the out-of-bounds path.
   evidence is weaker. Add `--gvisor` for stronger container isolation.
 - No matching finding: increase budget, run more independent passes, enable
   `--shard-entry-points` and `--seed-cves`, and keep `CLEARWING_HOME`
-  isolated. Large mature C projects are intentionally hard targets.
+  isolated. Large mature C projects are intentionally hard targets. Try
+  adding `--campaign-hint` to steer hunters toward the right bug class.
 - Too much report noise: search `findings.json` first, then inspect the
   matching hunter trajectory under `trajectories*/`. Check
-  `stability_classification` to filter out unreliable PoCs.
+  `stability_classification` to filter out unreliable PoCs. Add
+  `--no-adversarial` to use the simpler verifier, or tighten with
+  `--adversarial-threshold crash_reproduced` to require stronger evidence.
 - Need a non-blind control: after the blind experiment, use the fix diff and
   `sourcehunt --retro-hunt` to test whether patch-derived variant hunting can
   rediscover the same pattern. Do not mix that result with blind-discovery
@@ -458,4 +610,10 @@ confirm the same input no longer reaches the out-of-bounds path.
 - PoC instability: if a finding has `stability_classification: "flaky"`,
   consider running with `--redundancy 5` to increase the number of
   independent agents per file, or manually trigger hardening through
-  elaboration.
+  elaboration. Pass `--no-stability-check` to skip stability verification
+  entirely (not recommended for formal benchmarks).
+- Slow runs: `--skip-tier-c` and `--no-variant-loop` reduce scope.
+  `--no-verify` skips the independent verifier (faster, but findings are
+  unverified). `--no-findings-pool` disables cross-agent dedup queries.
+- Using a different model: pass `--model <name>` to override the default
+  provider. For local models, add `--base-url` and `--api-key`.

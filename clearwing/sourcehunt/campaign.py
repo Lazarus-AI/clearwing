@@ -358,8 +358,12 @@ class CampaignRunner:
                 project_budget = max(remaining / max(1, self._queued_count()), 0)
 
             try:
+                from clearwing.providers import ProviderManager, resolve_llm_endpoint
+
                 from .runner import SourceHuntRunner
 
+                endpoint = resolve_llm_endpoint()
+                provider_manager = ProviderManager.for_endpoint(endpoint)
                 max_par = target.max_parallel or 8
                 runner = SourceHuntRunner(
                     repo_url=target.repo,
@@ -375,6 +379,7 @@ class CampaignRunner:
                     enable_subsystem_hunt=bool(target.focus),
                     subsystem_paths=target.focus or None,
                     redundancy_override=target.redundancy,
+                    provider_manager=provider_manager,
                 )
 
                 if self._findings_pool is not None:

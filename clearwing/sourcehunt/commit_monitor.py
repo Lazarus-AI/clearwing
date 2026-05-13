@@ -255,22 +255,25 @@ class CommitMonitor:
         if self.config.runner_factory is not None:
             runner = self.config.runner_factory(files)
         else:
+            from clearwing.providers import ProviderManager, resolve_llm_endpoint
+
             from .pool import TierBudget
             from .runner import SourceHuntRunner
 
+            endpoint = resolve_llm_endpoint()
+            provider_manager = ProviderManager.for_endpoint(endpoint)
             runner = SourceHuntRunner(
                 repo_url=self.config.repo_path,
                 local_path=self.config.repo_path,
                 depth=self.config.depth,
                 budget_usd=self.config.budget_usd,
-                # More Tier A allocation because we're already in a
-                # narrowed, pre-selected file set.
                 tier_budget=TierBudget(
                     tier_a_fraction=0.80,
                     tier_b_fraction=0.15,
                     tier_c_fraction=0.05,
                 ),
                 output_dir=self.config.output_dir,
+                provider_manager=provider_manager,
             )
         try:
             result = runner.run()
