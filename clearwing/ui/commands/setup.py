@@ -201,7 +201,6 @@ def _prompt_provider_choice(
         entries,
         cursor_index=0,
         menu_highlight_style=("bg_cyan", "fg_black", "bold"),
-        status_bar_style=("dim",),
     )
     idx = menu.show()
     _flush_stdin_after_menu()
