@@ -179,7 +179,7 @@ class Validator:
             response = await self.llm.aask_text(
                 system=system_prompt, user=user_msg,
             )
-            content = response.first_text() or ""
+            content = response.first_text or ""
         except Exception as e:
             logger.warning("Validator LLM call failed", exc_info=True)
             return self._error_verdict(finding, f"validator error: {e}")

@@ -2352,3 +2352,1217 @@ The `hello` parameter requires a proper Noise protocol handshake message generat
 2. Investigate the 6th WASM module (`op_wasm_trusted_device_key_exchange`) if access can be obtained
 3. Attempt WebSocket connection to `wss://b5n.1password.com` (notifier service)
 4. Deeper analysis of the SK retrieval fallback script (`sk-*.min.js`) which includes SJCL crypto
+
+---
+
+## Phase 8 — Deep Probes: SK Script, WebSocket, Lazy Chunks
+
+**Date:** 2026-04-24
+
+### 8.1 SK Retrieval Script Deep Analysis
+
+**Target:** `app.1password.com/js/sk-2c17b526b1a01ed2f995.min.js` (54KB)
+
+**Contents:**
+- Stanford JavaScript Crypto Library (SJCL) — full implementation of AES, GCM, PBKDF2, ECC/ECDSA, SHA-256, SHA-512
+- Deobfuscation function using key derived from SHA-1 of string: `"Obfuscation Does Not Provide Security But It D..."`
+- Purpose: Displays previously stored Secret Keys from browser local storage when a user requests recovery
+- No API calls — entirely client-side crypto for local key retrieval
+
+**Assessment:** The obfuscation is explicitly declared non-security (the key derivation input literally says so). The script decrypts locally stored SK material for display — no exploitable server interaction. The SJCL implementation appears standard with no backdoors.
+
+### 8.2 WebSocket / Notifier Probing
+
+**Target:** `b5n.1password.com` (notifier/push service)
+
+| Path | Method | Status | Response |
+|------|--------|--------|----------|
+| `/` | GET | 400 | Bad Request |
+| `/ws` | GET | 400 | Bad Request |
+| `/websocket` | GET | 400 | Bad Request |
+| `/notifier` | GET | 400 | Bad Request |
+| `/ws` | GET (Upgrade) | 400 | Bad Request |
+
+**CTF domain WebSocket attempt:** Returns 200 with the HTML page (no WebSocket upgrade).
+
+**Notifier URL endpoint** (`/api/v1/account/notifier-url`): 401 `{}` — requires authentication.
+
+**Assessment:** The notifier service expects a specific protocol handshake that likely includes session tokens. Cannot access without completing authentication first.
+
+### 8.3 Lazy Chunk & Admin Endpoint Scanning
+
+**Lazy-loaded chunks found in JS:**
+- `core_trustedDeviceCredentialExchange-f8bb0904.js` — 403 blocked from all paths
+
+**Admin/debug endpoints probed:**
+- No admin panels, debug endpoints, health checks, or status pages found
+- Flow service (`/api/v1/flow`) returns 403
+- Signup/enrollment paths return standard 403
+
+**Assessment:** The WAF blocks all non-essential endpoints. No hidden admin interfaces or debug endpoints accessible.
+
+### 8.4 Phase 8 Summary
+
+All three probe vectors confirmed the target's hardened posture:
+- SK script: Client-side only, no server interaction to exploit
+- WebSocket: Requires auth, no pre-auth access
+- Lazy chunks: Blocked by WAF
+- No admin/debug surfaces exposed
+
+---
+
+## Phase 9 — WASM Deep Analysis, Enrollment Probing, Mycelium Protocol
+
+**Date:** 2026-04-24
+
+### 9.1 Mycelium WASM Deep Analysis
+
+**Module:** `b5_mycelium_bg-81e1515173df8b75c89e.wasm` (319KB, 47 exports)
+
+**Noise Protocol Identification:** `Noise_KXpsk0_25519_ChaChaPoly_BLAKE2b`
+- Pattern: KX with pre-shared key at position 0
+- DH: X25519 (Curve25519)
+- Cipher: ChaCha20-Poly1305
+- Hash: BLAKE2b
+- Built with: `snow` Rust crate v0.9.6
+
+**Pairing Session Flow (New Device):**
+1. `wasmpairingsessionstarternewdevice_init` — Initialize session
+2. `wasmpairingsessionstarternewdevice_create_hello` — Create Noise initiator hello (takes device UUID)
+3. `wasmpairingsessionstarternewdevice_receive_reply` — Process responder reply
+4. `wasmpairingsessionstarternewdevice_shared_key` — Extract shared key
+
+**Pairing Session Flow (Existing Device):**
+1. `wasmpairingsessionstarterexistingdevice_join` — Join as existing device
+2. `wasmpairingsessionstarterexistingdevice_receive_hello` — Receive hello from initiator
+3. `wasmpairingsessionstarterexistingdevice_create_reply` — Create reply
+
+**Channel & Credential Functions:**
+- `wasmchannelseed_new`, `wasmchannelseed_derive_auth`, `wasmchannelseed_derive_uuid`
+- `wasmpairingsetupcredentials_generate`, `wasmpairingcredentials_generate`
+- `wasmhandshakepsk_generate`, `wasmhandshakepsk_from_bytes`
+
+**JS Glue Code Analysis — `create_hello` call flow:**
+```
+createHello = e => this.starter.create_hello((0, a.kV)(h(e)))
+```
+- Takes a single argument: a serialized (JSON-encoded) device info string
+- `(0,c.u)()` generates the parameter — likely a fresh device UUID
+- Result is the Noise KXpsk0 initiator message
+
+**Full Pairing Sequence (from JS):**
+1. Generate pairing setup credentials
+2. `createHello(deviceUUID)` → Noise initiator message
+3. POST to mycelium U channel → receive `{channelUuid, channelSeed, initiatorAuth}`
+4. `receiveResponse(channelUuid, channelSeed)` → process handshake
+5. Extract `pubKey`, `psk`, create QR data for second device
+
+**Key Strings in Data Section:**
+- `B5_MYCELIUM_CHANNEL_JOIN_TOKEN`, `B5_MYCELIUM_CHANNEL_UUID`
+- `CapabilitySIGN_INITEM_SHARINGSECURE_REMOTE_AUTOFILL`
+- Source: `crypto/op-mycelium/src/{buffers,lib,channel}.rs`
+
+**HPKE Module:** `b5_hpke_bg` (82KB) — `seal_x25519_chacha20poly1305`, `open_x25519_chacha20poly1305`
+
+### 9.2 Enrollment Endpoint Probing (CTF domain only)
+
+| Endpoint | Status | Response |
+|----------|--------|----------|
+| `/api/v1/auth/enroll` | 404 | Not found |
+| `/api/v2/auth/enroll` | 404 | Not found |
+| `/api/v3/auth/enroll` | 404 | Not found |
+| `/api/v1/signup` | 400 | `{}` |
+| `/api/v2/signup` | 400 | `{}` |
+| `/api/v1/register` | 404 | Not found |
+| `/api/v1/account/create` | 404 | Not found |
+| `/api/v1/accounts` | 404 | Not found |
+| `/api/v1/invitation` | 404 | Not found |
+| `/api/v1/invitation/accept` | 404 | Not found |
+| `/api/v1/flow` | 404 | Not found |
+
+**Notable:** `/api/v1/signup` and `/api/v2/signup` return 400 `{}` (not 404) — these endpoints exist but reject the payload silently, same as auth/start.
+
+**v3/auth/start extended payloads:** Adding `skid`, `accountKeyFormat`, `userAuth`, `deviceUuid` all return the same 400 `{}`. No additional error information leaked.
+
+**v2/auth direct:** Returns 401 `{}` for all payload variations (requires session from v3/auth/start first).
+
+**Response Headers (v3/auth/start):**
+- `x-request-id: 46727144` — request tracking present
+- Full CSP with `sandbox` directive
+- HSTS with preload
+- `cross-origin-opener-policy: restrict-properties`
+
+### 9.3 CORS Header Analysis
+
+OPTIONS requests reveal the exact auth mechanism:
+```
+access-control-allow-headers: X-AgileBits-Client, X-AgileBits-MAC, Cache-Control, X-AgileBits-Session-ID, Content-Type, OP-User-Agent, ChannelJoinAuth
+access-control-allow-methods: GET, POST, PUT, PATCH, DELETE
+access-control-allow-origin: https://bugbounty-ctf.1password.com
+access-control-allow-credentials: true
+```
+
+**Auth headers:** `X-AgileBits-Session-ID` (session UUID), `X-AgileBits-MAC` (request HMAC), `X-AgileBits-Client` (client identifier). Session-based auth — no cookies used.
+
+### 9.4 Endpoint Map (Comprehensive)
+
+**Authenticated endpoints (401):**
+
+| Endpoint | Methods | Notes |
+|----------|---------|-------|
+| `/api/v1/vaults` | GET, POST | List/create vaults |
+| `/api/v1/vault` | POST | Create vault |
+| `/api/v1/vault/default` | GET | Default vault |
+| `/api/v1/vault/personal` | GET | Personal vault |
+| `/api/v1/vault/shared` | GET | Shared vault |
+| `/api/v1/vault/items` | GET | Vault items |
+| `/api/v1/device` | POST, PATCH | Create/update device |
+| `/api/v1/device/register` | DELETE | Deregister device |
+| `/api/v1/account` | GET, DELETE | Account info |
+| `/api/v1/account/keysets` | GET | Keysets |
+| `/api/v1/groups` | GET | Groups |
+| `/api/v1/session/touch` | PUT | Keep session alive |
+| `/api/v1/session/signout` | PUT | Sign out |
+| `/api/v1/auth/verify` | POST | Verify auth |
+| `/api/v2/auth/verify` | POST | Verify auth |
+| `/api/v2/auth/complete` | POST | Complete auth |
+
+**Pre-auth endpoints:**
+
+| Endpoint | Status | Response |
+|----------|--------|----------|
+| `/api/v2/auth/methods` | 200 | `{"authMethods":[{"type":"PASSWORD+SK"}]}` (anti-enum) |
+| `/api/v3/auth/start` | 400 | `{}` (silent rejection) |
+| `/api/v1/confidential-computing/session` | 200 | Handshake exchange! |
+| `/api/v1/signup` | 400 | `{}` (silent rejection) |
+| `/api/v2/signup` | 400 | `{}` (silent rejection) |
+| `/api/v1/account` | 400 | `{}` (POST creates account?) |
+| `/api/v2/mycelium/u` | 400 | Needs Noise handshake |
+
+### 9.5 Confidential Computing Session (MAJOR FINDING)
+
+**`POST /api/v1/confidential-computing/session`** is a **pre-auth endpoint** that exchanges Noise protocol handshake messages.
+
+**Request:** `{"handshakeMessage": "<hex-encoded-bytes>"}` (minimum 32 bytes)
+**Response:** `{"handshakeMessage": "<base64url-encoded-12077-bytes>", "sessionUuid": "<uuid>"}`
+
+**Key observations:**
+- Accepts ANY 32+ byte hex string as handshake — no client validation
+- Returns a fresh sessionUuid each time
+- Response is 12077 bytes (ephemeral key + encrypted attestation report)
+- Extra fields (`verificationMode`, `attestationReport`) are silently ignored
+- Multiple handshakes create separate sessions
+- CC sessions do NOT grant access to vault/auth endpoints (separate auth system)
+- `<32 bytes` → `{"reason":"Failed to decrypt request"}`
+- Non-hex input → `422 serde parse error`
+
+**CC Verification Mode (from JS):**
+- `*.b5local.com` → `unsafe-local` (no attestation verification)
+- `*.b5dev.com`/`*.b5test.com` → `unsafe-lower` (relaxed verification)
+- `bugbounty-ctf.1password.com` → `upper` (full verification)
+
+**Implication:** To properly interact with CC, we need the `confidential_computing` WASM module to generate valid Noise protocol messages. The server's response is encrypted with the (invalid) shared secret derived from our random "key."
+
+### 9.6 JS Bundle Analysis — Key Findings
+
+**Hardcoded HKDF key for Brex OAuth:**
+```javascript
+const J = "klp4y2ywpkpczwhhutf2fqy5ri";
+// HKDF(SHA256, "This value works around an OAuth implementation limitation...", "brex-oauth-obfuscation", 32)
+```
+Used for vault item deobfuscation, not exploitable.
+
+**Unsafe device enrollment functions:**
+- `unsafeCancelDeviceEnrollment` — requires authenticated session
+- `unsafeGetDeviceEnrollmentStatus` — requires authenticated session
+Both need a valid session, not pre-auth accessible.
+
+**Debug mode:** `setDebugMode(internalFeaturesAreEnabled)` — build-time flag, `false` in production.
+
+**Auth flow field names confirmed (from JS):**
+```javascript
+// v3/auth/start request:
+{email, skFormat, skid, deviceUuid, userUuid, signInToken}
+
+// v3/auth/start response:
+{userAuth, sessionID, status, newHost, newEmail, accountKeyFormat, accountKeyUuid}
+
+// v2/auth request:
+{userA: <SRP-A-hex>}
+
+// v2/auth response:
+{userB: <SRP-B-hex>}
+
+// v2/auth/confirm-key:
+{clientVerifyHash} → {serverVerifyHash}
+```
+
+**OP-User-Agent behavior:** Adding the `OP-User-Agent` header changes response format (empty body vs `{}`) and breaks the `auth/methods` endpoint (200→400). The production client sends this header, so the server has two code paths.
+
+### 9.7 Phase 9 Assessment
+
+**CC session is the most promising pre-auth vector.** The endpoint accepts arbitrary handshake data and returns encrypted responses with session UUIDs. However:
+1. Without the CC WASM module, we can't generate valid Noise protocol messages
+2. CC sessions are isolated from the SRP-based auth system
+3. The `upper` verification mode means attestation is fully verified
+
+**Remaining attack surface:**
+1. **CC WASM execution** — Need wasmtime/wasmer to generate proper Noise handshakes
+2. **Mycelium WASM execution** — Need WASM runtime for Noise_KXpsk0_25519_ChaChaPoly_BLAKE2b hello
+3. **Auth/start payload mystery** — Server validates email/skFormat but then silently fails. Something else is wrong with our payloads that we can't determine without seeing serde error messages (which the server suppresses)
+4. **Signup flow** — Endpoints exist (400, not 404) but payload format unknown
+
+**No WASM runtime available** on this system (no wasmtime, wasmer, or Python bindings).
+
+---
+
+## Phase 10: CC Noise Handshake Breakthrough
+
+### 10.1 WASM Module Instantiation
+
+Installed `wasmtime` Python bindings and instantiated the CC WASM module (`confidential_computing_bg-8b963455d8e79c3a746b.wasm`, 1,847,799 bytes) with stub implementations for all 48 host imports from the `wbg` module.
+
+**Key exports discovered:**
+| Export | Signature | Notes |
+|--------|-----------|-------|
+| `testResponderSessionHandshake` | `(anyref) → (anyref)` | Requires JS runtime |
+| `createSession` | `(anyref, anyref, i32) → (anyref)` | `i32` = verification mode enum |
+| `enclavesession_encryptMessage` | `(i32, i32, i32, i32, i32) → (i32, i32, i32)` | `(self, path_ptr, path_len, body_ptr, body_len)` |
+| `enclavesession_decryptMessage` | `(i32, i32, i32) → (i32, i32, i32, i32)` | `(self, ptr, len)` |
+
+Functions using `anyref` parameters require a full JavaScript runtime (V8/SpiderMonkey) to provide proper JS objects. Stub implementations returned dummy values.
+
+### 10.2 WASM String Extraction — Protocol Identification
+
+Extracted 4,484 strings from the WASM data section. Critical findings:
+
+**Noise protocol:** `Noise_NX_25519_ChaChaPoly_SHA256` at offset 1422102
+- Snow Rust crate v0.9.6 used for Noise implementation
+- Source path: `crates/internal/cc-secure-channel/src/handshake.rs`
+
+**Serde struct names:**
+- `CreateClientSessionRequest`
+- `CreateClientSessionResponse`
+- `CreateClientSessionHandshakeMessageResponse with 2 elements`
+
+**Error messages:**
+- `Failed to decrypt the handshake request`
+- `Failed to serialize handshake message`
+- `SecureChannelCreateSession`
+
+**Hardcoded test keys:** Ed25519 keys at offsets 1672607-1672691 (for Sigstore verification in test mode)
+
+### 10.3 Encoding Breakthrough — Root Cause of Handshake Failures
+
+**Root cause:** All previous handshake failures (v1-v4) were caused by an encoding mismatch.
+
+The server's serde deserializer uses **base64url** decoding for the `handshakeMessage` field. We were sending hex-encoded keys. Since all hex characters (0-9, a-f) are valid base64url characters, the server accepted our requests (200 OK) but decoded them differently:
+
+| Encoding | Characters | Bytes produced | Result |
+|----------|-----------|----------------|--------|
+| Hex (wrong) | 64 chars | 48 bytes (base64url decode) | **Mismatch** — server DH uses wrong key |
+| Base64url (correct) | 43 chars | 32 bytes | **Correct** — both sides use same key |
+
+The 48 vs 32 byte mismatch caused the Noise state machines to diverge, making all subsequent decryption impossible.
+
+**Fix:** Use base64url encoding without padding for `handshakeMessage` field.
+
+### 10.4 Successful Noise_NX Handshake
+
+Using the `noiseprotocol` Python library (v0.3.1) with base64url encoding:
+
+```
+Pattern: Noise_NX_25519_ChaChaPoly_SHA256
+Prologue: empty (b"")
+Encoding: base64url, no padding
+Handshake: COMPLETE
+Payload: 11,981 bytes (JSON)
+```
+
+**Handshake flow:**
+1. **→ e**: Client sends ephemeral X25519 public key (32 bytes, base64url encoded)
+2. **← e, ee, s, es**: Server responds with ephemeral key + encrypted static key + encrypted payload
+3. Transport keys established — bidirectional Noise encryption active
+
+### 10.5 Attestation Document Analysis
+
+The 11,981-byte handshake payload is JSON with two fields:
+
+#### `attestation_document` (COSE_Sign1, 4,728 bytes)
+
+AWS Nitro Enclave attestation signed with ES384 (ECDSA-P384-SHA384):
+
+| Field | Value |
+|-------|-------|
+| module_id | `i-0957b0a073239ba7a-enc019dbc9e66185d27` |
+| digest | SHA384 |
+| timestamp | 2026-04-25 03:34:39 UTC |
+| nonce | None |
+| enclave public_key | `831366eff73f9003f05a232a141b7abbedd9481f6723212d36542f54408a3571` (32 bytes) |
+
+**PCR measurements (SHA-384):**
+| PCR | Value | Meaning |
+|-----|-------|---------|
+| PCR0 | `b6b2c1ff...aca50` | Enclave image hash |
+| PCR1 | `3b4a7e1b...74d03` | Linux kernel + bootstrap hash |
+| PCR2 | `eb7288de...caf0` | Application hash |
+| PCR3 | `88e92e30...f954` | IAM role hash |
+| PCR4 | `ff62927e...ac33b` | Instance ID hash |
+| PCR5-15 | (all zeros) | Unused |
+
+**user_data (JSON):**
+```json
+{
+  "expiry": 1777088679,  // 10-minute TTL from timestamp
+  "rootCa": {
+    "alg": "SHA-256",
+    "fingerprint": "74a01539ab166f7389c760bf49557092f61a8c95ccd6162c399e0a9e1067cc9a"
+  },
+  "tlog": {
+    "alg": "SHA-256",
+    "fingerprint": "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d"
+  }
+}
+```
+
+**AWS Nitro certificate chain (5 levels):**
+1. `aws.nitro-enclaves` (self-signed root)
+2. `fe51ad30b41313d7.us-east-1.aws.nitro-enclaves` (regional)
+3. `548fff4208fe992a.zonal.us-east-1.aws.nitro-enclaves` (availability zone)
+4. `i-0957b0a073239ba7a.us-east-1.aws.nitro-enclaves` (EC2 instance)
+5. `i-0957b0a073239ba7a-enc019dbc9e66185d27.us-east-1.aws` (enclave)
+
+End-entity cert valid for 3 hours (03:28:59 - 06:29:02 UTC).
+
+#### `signature_bundle` (Sigstore v0.2)
+
+**1Password certificate chain:**
+1. `com.1password.enclave-application` (code signing, valid 2026-03-26 to 2027-03-26)
+   - CRL: `http://crl.1passwordservices.com/crl/ff6a9d83-d360-421e-bc1c-225e9ebde301.crl`
+2. `1Password Signing Authority 1` (CA, valid 2023-12-01 to 2068-12-01)
+   - CRL: `http://crl.1passwordservices.com/crl/72c6f9f8-cb97-467a-8760-829585134246.crl`
+3. `1Password Root CA 1` (root, not included in bundle — fingerprint in user_data)
+
+**Rekor transparency log:**
+- Log index: 1351731398
+- Integrated time: 2026-04-21 17:09:11 UTC
+- Log ID fingerprint matches `user_data.tlog.fingerprint` ✓
+
+### 10.6 CC Transport Architecture
+
+**Architecture discovered from JS bundle analysis:**
+
+The CC session provides an encrypted channel to the Nitro Enclave. Transport works in two layers:
+
+1. **Noise encryption (CC session):** Encrypts `(destinationPath, body)` for the enclave
+2. **SRP encryption (auth session):** Wraps the Noise ciphertext for transport
+
+```
+Client → SRP-encrypt({sessionUuid, encryptedRequest}) → Session Bridge (B5)
+         → Noise-decrypt → route to destinationPath → Enclave microservice
+```
+
+**Transport requires SRP authentication.** The `sendRequest` callback in the JS sends through `session.request()` (the SRP session), which adds authentication headers. Without SRP auth, we can only complete the handshake phase.
+
+**Session Bridge behavior:**
+- Identified as `B5` in `Proxy-Status` header
+- Also reports as `SessionBridge` in structured Proxy-Status
+- Only intercepts requests at `/api/v1/confidential-computing/session`
+- Returns 422 for transport requests without SRP wrapping: `{"reason":"Failed to parse the request body as JSON at line 1 column X"}`
+- Column X = total JSON body length (serde cannot deserialize because the outer struct only expects `handshakeMessage`)
+
+**Known enclave destination paths (from JS bundle):**
+- `/epm-login-discovery/api/v1/register`
+- `/provisioning-key-service/api/v1/integration/create`
+- `/provisioning-key-service/api/v2/integration/create`
+
+**CC session use cases (from JS):**
+- CPACE device enrollment (`/api/v3/device/enrollments/{id}/cpace/msga|msgb|taga|tagb`)
+- Provisioning key service
+- Login discovery service
+
+### 10.7 Transport Layer Testing
+
+**Results of sending encrypted messages to the CC session endpoint:**
+
+| Body format | Status | Error |
+|-------------|--------|-------|
+| `{sessionUuid, encryptedRequest}` | 422 | Failed to parse JSON (unknown fields) |
+| `{handshakeMessage: encrypted}` | 400 | Failed to decrypt request (not a valid handshake) |
+| `{sessionUuid, handshakeMessage: encrypted}` | 400 | Failed to decrypt request |
+| Raw bytes (octet-stream) | 400 | Failed to parse JSON at column 1 |
+
+**Results of sending to other endpoints (with/without CC headers):**
+
+| Endpoint | Status | Proxy-Status |
+|----------|--------|-------------|
+| `/api/v1/auth` | 401 | (none) |
+| `/api/v1/account` | 400 | (none) |
+| `/api/v3/device/enrollments` | 401 | (none) |
+| `/api/v1/vault/personal` | 405 | (none) |
+| `/api/v1/confidential-computing/request` | 404 | (none) |
+| `/api/v1/confidential-computing/session/{uuid}` | 404 | (none) |
+
+No endpoints besides `/api/v1/confidential-computing/session` are intercepted by the Session Bridge.
+
+### 10.8 Phase 10 Assessment
+
+**The CC Noise handshake is the most significant pre-auth finding.** We successfully:
+1. Identified the Noise protocol variant from WASM binary analysis
+2. Discovered the base64url encoding requirement (root cause of all failures)
+3. Completed a full Noise_NX handshake and decrypted the attestation payload
+4. Verified the AWS Nitro certificate chain and Sigstore signature bundle
+5. Mapped the complete CC transport architecture
+
+**However, CC transport requires SRP auth.** The pre-auth CC handshake provides:
+- Enclave identity verification (attestation document)
+- PCR measurements (enclave image hashes)
+- Sigstore code signing verification
+- 10-minute session TTL
+
+**No vulnerabilities found in the CC implementation:**
+- Attestation is properly signed and verified
+- Certificate chains are valid
+- TTL is reasonable (10 minutes)
+- Transport requires double encryption (Noise + SRP)
+- Session Bridge properly rejects unauthenticated transport requests
+
+**Remaining pre-auth attack surface:**
+1. **SRP authentication** — Need valid credentials (email + password + Secret Key)
+2. **Signup/enrollment flow** — See Phase 11 below
+3. **Auth timing analysis** — Check for oracle attacks in SRP verification
+4. **Mycelium WASM** — Noise_KXpsk0_25519_ChaChaPoly_BLAKE2b (separate protocol)
+
+---
+
+## Phase 11: Signup Flow & Pre-Auth Endpoint Exploration
+
+### 11.1 Signup Endpoint Discovery
+
+**Working endpoint:** `POST /api/v1/signup` and `POST /api/v2/signup`
+
+```
+Request:  {"name": "Test", "email": "test@test.com", "type": "I"}
+Response: 200 {"emailResendToken": "B6L2RO7QHBFAZF23DCHAFOR4QQ"}
+```
+
+- `type: "I"` = Individual account (only value tested before rate limit hit)
+- `encrypted: false` in JS — no SRP/auth required
+- `withCredentials: true` — cookie-based session
+- Rate limit: ~1 request per minute, 429 with absolute retry time
+
+The `emailResendToken` is a 26-character base32 string used for email verification resend.
+
+### 11.2 Signup Flow Architecture (from JS)
+
+The complete signup flow involves 8 endpoints, all with `encrypted: false`:
+
+| Step | Endpoint | Method | Purpose |
+|------|----------|--------|---------|
+| 1 | `/api/v1/signup` or `/api/v2/signup` | POST | Initial signup → `{emailResendToken}` |
+| 2 | `/api/v1/signup/resend/{token}` | POST | Resend verification email |
+| 3 | `/api/v2/signup/{signupId}` | GET | Get signup details (state) |
+| 4 | `/api/v3/signup/{signupId}` | PATCH | Update signup data |
+| 5 | `/api/v2/signup/{signupId}?email=X&account-type=Y` | GET | Get signup info |
+| 6 | `/api/v2/user` | POST | Create user → `{userUuid, sessionUuid?, signInTokenDetails?}` |
+| 7 | `/api/v1/account` | POST | Register account → `{accountUuid, userUuid, signInTokenDetails?}` |
+| 8 | Email verification | Out-of-band | User clicks email link |
+
+**Critical: Steps 6 and 7 return `signInTokenDetails`** — potentially providing a session token directly at account creation. However, both return 400 `{}` with our test payloads (missing required SRP verifier, salt, etc.).
+
+### 11.3 Signup Sub-Endpoint Testing
+
+| Endpoint | Status | Response |
+|----------|--------|----------|
+| `POST /api/v1/signup/resend/{token}` | **200** | `{"success": 1}` — **works!** |
+| `GET /api/v2/signup/{token}` | 400 | `{"errorCode": 100, "errorMessage": "Invalid request parameters."}` |
+| `PATCH /api/v3/signup/{token}` | 400 | `{}` |
+| `PATCH /api/v2/signup/{token}` | 400 | `{}` |
+| `POST /api/v2/user` (various payloads) | 400 | `{}` |
+| `POST /api/v1/account` (various payloads) | 400 | `{}` |
+
+The `emailResendToken` works for resending but isn't the correct `signupId` for `GET /api/v2/signup/`. The signup may use a separate UUID returned in a field we're not seeing, or the v2 response format includes additional fields.
+
+### 11.4 Secret Key Format Validation
+
+**`POST /api/v3/auth/start`** validates the `skFormat` field:
+
+| Format | Response | Status |
+|--------|----------|--------|
+| `A2` | `{}` | 400 (accepted format, different error) |
+| `A3` | `{}` | 400 (accepted format, different error) |
+| `A1`, `A4` | `{"reason": "invalid_sk_prefix_format"}` | 400 |
+| `B1`, `B2`, `B5` | `{"reason": "invalid_sk_prefix_format"}` | 400 |
+| `SK`, `SRP`, etc. | `{"reason": "invalid_sk_prefix_format"}` | 400 |
+| (lowercase) `a3` | `{"reason": "invalid_sk_prefix_format"}` | 400 |
+
+Only `A2` and `A3` are valid Secret Key format prefixes. The A3 format is current (128-bit key), A2 is the older format.
+
+### 11.5 Account Enumeration Resistance
+
+All email addresses tested return identical responses from `POST /api/v3/auth/start`:
+- Status: 400
+- Body: `{}`
+- Timing: 112-145ms (no significant variation)
+
+Emails tested: `ctf@`, `admin@`, `test@`, `nonexistent@fakeDomain123xyz.com`, `security@`, `bugbounty@`, `bad.poetry@`, `vault@`, `challenge@`, `demo@`, `flag@` — all `@1password.com`. No account enumeration possible via this endpoint.
+
+### 11.6 Additional Endpoint Discovery
+
+| Endpoint | Status | Notes |
+|----------|--------|-------|
+| `POST /api/v1/invite` | 401 | Requires auth |
+| `POST /api/v1/device` | 401 | Requires auth |
+| `GET /api/v2/notification` | 401 | Requires auth |
+| `POST /api/v3/device/enrollments` | 401 | Requires auth |
+| `POST /api/v1/signup` | **200** | Works pre-auth |
+| `POST /api/v2/signup` | **200** | Works pre-auth |
+| `POST /api/v1/signup/resend/{token}` | **200** | Works pre-auth |
+| `GET /api/v1/auth/methods` | 404 | Removed or renamed |
+| `/health`, `/healthz`, `/ready`, `/readyz` | 200 | Return SPA HTML (not real health endpoints) |
+| `/.well-known/*` | 200 | Return SPA HTML (client-side routing) |
+
+### 11.7 Phase 11 Assessment
+
+**The signup endpoint is accessible and functional**, but completing the flow requires:
+1. Email verification (the CTF server appears to actually send emails — the resend endpoint returns `{"success": 1}`)
+2. SRP verifier generation with password + Secret Key
+3. Multi-step account registration
+
+**No bypass found for email verification.** The signup flow follows the expected pattern:
+- Initial registration (pre-auth) → email verification → user creation → account registration
+- Steps 2+ likely require the email verification code
+- The `signInTokenDetails` in the user/account creation response could provide auth, but those endpoints reject our payloads (missing crypto fields)
+
+**Key observation:** The CTF may be designed so that NO valid accounts exist, making all auth-dependent features inaccessible. The challenge may specifically test whether 1Password's 2SKD model prevents access without valid credentials.
+
+**Remaining vectors:**
+1. **SRP verifier construction** — Build a valid v2/user or v1/account payload with proper SRP fields
+2. **Mycelium WASM** — Separate Noise protocol for real-time features
+3. **CRL checking** — The Sigstore certificates reference CRL URLs at `crl.1passwordservices.com`
+4. **Auth timing oracle** — Statistical analysis of SRP verify responses
+
+---
+
+## Phase 12: Signup Flow Deep Dive & Registration Endpoint Mapping
+
+### 12.1 Registration Endpoint Discovery (from JS Bundle)
+
+Traced `registerAccount` and `registerPasskeyAccount` through the minified JS:
+
+**Module 29455** (signup functions):
+- `registerAccount` (`NH` export) → function `k` → calls `C(e,t)` (generates SRP creds from password) then `K(e)` (sends to API)
+- `registerPasskeyAccount` (`Ff` export) → function `U` → calls `R(e,t)` (generates passkey creds) then `I(e, challenge, encCredential, auth)` (sends to API)
+
+**Both ultimately call `o.uZ`** from module 44367, which maps to:
+
+```
+R = (e) => ({name: "postAccount", method: "POST", url: "/api/v1/account", body: e, responseType: C, encrypted: false})
+```
+
+**Module 44367** (API endpoint definitions):
+
+| Export | Function | Method | URL | Purpose |
+|--------|----------|--------|-----|---------|
+| `BC` | `A` | POST | `/api/v1/signup` | Legacy signup |
+| `wZ` | `b` | POST | `/api/v2/signup` | Signup → `{emailResendToken}` |
+| `Wd` | `T` | POST | `/api/v2/user` | Create user → `{userUuid, sessionUuid?}` |
+| `uZ` | `R` | POST | `/api/v1/account` | Register account → `{accountUuid, userUuid, signInTokenDetails?}` |
+| `NL` | `P` | GET | `/api/v2/signup/${id}` | Get signup details |
+| `K5` | `U` | GET | `/api/v2/signup/${id}?email=X&account-type=Y` | **signUpAndGetInfo** |
+| `Yv` | `E` | PATCH | `/api/v3/signup/${id}` | Update signup |
+| `BV` | `k` | PATCH | `/api/v2/signup/${id}` | Update signup type |
+| `nA` | `K` | POST | `/api/v1/signup/resend/${token}` | Resend verification email |
+
+### 12.2 SRP Auth Construction (from JS)
+
+`getForUpload` returns: `{method, alg, iterations, salt, v}` where:
+- `v` = SRP verifier = `g^srpX mod N` (hex string)
+- `srpX` for SRPg method = `HKDF(SHA256, salt, method, email, 32) → PBKDF2(password, hkdf_output, iterations) → XOR secretKey`
+- Default params: `PBKDF2-HMAC-SHA256`, `SRPg-4096`, 650000 iterations
+
+### 12.3 Password-Based Registration Payload
+
+Function `K` sends to `POST /api/v1/account`:
+```json
+{
+  "signupUuid": "<client-generated-UUID>",
+  "user": {
+    "email": "...", "language": "en", "name": "...",
+    "newsletterPrefs": 0,
+    "accountKeyFormat": "A3",
+    "accountKeyUuid": "<UUID>",
+    "avatar": ""
+  },
+  "account": {
+    "name": "...", "domain": "1password.com", "type": "I", "avatar": ""
+  },
+  "device": { ... },
+  "keyset": { ... },
+  "userAuth": { "method": "SRPg-4096", "alg": "PBES2g-HS256", "iterations": 650000, "salt": "...", "v": "..." }
+}
+```
+
+### 12.4 Passkey-Based Registration Payload
+
+Function `I` sends to `POST /api/v1/account`:
+```json
+{
+  "signupUuid": "<client-generated-UUID>",
+  "user": {
+    "email": "...", "language": "en", "name": "...",
+    "newsletterPrefs": 0,
+    "accountKeyFormat": "A3",
+    "accountKeyUuid": "<UUID>",
+    "avatar": "",
+    "challenge": "852809",
+    "deviceCredential": {"v": 2, "encCredentials": "..."}
+  },
+  "account": { ... },
+  "device": { ... },
+  "keyset": { ... },
+  "userAuth": { ... }
+}
+```
+
+### 12.5 CRITICAL: Verification Code IS the Signup ID
+
+**Breakthrough from signup verify page (chunk 6529):**
+
+The email verification code (6-digit number) is used directly as the `signupId` in the URL:
+
+```javascript
+// From verify chunk:
+const r = await l.XI.signUpAndGetInfo(f.S9, a, e.signUpData.email, e.signUpData.type);
+// a = the 6-digit code entered by user
+// Maps to: GET /api/v2/signup/${code}?email=${email}&account-type=${type}
+```
+
+**signUpAndGetInfo response type (from webapi):**
+```
+{uuid, domain, state, createdAt, completedAt, expiresAt, name, type, source, email,
+ language, availablePlans, tierName, trialEndsAt, features: {creditCardForm, passkey},
+ setupIntentCode, stepUuid?, promoCode?, flowServiceUuid?, duplicateAccounts?,
+ accountCreationDisabled?, defaultBillingFrequency?}
+```
+
+The response includes `features.passkey.isRequired` — if true, the passkey flow is mandatory (challenge code submitted with registration). If false, the password flow is used.
+
+**Signup URL encoding:** The signup data is base64url-encoded JSON in the URL:
+```
+/sign-up/{accountType}/{base64url(JSON.stringify(signUpData))}
+```
+
+### 12.6 Complete Signup Flow (Verified)
+
+1. `POST /api/v2/signup` → `{emailResendToken}` (creates server-side signup, sends verification email)
+2. User enters 6-digit code on `/sign-up/verify` page
+3. `GET /api/v2/signup/{code}?email=X&account-type=Y` → signup details including `uuid`, `domain`, `features`
+4. Client generates crypto material (SecretKey, SRP verifier, keyset, device)
+5. `POST /api/v1/account` → `{accountUuid, userUuid, signInTokenDetails?}` — creates the account
+6. Client auto-signs in using the returned session details
+
+**Status:** Created new signup (token `MFZKTNU3JBEUNCAOUAP7YGTF3Y`), awaiting fresh verification code.
+Previous code (852809) was consumed during a prior conversation compaction.
+
+### 12.7 Phase 12 Assessment
+
+The signup flow is now fully mapped. The remaining challenge is constructing valid crypto material for step 5:
+- **SecretKey**: Generated client-side (A3 format, 128-bit random)
+- **SRP verifier**: Requires HKDF + PBKDF2 + SecretKey XOR + modular exponentiation
+- **Keyset**: AES-GCM encrypted keypair bundle
+- **Device**: Device identifier structure
+
+All of this is doable with the `cryptography` Python library, but requires implementing 1Password's specific 2SKD protocol.
+
+---
+
+## Phase 13: Browser-Based Traffic Interception & Signup Flow Capture
+
+**Date:** 2026-04-25
+
+### 13.1 Approach
+
+Used clearwing's Playwright browser tools to load the CTF signup SPA in a headless Chromium instance, mock the 1Password extension detection, fill the signup form, and capture the exact API requests the SPA sends — including all headers, cookies, and body format.
+
+### 13.2 Extension Detection Bypass
+
+The SPA gates the signup form behind a browser extension promo. The extension detection function (module 40301 in `webapi.js`) checks two `data-` attributes on `document.body`:
+
+```javascript
+const hasExtensionInstalled = () => {
+    const e = !!document?.body?.dataset?.onepasswordExtensionVersion;
+    const t = !!document?.body?.dataset?.b5xBuildNumber;
+    return e || t;
+};
+```
+
+Bypassed via `page.addInitScript()`:
+```javascript
+document.body.dataset.onepasswordExtensionVersion = '2.28.1';
+document.body.dataset.b5xBuildNumber = '2280100';
+```
+
+This reveals the "Create your account" form with Name, Email, and Newsletter checkbox fields.
+
+### 13.3 Domain Redirect Chain
+
+The CTF page performs a client-side redirect through multiple 1Password domains:
+
+1. `bugbounty-ctf.1password.com/sign-up` → serves SPA HTML (status 200)
+2. SPA loads JS from `app.1password.com/js/*` (static assets CDN)
+3. `POST bugbounty-ctf.1password.com/api/pre-registration-features` → 200
+4. SPA redirects to `start.1password.com/sign-up` (client-side)
+5. `POST start.1password.com/api/pre-registration-features` → 200
+6. After signup: redirects to `my.1password.com/sign-up/verify/{base64data}`
+
+**Key finding:** The CTF domain is the entry point, but the SPA redirects to production 1Password domains for the actual signup flow. API calls go to whichever domain the browser is currently on.
+
+### 13.4 Signup POST — Exact Request Format
+
+The SPA sends the signup POST to `start.1password.com` (not the CTF domain):
+
+```
+POST https://start.1password.com/api/v2/signup
+```
+
+**Headers:**
+```
+op-user-agent: 1|B|2248|{random26chars}|||Chrome|145.0.7632.6|MacOSX|26.3.1|
+accept-language: en
+user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ...
+```
+
+**Body (full fields):**
+```json
+{
+  "email": "...",
+  "domain": "my",
+  "name": "Eric Hartford",
+  "type": "I",
+  "language": "en",
+  "promoCode": "",
+  "purchaseOrderToken": "",
+  "stripePurchaseOrderToken": "",
+  "source": "B",
+  "companySize": ""
+}
+```
+
+**Previously missing fields in our API calls:**
+- `domain`: `"my"` — determines which subdomain the account lands on
+- `name`: user's display name (from the Name field)
+- `language`: `"en"`
+- `promoCode`, `purchaseOrderToken`, `stripePurchaseOrderToken`: empty strings
+- `source`: `"B"` (B = Browser/web client)
+- `companySize`: empty string
+
+Our earlier calls only sent `{"email": "...", "type": "I"}`, which was accepted initially but may have been the reason for later 400 errors (or the 400s were IP-level rate limiting after too many attempts).
+
+### 13.5 The `op-user-agent` Header
+
+The SPA sends a custom `op-user-agent` header on all API requests. Format:
+
+```
+1|B|{buildNumber}|{deviceUuid}|||{browserName}|{browserVersion}|{platform}|{osVersion}|
+```
+
+Components:
+- `1` — protocol version
+- `B` — client type (B = Browser)
+- `2248` — build number (from data-build-time or hardcoded)
+- `{deviceUuid}` — 26-char random alphanumeric string, generated per session
+- `|||` — empty fields (possibly app-specific identifiers)
+- `Chrome|145.0.7632.6` — browser name and version
+- `MacOSX|26.3.1` — platform and OS version
+
+This header appears on every API request from the SPA. Our previous API calls omitted it entirely.
+
+### 13.6 Cookies Set During Signup
+
+The `.1password.com` domain sets three cookies during the flow:
+
+| Cookie | Value | Purpose |
+|--------|-------|---------|
+| `_tsession` | 26-char random string | Session tracking |
+| `_ab` | `a` or `b` | A/B test assignment |
+| `_fs` | UUID | Flow service correlation ID |
+
+These are set with `domain=.1password.com` and apply across all 1Password subdomains.
+
+### 13.7 Verify Page URL Encoding
+
+After successful signup POST, the SPA navigates to the verify page with base64url-encoded signup data in the URL:
+
+```
+https://my.1password.com/sign-up/verify/{base64url_json}?l=en
+```
+
+Decoded JSON contains:
+```json
+{
+  "accountType": "individual",
+  "type": "I",
+  "userName": "Eric Hartford",
+  "email": "...",
+  "emailResendToken": "ONARTAWATZEETHXZXVKLNN3YNH4",
+  "newsletterSubscribe": false,
+  "companySize": "",
+  "purchaseOrder": "",
+  "stripePurchaseOrder": ""
+}
+```
+
+### 13.8 Pre-Registration Features
+
+The SPA calls two feature-flag endpoints before showing the signup form:
+
+**`POST /api/pre-registration-features`** — checks broad feature flags:
+```json
+{"features": ["test-feature-flag", "b5web-auto-sign-in", "b5web-mycelium-forward-sign-in",
+  "safari-web-extension-iap", "b5web-b2b-signup-requirePhoneNumber", ...]}
+```
+
+**`POST /api/v2/pre-registration-features`** — checks specific flags with context:
+```json
+{
+  "features": ["b5web-b2b-signup-requirePhoneNumber"],
+  "baseFeatureContext": {
+    "deviceUuid": "...",
+    "app": "1Password for Web",
+    "browserType": "Chrome",
+    "buildNumber": "2248",
+    "platform": "MacOSX",
+    "subEnvironment": ""
+  }
+}
+```
+
+Both endpoints return 200 on all tested domains (CTF, start, my).
+
+### 13.9 IP-Level Rate Limiting
+
+After multiple signup attempts across sessions, all API calls to both `bugbounty-ctf.1password.com` and `start.1password.com` began returning 400 with empty body `{}`. This appears to be IP-level rate limiting (not email-specific — tested with multiple emails). The rate limiter escalated from 429 (with retry-after) to hard 400 blocks.
+
+### 13.10 Phase 13 Assessment
+
+**Solved:** The exact request format, headers, and flow the SPA uses for signup and email verification. The critical missing pieces in our earlier API calls were:
+1. The `op-user-agent` header (sent on every request)
+2. Additional body fields (`domain`, `name`, `source`, etc.)
+3. The correct target domain (SPA sends to `start.1password.com`, not `bugbounty-ctf.1password.com`)
+
+**Remaining:** Need to capture the exact verification request (entering the 6-digit code on the verify page). From JS analysis we know it's `GET /api/v2/signup/{code}?email=X&account-type=Y`, but need to confirm which domain it targets and whether cookies/headers matter.
+
+**Next steps:**
+1. Wait for IP rate limit to clear
+2. Redo signup with `eric@quixi.ai` using the correct full request format
+3. Capture the verification GET request via the browser
+4. Complete the full account registration flow
+
+---
+
+## Phase 14: CTF Rules, White Paper Analysis & Protocol Deep Dive
+
+**Date:** 2026-04-29
+
+### 14.1 CTF Rules (HackerOne)
+
+Retrieved the full CTF program description from HackerOne GraphQL API (`hackerone.com/1password_ctf`).
+
+**Key rules:**
+- $1M reward, running since 2022 — unclaimed after 4+ years
+- "There are no known vulnerabilities that will award you access to the flag; there's no starting point, nor a guaranteed reward."
+- **Target:** Bad poetry in a Secure Note, in a dedicated CTF account at `bugbounty-ctf.1password.com`
+- **Access:** Email `bugbounty@agilebits.com` with HackerOne username → receive access to the CTF account with "more information"
+- Only submit if you've captured the flag or are close — invalid submissions lose HackerOne points
+- Recommended reading: White paper "Beware of the Leopard" section (page 68 / Appendix A)
+- Provided tool: `github.com/1Password/burp-1password-session-analyzer`
+
+**Scope (Burp config):**
+- Include: `bugbounty-ctf.1password.com:443` only
+- Exclude: `*.agilebits.com`, `support.1password.com`, `www.1password.com`
+
+**Critical realization:** We were trying to CREATE an account when we should have REQUESTED ACCESS to the existing CTF account. The signup flow was a dead end — the vault with the flag is in a pre-existing account that researchers get invited to.
+
+Email sent to `bugbounty@agilebits.com` requesting CTF account access on 2026-04-29.
+
+### 14.2 Burp Session Analyzer — Protocol Implementation
+
+Cloned `github.com/1Password/burp-1password-session-analyzer` to `projects/1password/burp-1password-session-analyzer/`.
+
+#### 14.2.1 Session Encryption (AES-256-GCM)
+
+All API payloads are encrypted with the session key:
+
+- **Algorithm:** AES-256-GCM (AES/GCM/NoPadding)
+- **Key:** 256-bit (32 bytes), base64url-encoded (43 chars)
+- **IV:** 96-bit (12 bytes), unique per message
+- **Auth tag:** 128-bit (implicit in GCM)
+
+**Encrypted message JSON structure:**
+```json
+{
+  "kid": "GBOJATMN3FGLNPXPBMMQXS6XH4",
+  "enc": "A256GCM",
+  "cty": "b5+jwk+json",
+  "iv": "Br3mr9L_-CIsl21k",
+  "data": "<base64url ciphertext>"
+}
+```
+
+- `kid`: 26-char key identifier (matches session ID)
+- `enc`: always `"A256GCM"`
+- `cty`: always `"b5+jwk+json"`
+- `iv`: base64url 12-byte IV
+- `data`: base64url ciphertext (includes GCM auth tag)
+
+The session key derives from the SRP exchange during login. With the session key, all traffic can be decrypted and re-encrypted.
+
+#### 14.2.2 Request MAC (X-AgileBits-MAC)
+
+Every authenticated request includes `X-AgileBits-MAC: v1|{requestId}|{mac}`:
+
+```
+authString = sessionId | requestMethod | host/path?query | v1 | requestId
+macKey = HMAC-SHA256(sessionKey, "He never wears a Mac, in the pouring rain. Very strange.")
+mac = HMAC-SHA256(macKey, authString)
+header = "v1|" + requestId + "|" + base64url(mac[0:12])
+```
+
+- Session ID from `X-AgileBits-Session-ID` header
+- Request ID is monotonically incrementing (prevents replay)
+- MAC truncated to first 12 bytes (96 bits)
+- HMAC algorithm: HMAC-SHA256
+
+**Key derivation constant:** `"He never wears a Mac, in the pouring rain. Very strange."` (ASCII)
+
+**Test vectors (from source):**
+```
+sessionId: RDPMIFQWUJBWZFDBKURHNRFVRA
+sessionKey: ETmGs4U7ReMolW1J64ZAmmksXbQFFbeyRPW6zPWj3VM
+requestId: 6
+method: GET
+url: https://my.b5local.com:3000/api/v1/invites
+expected: v1|6|oBnE8JLpG2Othzgy
+```
+
+#### 14.2.3 Session Key Extraction
+
+The README hints: "you can probably find the session key yourself by knowing that we use standard JavaScript APIs (SubtleCrypto) to do the encryption in the 1Password frontend."
+
+This means: hook `crypto.subtle.importKey` or `crypto.subtle.encrypt`/`decrypt` in the browser to capture the AES-256-GCM session key. Our `webcrypto_hooks` clearwing tool was designed exactly for this.
+
+### 14.3 White Paper — Security Architecture
+
+Source: `agilebits.github.io/security-design/` (redirected from `1password.com/files/1Password-White-Paper.pdf`)
+
+#### 14.3.1 Key Hierarchy
+
+```
+Account Password + Secret Key
+        ↓ (PBKDF2-HMAC-SHA256, 650K iterations + HKDF + XOR)
+Account Unlock Key (AUK)
+        ↓ (decrypts)
+Personal Keyset (RSA-2048 private key + symmetric key)
+        ↓ (RSA decrypt)
+Vault Key (AES-256, per-vault, random)
+        ↓ (AES-256-GCM)
+Vault Items (overview + details encrypted separately)
+```
+
+- **Secret Key format:** Characters from `{2-9, A-H, J-N, P-T, V-Z}` — avoids ambiguous chars (0/O, 1/I/L)
+- **Secret Key entropy:** 128 bits
+- **Salt stretching:** 16-byte salt stretched via HKDF with lowercase email as context
+- **Password preprocessing:** strip whitespace, NFKD normalization
+- **2SKD XOR step:** PBKDF2 output XOR'd with HKDF(Secret Key, account_id_as_salt)
+- **AUK output:** JWK with key ID `"mp"`
+- **SRP-x:** Derived identically to AUK but with independent salt — ensures auth and encryption keys are independent
+
+#### 14.3.2 Item Encryption
+
+- Items have two encrypted components: **overview** (title, URL, tags) and **details** (passwords, notes)
+- Both encrypted with the vault key using AES-256-GCM
+- Each user gets a copy of the vault key encrypted with their RSA public key
+- Private key is encrypted with AUK derived from password + Secret Key
+
+#### 14.3.3 Server Storage
+
+The server stores (unencrypted):
+- Team/account info (domain, name, avatars)
+- User info (names, emails, avatar filenames)
+- Device metadata (IP, device model, OS)
+- MFA secrets and public keys
+- Group info (names, descriptions)
+
+Database tables: `accounts`, `users`, `vaults`, `vault_items`, `user_vault_access`, `groups`, `invites`, `signups`
+
+The `vault_items` table stores encrypted overviews and details. The `user_vault_access` table stores vault keys encrypted per-user with their public key.
+
+Even if the database is fully compromised, vault contents remain encrypted. Breaking in requires the private key, which requires the AUK, which requires password + Secret Key.
+
+### 14.4 Acknowledged Weaknesses (Appendix A — "Beware of the Leopard")
+
+| Section | Weakness | Exploitability |
+|---------|----------|----------------|
+| A.1 | Crypto over HTTPS — malicious server can deliver bad JS client | Requires server compromise |
+| A.1.1 | Browser crypto limitations — can't clear memory, limited to PBKDF2 | Theoretical |
+| A.2 | Recovery Group has crypto access to all vault keys | Requires Recovery Group member compromise |
+| A.3 | **No public key verification — server can MITM key exchanges** | Server-side attack; no user verification possible |
+| A.4 | Revoked users who saved vault keys can decrypt future data | Requires prior key exfiltration |
+| A.5 | Password changes don't rotate keysets — old creds still work | Requires old credentials |
+| A.6 | Weak primary account password unlocks stronger secondary accounts | Local attack |
+| A.8 | No barrier to malicious client generating bad keys | Requires client compromise |
+| A.9 | Server data accessible to governments/law enforcement | Server-side; data still encrypted |
+| A.10.2 | **Secret Keys stored with "light obfuscation" on enrolled devices** | Requires device access |
+| A.11 | **User enumeration possible — acknowledged "design error"** | Pre-auth, no fix planned |
+| A.12 | Email-based invitations/recovery — email can be intercepted | Requires email compromise |
+
+### 14.5 Strategic Assessment
+
+**What 1Password has hardened against (the "expected" attack surface):**
+- Brute-force password cracking (2SKD makes verifiers uncrackable without Secret Key)
+- Server breach (all vault data encrypted, server never sees plaintext)
+- Network MITM (SRP + session encryption on top of TLS)
+- Replay attacks (monotonic request MAC counter)
+- Client-side attacks (CSP, SRI, WebCrypto)
+
+**What they acknowledge but accept:**
+- Server can MITM public key exchanges (A.3)
+- User enumeration via auth endpoint (A.11)
+- Secret Keys recoverable from enrolled devices (A.10.2)
+
+**The CTF is designed to be "impossible"** — they're confident the architecture prevents access without valid credentials. The $1M has been unclaimed for 4+ years. Breaking the crypto directly is not realistic.
+
+**Potential vectors once we have CTF account access:**
+1. **Access control logic bugs** — server grants vault key copies based on `user_vault_access` entries; can we trick it into granting access to vaults we shouldn't see?
+2. **IDOR on vault items** — can we request vault items by UUID from vaults we don't have keys for? The server might return encrypted data we can't decrypt, but maybe there's a path where it returns decrypted data.
+3. **Sharing/invitation flow bugs** — the mechanism that grants us CTF access might have logic flaws
+4. **Recovery group exploitation** — if the CTF account has a recovery group and we're in it
+5. **Session key + Burp analyzer** — once authenticated, use webcrypto hooks to capture session key, then use Burp analyzer to inspect and modify all requests
+6. **Confidential Computing enclave** — we already completed Noise_NX handshake; with an authenticated session, the enclave might process requests differently
+7. **Public key substitution (A.3)** — the server can substitute public keys; if we can somehow trigger re-encryption of the flag vault's key to our public key
+8. **The "more information" in the CTF account** — may contain hints, partial credentials, or a different attack surface entirely
+
+**Immediate next step:** Wait for CTF account access via email response from `bugbounty@agilebits.com`.
+
+
+## Phase 15 — CTF Domain Probing (In-Scope)
+
+**Date:** 2026-05-01
+
+Revisited the CTF domain directly (`bugbounty-ctf.1password.com`) to probe in-scope endpoints.
+
+### 15.1 Sign-In Page Structure
+
+Navigated to `https://bugbounty-ctf.1password.com` via Playwright with extension bypass (mock `document.body.dataset.onepasswordExtensionVersion` and `b5xBuildNumber`). Rate limiting from prior sessions (2026-04-29) has cleared — page loads normally.
+
+The CTF domain redirects to `/signin` and serves a standard 1Password sign-in form:
+- Email field
+- Secret Key field (shown after email submission)
+- Password field
+- "Sign In" button
+- "Create a new account" link → points to `https://1password.com/sign-up/` (off-scope, main site)
+
+**Key finding:** The CTF domain does not support self-registration. Accounts must be provisioned externally. This confirms the HackerOne instruction to email `bugbounty@agilebits.com` for access.
+
+### 15.2 Auth Methods Endpoint (No User Enumeration)
+
+**Endpoint:** `POST /api/v2/auth/methods`
+
+Tested with two emails:
+```
+POST /api/v2/auth/methods {"email":"nonexistent_test_xyz_12345@example.com"}
+→ 200 {"authMethods":[{"type":"PASSWORD+SK"}],"signInAddress":"https://bugbounty-ctf.1password.com"}
+
+POST /api/v2/auth/methods {"email":"eric@quixi.ai"}
+→ 200 {"authMethods":[{"type":"PASSWORD+SK"}],"signInAddress":"https://bugbounty-ctf.1password.com"}
+```
+
+**Finding:** Identical response for both existent and nonexistent emails. No user enumeration via this endpoint. The auth method is always `PASSWORD+SK` for this domain. The `signInAddress` confirms the CTF domain is self-contained.
+
+Note: The white paper acknowledges user enumeration as a known weakness (Appendix A.11), but this specific endpoint doesn't leak it. The SRP init endpoint (`/api/v1/auth`) may behave differently — needs testing with valid credentials.
+
+### 15.3 Pre-Registration Features
+
+**Endpoint:** `POST /api/pre-registration-features`
+
+The CTF domain serves the same feature flag set as the main site:
+```json
+{
+  "features": [
+    {"name": "b5web-auto-sign-in"},
+    {"name": "b5web-mycelium-forward-sign-in"},
+    {"name": "safari-web-extension-iap"},
+    {"name": "b5web-b2b-signup-requirePhoneNumber"},
+    {"name": "b5-bpo-client-notification"},
+    {"name": "pre-auth-telemetry-data-collection"},
+    {"name": "distributor-sign-up"},
+    {"name": "distributor-change-of-channel"},
+    {"name": "b5web-authx-auto_sign_in-policy"}
+  ]
+}
+```
+
+Notable flags: `b5web-mycelium-forward-sign-in` (device pairing for sign-in), `b5web-authx-auto_sign_in-policy` (auto sign-in policy).
+
+### 15.4 Mycelium Device Pairing Channels
+
+**Endpoint:** `POST /api/v2/mycelium/u`
+
+The sign-in page automatically creates Mycelium pairing channels on load:
+```json
+{"channelSeed":"vWwQy0HDbdl74v9ho_aFQA","channelUuid":"KK4XZK47EDKQ4HQN6J3QUNJKXE","initiatorAuth":"i_0bBT_CUXw9i-a8yKOtM1bQ"}
+```
+
+Each page load creates 2 channels with unique UUIDs and seeds. The client then polls `GET /api/v2/mycelium/u/{channelUuid}/2` repeatedly (long-polling). These channels are for QR-code-based sign-in via a mobile device.
+
+The request body includes a `deviceUuid` and a `hello` field (base64url-encoded, ~128 bytes). This is the Noise_NX handshake initiator message for the Mycelium protocol.
+
+**Security note:** Mycelium channels are created pre-auth. If channel UUIDs are predictable or reusable, this could be an attack surface for session hijacking via the device pairing flow.
+
+### 15.5 Account Cookies Check
+
+On page load, the client checks for existing account cookies across all 1Password regions:
+```
+GET https://accounts.1password.com/api/v1/accountcookies → []
+GET https://accounts.1password.ca/api/v1/accountcookies → []
+GET https://accounts.ent.1password.com/api/v1/accountcookies → []
+GET https://accounts.1password.eu/api/v1/accountcookies → []
+```
+
+All return empty arrays — no existing sessions. These requests go to production domains (not the CTF domain), confirming the CTF domain shares the same client codebase as production 1Password.
+
+### 15.6 JS Bundle Source
+
+The main application JS is loaded from `https://app.1password.com/js/webapi-092b9e5d154383738ffc.min.js` — a shared CDN for the 1Password web client. The CTF domain does not serve its own JS; it uses the same production web app. This means:
+- Any client-side vulnerability in the production web app applies to the CTF domain
+- The CSP, SRI hashes, and WASM whitelist are identical to production
+- Client-side attack vectors (Phase 3.9) are the same
+
+### 15.7 Scope Discipline
+
+Attempted to create a regular 1Password account on `start.1password.com` / `my.1password.com` to observe the registration protocol. Stopped mid-flow after recognizing this is outside the CTF scope. The CTF rules state only `bugbounty-ctf.1password.com` is in play.
+
+**Lesson learned:** All probing, protocol analysis, and API testing must target the CTF domain only. Understanding the protocol from public documentation (white paper, Burp analyzer source) is fine; actively instrumenting production infrastructure is not.
+
+### 15.8 Copy Fail (CVE-2026-31431) Assessment
+
+Documented separately in `projects/1password/copyfail.md`. Linux kernel privilege escalation via AF_ALG + splice page cache corruption, disclosed 2026-04-29. Relevant to the CTF only if we achieve server-side code execution first — it's an escalation primitive, not an entry point. The CTF infrastructure likely runs on Linux behind AWS ELB, but patching status is unknown.
+
+### 15.9 Summary of Pre-Auth Attack Surface (CTF Domain)
+
+| Endpoint | Method | Behavior | Notes |
+|----------|--------|----------|-------|
+| `/signin` | GET | Sign-in page | Standard 1Password web client |
+| `/api/v2/auth/methods` | POST | Returns `PASSWORD+SK` | No user enumeration |
+| `/api/pre-registration-features` | POST | Feature flags | Same as production |
+| `/api/v2/mycelium/u` | POST | Creates pairing channel | Pre-auth, 2 channels per load |
+| `/api/v2/mycelium/u/{uuid}/2` | GET | Long-polls channel | Noise_NX handshake |
+
+**Still untested (need credentials):**
+- `/api/v1/auth` — SRP init (salt, iterations, B)
+- `/api/v1/auth/verify` — SRP proof verification
+- `/api/v2/recovery-keys/*` — Recovery flow endpoints
+- All authenticated endpoints (vaults, items, keys)
+
+**Next step:** Await CTF account credentials from `bugbounty@agilebits.com` (email sent 2026-04-29).

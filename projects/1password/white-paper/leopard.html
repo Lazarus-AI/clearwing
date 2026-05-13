@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+<head>
+
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>A Appendix A: Beware of the leopard | 1Password Security Design White Paper</title>
+  <meta name="description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="generator" content="bookdown 0.46 and GitBook 2.6.7" />
+
+  <meta property="og:title" content="A Appendix A: Beware of the leopard | 1Password Security Design White Paper" />
+  <meta property="og:type" content="book" />
+  <meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+  <meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="github-repo" content="https://github.com/agilebits/security-design/" />
+
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="A Appendix A: Beware of the leopard | 1Password Security Design White Paper" />
+  
+  <meta name="twitter:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="twitter:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  
+  <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+<link rel="prev" href="infra.html"/>
+<link rel="next" href="srp.html"/>
+<script src="libs/jquery-3.6.0/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@6.4.6/dist/fuse.min.js"></script>
+<link href="libs/gitbook-2.6.7/css/style.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-table.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-bookdown.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-highlight.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-search.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-fontsettings.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-clipboard.css" rel="stylesheet" />
+
+
+
+
+
+
+
+
+<link href="libs/anchor-sections-1.1.0/anchor-sections.css" rel="stylesheet" />
+<link href="libs/anchor-sections-1.1.0/anchor-sections-hash.css" rel="stylesheet" />
+<script src="libs/anchor-sections-1.1.0/anchor-sections.js"></script>
+<script>
+// Fix glossary tooltips: create tooltip span and remove title to prevent browser's native delayed tooltip
+function fixGlossaryTooltips() {
+  document.querySelectorAll('a.glossary[title]').forEach(function(el) {
+    // Skip if already processed
+    if (el.querySelector('.glossary-tooltip')) return;
+    
+    var definition = el.getAttribute('title');
+    if (definition) {
+      // Create tooltip span
+      var tooltip = document.createElement('span');
+      tooltip.className = 'glossary-tooltip';
+      tooltip.textContent = definition;
+      el.appendChild(tooltip);
+      
+      // Remove title to prevent browser's native tooltip
+      el.removeAttribute('title');
+    }
+  });
+}
+
+// Run on initial load
+document.addEventListener('DOMContentLoaded', fixGlossaryTooltips);
+
+// Also run when gitbook navigates to a new page (handles AJAX page loads)
+document.addEventListener('DOMContentLoaded', function() {
+  if (typeof gitbook !== 'undefined' && gitbook.events) {
+    gitbook.events.bind('page.change', fixGlossaryTooltips);
+  }
+});
+
+// Fallback: watch for DOM changes and fix any new glossary elements
+var glossaryObserver = new MutationObserver(function(mutations) {
+  var shouldFix = false;
+  mutations.forEach(function(mutation) {
+    if (mutation.addedNodes.length) shouldFix = true;
+  });
+  if (shouldFix) fixGlossaryTooltips();
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  glossaryObserver.observe(document.body, { childList: true, subtree: true });
+});
+</script>
+<link rel="canonical" href="https://1pw.ca/whitepaper/" />
+
+<meta property="og:url" content="https://1pw.ca/whitepaper/" />
+<meta property="og:title" content="A Appendix A: Beware of the leopard | 1Password Security Design White Paper" />
+<meta property="og:site_name" content="1password.com" />
+<meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+<meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+<style type="text/css">
+  
+  div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+</style>
+<style type="text/css">
+/* Used with Pandoc 2.11+ new --citeproc when CSL is used */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}
+</style>
+
+<link rel="stylesheet" href="assets/style.css" type="text/css" />
+</head>
+
+<body>
+
+
+
+  <div class="book without-animation with-summary font-size-2 font-family-1" data-basepath=".">
+
+    <div class="book-summary">
+      <nav role="navigation">
+
+<ul class="summary">
+<li class="chapter" data-level="" data-path="index.html"><a href="index.html"><i class="fa fa-check"></i>1Password Memberships</a></li>
+<li class="chapter" data-level="1" data-path="key-security-features.html"><a href="key-security-features.html"><i class="fa fa-check"></i><b>1</b> Key security features</a></li>
+<li class="chapter" data-level="2" data-path="principles.html"><a href="principles.html"><i class="fa fa-check"></i><b>2</b> Principles</a></li>
+<li class="chapter" data-level="3" data-path="apsk.html"><a href="apsk.html"><i class="fa fa-check"></i><b>3</b> Account password and Secret Key</a>
+<ul>
+<li class="chapter" data-level="3.1" data-path="apsk.html"><a href="apsk.html#account-password"><i class="fa fa-check"></i><b>3.1</b> Account password</a></li>
+<li class="chapter" data-level="3.2" data-path="apsk.html"><a href="apsk.html#sec:sk"><i class="fa fa-check"></i><b>3.2</b> Secret Key</a></li>
+<li class="chapter" data-level="3.3" data-path="apsk.html"><a href="apsk.html#emergency-kit"><i class="fa fa-check"></i><b>3.3</b> Emergency Kit</a></li>
+</ul></li>
+<li class="chapter" data-level="4" data-path="modernauth.html"><a href="modernauth.html"><i class="fa fa-check"></i><b>4</b> A modern approach to authentication</a>
+<ul>
+<li class="chapter" data-level="4.1" data-path="modernauth.html"><a href="modernauth.html#what-we-want-from-authentication"><i class="fa fa-check"></i><b>4.1</b> What we want from authentication</a>
+<ul>
+<li class="chapter" data-level="4.1.1" data-path="modernauth.html"><a href="modernauth.html#traditional-authentication"><i class="fa fa-check"></i><b>4.1.1</b> Traditional authentication</a></li>
+<li class="chapter" data-level="4.1.2" data-path="modernauth.html"><a href="modernauth.html#password-authenticated-key-exchange"><i class="fa fa-check"></i><b>4.1.2</b> Password-Authenticated Key Exchange</a></li>
+<li class="chapter" data-level="4.1.3" data-path="modernauth.html"><a href="modernauth.html#sec:2SKD"><i class="fa fa-check"></i><b>4.1.3</b> Making verifiers uncrackable with 2SKD</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="5" data-path="secureItems.html"><a href="secureItems.html"><i class="fa fa-check"></i><b>5</b> How vault items are secured</a>
+<ul>
+<li class="chapter" data-level="5.1" data-path="secureItems.html"><a href="secureItems.html#key-derivation-overview"><i class="fa fa-check"></i><b>5.1</b> Key derivation overview</a></li>
+<li class="chapter" data-level="5.2" data-path="secureItems.html"><a href="secureItems.html#a-first-look-at-key-sets"><i class="fa fa-check"></i><b>5.2</b> A first look at key sets</a>
+<ul>
+<li class="chapter" data-level="5.2.1" data-path="secureItems.html"><a href="secureItems.html#flexible-yet-firm"><i class="fa fa-check"></i><b>5.2.1</b> Flexible, yet firm</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="6" data-path="sharedVaults.html"><a href="sharedVaults.html"><i class="fa fa-check"></i><b>6</b> How vaults are shared securely</a>
+<ul>
+<li class="chapter" data-level="6.1" data-path="sharedVaults.html"><a href="sharedVaults.html#getting-the-message-to-the-right-people"><i class="fa fa-check"></i><b>6.1</b> Getting the message (to the right people)</a></li>
+</ul></li>
+<li class="chapter" data-level="7" data-path="share.html"><a href="share.html"><i class="fa fa-check"></i><b>7</b> How items are shared with anyone</a>
+<ul>
+<li class="chapter" data-level="7.1" data-path="share.html"><a href="share.html#overview"><i class="fa fa-check"></i><b>7.1</b> Overview</a></li>
+<li class="chapter" data-level="7.2" data-path="share.html"><a href="share.html#password-client"><i class="fa fa-check"></i><b>7.2</b> 1Password client</a>
+<ul>
+<li class="chapter" data-level="7.2.1" data-path="share.html"><a href="share.html#making-a-share-link"><i class="fa fa-check"></i><b>7.2.1</b> Making a share link</a></li>
+<li class="chapter" data-level="7.2.2" data-path="share.html"><a href="share.html#clients-first-steps"><i class="fa fa-check"></i><b>7.2.2</b> Client’s first steps</a></li>
+<li class="chapter" data-level="7.2.3" data-path="share.html"><a href="share.html#encryption-and-key-generation"><i class="fa fa-check"></i><b>7.2.3</b> Encryption and key generation</a></li>
+<li class="chapter" data-level="7.2.4" data-path="share.html"><a href="share.html#uploading-the-share"><i class="fa fa-check"></i><b>7.2.4</b> Uploading the share</a></li>
+<li class="chapter" data-level="7.2.5" data-path="share.html"><a href="share.html#sharing-the-share-link"><i class="fa fa-check"></i><b>7.2.5</b> Sharing the share link</a></li>
+</ul></li>
+<li class="chapter" data-level="7.3" data-path="share.html"><a href="share.html#server-to-server"><i class="fa fa-check"></i><b>7.3</b> Server to server</a>
+<ul>
+<li class="chapter" data-level="7.3.1" data-path="share.html"><a href="share.html#audit-and-status-queries"><i class="fa fa-check"></i><b>7.3.1</b> Audit and status queries</a></li>
+</ul></li>
+<li class="chapter" data-level="7.4" data-path="share.html"><a href="share.html#share-pickup"><i class="fa fa-check"></i><b>7.4</b> Share pickup</a>
+<ul>
+<li class="chapter" data-level="7.4.1" data-path="share.html"><a href="share.html#additional-authentication"><i class="fa fa-check"></i><b>7.4.1</b> Additional authentication</a></li>
+<li class="chapter" data-level="7.4.2" data-path="share.html"><a href="share.html#client-analytics"><i class="fa fa-check"></i><b>7.4.2</b> Client analytics</a></li>
+</ul></li>
+<li class="chapter" data-level="7.5" data-path="share.html"><a href="share.html#caveats"><i class="fa fa-check"></i><b>7.5</b> Caveats</a></li>
+</ul></li>
+<li class="chapter" data-level="8" data-path="deepKeys.html"><a href="deepKeys.html"><i class="fa fa-check"></i><b>8</b> A deeper look at keys</a>
+<ul>
+<li class="chapter" data-level="8.1" data-path="deepKeys.html"><a href="deepKeys.html#key-creation"><i class="fa fa-check"></i><b>8.1</b> Key creation</a></li>
+<li class="chapter" data-level="8.2" data-path="deepKeys.html"><a href="deepKeys.html#sec:keyderiv"><i class="fa fa-check"></i><b>8.2</b> Key derivation</a>
+<ul>
+<li class="chapter" data-level="8.2.1" data-path="deepKeys.html"><a href="deepKeys.html#deriving-two-keys-from-two-secrets"><i class="fa fa-check"></i><b>8.2.1</b> Deriving two keys from two secrets</a></li>
+<li class="chapter" data-level="8.2.2" data-path="deepKeys.html"><a href="deepKeys.html#preprocessing-the-account-password"><i class="fa fa-check"></i><b>8.2.2</b> Preprocessing the account password</a></li>
+<li class="chapter" data-level="8.2.3" data-path="deepKeys.html"><a href="deepKeys.html#preparing-the-salt"><i class="fa fa-check"></i><b>8.2.3</b> Preparing the salt</a></li>
+<li class="chapter" data-level="8.2.4" data-path="deepKeys.html"><a href="deepKeys.html#slow-hashing"><i class="fa fa-check"></i><b>8.2.4</b> Slow hashing</a></li>
+<li class="chapter" data-level="8.2.5" data-path="deepKeys.html"><a href="deepKeys.html#combining-with-the-secret-key"><i class="fa fa-check"></i><b>8.2.5</b> Combining with the Secret Key</a></li>
+<li class="chapter" data-level="8.2.6" data-path="deepKeys.html"><a href="deepKeys.html#deriving-the-authentication-key"><i class="fa fa-check"></i><b>8.2.6</b> Deriving the authentication key</a></li>
+</ul></li>
+<li class="chapter" data-level="8.3" data-path="deepKeys.html"><a href="deepKeys.html#initial-sign-up"><i class="fa fa-check"></i><b>8.3</b> Initial sign-up</a>
+<ul>
+<li class="chapter" data-level="8.3.1" data-path="deepKeys.html"><a href="deepKeys.html#protecting-email-invitations"><i class="fa fa-check"></i><b>8.3.1</b> Protecting email invitations</a></li>
+</ul></li>
+<li class="chapter" data-level="8.4" data-path="deepKeys.html"><a href="deepKeys.html#enrolling-a-new-client"><i class="fa fa-check"></i><b>8.4</b> Enrolling a new client</a></li>
+<li class="chapter" data-level="8.5" data-path="deepKeys.html"><a href="deepKeys.html#normal-unlock-and-sign-in"><i class="fa fa-check"></i><b>8.5</b> Normal unlock and sign-in</a></li>
+</ul></li>
+<li class="chapter" data-level="9" data-path="passkeySSO.html"><a href="passkeySSO.html"><i class="fa fa-check"></i><b>9</b> Unlock with a passkey or single sign-on</a>
+<ul>
+<li class="chapter" data-level="9.1" data-path="passkeySSO.html"><a href="passkeySSO.html#unlocking-without-an-account-password"><i class="fa fa-check"></i><b>9.1</b> Unlocking without an account password</a>
+<ul>
+<li class="chapter" data-level="9.1.1" data-path="passkeySSO.html"><a href="passkeySSO.html#sec:authCred"><i class="fa fa-check"></i><b>9.1.1</b> Authorization and the credential bundle</a></li>
+</ul></li>
+<li class="chapter" data-level="9.2" data-path="passkeySSO.html"><a href="passkeySSO.html#linked-apps-and-browsers"><i class="fa fa-check"></i><b>9.2</b> Linked apps and browsers</a></li>
+<li class="chapter" data-level="9.3" data-path="passkeySSO.html"><a href="passkeySSO.html#linking-other-devices"><i class="fa fa-check"></i><b>9.3</b> Linking other devices</a></li>
+<li class="chapter" data-level="9.4" data-path="passkeySSO.html"><a href="passkeySSO.html#quick-on-device-access-with-biometrics"><i class="fa fa-check"></i><b>9.4</b> Quick on-device access with biometrics</a></li>
+</ul></li>
+<li class="chapter" data-level="10" data-path="revoke-access.html"><a href="revoke-access.html"><i class="fa fa-check"></i><b>10</b> Revoking access</a></li>
+<li class="chapter" data-level="11" data-path="access-control.html"><a href="access-control.html"><i class="fa fa-check"></i><b>11</b> Access control enforcement</a>
+<ul>
+<li class="chapter" data-level="11.1" data-path="access-control.html"><a href="access-control.html#cryptographically-enforced-controls"><i class="fa fa-check"></i><b>11.1</b> Cryptographically enforced controls</a></li>
+<li class="chapter" data-level="11.2" data-path="access-control.html"><a href="access-control.html#server-enforced-controls"><i class="fa fa-check"></i><b>11.2</b> Server-enforced controls</a></li>
+<li class="chapter" data-level="11.3" data-path="access-control.html"><a href="access-control.html#client-enforced-controls"><i class="fa fa-check"></i><b>11.3</b> Client-enforced controls</a>
+<ul>
+<li class="chapter" data-level="11.3.1" data-path="access-control.html"><a href="access-control.html#controls-enforced-by-client-policy"><i class="fa fa-check"></i><b>11.3.1</b> Controls enforced by client policy</a></li>
+</ul></li>
+<li class="chapter" data-level="11.4" data-path="access-control.html"><a href="access-control.html#multiple-layers-of-enforcement"><i class="fa fa-check"></i><b>11.4</b> Multiple layers of enforcement</a></li>
+</ul></li>
+<li class="chapter" data-level="12" data-path="restore.html"><a href="restore.html"><i class="fa fa-check"></i><b>12</b> Restoring a user’s access to a vault</a>
+<ul>
+<li class="chapter" data-level="12.1" data-path="restore.html"><a href="restore.html#overview-of-groups"><i class="fa fa-check"></i><b>12.1</b> Overview of groups</a></li>
+<li class="chapter" data-level="12.2" data-path="restore.html"><a href="restore.html#recovery-groups"><i class="fa fa-check"></i><b>12.2</b> Recovery groups</a></li>
+<li class="chapter" data-level="12.3" data-path="restore.html"><a href="restore.html#implicit-sharing"><i class="fa fa-check"></i><b>12.3</b> Implicit sharing</a></li>
+<li class="chapter" data-level="12.4" data-path="restore.html"><a href="restore.html#protecting-vaults-from-recovery-group-members"><i class="fa fa-check"></i><b>12.4</b> Protecting vaults from recovery group members</a></li>
+<li class="chapter" data-level="12.5" data-path="restore.html"><a href="restore.html#recovery-risks"><i class="fa fa-check"></i><b>12.5</b> Recovery risks</a></li>
+<li class="chapter" data-level="12.6" data-path="restore.html"><a href="restore.html#recovery-keys"><i class="fa fa-check"></i><b>12.6</b> Recovery keys</a>
+<ul>
+<li class="chapter" data-level="12.6.1" data-path="restore.html"><a href="restore.html#recovery-key-generation"><i class="fa fa-check"></i><b>12.6.1</b> Recovery key generation</a></li>
+<li class="chapter" data-level="12.6.2" data-path="restore.html"><a href="restore.html#recovery-key-authentication"><i class="fa fa-check"></i><b>12.6.2</b> Recovery key authentication</a></li>
+<li class="chapter" data-level="12.6.3" data-path="restore.html"><a href="restore.html#recovery-key-policies"><i class="fa fa-check"></i><b>12.6.3</b> Recovery key policies</a></li>
+<li class="chapter" data-level="12.6.4" data-path="restore.html"><a href="restore.html#recovery-key-use"><i class="fa fa-check"></i><b>12.6.4</b> Recovery key use</a></li>
+<li class="chapter" data-level="12.6.5" data-path="restore.html"><a href="restore.html#recovery-codes"><i class="fa fa-check"></i><b>12.6.5</b> Recovery codes</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="13" data-path="secrets.html"><a href="secrets.html"><i class="fa fa-check"></i><b>13</b> Secrets Automation</a>
+<ul>
+<li class="chapter" data-level="13.1" data-path="secrets.html"><a href="secrets.html#the-connect-server"><i class="fa fa-check"></i><b>13.1</b> The Connect server</a>
+<ul>
+<li class="chapter" data-level="13.1.1" data-path="secrets.html"><a href="secrets.html#service-account"><i class="fa fa-check"></i><b>13.1.1</b> Service account</a></li>
+<li class="chapter" data-level="13.1.2" data-path="secrets.html"><a href="secrets.html#local-deployment"><i class="fa fa-check"></i><b>13.1.2</b> Local deployment</a></li>
+<li class="chapter" data-level="13.1.3" data-path="secrets.html"><a href="secrets.html#credential-store"><i class="fa fa-check"></i><b>13.1.3</b> Credential store</a></li>
+<li class="chapter" data-level="13.1.4" data-path="secrets.html"><a href="secrets.html#the-credentials-file"><i class="fa fa-check"></i><b>13.1.4</b> The credentials file</a></li>
+<li class="chapter" data-level="13.1.5" data-path="secrets.html"><a href="secrets.html#encrypted-credentials"><i class="fa fa-check"></i><b>13.1.5</b> Encrypted credentials</a></li>
+<li class="chapter" data-level="13.1.6" data-path="secrets.html"><a href="secrets.html#verifier"><i class="fa fa-check"></i><b>13.1.6</b> Verifier</a></li>
+<li class="chapter" data-level="13.1.7" data-path="secrets.html"><a href="secrets.html#interprocess-key"><i class="fa fa-check"></i><b>13.1.7</b> Interprocess key</a></li>
+</ul></li>
+<li class="chapter" data-level="13.2" data-path="secrets.html"><a href="secrets.html#bearer-token"><i class="fa fa-check"></i><b>13.2</b> Bearer token</a></li>
+<li class="chapter" data-level="13.3" data-path="secrets.html"><a href="secrets.html#header"><i class="fa fa-check"></i><b>13.3</b> Header</a>
+<ul>
+<li class="chapter" data-level="13.3.1" data-path="secrets.html"><a href="secrets.html#payload"><i class="fa fa-check"></i><b>13.3.1</b> Payload</a></li>
+<li class="chapter" data-level="13.3.2" data-path="secrets.html"><a href="secrets.html#signature"><i class="fa fa-check"></i><b>13.3.2</b> Signature</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="14" data-path="transport.html"><a href="transport.html"><i class="fa fa-check"></i><b>14</b> Transport security</a>
+<ul>
+<li class="chapter" data-level="14.1" data-path="transport.html"><a href="transport.html#data-at-rest"><i class="fa fa-check"></i><b>14.1</b> Data at rest</a></li>
+<li class="chapter" data-level="14.2" data-path="transport.html"><a href="transport.html#tls"><i class="fa fa-check"></i><b>14.2</b> TLS</a></li>
+<li class="chapter" data-level="14.3" data-path="transport.html"><a href="transport.html#our-transport-security"><i class="fa fa-check"></i><b>14.3</b> Our transport security</a>
+<ul>
+<li class="chapter" data-level="14.3.1" data-path="transport.html"><a href="transport.html#client-delivery"><i class="fa fa-check"></i><b>14.3.1</b> Client delivery</a></li>
+<li class="chapter" data-level="14.3.2" data-path="transport.html"><a href="transport.html#passkey-and-single-sign-on-unlock-caveats"><i class="fa fa-check"></i><b>14.3.2</b> Passkey and single sign-on unlock caveats</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="15" data-path="infra.html"><a href="infra.html"><i class="fa fa-check"></i><b>15</b> Server infrastructure</a>
+<ul>
+<li class="chapter" data-level="15.1" data-path="infra.html"><a href="infra.html#what-the-server-stores"><i class="fa fa-check"></i><b>15.1</b> What the server stores</a></li>
+<li class="chapter" data-level="15.2" data-path="infra.html"><a href="infra.html#how-your-data-is-stored"><i class="fa fa-check"></i><b>15.2</b> How your data is stored</a></li>
+</ul></li>
+<li class="appendix"><span><b>Appendix</b></span></li>
+<li class="chapter" data-level="A" data-path="leopard.html"><a href="leopard.html"><i class="fa fa-check"></i><b>A</b> Appendix A: Beware of the leopard</a>
+<ul>
+<li class="chapter" data-level="A.1" data-path="leopard.html"><a href="leopard.html#sec:cryptoHTTPS"><i class="fa fa-check"></i><b>A.1</b> Crypto over HTTPS</a>
+<ul>
+<li class="chapter" data-level="A.1.1" data-path="leopard.html"><a href="leopard.html#crypto-in-the-browser"><i class="fa fa-check"></i><b>A.1.1</b> Crypto in the browser</a></li>
+</ul></li>
+<li class="chapter" data-level="A.2" data-path="leopard.html"><a href="leopard.html#recovery-group-powers"><i class="fa fa-check"></i><b>A.2</b> Recovery Group powers</a></li>
+<li class="chapter" data-level="A.3" data-path="leopard.html"><a href="leopard.html#no-public-key-verification"><i class="fa fa-check"></i><b>A.3</b> No public key verification</a></li>
+<li class="chapter" data-level="A.4" data-path="leopard.html"><a href="leopard.html#limited-re-encryption-secrecy"><i class="fa fa-check"></i><b>A.4</b> Limited re-encryption secrecy</a>
+<ul>
+<li class="chapter" data-level="A.4.1" data-path="leopard.html"><a href="leopard.html#revocation"><i class="fa fa-check"></i><b>A.4.1</b> Revocation</a></li>
+<li class="chapter" data-level="A.4.2" data-path="leopard.html"><a href="leopard.html#your-mitigations"><i class="fa fa-check"></i><b>A.4.2</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.5" data-path="leopard.html"><a href="leopard.html#account-password-changes-dont-change-keysets"><i class="fa fa-check"></i><b>A.5</b> Account password changes don’t change keysets</a>
+<ul>
+<li class="chapter" data-level="A.5.1" data-path="leopard.html"><a href="leopard.html#your-mitigations-1"><i class="fa fa-check"></i><b>A.5.1</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.6" data-path="leopard.html"><a href="leopard.html#local-client-account-password-has-control-of-other-account-passwords"><i class="fa fa-check"></i><b>A.6</b> Local client account password has control of other account passwords</a>
+<ul>
+<li class="chapter" data-level="A.6.1" data-path="leopard.html"><a href="leopard.html#mitigations"><i class="fa fa-check"></i><b>A.6.1</b> Mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.7" data-path="leopard.html"><a href="leopard.html#policy-enforcement-mechanisms-not-always-clear-to-user"><i class="fa fa-check"></i><b>A.7</b> Policy enforcement mechanisms not always clear to user</a></li>
+<li class="chapter" data-level="A.8" data-path="leopard.html"><a href="leopard.html#malicious-client"><i class="fa fa-check"></i><b>A.8</b> Malicious client</a></li>
+<li class="chapter" data-level="A.9" data-path="leopard.html"><a href="leopard.html#vulnerability-of-server-data"><i class="fa fa-check"></i><b>A.9</b> Vulnerability of server data</a></li>
+<li class="chapter" data-level="A.10" data-path="leopard.html"><a href="leopard.html#malicious-processes-on-your-devices"><i class="fa fa-check"></i><b>A.10</b> Malicious processes on your devices</a>
+<ul>
+<li class="chapter" data-level="A.10.1" data-path="leopard.html"><a href="leopard.html#malicious-or-undesired-browser-components"><i class="fa fa-check"></i><b>A.10.1</b> Malicious or undesired browser components</a></li>
+<li class="chapter" data-level="A.10.2" data-path="leopard.html"><a href="leopard.html#sec:localKeys"><i class="fa fa-check"></i><b>A.10.2</b> Locally exposed Secret Keys</a></li>
+<li class="chapter" data-level="A.10.3" data-path="leopard.html"><a href="leopard.html#sec:deviceKeys"><i class="fa fa-check"></i><b>A.10.3</b> Device keys used with passkey and single sign-on unlock</a></li>
+</ul></li>
+<li class="chapter" data-level="A.11" data-path="leopard.html"><a href="leopard.html#revealing-who-is-registered"><i class="fa fa-check"></i><b>A.11</b> Revealing who is registered</a></li>
+<li class="chapter" data-level="A.12" data-path="leopard.html"><a href="leopard.html#use-of-email"><i class="fa fa-check"></i><b>A.12</b> Use of email</a></li>
+</ul></li>
+<li class="chapter" data-level="B" data-path="srp.html"><a href="srp.html"><i class="fa fa-check"></i><b>B</b> Appendix B: Secure Remote Password</a>
+<ul>
+<li class="chapter" data-level="B.0.1" data-path="srp.html"><a href="srp.html#registration"><i class="fa fa-check"></i><b>B.0.1</b> Registration</a></li>
+<li class="chapter" data-level="B.0.2" data-path="srp.html"><a href="srp.html#sign-in"><i class="fa fa-check"></i><b>B.0.2</b> Sign-in</a></li>
+<li class="chapter" data-level="B.0.3" data-path="srp.html"><a href="srp.html#sec:strongKDF"><i class="fa fa-check"></i><b>B.0.3</b> With a strong KDF</a></li>
+<li class="chapter" data-level="B.1" data-path="srp.html"><a href="srp.html#srpmath"><i class="fa fa-check"></i><b>B.1</b> The math of SRP</a>
+<ul>
+<li class="chapter" data-level="B.1.1" data-path="srp.html"><a href="srp.html#math-background"><i class="fa fa-check"></i><b>B.1.1</b> Math background</a></li>
+<li class="chapter" data-level="B.1.2" data-path="srp.html"><a href="srp.html#sec:dhe"><i class="fa fa-check"></i><b>B.1.2</b> Diffie-Hellman key exchange</a></li>
+<li class="chapter" data-level="B.1.3" data-path="srp.html"><a href="srp.html#authenticated-key-exchange"><i class="fa fa-check"></i><b>B.1.3</b> Authenticated key exchange</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="C" data-path="mitm.html"><a href="mitm.html"><i class="fa fa-check"></i><b>C</b> Appendix C: Verifying public keys</a>
+<ul>
+<li class="chapter" data-level="C.1" data-path="mitm.html"><a href="mitm.html#types-of-defenses"><i class="fa fa-check"></i><b>C.1</b> Types of defenses</a>
+<ul>
+<li class="chapter" data-level="C.1.1" data-path="mitm.html"><a href="mitm.html#trust-hierarchy"><i class="fa fa-check"></i><b>C.1.1</b> Trust hierarchy</a></li>
+<li class="chapter" data-level="C.1.2" data-path="mitm.html"><a href="mitm.html#user-to-user-verification"><i class="fa fa-check"></i><b>C.1.2</b> User-to-user verification</a></li>
+</ul></li>
+<li class="chapter" data-level="C.2" data-path="mitm.html"><a href="mitm.html#the-problem-remains"><i class="fa fa-check"></i><b>C.2</b> The problem remains</a></li>
+</ul></li>
+<li class="chapter" data-level="" data-path="glossary.html"><a href="glossary.html"><i class="fa fa-check"></i>Glossary</a></li>
+<li class="chapter" data-level="" data-path="changelog.html"><a href="changelog.html"><i class="fa fa-check"></i>Changelog</a></li>
+<li class="chapter" data-level="" data-path="bibliography.html"><a href="bibliography.html"><i class="fa fa-check"></i>Bibliography</a></li>
+<li class="chapter" data-level="" data-path="acknowledgments.html"><a href="acknowledgments.html"><i class="fa fa-check"></i>Acknowledgments</a></li>
+</ul>
+
+      </nav>
+    </div>
+
+    <div class="book-body">
+      <div class="body-inner">
+        <div class="book-header" role="navigation">
+          <h1>
+            <i class="fa fa-circle-o-notch fa-spin"></i><a href="./">1Password Security Design White Paper</a>
+          </h1>
+        </div>
+
+        <div class="page-wrapper" tabindex="-1" role="main">
+          <div class="page-inner">
+
+            <section class="normal" id="section-">
+<div id="leopard" class="section level1 hasAnchor" number="16">
+<h1><span class="header-section-number">A</span> Appendix A: Beware of the leopard<a href="leopard.html#leopard" class="anchor-section" aria-label="Anchor link to header"></a></h1>
+<div class="divStory">
+Beware of the leopard
+</div>
+<div class="infobox">
+<p>“You hadn’t exactly gone out of your way to call attention to them had
+you? I mean like actually telling anyone or anything.”</p>
+<p>“But the plans were on display…”</p>
+<p>“On display? I eventually had to go down to the cellar to find them.”</p>
+<p>“That’s the display department.”</p>
+<p>“With a torch.”</p>
+<p>“Ah, well the lights had probably gone.”</p>
+<p>“So had the stairs.”</p>
+<p>“But look you found the notice didn’t you?”</p>
+<p>“Yes,” said Arthur, “yes, I did. It was on display in the bottom of a
+locked filing cabinet stuck in a disused lavatory with a sign on the
+door saying <em>Beware of the leopard.</em>”<a href="#fn34" class="footnote-ref" id="fnref34"><sup>34</sup></a></p>
+</div>
+<p>This chapter discusses places where the actual security properties of 1Password may not meet user expectations.</p>
+<div id="sec:cryptoHTTPS" class="section level2 hasAnchor" number="16.1">
+<h2><span class="header-section-number">A.1</span> Crypto over HTTPS<a href="leopard.html#sec:cryptoHTTPS" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>1Password offers a web client which provides the same <a class='glossary' title='Data is only encrypted or decrypted locally on the users’ devices with keys that only the end users possess. This protects the data confidentiality and integrity from compromises during transport or remote storage.'>end-to-end (E2E)</a> encryption as when using the native clients. The web client is fetched from our servers as a set of JavaScript files (compiled from TypeScript source) that’s run and executed locally in the user’s browser on their own machine. Although it may appear to users of the web client that our server has the capacity to decrypt user data, all encryption occurs on the user’s machine using keys derived from their <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>. Likewise authentication in the web-client involves the same zero-knowledge authentication scheme described in <a href="modernauth.html#modernauth">4</a>.</p>
+<p>Despite that preservation of <a class='glossary' title='Data is only encrypted or decrypted locally on the users’ devices with keys that only the end users possess. This protects the data confidentiality and integrity from compromises during transport or remote storage.'>end-to-end (E2E)</a> encryption and zero-knowledge authentication, the use and availability of the web client introduces a number of significant risks.</p>
+<ul>
+<li><p><strong>The authenticity and integrity of the web client depends on the integrity of the TLS connection by which it’s delivered.</strong> An attacker capable of tampering with the traffic that delivers the web client could deliver a malicious client to the user.</p></li>
+<li><p><strong>The authenticity and integrity of the web client depends on the security of the host from which it’s delivered.</strong> An attacker capable of changing the web client on the server could deliver a malicious client to the user.</p></li>
+<li><p><strong>The web client runs in a very hostile environment: the web browser.</strong> Some attacks on the browser (like a malicious extension) may be able to capture user secrets. This is discussed further in <a href="leopard.html#crypto-in-the-browser">A.1.1</a>.</p></li>
+<li><p><strong>Without the web-client users would only enter their <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> into native clients and so would be less vulnerable to phishing attacks.</strong></p></li>
+<li><p><strong>The web client creates the false impression for many users that encryption is not end-to-end.</strong> Although this may not have direct security consequences for the user, it may re-enforce unfortunately low expectations of security in general.</p></li>
+</ul>
+<p>User mitigations include:</p>
+<ul>
+<li>Use (code signed) native clients as much as possible.</li>
+<li>Keep browser software up to date</li>
+<li>Create a specific browser profile for using the web-client</li>
+<li>Pay close attention to browser security warnings</li>
+<li>Use only on trusted networks.</li>
+<li>Manually check certificates</li>
+</ul>
+<p>Our mitigations include:</p>
+<ul>
+<li>Use the most recent <a class='glossary' title='The successor to SSL. It puts the “S” in HTTPS.'>TLS</a> version</li>
+<li>Don’t support weak cipher suites (so avoiding many downgrade attacks)</li>
+<li>Use of safe JavaScript constructions.</li>
+<li>Use <a class='glossary' title='Strict Transport Security has the server instruct the client that insecure HTTP is never to be used when talking to the server.'>HSTS</a> (so avoiding HTTPS to HTTP downgrade attacks)</li>
+<li>Pin Certificates (not yet implemented)</li>
+</ul>
+<div class="divWarning">
+Browser warnings
+</div>
+<div class="infobox">
+<p>Always be sure to heed all browser warnings regarding TLS connections.</p>
+</div>
+<div id="crypto-in-the-browser" class="section level3 hasAnchor" number="16.1.1">
+<h3><span class="header-section-number">A.1.1</span> Crypto in the browser<a href="leopard.html#crypto-in-the-browser" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>Running security tools within a browser environment brings its own perils, irrespective of whether it’s delivered over the web. These perils include:</p>
+<ul>
+<li><p>The browser itself is a hostile environment, running processes and content that are neither under your control nor ours. Sandboxing within the browser provides the first line of defense. Structuring our in-browser code to expose only what needs to be exposed is another. Over the past decade, browsers have made enormous improvements in their security and in their isolation of processes, but it still remains a tough environment.</p></li>
+<li><p>JavaScript, the language used within the browser, offers us very limited ability to clear data from memory. Secrets we’d like the client to forget may remain in memory longer than useful.</p></li>
+<li><p>We have a strictly limited ability to use security features of the operating system when operating within the browser. See section <a href="leopard.html#sec:localKeys">A.10.2</a> for how this limits the tools available for protecting the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> when stored locally.</p></li>
+<li><p>There’s a paucity of efficient cryptographic functions available to run in JavaScript. As a consequence, the WebCrypto facilities available in the browsers we support impose a limit on the cryptographic methods we can use. For example, our reliance on PBKDF2 instead of a memory-hard KDF such as Argon2 is a consequence of this.</p></li>
+</ul>
+</div>
+</div>
+<div id="recovery-group-powers" class="section level2 hasAnchor" number="16.2">
+<h2><span class="header-section-number">A.2</span> Recovery Group powers<a href="leopard.html#recovery-group-powers" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>From a cryptographic point of view, the members of a <a class='glossary' title='The 1Password Group that has a copy of the vault keys for vaults that may need to be recovered if account passwords or Secret Keys are lost.'>Recovery Group</a> have access to all the vault keys in that group.<a href="#fn35" class="footnote-ref" id="fnref35"><sup>35</sup></a> Server policy restricts what a member of the Recovery Group can do with that access, but if a <a class='glossary' title='A member of a Recovery Group. See Recovery Group'>Recovery Group member</a> is able to defeat or evade server policy and gain access to an encrypted vault (for example, as cached on someone else’s device) then that Recovery Group member can decrypt the contents of that vault.</p>
+<p>Depending on the nature of the threat to the team’s data and resources an attacker will put into acquiring it, members of the <a class='glossary' title='The 1Password Group that has a copy of the vault keys for vaults that may need to be recovered if account passwords or Secret Keys are lost.'>Recovery Group</a> and their computers may be subject to targeted attacks.</p>
+<div class="divWarning">
+Recovery group members
+</div>
+<div class="infobox">
+<p>Members of the <a class='glossary' title='The 1Password Group that has a copy of the vault keys for vaults that may need to be recovered if account passwords or Secret Keys are lost.'>recovery group</a> must be selected with care and keep their systems secure.</p>
+</div>
+</div>
+<div id="no-public-key-verification" class="section level2 hasAnchor" number="16.3">
+<h2><span class="header-section-number">A.3</span> No public key verification<a href="leopard.html#no-public-key-verification" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>At present there’s no practical method<a href="#fn36" class="footnote-ref" id="fnref36"><sup>36</sup></a> for a user to verify the public key they’re encrypting data to belongs to their intended recipient. As a consequence it would be possible for a malicious or compromised 1Password server to provide dishonest public keys to the user, and run a successful <a class='glossary' title='A Man in the Middle attack has Alice believing she’s encrypting data to Bob, while she’s actually encrypting her data to a malicious actor who then re-encrypts the data to Bob. The typical defense for such an attack is for Alice and Bob to manually verify they’re using the correct public keys for each other. The other approach is to rely on a trusted third party who independently verifies and signs Bob’s public key.'>Man in the Middle (MITM)</a> attack. Under such an attack, it would be possible for the 1Password server to acquire vault encryption keys with little ability for users to detect or prevent it</p>
+<p>This is discussed in greater detail in <a href="mitm.html#mitm">“Appendix C.”</a></p>
+</div>
+<div id="limited-re-encryption-secrecy" class="section level2 hasAnchor" number="16.4">
+<h2><span class="header-section-number">A.4</span> Limited re-encryption secrecy<a href="leopard.html#limited-re-encryption-secrecy" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<div id="revocation" class="section level3 hasAnchor" number="16.4.1">
+<h3><span class="header-section-number">A.4.1</span> Revocation<a href="leopard.html#revocation" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>Removing someone from a vault, group, or team isn’t cryptographically enforced. Cryptographic keys are not changed.</p>
+<p>A member of a vault has access to the vault key, as a copy of the vault key is encrypted with that member’s public key. When someone is removed from a vault, that copy of the vault key is removed from the server, and the server will no longer allow that member to get a copy of the vault data.</p>
+<p>If prior to being removed from a vault the person makes a copy of the vault key which they store locally, they will be able to decrypt all future data if they find a way to obtain the encrypted vault data. This is illustrated in <a href="leopard.html#story10">Story 10</a>. Note this requires the attacker both plan ahead and somehow acquire updated data.</p>
+<div id="story10" class="divStory">
+Story 10: Mr. Talk is not a good team player
+</div>
+<div class="infobox">
+<p><strong>[Monday]</strong> Patty (a dog and Team administrator) adds Mr. Talk (neighbor’s cat) to the Squirrel Watchers vault. Molly (another dog) is already a member.</p>
+<p><strong>[Tuesday]</strong> Mr. Talk makes a copy of all of his keys and stores that copy separately from 1Password.</p>
+<p><strong>[Wednesday]</strong> Mr. Talk is discovered stealing Patty’s toys and is expelled from the vault (and from the team).</p>
+<p><strong>[Thursday]</strong> Patty updates the Squirrel Watchers vault with the new hiding place for her toys.</p>
+<p><strong>[Friday]</strong> Mr. Talk manages to steal a cached copy of the encrypted vault from Molly’s poorly secured device. (Molly still hasn’t learned the importance of using a device passcode on her phone.)</p>
+<p><strong>[Saturday]</strong> Mr. Talk decrypts the data he stole on Friday using the keys he saved on Tuesday, and is able to see the hiding place Patty added on Thursday.</p>
+<p>To launch the attack, Mr. Talk needed to acquire a copy of the encrypted data the server would no longer provide, and he needed to anticipate being fired.</p>
+</div>
+</div>
+<div id="your-mitigations" class="section level3 hasAnchor" number="16.4.2">
+<h3><span class="header-section-number">A.4.2</span> Your mitigations<a href="leopard.html#your-mitigations" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>If you feel that someone removed from a vault may have a store of their vault keys and will somehow be able to acquire new encrypted vault data despite being denied access by server policy, then it’s possible to create a new vault (which will have a new key), and move items from the old vault to the new one. Someone revoked from a vault won’t be able to decrypt the data in the new vault no matter what encrypted data they gain access to.</p>
+</div>
+</div>
+<div id="account-password-changes-dont-change-keysets" class="section level2 hasAnchor" number="16.5">
+<h2><span class="header-section-number">A.5</span> Account password changes don’t change keysets<a href="leopard.html#account-password-changes-dont-change-keysets" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>A change of <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> or <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> does not create a new personal keyset, it only changes the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>Account Unlock Key (AUK)</a> with which the personal <a class='glossary' title='How collections of keys and their metadata are organized within 1Password.'>key set</a> is encrypted. Thus an attacker who gains access to a victim’s old personal key set can decrypt it with an old account password and old Secret Key, and use that to decrypt data that was created by the victim after the change of the account password.</p>
+<div id="your-mitigations-1" class="section level3 hasAnchor" number="16.5.1">
+<h3><span class="header-section-number">A.5.1</span> Your mitigations<a href="leopard.html#your-mitigations-1" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>A user’s personal keyset may be replaced by voluntarily requesting their account be recovered. This will create a new personal keyset which will be used to re-encrypt all the vault keys and other items which were encrypted with the previous personal keyset.</p>
+</div>
+</div>
+<div id="local-client-account-password-has-control-of-other-account-passwords" class="section level2 hasAnchor" number="16.6">
+<h2><span class="header-section-number">A.6</span> Local client account password has control of other account passwords<a href="leopard.html#local-client-account-password-has-control-of-other-account-passwords" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>Most 1Password client applications can handle multiple 1Password user accounts. It’s common, perhaps even typical, for an individual to have a 1Password membership as part of the business or organization they’re a member of, as well as being a member of their own 1Password family.</p>
+<p>Most 1Password clients are designed to unlock all accounts when unlocked. The account that will locally contain the encrypted secrets
+to unlock the others is called the <a class='glossary' title='A local client may distinguish a single account it knows about as the primary account. Unlocking this account may automatically unlock secondary accounts the client may handle. See also secondary account'>primary account</a>. It’s (for most clients) the first account the client signed into. The precise details of how this is handled can vary from client to client, but in essence, the secrets needed to unlock a secondary account (the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a> and <a class='glossary' title='The client secret, 𝑥, used by the Secure Remote Password (SRP) protocol. Derived from the user’s account password and Secret Key.'>SRP-<span class="math inline">\(x\)</span></a>) are encrypted with (keys encrypted by) the AUK of the primary account.</p>
+<p>The security risk is that account password policies that may be set and expected by an organization won’t be followed in practice if the
+account with such policies is a <a class='glossary' title='An account that a client may unlocked automatically when the primary account is unlocked. See also primary account'>secondary account</a> for a particular client.</p>
+<div id="story11" class="divStory">
+Story 11: A weak primary account password unlocks a stronger account
+</div>
+<div class="infobox">
+<p>Molly (a dog) is a member of a business account for Rabbit Chasers Inc., and Patty, an administrator for Rabbit Chasers Inc., has used the features of a business account to set very strict account password requirements for all of its members. So Molly’s account password for that account does conform to that account’s requirements. Patty is naturally under the impression that Molly must use the strong account password when unlocking her work account.</p>
+<p>But Molly is also a member of a family account, and in her family account she has set her password to be <code>squirrelrabbit</code>, which is easily guessable by anyone familiar with Molly. Furthermore, Molly set up her family account first when she set up 1Password on her device. She added her work account later.</p>
+<p>When she first added her work account to that device, she had to enter the strong account password for that account, but every time she unlocks 1Password thereafter, she unlocks both accounts with <code>squirrelrabbit</code>.</p>
+<p>One day the evil neighborhood cat, Mr. Talk, steals Molly’s device. Mr. Talk can guess Molly’s weak family account account password, and unlocking 1Password on Molly’s computer can now unlock Molly’s work account as well.</p>
+<p>Patty is not amused.</p>
+</div>
+<p>An additional problem with this scheme is that users are more likely to forget they have a separate account password for their secondary
+account(s), and are more likely to forget those passwords.</p>
+<div id="mitigations" class="section level3 hasAnchor" number="16.6.1">
+<h3><span class="header-section-number">A.6.1</span> Mitigations<a href="leopard.html#mitigations" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>There are no mitigations for users of 1Password 7 and earlier other than risk awareness. 1Password 8 periodically requests the user’s
+account password by default.</p>
+</div>
+</div>
+<div id="policy-enforcement-mechanisms-not-always-clear-to-user" class="section level2 hasAnchor" number="16.7">
+<h2><span class="header-section-number">A.7</span> Policy enforcement mechanisms not always clear to user<a href="leopard.html#policy-enforcement-mechanisms-not-always-clear-to-user" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>Readers of this document may recall from <a href="access-control.html#access-control">“Access control enforcement”</a> that some controls (such as the ability to decrypt and read the contents of a vault) are enforced through cryptography, while others are enforced only through the client user interface (such as the ability to print the contents of a vault they have use access to). The security properties of those differ enormously. In particular, it’s very easy to evade policy that is only enforced by the client.</p>
+<p>Many team administrators will not have read this document or other places where the distinction is documented. Therefore, there’s a potential for them to have an incorrect impression of the security consequences of their decisions.</p>
+</div>
+<div id="malicious-client" class="section level2 hasAnchor" number="16.8">
+<h2><span class="header-section-number">A.8</span> Malicious client<a href="leopard.html#malicious-client" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>There’s no technical barrier to a malicious client, which might generate bad keys or send keys to some third party.</p>
+</div>
+<div id="vulnerability-of-server-data" class="section level2 hasAnchor" number="16.9">
+<h2><span class="header-section-number">A.9</span> Vulnerability of server data<a href="leopard.html#vulnerability-of-server-data" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>It should be assumed that governments, whether through law enforcement demands or other means, may gain access to all the data we have
+or our data hosting provider has. This may happen with or without our knowledge or consent. The same is true for non-governmental entities which may somehow obtain server data. Your protection is to have a good <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and to keep your <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> secure.</p>
+<p>Although we may resist law enforcement requests, we obey the laws of the jurisdictions in which we are obliged to do so.</p>
+</div>
+<div id="malicious-processes-on-your-devices" class="section level2 hasAnchor" number="16.10">
+<h2><span class="header-section-number">A.10</span> Malicious processes on your devices<a href="leopard.html#malicious-processes-on-your-devices" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>Malware that can inspect the memory of your computer or device when the 1Password client has unlocked your data will be able to extract secrets from the 1Password process. Malware that can install a malicious version of 1Password and have you execute it will also be able to extract your secrets. After malware running on a system has gained sufficient power, there’s no way in principle to protect other processes running on that system.</p>
+<p>But we must also consider the threat posed by less powerful malware, and in particular with respect to the exposure of the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>.</p>
+<div id="malicious-or-undesired-browser-components" class="section level3 hasAnchor" number="16.10.1">
+<h3><span class="header-section-number">A.10.1</span> Malicious or undesired browser components<a href="leopard.html#malicious-or-undesired-browser-components" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>When you use 1Password in your web browser, browser extensions – even built-in browser features – can expose the data you fill into your browser. This can have explicit malicious intent, like when a browser extension monitors the data input into text fields to spy on you. Sometimes this can be accidental, such as when browser extensions submit the data you put into text fields to perform autocompletion features, perform translation, or store or analyze the text you’re typing in some other way.</p>
+<p>The 1Password browser extension tries to avoid filling certain form fields if it suspects data may be submitted elsewhere; however, you
+should use caution when selecting your web browser and extensions, and attempt to understand if and when they send text you enter other places.</p>
+</div>
+<div id="sec:localKeys" class="section level3 hasAnchor" number="16.10.2">
+<h3><span class="header-section-number">A.10.2</span> Locally exposed Secret Keys<a href="leopard.html#sec:localKeys" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>After a client is enrolled, it will store a copy of the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> on the local device. Because the Secret Key must be used to derive the user’s <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a> it cannot be encrypted by the same AUK or by any key directly or indirectly encrypted with the AUK. Depending on client and client platform, the Secret Key may<a href="#fn37" class="footnote-ref" id="fnref37"><sup>37</sup></a> be stored on the device using some of the protections offered by the operating system and lightly obfuscated. But it should be assumed that an attacker who gains read access to the user’s disk will acquire the Secret Key.</p>
+<p>Recall from the discussion of <a class='glossary' title='Two different secrets, each with their own security properties, are used in deriving encryption and authentication keys. In 1Password, these are your account password (something you know) and your Secret Key (a high-entropy secret you have on your device).'>two-secret key derivation (2SKD)</a> in <a href="modernauth.html#sec:2SKD">4.1.3</a> that the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> is designed so an attacker won’t be in a position to launch an offline password-guessing attack if they capture data from our server alone. That is, the Secret Key provides extremely strong protection for users if <strong>our</strong> servers were to be breached. The Secret Key plays no security role if the <strong>user’s</strong> system is breached. In the latter situation, the strength of the user’s <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a><a href="#fn38" class="footnote-ref" id="fnref38"><sup>38</sup></a> determines whether an attacker will be able to decrypt data captured from the user’s device.</p>
+</div>
+<div id="sec:deviceKeys" class="section level3 hasAnchor" number="16.10.3">
+<h3><span class="header-section-number">A.10.3</span> Device keys used with passkey and single sign-on unlock<a href="leopard.html#sec:deviceKeys" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>A client enrolled using <a class='glossary' title='A credential with which you authenticate to a server. Unlike a password, the passkey isn’t sent to the server to authenticate. Instead, the passkey signs a challenge the server provides to your device. This process is also known as WebAuthn or FIDO2 authentication.'>passkey</a> or <a class='glossary' title='In the setting of a company or another organization, when you are provided with a single set of username, password, or other authentication factors to log in to services that company or organization provides for you. It’s one of the methods that can be used to sign in to 1Password.'>SSO</a> unlock (described in <a href="passkeySSO.html#passkeySSO">“Unlock with a passkey or SSO”</a>) doesn’t store a <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> locally. Instead it stores a <a class='glossary' title='A cryptographic key stored on a 1Password client that uses single sign-on (SSO). It’s used to decrypt the credential bundle it receives from the server upon successful sign in. See SSO'>device key</a> locally. The combination of a device key and successful passkey or SSO authentication is required to unlock a 1Password account on those devices.</p>
+<p>On iOS, macOS, and Android devices, we protect the <a class='glossary' title='A cryptographic key stored on a 1Password client that uses single sign-on (SSO). It’s used to decrypt the credential bundle it receives from the server upon successful sign in. See SSO'>device key</a> with the device’s hardware security features; other devices don’t reliably allow protecting an encryption key with hardware, nor do web browsers on any platform. In cases which we can’t store the device key protected by a hardware mechanism, we store it (lightly obfuscated) on the computer’s storage drive. This means malware could read the device key and can use it to attempt to access a user’s 1Password account.</p>
+<p>If Oscar runs malware on Alice’s computer when she uses <a class='glossary' title='In the setting of a company or another organization, when you are provided with a single set of username, password, or other authentication factors to log in to services that company or organization provides for you. It’s one of the methods that can be used to sign in to 1Password.'>SSO</a> to unlock 1Password, he can steal both Alice’s device key and Alice’s SSO session cookies from her browser’s cache. Oscar can use the combination of items to unlock Alice’s 1Password account. Similarly, if Oscar has access to the hard drive contents from Alice’s computer (like when he gains access to a backup of Alice’s computer or performs forensic analysis on her computer) he can copy this information and unlock Alice’s 1Password account, as well.</p>
+<p>Devices that unlock with <a class='glossary' title='A credential with which you authenticate to a server. Unlike a password, the passkey isn’t sent to the server to authenticate. Instead, the passkey signs a challenge the server provides to your device. This process is also known as WebAuthn or FIDO2 authentication.'>passkeys</a> store their passkey unlocking information in their operating system’s passkey provider. We rely on the operating system and device manufacturer to prevent malware from being able to steal the authentiction information for passkeys. We don’t use session information stored in the web browser to unlock accounts with passkeys.</p>
+<p>Because of the risks of the device key and single sign-on authorization data sitting together on a disk we only offer <a class='glossary' title='In the setting of a company or another organization, when you are provided with a single set of username, password, or other authentication factors to log in to services that company or organization provides for you. It’s one of the methods that can be used to sign in to 1Password.'>SSO</a> to businesses that can weigh the risks and rewards of using SSO with device security aspects. Businesses using SSO can configure the details of devices used, the single sign-on provider used, and the way single sign-on is used within 1Password to fit their individual security needs.</p>
+</div>
+</div>
+<div id="revealing-who-is-registered" class="section level2 hasAnchor" number="16.11">
+<h2><span class="header-section-number">A.11</span> Revealing who is registered<a href="leopard.html#revealing-who-is-registered" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>If Oscar suspects that <code>alice@company.example</code> is a registered user in a particular Team or Family, it’s possible for him to submit requests to our server that would allow him to confirm an email address is or isn’t a member of a team. Note that this does <strong>not</strong> provide a mechanism for enumerating registered users, it’s only a mechanism that confirms whether or not a particular user is registered. Oscar must first make his guess and test that guess.</p>
+<p>We attempted to prevent this leak of information and believed we had. A design error (that’s difficult to fix) means we must withdraw our claim of that protection.</p>
+</div>
+<div id="use-of-email" class="section level2 hasAnchor" number="16.12">
+<h2><span class="header-section-number">A.12</span> Use of email<a href="leopard.html#use-of-email" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>Both invitations and recovery messages are sent by email. It’s very important that when administrators or <a class='glossary' title='A member of a Recovery Group. See Recovery Group'>Recovery Group members</a> take actions that result in sensitive email being sent, they check with the recipients through means other than email that the messages were received and acted upon.</p>
+
+</div>
+</div>
+<div class="footnotes">
+<hr />
+<ol start="34">
+<li id="fn34"><p><span class="citation">Adams (<a href="bibliography.html#ref-hhg79">1979</a>)</span><a href="leopard.html#fnref34" class="footnote-back">↩︎</a></p></li>
+<li id="fn35"><p>1Password Teams accounts also have a permission called “Manage All Groups” with equivalent cryptographic access, which is only given to the Administrators and Owners groups by default.<a href="leopard.html#fnref35" class="footnote-back">↩︎</a></p></li>
+<li id="fn36"><p>An impractical method for the users to run 1Password in a debugger to inspect the crucial values of the public keys themselves. Additionally, the 1Password command line utility (as of version 0.21), has an undocumented method to display public keys and fingerprints of users.<a href="leopard.html#fnref36" class="footnote-back">↩︎</a></p></li>
+<li id="fn37"><p>We’re deliberately vague about this, as practice may change rapidly from version to version, including different behaviors on different operating system versions.<a href="leopard.html#fnref37" class="footnote-back">↩︎</a></p></li>
+<li id="fn38"><p>The slow hashing (described in <a href="deepKeys.html#slow-hashing">8.2.4</a>) in our key derivation function goes some way to increase the work that an attacker must do to verify account password guesses from data captured from the user, but it cannot substitute a strong account password.<a href="leopard.html#fnref38" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+<a href="infra.html" class="navigation navigation-prev " aria-label="Previous page"><i class="fa fa-angle-left"></i></a>
+<a href="srp.html" class="navigation navigation-next " aria-label="Next page"><i class="fa fa-angle-right"></i></a>
+    </div>
+  </div>
+<script src="libs/gitbook-2.6.7/js/app.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/clipboard.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-search.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-sharing.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-fontsettings.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-bookdown.js"></script>
+<script src="libs/gitbook-2.6.7/js/jquery.highlight.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-clipboard.js"></script>
+<script>
+gitbook.require(["gitbook"], function(gitbook) {
+gitbook.start({
+  "sharing": {
+    "github": false,
+    "facebook": false,
+    "twitter": false,
+    "linkedin": false,
+    "weibo": false,
+    "instapaper": false,
+    "vk": false,
+    "whatsapp": false,
+    "all": ["facebook", "twitter", "linkedin", "weibo", "instapaper"]
+  },
+  "fontsettings": {
+    "theme": "white",
+    "family": "sans",
+    "size": 2
+  },
+  "edit": {
+    "link": null,
+    "text": null
+  },
+  "history": {
+    "link": null,
+    "text": null
+  },
+  "view": {
+    "link": null,
+    "text": null
+  },
+  "download": ["1Password_Security_Design.pdf"],
+  "search": {
+    "engine": "fuse",
+    "options": null
+  },
+  "toc": {
+    "collapse": "none"
+  }
+});
+});
+</script>
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    var src = "true";
+    if (src === "" || src === "true") src = "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/latest.js?config=TeX-MML-AM_CHTML";
+    if (location.protocol !== "file:")
+      if (/^https?:/.test(src))
+        src = src.replace(/^https?:/, '');
+    script.src = src;
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+</body>
+
+</html>

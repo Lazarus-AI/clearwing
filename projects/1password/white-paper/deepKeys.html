@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+<head>
+
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>8 A deeper look at keys | 1Password Security Design White Paper</title>
+  <meta name="description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="generator" content="bookdown 0.46 and GitBook 2.6.7" />
+
+  <meta property="og:title" content="8 A deeper look at keys | 1Password Security Design White Paper" />
+  <meta property="og:type" content="book" />
+  <meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+  <meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="github-repo" content="https://github.com/agilebits/security-design/" />
+
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="8 A deeper look at keys | 1Password Security Design White Paper" />
+  
+  <meta name="twitter:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="twitter:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  
+  <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+<link rel="prev" href="share.html"/>
+<link rel="next" href="passkeySSO.html"/>
+<script src="libs/jquery-3.6.0/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@6.4.6/dist/fuse.min.js"></script>
+<link href="libs/gitbook-2.6.7/css/style.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-table.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-bookdown.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-highlight.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-search.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-fontsettings.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-clipboard.css" rel="stylesheet" />
+
+
+
+
+
+
+
+
+<link href="libs/anchor-sections-1.1.0/anchor-sections.css" rel="stylesheet" />
+<link href="libs/anchor-sections-1.1.0/anchor-sections-hash.css" rel="stylesheet" />
+<script src="libs/anchor-sections-1.1.0/anchor-sections.js"></script>
+<script>
+// Fix glossary tooltips: create tooltip span and remove title to prevent browser's native delayed tooltip
+function fixGlossaryTooltips() {
+  document.querySelectorAll('a.glossary[title]').forEach(function(el) {
+    // Skip if already processed
+    if (el.querySelector('.glossary-tooltip')) return;
+    
+    var definition = el.getAttribute('title');
+    if (definition) {
+      // Create tooltip span
+      var tooltip = document.createElement('span');
+      tooltip.className = 'glossary-tooltip';
+      tooltip.textContent = definition;
+      el.appendChild(tooltip);
+      
+      // Remove title to prevent browser's native tooltip
+      el.removeAttribute('title');
+    }
+  });
+}
+
+// Run on initial load
+document.addEventListener('DOMContentLoaded', fixGlossaryTooltips);
+
+// Also run when gitbook navigates to a new page (handles AJAX page loads)
+document.addEventListener('DOMContentLoaded', function() {
+  if (typeof gitbook !== 'undefined' && gitbook.events) {
+    gitbook.events.bind('page.change', fixGlossaryTooltips);
+  }
+});
+
+// Fallback: watch for DOM changes and fix any new glossary elements
+var glossaryObserver = new MutationObserver(function(mutations) {
+  var shouldFix = false;
+  mutations.forEach(function(mutation) {
+    if (mutation.addedNodes.length) shouldFix = true;
+  });
+  if (shouldFix) fixGlossaryTooltips();
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  glossaryObserver.observe(document.body, { childList: true, subtree: true });
+});
+</script>
+<link rel="canonical" href="https://1pw.ca/whitepaper/" />
+
+<meta property="og:url" content="https://1pw.ca/whitepaper/" />
+<meta property="og:title" content="8 A deeper look at keys | 1Password Security Design White Paper" />
+<meta property="og:site_name" content="1password.com" />
+<meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+<meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+<style type="text/css">
+  
+  div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+</style>
+<style type="text/css">
+/* Used with Pandoc 2.11+ new --citeproc when CSL is used */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}
+</style>
+
+<link rel="stylesheet" href="assets/style.css" type="text/css" />
+</head>
+
+<body>
+
+
+
+  <div class="book without-animation with-summary font-size-2 font-family-1" data-basepath=".">
+
+    <div class="book-summary">
+      <nav role="navigation">
+
+<ul class="summary">
+<li class="chapter" data-level="" data-path="index.html"><a href="index.html"><i class="fa fa-check"></i>1Password Memberships</a></li>
+<li class="chapter" data-level="1" data-path="key-security-features.html"><a href="key-security-features.html"><i class="fa fa-check"></i><b>1</b> Key security features</a></li>
+<li class="chapter" data-level="2" data-path="principles.html"><a href="principles.html"><i class="fa fa-check"></i><b>2</b> Principles</a></li>
+<li class="chapter" data-level="3" data-path="apsk.html"><a href="apsk.html"><i class="fa fa-check"></i><b>3</b> Account password and Secret Key</a>
+<ul>
+<li class="chapter" data-level="3.1" data-path="apsk.html"><a href="apsk.html#account-password"><i class="fa fa-check"></i><b>3.1</b> Account password</a></li>
+<li class="chapter" data-level="3.2" data-path="apsk.html"><a href="apsk.html#sec:sk"><i class="fa fa-check"></i><b>3.2</b> Secret Key</a></li>
+<li class="chapter" data-level="3.3" data-path="apsk.html"><a href="apsk.html#emergency-kit"><i class="fa fa-check"></i><b>3.3</b> Emergency Kit</a></li>
+</ul></li>
+<li class="chapter" data-level="4" data-path="modernauth.html"><a href="modernauth.html"><i class="fa fa-check"></i><b>4</b> A modern approach to authentication</a>
+<ul>
+<li class="chapter" data-level="4.1" data-path="modernauth.html"><a href="modernauth.html#what-we-want-from-authentication"><i class="fa fa-check"></i><b>4.1</b> What we want from authentication</a>
+<ul>
+<li class="chapter" data-level="4.1.1" data-path="modernauth.html"><a href="modernauth.html#traditional-authentication"><i class="fa fa-check"></i><b>4.1.1</b> Traditional authentication</a></li>
+<li class="chapter" data-level="4.1.2" data-path="modernauth.html"><a href="modernauth.html#password-authenticated-key-exchange"><i class="fa fa-check"></i><b>4.1.2</b> Password-Authenticated Key Exchange</a></li>
+<li class="chapter" data-level="4.1.3" data-path="modernauth.html"><a href="modernauth.html#sec:2SKD"><i class="fa fa-check"></i><b>4.1.3</b> Making verifiers uncrackable with 2SKD</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="5" data-path="secureItems.html"><a href="secureItems.html"><i class="fa fa-check"></i><b>5</b> How vault items are secured</a>
+<ul>
+<li class="chapter" data-level="5.1" data-path="secureItems.html"><a href="secureItems.html#key-derivation-overview"><i class="fa fa-check"></i><b>5.1</b> Key derivation overview</a></li>
+<li class="chapter" data-level="5.2" data-path="secureItems.html"><a href="secureItems.html#a-first-look-at-key-sets"><i class="fa fa-check"></i><b>5.2</b> A first look at key sets</a>
+<ul>
+<li class="chapter" data-level="5.2.1" data-path="secureItems.html"><a href="secureItems.html#flexible-yet-firm"><i class="fa fa-check"></i><b>5.2.1</b> Flexible, yet firm</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="6" data-path="sharedVaults.html"><a href="sharedVaults.html"><i class="fa fa-check"></i><b>6</b> How vaults are shared securely</a>
+<ul>
+<li class="chapter" data-level="6.1" data-path="sharedVaults.html"><a href="sharedVaults.html#getting-the-message-to-the-right-people"><i class="fa fa-check"></i><b>6.1</b> Getting the message (to the right people)</a></li>
+</ul></li>
+<li class="chapter" data-level="7" data-path="share.html"><a href="share.html"><i class="fa fa-check"></i><b>7</b> How items are shared with anyone</a>
+<ul>
+<li class="chapter" data-level="7.1" data-path="share.html"><a href="share.html#overview"><i class="fa fa-check"></i><b>7.1</b> Overview</a></li>
+<li class="chapter" data-level="7.2" data-path="share.html"><a href="share.html#password-client"><i class="fa fa-check"></i><b>7.2</b> 1Password client</a>
+<ul>
+<li class="chapter" data-level="7.2.1" data-path="share.html"><a href="share.html#making-a-share-link"><i class="fa fa-check"></i><b>7.2.1</b> Making a share link</a></li>
+<li class="chapter" data-level="7.2.2" data-path="share.html"><a href="share.html#clients-first-steps"><i class="fa fa-check"></i><b>7.2.2</b> Client’s first steps</a></li>
+<li class="chapter" data-level="7.2.3" data-path="share.html"><a href="share.html#encryption-and-key-generation"><i class="fa fa-check"></i><b>7.2.3</b> Encryption and key generation</a></li>
+<li class="chapter" data-level="7.2.4" data-path="share.html"><a href="share.html#uploading-the-share"><i class="fa fa-check"></i><b>7.2.4</b> Uploading the share</a></li>
+<li class="chapter" data-level="7.2.5" data-path="share.html"><a href="share.html#sharing-the-share-link"><i class="fa fa-check"></i><b>7.2.5</b> Sharing the share link</a></li>
+</ul></li>
+<li class="chapter" data-level="7.3" data-path="share.html"><a href="share.html#server-to-server"><i class="fa fa-check"></i><b>7.3</b> Server to server</a>
+<ul>
+<li class="chapter" data-level="7.3.1" data-path="share.html"><a href="share.html#audit-and-status-queries"><i class="fa fa-check"></i><b>7.3.1</b> Audit and status queries</a></li>
+</ul></li>
+<li class="chapter" data-level="7.4" data-path="share.html"><a href="share.html#share-pickup"><i class="fa fa-check"></i><b>7.4</b> Share pickup</a>
+<ul>
+<li class="chapter" data-level="7.4.1" data-path="share.html"><a href="share.html#additional-authentication"><i class="fa fa-check"></i><b>7.4.1</b> Additional authentication</a></li>
+<li class="chapter" data-level="7.4.2" data-path="share.html"><a href="share.html#client-analytics"><i class="fa fa-check"></i><b>7.4.2</b> Client analytics</a></li>
+</ul></li>
+<li class="chapter" data-level="7.5" data-path="share.html"><a href="share.html#caveats"><i class="fa fa-check"></i><b>7.5</b> Caveats</a></li>
+</ul></li>
+<li class="chapter" data-level="8" data-path="deepKeys.html"><a href="deepKeys.html"><i class="fa fa-check"></i><b>8</b> A deeper look at keys</a>
+<ul>
+<li class="chapter" data-level="8.1" data-path="deepKeys.html"><a href="deepKeys.html#key-creation"><i class="fa fa-check"></i><b>8.1</b> Key creation</a></li>
+<li class="chapter" data-level="8.2" data-path="deepKeys.html"><a href="deepKeys.html#sec:keyderiv"><i class="fa fa-check"></i><b>8.2</b> Key derivation</a>
+<ul>
+<li class="chapter" data-level="8.2.1" data-path="deepKeys.html"><a href="deepKeys.html#deriving-two-keys-from-two-secrets"><i class="fa fa-check"></i><b>8.2.1</b> Deriving two keys from two secrets</a></li>
+<li class="chapter" data-level="8.2.2" data-path="deepKeys.html"><a href="deepKeys.html#preprocessing-the-account-password"><i class="fa fa-check"></i><b>8.2.2</b> Preprocessing the account password</a></li>
+<li class="chapter" data-level="8.2.3" data-path="deepKeys.html"><a href="deepKeys.html#preparing-the-salt"><i class="fa fa-check"></i><b>8.2.3</b> Preparing the salt</a></li>
+<li class="chapter" data-level="8.2.4" data-path="deepKeys.html"><a href="deepKeys.html#slow-hashing"><i class="fa fa-check"></i><b>8.2.4</b> Slow hashing</a></li>
+<li class="chapter" data-level="8.2.5" data-path="deepKeys.html"><a href="deepKeys.html#combining-with-the-secret-key"><i class="fa fa-check"></i><b>8.2.5</b> Combining with the Secret Key</a></li>
+<li class="chapter" data-level="8.2.6" data-path="deepKeys.html"><a href="deepKeys.html#deriving-the-authentication-key"><i class="fa fa-check"></i><b>8.2.6</b> Deriving the authentication key</a></li>
+</ul></li>
+<li class="chapter" data-level="8.3" data-path="deepKeys.html"><a href="deepKeys.html#initial-sign-up"><i class="fa fa-check"></i><b>8.3</b> Initial sign-up</a>
+<ul>
+<li class="chapter" data-level="8.3.1" data-path="deepKeys.html"><a href="deepKeys.html#protecting-email-invitations"><i class="fa fa-check"></i><b>8.3.1</b> Protecting email invitations</a></li>
+</ul></li>
+<li class="chapter" data-level="8.4" data-path="deepKeys.html"><a href="deepKeys.html#enrolling-a-new-client"><i class="fa fa-check"></i><b>8.4</b> Enrolling a new client</a></li>
+<li class="chapter" data-level="8.5" data-path="deepKeys.html"><a href="deepKeys.html#normal-unlock-and-sign-in"><i class="fa fa-check"></i><b>8.5</b> Normal unlock and sign-in</a></li>
+</ul></li>
+<li class="chapter" data-level="9" data-path="passkeySSO.html"><a href="passkeySSO.html"><i class="fa fa-check"></i><b>9</b> Unlock with a passkey or single sign-on</a>
+<ul>
+<li class="chapter" data-level="9.1" data-path="passkeySSO.html"><a href="passkeySSO.html#unlocking-without-an-account-password"><i class="fa fa-check"></i><b>9.1</b> Unlocking without an account password</a>
+<ul>
+<li class="chapter" data-level="9.1.1" data-path="passkeySSO.html"><a href="passkeySSO.html#sec:authCred"><i class="fa fa-check"></i><b>9.1.1</b> Authorization and the credential bundle</a></li>
+</ul></li>
+<li class="chapter" data-level="9.2" data-path="passkeySSO.html"><a href="passkeySSO.html#linked-apps-and-browsers"><i class="fa fa-check"></i><b>9.2</b> Linked apps and browsers</a></li>
+<li class="chapter" data-level="9.3" data-path="passkeySSO.html"><a href="passkeySSO.html#linking-other-devices"><i class="fa fa-check"></i><b>9.3</b> Linking other devices</a></li>
+<li class="chapter" data-level="9.4" data-path="passkeySSO.html"><a href="passkeySSO.html#quick-on-device-access-with-biometrics"><i class="fa fa-check"></i><b>9.4</b> Quick on-device access with biometrics</a></li>
+</ul></li>
+<li class="chapter" data-level="10" data-path="revoke-access.html"><a href="revoke-access.html"><i class="fa fa-check"></i><b>10</b> Revoking access</a></li>
+<li class="chapter" data-level="11" data-path="access-control.html"><a href="access-control.html"><i class="fa fa-check"></i><b>11</b> Access control enforcement</a>
+<ul>
+<li class="chapter" data-level="11.1" data-path="access-control.html"><a href="access-control.html#cryptographically-enforced-controls"><i class="fa fa-check"></i><b>11.1</b> Cryptographically enforced controls</a></li>
+<li class="chapter" data-level="11.2" data-path="access-control.html"><a href="access-control.html#server-enforced-controls"><i class="fa fa-check"></i><b>11.2</b> Server-enforced controls</a></li>
+<li class="chapter" data-level="11.3" data-path="access-control.html"><a href="access-control.html#client-enforced-controls"><i class="fa fa-check"></i><b>11.3</b> Client-enforced controls</a>
+<ul>
+<li class="chapter" data-level="11.3.1" data-path="access-control.html"><a href="access-control.html#controls-enforced-by-client-policy"><i class="fa fa-check"></i><b>11.3.1</b> Controls enforced by client policy</a></li>
+</ul></li>
+<li class="chapter" data-level="11.4" data-path="access-control.html"><a href="access-control.html#multiple-layers-of-enforcement"><i class="fa fa-check"></i><b>11.4</b> Multiple layers of enforcement</a></li>
+</ul></li>
+<li class="chapter" data-level="12" data-path="restore.html"><a href="restore.html"><i class="fa fa-check"></i><b>12</b> Restoring a user’s access to a vault</a>
+<ul>
+<li class="chapter" data-level="12.1" data-path="restore.html"><a href="restore.html#overview-of-groups"><i class="fa fa-check"></i><b>12.1</b> Overview of groups</a></li>
+<li class="chapter" data-level="12.2" data-path="restore.html"><a href="restore.html#recovery-groups"><i class="fa fa-check"></i><b>12.2</b> Recovery groups</a></li>
+<li class="chapter" data-level="12.3" data-path="restore.html"><a href="restore.html#implicit-sharing"><i class="fa fa-check"></i><b>12.3</b> Implicit sharing</a></li>
+<li class="chapter" data-level="12.4" data-path="restore.html"><a href="restore.html#protecting-vaults-from-recovery-group-members"><i class="fa fa-check"></i><b>12.4</b> Protecting vaults from recovery group members</a></li>
+<li class="chapter" data-level="12.5" data-path="restore.html"><a href="restore.html#recovery-risks"><i class="fa fa-check"></i><b>12.5</b> Recovery risks</a></li>
+<li class="chapter" data-level="12.6" data-path="restore.html"><a href="restore.html#recovery-keys"><i class="fa fa-check"></i><b>12.6</b> Recovery keys</a>
+<ul>
+<li class="chapter" data-level="12.6.1" data-path="restore.html"><a href="restore.html#recovery-key-generation"><i class="fa fa-check"></i><b>12.6.1</b> Recovery key generation</a></li>
+<li class="chapter" data-level="12.6.2" data-path="restore.html"><a href="restore.html#recovery-key-authentication"><i class="fa fa-check"></i><b>12.6.2</b> Recovery key authentication</a></li>
+<li class="chapter" data-level="12.6.3" data-path="restore.html"><a href="restore.html#recovery-key-policies"><i class="fa fa-check"></i><b>12.6.3</b> Recovery key policies</a></li>
+<li class="chapter" data-level="12.6.4" data-path="restore.html"><a href="restore.html#recovery-key-use"><i class="fa fa-check"></i><b>12.6.4</b> Recovery key use</a></li>
+<li class="chapter" data-level="12.6.5" data-path="restore.html"><a href="restore.html#recovery-codes"><i class="fa fa-check"></i><b>12.6.5</b> Recovery codes</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="13" data-path="secrets.html"><a href="secrets.html"><i class="fa fa-check"></i><b>13</b> Secrets Automation</a>
+<ul>
+<li class="chapter" data-level="13.1" data-path="secrets.html"><a href="secrets.html#the-connect-server"><i class="fa fa-check"></i><b>13.1</b> The Connect server</a>
+<ul>
+<li class="chapter" data-level="13.1.1" data-path="secrets.html"><a href="secrets.html#service-account"><i class="fa fa-check"></i><b>13.1.1</b> Service account</a></li>
+<li class="chapter" data-level="13.1.2" data-path="secrets.html"><a href="secrets.html#local-deployment"><i class="fa fa-check"></i><b>13.1.2</b> Local deployment</a></li>
+<li class="chapter" data-level="13.1.3" data-path="secrets.html"><a href="secrets.html#credential-store"><i class="fa fa-check"></i><b>13.1.3</b> Credential store</a></li>
+<li class="chapter" data-level="13.1.4" data-path="secrets.html"><a href="secrets.html#the-credentials-file"><i class="fa fa-check"></i><b>13.1.4</b> The credentials file</a></li>
+<li class="chapter" data-level="13.1.5" data-path="secrets.html"><a href="secrets.html#encrypted-credentials"><i class="fa fa-check"></i><b>13.1.5</b> Encrypted credentials</a></li>
+<li class="chapter" data-level="13.1.6" data-path="secrets.html"><a href="secrets.html#verifier"><i class="fa fa-check"></i><b>13.1.6</b> Verifier</a></li>
+<li class="chapter" data-level="13.1.7" data-path="secrets.html"><a href="secrets.html#interprocess-key"><i class="fa fa-check"></i><b>13.1.7</b> Interprocess key</a></li>
+</ul></li>
+<li class="chapter" data-level="13.2" data-path="secrets.html"><a href="secrets.html#bearer-token"><i class="fa fa-check"></i><b>13.2</b> Bearer token</a></li>
+<li class="chapter" data-level="13.3" data-path="secrets.html"><a href="secrets.html#header"><i class="fa fa-check"></i><b>13.3</b> Header</a>
+<ul>
+<li class="chapter" data-level="13.3.1" data-path="secrets.html"><a href="secrets.html#payload"><i class="fa fa-check"></i><b>13.3.1</b> Payload</a></li>
+<li class="chapter" data-level="13.3.2" data-path="secrets.html"><a href="secrets.html#signature"><i class="fa fa-check"></i><b>13.3.2</b> Signature</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="14" data-path="transport.html"><a href="transport.html"><i class="fa fa-check"></i><b>14</b> Transport security</a>
+<ul>
+<li class="chapter" data-level="14.1" data-path="transport.html"><a href="transport.html#data-at-rest"><i class="fa fa-check"></i><b>14.1</b> Data at rest</a></li>
+<li class="chapter" data-level="14.2" data-path="transport.html"><a href="transport.html#tls"><i class="fa fa-check"></i><b>14.2</b> TLS</a></li>
+<li class="chapter" data-level="14.3" data-path="transport.html"><a href="transport.html#our-transport-security"><i class="fa fa-check"></i><b>14.3</b> Our transport security</a>
+<ul>
+<li class="chapter" data-level="14.3.1" data-path="transport.html"><a href="transport.html#client-delivery"><i class="fa fa-check"></i><b>14.3.1</b> Client delivery</a></li>
+<li class="chapter" data-level="14.3.2" data-path="transport.html"><a href="transport.html#passkey-and-single-sign-on-unlock-caveats"><i class="fa fa-check"></i><b>14.3.2</b> Passkey and single sign-on unlock caveats</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="15" data-path="infra.html"><a href="infra.html"><i class="fa fa-check"></i><b>15</b> Server infrastructure</a>
+<ul>
+<li class="chapter" data-level="15.1" data-path="infra.html"><a href="infra.html#what-the-server-stores"><i class="fa fa-check"></i><b>15.1</b> What the server stores</a></li>
+<li class="chapter" data-level="15.2" data-path="infra.html"><a href="infra.html#how-your-data-is-stored"><i class="fa fa-check"></i><b>15.2</b> How your data is stored</a></li>
+</ul></li>
+<li class="appendix"><span><b>Appendix</b></span></li>
+<li class="chapter" data-level="A" data-path="leopard.html"><a href="leopard.html"><i class="fa fa-check"></i><b>A</b> Appendix A: Beware of the leopard</a>
+<ul>
+<li class="chapter" data-level="A.1" data-path="leopard.html"><a href="leopard.html#sec:cryptoHTTPS"><i class="fa fa-check"></i><b>A.1</b> Crypto over HTTPS</a>
+<ul>
+<li class="chapter" data-level="A.1.1" data-path="leopard.html"><a href="leopard.html#crypto-in-the-browser"><i class="fa fa-check"></i><b>A.1.1</b> Crypto in the browser</a></li>
+</ul></li>
+<li class="chapter" data-level="A.2" data-path="leopard.html"><a href="leopard.html#recovery-group-powers"><i class="fa fa-check"></i><b>A.2</b> Recovery Group powers</a></li>
+<li class="chapter" data-level="A.3" data-path="leopard.html"><a href="leopard.html#no-public-key-verification"><i class="fa fa-check"></i><b>A.3</b> No public key verification</a></li>
+<li class="chapter" data-level="A.4" data-path="leopard.html"><a href="leopard.html#limited-re-encryption-secrecy"><i class="fa fa-check"></i><b>A.4</b> Limited re-encryption secrecy</a>
+<ul>
+<li class="chapter" data-level="A.4.1" data-path="leopard.html"><a href="leopard.html#revocation"><i class="fa fa-check"></i><b>A.4.1</b> Revocation</a></li>
+<li class="chapter" data-level="A.4.2" data-path="leopard.html"><a href="leopard.html#your-mitigations"><i class="fa fa-check"></i><b>A.4.2</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.5" data-path="leopard.html"><a href="leopard.html#account-password-changes-dont-change-keysets"><i class="fa fa-check"></i><b>A.5</b> Account password changes don’t change keysets</a>
+<ul>
+<li class="chapter" data-level="A.5.1" data-path="leopard.html"><a href="leopard.html#your-mitigations-1"><i class="fa fa-check"></i><b>A.5.1</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.6" data-path="leopard.html"><a href="leopard.html#local-client-account-password-has-control-of-other-account-passwords"><i class="fa fa-check"></i><b>A.6</b> Local client account password has control of other account passwords</a>
+<ul>
+<li class="chapter" data-level="A.6.1" data-path="leopard.html"><a href="leopard.html#mitigations"><i class="fa fa-check"></i><b>A.6.1</b> Mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.7" data-path="leopard.html"><a href="leopard.html#policy-enforcement-mechanisms-not-always-clear-to-user"><i class="fa fa-check"></i><b>A.7</b> Policy enforcement mechanisms not always clear to user</a></li>
+<li class="chapter" data-level="A.8" data-path="leopard.html"><a href="leopard.html#malicious-client"><i class="fa fa-check"></i><b>A.8</b> Malicious client</a></li>
+<li class="chapter" data-level="A.9" data-path="leopard.html"><a href="leopard.html#vulnerability-of-server-data"><i class="fa fa-check"></i><b>A.9</b> Vulnerability of server data</a></li>
+<li class="chapter" data-level="A.10" data-path="leopard.html"><a href="leopard.html#malicious-processes-on-your-devices"><i class="fa fa-check"></i><b>A.10</b> Malicious processes on your devices</a>
+<ul>
+<li class="chapter" data-level="A.10.1" data-path="leopard.html"><a href="leopard.html#malicious-or-undesired-browser-components"><i class="fa fa-check"></i><b>A.10.1</b> Malicious or undesired browser components</a></li>
+<li class="chapter" data-level="A.10.2" data-path="leopard.html"><a href="leopard.html#sec:localKeys"><i class="fa fa-check"></i><b>A.10.2</b> Locally exposed Secret Keys</a></li>
+<li class="chapter" data-level="A.10.3" data-path="leopard.html"><a href="leopard.html#sec:deviceKeys"><i class="fa fa-check"></i><b>A.10.3</b> Device keys used with passkey and single sign-on unlock</a></li>
+</ul></li>
+<li class="chapter" data-level="A.11" data-path="leopard.html"><a href="leopard.html#revealing-who-is-registered"><i class="fa fa-check"></i><b>A.11</b> Revealing who is registered</a></li>
+<li class="chapter" data-level="A.12" data-path="leopard.html"><a href="leopard.html#use-of-email"><i class="fa fa-check"></i><b>A.12</b> Use of email</a></li>
+</ul></li>
+<li class="chapter" data-level="B" data-path="srp.html"><a href="srp.html"><i class="fa fa-check"></i><b>B</b> Appendix B: Secure Remote Password</a>
+<ul>
+<li class="chapter" data-level="B.0.1" data-path="srp.html"><a href="srp.html#registration"><i class="fa fa-check"></i><b>B.0.1</b> Registration</a></li>
+<li class="chapter" data-level="B.0.2" data-path="srp.html"><a href="srp.html#sign-in"><i class="fa fa-check"></i><b>B.0.2</b> Sign-in</a></li>
+<li class="chapter" data-level="B.0.3" data-path="srp.html"><a href="srp.html#sec:strongKDF"><i class="fa fa-check"></i><b>B.0.3</b> With a strong KDF</a></li>
+<li class="chapter" data-level="B.1" data-path="srp.html"><a href="srp.html#srpmath"><i class="fa fa-check"></i><b>B.1</b> The math of SRP</a>
+<ul>
+<li class="chapter" data-level="B.1.1" data-path="srp.html"><a href="srp.html#math-background"><i class="fa fa-check"></i><b>B.1.1</b> Math background</a></li>
+<li class="chapter" data-level="B.1.2" data-path="srp.html"><a href="srp.html#sec:dhe"><i class="fa fa-check"></i><b>B.1.2</b> Diffie-Hellman key exchange</a></li>
+<li class="chapter" data-level="B.1.3" data-path="srp.html"><a href="srp.html#authenticated-key-exchange"><i class="fa fa-check"></i><b>B.1.3</b> Authenticated key exchange</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="C" data-path="mitm.html"><a href="mitm.html"><i class="fa fa-check"></i><b>C</b> Appendix C: Verifying public keys</a>
+<ul>
+<li class="chapter" data-level="C.1" data-path="mitm.html"><a href="mitm.html#types-of-defenses"><i class="fa fa-check"></i><b>C.1</b> Types of defenses</a>
+<ul>
+<li class="chapter" data-level="C.1.1" data-path="mitm.html"><a href="mitm.html#trust-hierarchy"><i class="fa fa-check"></i><b>C.1.1</b> Trust hierarchy</a></li>
+<li class="chapter" data-level="C.1.2" data-path="mitm.html"><a href="mitm.html#user-to-user-verification"><i class="fa fa-check"></i><b>C.1.2</b> User-to-user verification</a></li>
+</ul></li>
+<li class="chapter" data-level="C.2" data-path="mitm.html"><a href="mitm.html#the-problem-remains"><i class="fa fa-check"></i><b>C.2</b> The problem remains</a></li>
+</ul></li>
+<li class="chapter" data-level="" data-path="glossary.html"><a href="glossary.html"><i class="fa fa-check"></i>Glossary</a></li>
+<li class="chapter" data-level="" data-path="changelog.html"><a href="changelog.html"><i class="fa fa-check"></i>Changelog</a></li>
+<li class="chapter" data-level="" data-path="bibliography.html"><a href="bibliography.html"><i class="fa fa-check"></i>Bibliography</a></li>
+<li class="chapter" data-level="" data-path="acknowledgments.html"><a href="acknowledgments.html"><i class="fa fa-check"></i>Acknowledgments</a></li>
+</ul>
+
+      </nav>
+    </div>
+
+    <div class="book-body">
+      <div class="body-inner">
+        <div class="book-header" role="navigation">
+          <h1>
+            <i class="fa fa-circle-o-notch fa-spin"></i><a href="./">1Password Security Design White Paper</a>
+          </h1>
+        </div>
+
+        <div class="page-wrapper" tabindex="-1" role="main">
+          <div class="page-inner">
+
+            <section class="normal" id="section-">
+<div id="deepKeys" class="section level1 hasAnchor" number="8">
+<h1><span class="header-section-number">8</span> A deeper look at keys<a href="deepKeys.html#deepKeys" class="anchor-section" aria-label="Anchor link to header"></a></h1>
+<p>It doesn’t matter how strong an encryption algorithm is if the keys used to encrypt the data are available to an attacker or easily guessed. This section describes not only the details of the encryption algorithms and protocols used, it also covers how and where keys are derived, generated, and handled.</p>
+<p>Here we provide details of how we achieve what is described in <a href="secureItems.html#secureItems">“How vault items are secured”</a> and <a href="sharedVaults.html#sharedVaults">“How vaults are shared securely.”</a> It’s one thing to assert (like we have) that our design means we never learn your secrets, but it’s another to show how this is the case. As a consequence, this section will be substantially more technical than others.</p>
+<div id="key-creation" class="section level2 hasAnchor" number="8.1">
+<h2><span class="header-section-number">8.1</span> Key creation<a href="deepKeys.html#key-creation" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>All keys are generated by the client using <a class='glossary' title='A random number generator whose output is indistinguishable from truly random. Despite “pseudo” in the name, a CSPRNG is entirely appropriate for generating cryptographic keys.'>Cryptographically Secure Pseudo-Random Number Generators (CSPRNGs)</a>. These keys are ultimately encrypted with keys derived from user secrets. Neither user secrets nor unencrypted keys are ever transmitted.</p>
+<table>
+<caption><span id="tab:tab-rngs">Table 8.1: </span> Random number generators used within 1Password by platform. The Browser platform refers to both the web client and to the 1Password X browser extension. “CLI” refers to the command line interface, op.</caption>
+<colgroup>
+<col width="15%" />
+<col width="34%" />
+<col width="49%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Platform</th>
+<th>Method</th>
+<th>Library</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>iOS/macOS</td>
+<td><code>SecRandomCopyBytes()</code></td>
+<td><a href="https://developer.apple.com/documentation/security/secrandomcopybytes(_:_:_:)">iOS/OS X Security</a></td>
+</tr>
+<tr class="even">
+<td>Windows</td>
+<td><code>CryptGenRandom()</code></td>
+<td><a href="https://docs.microsoft.com/en-us/windows/desktop/api/Bcrypt/nf-bcrypt-bcryptgenrandom">Cryptography API: NG</a></td>
+</tr>
+<tr class="odd">
+<td>Browser</td>
+<td><code>getRandomValues()</code></td>
+<td><a href="https://w3c.github.io/webcrypto/">WebCrypto</a></td>
+</tr>
+<tr class="even">
+<td>Android</td>
+<td><code>SecureRandom()</code></td>
+<td><a href="https://developer.android.com/reference/java/security/SecureRandom.html">java.security</a></td>
+</tr>
+<tr class="odd">
+<td>CLI</td>
+<td><code>crypto/rand</code></td>
+<td><a href="https://golang.org/pkg/crypto/rand/">Go standard crypto library</a></td>
+</tr>
+</tbody>
+</table>
+<!--
+<div id="RNGs" class="divAside">Table 2: Random number generators used within 1Password by platform. </div>
+<div class="infobox">
+<table>
+<tbody>
+<tr>
+<td><strong>Platform</strong></td>
+<td><strong>Method</strong></td>
+<td><strong>Library</strong></td>
+</tr>
+<tr>
+<td>iOS/OS X</td>
+<td>`SecRandomCopyBytes()`</td>
+<td>[iOS/OS X Security](https://developer.apple.com/library/prerelease/ios/documentation/Security/Reference/RandomizationReference/index.html#//apple_ref/c/func/SecRandomCopyBytes)</td>
+</tr>
+<tr>
+<td>Windows</td>
+<td>`CryptGenRandom()`</td>
+<td>[Cryptography API: NG](https://docs.microsoft.com/en-us/windows/desktop/api/Bcrypt/nf-bcrypt-bcryptgenrandom)</td>
+</tr>
+<tr>
+<td>Browser</td>
+<td>`getRandomValues()`</td>
+<td>[WebCrypto](https://dvcs.w3.org/hg/webcrypto-api/raw-file/tip/spec/Overview.html#Crypto-method-getRandomValues)</td>
+</tr>
+<tr>
+<td>Android</td>
+<td>`SecureRandom()`</td>
+<td>[java.security](https://developer.android.com/reference/java/security/SecureRandom.html)</td>
+</tr>
+<tr>
+<td>CLI</td>
+<td>`crypto/rand`</td>
+<td>[Go standard crypto library](https://golang.org/pkg/crypto/rand/)</td>
+</tr>
+</tbody>
+</table>
+<em>The Browser platform refers to both the web client and to the 1Password X browser extension. "CLI" refers to the command line interface, op.</em>
+</div>
+--->
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>The public/private key pairs are generated using WebCrypto’s crypto.generateKey as an RSA-OAEP padded RSA key, with a modulus length of 2048 bits and a public exponent of 65537.</p>
+</div>
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>The secret part of the Secret Key is generated by the client as we would generate a random password. Our password generation scheme takes care to ensure each possible character is chosen independently and with probability equal to any other. Secret Key characters are drawn from the character set {2-9, A-H, J-N, P-T, V-Z}.</p>
+</div>
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>An Elliptic Curve Digital Signature Algorithm (ECDSA) key is also created at this time. It’s not used in the current version of 1Password, but its future use is anticipated. The key is generated on curve P-256.</p>
+</div>
+</div>
+<div id="sec:keyderiv" class="section level2 hasAnchor" number="8.2">
+<h2><span class="header-section-number">8.2</span> Key derivation<a href="deepKeys.html#sec:keyderiv" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>For expository purposes, it’s easiest to work backwards. The first section will discuss what a typical login looks like from an already enrolled user using an already enrolled client, as this involves the simplest instance of the protocol.</p>
+<div id="deriving-two-keys-from-two-secrets" class="section level3 hasAnchor" number="8.2.1">
+<h3><span class="header-section-number">8.2.1</span> Deriving two keys from two secrets<a href="deepKeys.html#deriving-two-keys-from-two-secrets" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<div class="right-figure" style="float: right; width: 65%;">
+<div class="figure"><span style="display:block;" id="fig:kdf"></span>
+<img src="images/figure_16_key_derivation.png" alt="The AUK is derived from the account password, 𝑝; Secret Key, k𝐴, and several non- secrets including the account ID, 𝐼, and a salt, 𝑠." style="padding:10px" />
+<p class="caption">
+Figure 8.1: The AUK is derived from the account password, 𝑝; Secret Key, k𝐴, and several non- secrets including the account ID, 𝐼, and a salt, 𝑠.
+</p>
+</div>
+</div>
+<p>As discussed in <a href="apsk.html#apsk">“Account password and Secret Key,”</a> 1Password uses <a class='glossary' title='Two different secrets, each with their own security properties, are used in deriving encryption and authentication keys. In 1Password, these are your account password (something you know) and your Secret Key (a high-entropy secret you have on your device).'>two-secret key derivation (2SKD)</a> so data we store cannot be used in brute-force cracking attempts against a user’s account password. The two secrets held by the user are their <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>.</p>
+<p>From those two user secrets the client needs to derive two independent keys. One is the key needed to decrypt their data, the other is the key needed for <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a>. We’ll call the key needed to decrypt the data encryption keys (and, in particular, the user’s private key) the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>Account Unlock Key (AUK)</a>, and the key that’s used as the secret for authentication <a class='glossary' title='The client secret, 𝑥, used by the Secure Remote Password (SRP) protocol. Derived from the user’s account password and Secret Key.'>SRP-<span class="math inline">\(x\)</span></a>.</p>
+<p>The processes for deriving each of these are similar, but involve different <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salts</a> in the key derivation function. A user will have a salt used for deriving the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a> and a different salt used for deriving <a class='glossary' title='The client secret, 𝑥, used by the Secure Remote Password (SRP) protocol. Derived from the user’s account password and Secret Key.'>SRP-<span class="math inline">\(x\)</span></a>.</p>
+<p>In both cases, the secret inputs to the key derivation process are the user’s <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>. Non-secret inputs include <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salts</a>, algorithm information, and the user’s email address.</p>
+</div>
+<div id="preprocessing-the-account-password" class="section level3 hasAnchor" number="8.2.2">
+<h3><span class="header-section-number">8.2.2</span> Preprocessing the account password<a href="deepKeys.html#preprocessing-the-account-password" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>Before the user’s account password is handed off to the slow hashing mechanism, it undergoes a number of preparatory steps. The details and rationale for those are described here.</p>
+<p><a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>Account passwords</a> are first stripped of any leading or trailing whitespace (Step 3, Figure <a href="deepKeys.html#fig:kdf">8.1</a>). Whitespace is allowed within the account password, but because leading or trailing whitespace may not be visible to the user, we want to avoid creating an account password with spaces they’re unaware of. Then it’s normalized (Step 4) to a UTF-8 byte string using <a class='glossary' title='A consistent normal form for Unicode characters that could otherwise be different sequences of bytes.'>Unicode Normalization Form Compatibility Decomposition (NFKD)</a>. By normalizing these strings before any further processing, we allow for different byte sequences that may encode the same Unicode character to be treated identically. This is discussed in greater depth in <a href="deepKeys.html#discuss91">Discussion 9.1.</a></p>
+<div id="discuss91" class="divDiscuss">
+Discussion 9.1: Non-ASCII passwords
+</div>
+<div class="infobox">
+<p>People naturally want to use passwords that involve characters other than the 7-bit US-ASCII printable characters. Yet doing so poses difficulties that simply supporting Unicode doesn’t answer. Unicode normalization goes a long way toward addressing these difficulties.</p>
+<p>The need for Unicode normalization can be exemplified by considering how the glyph “Å” may be encoded when it’s typed on some devices. It can be encoded in (at least) three different ways: It might be the byte sequence 0x212B, or 0x00C5, or 0x0041030A. Exactly how it’s encoded and passed to 1Password (or any software) depends on the often arbitrary details of the user’s keyboard, operating system, and settings. 1Password itself has no control over what particular sequence of bytes it will receive, but the user who uses “Å” in their password needs it to work reliably.</p>
+<p>Normalization ensures that whichever particular UTF encoding of a string is passed to 1Password by the user’s operating system will be treated as identical. In the case of “Å”, the normalization we have chosen (NFKD), will convert any of those three representations to 0x0041030A.</p>
+</div>
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>Normalization does not correct for homoglyphs. For example, the letter “a” (the second letter in “password”) in the Latin alphabet will never be treated the same as the visually similar letter “а” (the second letter in “пароль”) in the Cyrillic alphabet. Thus, despite our use of normalization, users still have to exercise care in the construction of account passwords that go beyond the unambiguous 7-bit US-ASCII character set.</p>
+</div>
+</div>
+<div id="preparing-the-salt" class="section level3 hasAnchor" number="8.2.3">
+<h3><span class="header-section-number">8.2.3</span> Preparing the salt<a href="deepKeys.html#preparing-the-salt" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>Next, the 16-byte <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a> is stretched using <a class='glossary' title='A key derivation function that uses HMAC for key extraction and expansion. Unlike PBKDF2, it’s not designed for password strengthening.'>hash-based key derivation function (HKDF)</a> and salted with the lowercase version of the email address (Step 5).<a href="#fn12" class="footnote-ref" id="fnref12"><sup>12</sup></a> The reason for binding the email address tightly with the cryptographic keys is discussed in <a href="restore.html#restore">“Restoring a user’s access to a vault.”</a></p>
+</div>
+<div id="slow-hashing" class="section level3 hasAnchor" number="8.2.4">
+<h3><span class="header-section-number">8.2.4</span> Slow hashing<a href="deepKeys.html#slow-hashing" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The normalized account password is then processed with the slow hash PBKDF2-HMAC-SHA256 along with a <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a>.</p>
+<div class="divBend">
+Dangerous bend
+</div>
+<div class="infobox">
+<p>The choice of PBKDF2-HMAC-SHA256 as our <a class='glossary' title='A cryptographic hash function designed to be computationally expensive. Used for hashing passwords or other guessible inputs to make guessing more expensive to an attacker who has the hash output.'>slow hash</a> is largely a function of there being (reasonably) efficient implementations available for all our clients. While we could have used a more modern password hashing scheme, any advantage of doing so would have been lost by how slowly it would run within JavaScript in most web browsers.</p>
+<p>Because key derivation is performed by the client (so the server never needs to see the password) we are constrained in our choices by our least efficient client. The Makwa password hashing scheme <a href="#fn13" class="footnote-ref" id="fnref13"><sup>13</sup></a>, however, is a possible road forward because it allows some of the computation to be passed to a server</p>
+</div>
+<p>In the current version, there are 650,000 iterations of PBKDF2.<a href="#fn14" class="footnote-ref" id="fnref14"><sup>14</sup></a> Extrapolating from a cracking challenge we ran,<a href="#fn15" class="footnote-ref" id="fnref15"><sup>15</sup></a> we estimate it costs an optimized attacker working at scale between 30 and ~40 US dollars to make <span class="math inline">\(2^{32}\)</span> guesses against PBKDF2-SHA256 with 650,000 iterations.</p>
+</div>
+<div id="combining-with-the-secret-key" class="section level3 hasAnchor" number="8.2.5">
+<h3><span class="header-section-number">8.2.5</span> Combining with the Secret Key<a href="deepKeys.html#combining-with-the-secret-key" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<div class="right-figure" style="float: right; width: 50%;">
+<div class="figure"><span style="display:block;" id="fig:combinesk"></span>
+<img src="images/figure_17_combining_secret_key.png" alt="The AUK is represented as a JSON Web Key (JWK) object and given the distinguished key ID of mp." style="padding:10px" />
+<p class="caption">
+Figure 8.2: The AUK is represented as a JSON Web Key (JWK) object and given the distinguished key ID of mp.
+</p>
+</div>
+</div>
+<p>The <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>, treated as a sequence of bytes, is used to generate an intermediate key of the same length as that derived from the <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a>. This is done using <a class='glossary' title='A key derivation function that uses HMAC for key extraction and expansion. Unlike PBKDF2, it’s not designed for password strengthening.'>HKDF</a>, using the raw Secret Key as its entropy source, the account ID as its salt, and the format version as additional data.</p>
+<p>The resulting bytes from the use of HKDF are XORed with the result of the PBKDF2 operations. This is then set with the structure of a <a class='glossary' title='A format for describing and storing cryptographic keys defined in RFC 7517.'>JWK</a> object as illustrated in Figure <a href="deepKeys.html#fig:combinesk">8.2</a>.</p>
+</div>
+<div id="deriving-the-authentication-key" class="section level3 hasAnchor" number="8.2.6">
+<h3><span class="header-section-number">8.2.6</span> Deriving the authentication key<a href="deepKeys.html#deriving-the-authentication-key" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The process of deriving the client-side <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> secret used for authenticating with the 1Password server is nearly identical to the procedure described above for deriving the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a>. The only difference is an entirely independent <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a> is used for the PBKDF2 rounds. This ensures the derived keys are independent of each other.</p>
+<p>The 32-byte resulting key is converted into a <a class='glossary' title='Some cryptographic algorithms involve arithmetic (particularly exponentiation) on numbers that are hundreds of digits long. These require the use of Big Number libraries in the software.'>BigNum</a> for use with <a class='glossary' title='A method for both a client and server to authenticate each other without either revealing any secrets. In the process, they also agree on an encryption key to be used for the current session. We’re using Version 6 with a modified key derivation function.'>Secure Remote Password (SRP)</a>. We use the JSBN library in the browser, and the tools from OpenSSL for all other platforms.</p>
+<p>The astute reader may have noticed the defender needs to perform 1,300,000 PBKDF2 rounds while an attacker (who has managed to obtain the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>) only needs to perform 650,000 PBKDF2 rounds per guess, thus giving the attacker a 1-bit advantage over the defender in such an attack.</p>
+<p>The sequence described above, however, in which the defender needs to derive both keys, rarely happens. In most instances, the <a class='glossary' title='The client secret, 𝑥, used by the Secure Remote Password (SRP) protocol. Derived from the user’s account password and Secret Key.'>SRP-<span class="math inline">\(x\)</span></a> will be encrypted with the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a> (or by some other key that’s encrypted with the AUK) and stored locally. Thus the defender needs to derive the AUK only. The client needs to go through both derivations only at original sign-up or when enrolling a new client.</p>
+</div>
+</div>
+<div id="initial-sign-up" class="section level2 hasAnchor" number="8.3">
+<h2><span class="header-section-number">8.3</span> Initial sign-up<a href="deepKeys.html#initial-sign-up" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>To focus on the initial creation of keys and establishment of <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> mechanisms, this section assumes the enrolling user has been invited to join a team by someone authorized to invite them.</p>
+<p>When the invitation is created, the server generates an account ID and knows which team someone has been invited to join and the type of account that’s being created. The server is given the new user’s email address and possibly the new user’s real name. An invitation <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>Universally Unique Identifier (UUID)</a> is created to uniquely identify the invitation, and known to the team administrator. An invitation token is created by the server and not made available to the administrator. Other information about the status of the invitation is stored on the server.</p>
+<p>The user is given (typically by email) the invitation <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a> along with the invitation token, and uses them to request invitation details from the server. If the UUID is for a valid and active invitation and the provided token matches the invitation’s token, the server will send the invitation details, which include the account name, invited email address, and (if supplied by the inviter) real name of the user. If the server doesn’t find a valid and active invitation for that UUID, it returns an error.</p>
+<p>The client will gather and compute a great deal of information, some of which is sent to the server.</p>
+<table>
+<caption><span id="tab:tab-legend">Table 8.2: </span> Symbols used to indicate status of different data client creates during signup.</caption>
+<thead>
+<tr class="header">
+<th>Symbol</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>𝜉</td>
+<td>Generated randomly</td>
+</tr>
+<tr class="even">
+<td>🗝️</td>
+<td>Key-like thing</td>
+</tr>
+<tr class="odd">
+<td>🔒</td>
+<td>Encrypted</td>
+</tr>
+<tr class="even">
+<td>↱</td>
+<td>Uploaded</td>
+</tr>
+<tr class="odd">
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<ol style="list-style-type: decimal">
+<li>Generate <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> 𝜉 🗝️</li>
+<li>Compute AUK
+<ol style="list-style-type: decimal">
+<li>Generate encryption key salt 𝜉 ↱</li>
+<li>Derive <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a> from encryption <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a>, <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a>, and Secret Key as described in <a href="deepKeys.html#sec:keyderiv">“Key derivation.”</a> 🗝️</li>
+</ol></li>
+<li>Create encrypted account key set
+<ol style="list-style-type: decimal">
+<li>Generate private key 𝜉 🗝️</li>
+<li>Compute public key (from private key) 🗝️ ↱</li>
+<li>Encrypt private part with AUK 🔒 ↱</li>
+<li>Generate key set <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a> 𝜉 ↱</li>
+<li>Include key set format ↱</li>
+</ol></li>
+<li>User information ↱
+<ol style="list-style-type: decimal">
+<li>Given name ↱</li>
+<li>Family name ↱</li>
+<li>Avatar image ↱</li>
+<li>Email address ↱</li>
+</ol></li>
+<li>Device information ↱
+<ol style="list-style-type: decimal">
+<li>Generate device UUID 𝜉 ↱</li>
+<li>Operating system (if available) ↱</li>
+<li>User agent (if applicable) ↱</li>
+<li>Hostname (if available) ↱</li>
+</ol></li>
+<li>Construct <a class='glossary' title='A method for both a client and server to authenticate each other without either revealing any secrets. In the process, they also agree on an encryption key to be used for the current session. We’re using Version 6 with a modified key derivation function.'>SRP</a> verifier
+<ol style="list-style-type: decimal">
+<li>Generate authentication salt 𝜉 ↱</li>
+<li>Derive SRP-𝑥 from account password, Secret Key, an authentication salt 🗝️</li>
+<li>Computer SRP verifier from SRP-𝑥 🗝️ ↱</li>
+</ol></li>
+<li>Send to the server everything marked ↱</li>
+</ol>
+<div id="protecting-email-invitations" class="section level3 hasAnchor" number="8.3.1">
+<h3><span class="header-section-number">8.3.1</span> Protecting email invitations<a href="deepKeys.html#protecting-email-invitations" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>Invitations are sent by email, and suffer the security limitations of email. Administrators are strongly encouraged to verify independently
+(by means other than email) the intended recipients have enrolled.</p>
+</div>
+</div>
+<div id="enrolling-a-new-client" class="section level2 hasAnchor" number="8.4">
+<h2><span class="header-section-number">8.4</span> Enrolling a new client<a href="deepKeys.html#enrolling-a-new-client" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>When enrolling a new device, the user will provide the client with the add-device link (possibly in the form of a QR code) and their <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a>. The add-device link is generated at the user’s request from an already enrolled client and includes the domain name for the team, the user’s email address, and their <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>.</p>
+<p>The link uses the custom schema <code>onepassword:</code> with a path of <code>//team-account/add</code> and a query string with fields <code>email</code>, <code>server</code>, and <code>key</code>. An example is shown in Figure <a href="deepKeys.html#fig:add-link">8.3</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:add-link"></span>
+<img src="images/figure_18_add_link.png" alt="An add link contains the email address, team domain, and Secret Key." width="75%" />
+<p class="caption">
+Figure 8.3: An add link contains the email address, team domain, and Secret Key.
+</p>
+</div>
+</div>
+<p>This new client doesn’t have its <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salts</a> nor its key derivation parameters so requests them from the server. It’s able to generate its device information and create a device <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:auth-response"></span>
+<img src="images/figure_19_auth_request_response.png" alt="Example response from server to auth request. The Secret Key is often referred to as “Account Key” internally." width="50%" />
+<p class="caption">
+Figure 8.4: Example response from server to auth request. The Secret Key is often referred to as “Account Key” internally.
+</p>
+</div>
+</div>
+<p>The client initiates an auth request to the server, sending the email address and device <a class='glossary' title='A large arbitrary identifier for an entity. No two entities in the universe should have the same UUID.'>UUID</a>. A typical server response looks similar to what’s shown in Figure <a href="deepKeys.html#fig:auth-response">8.4</a>.</p>
+<p>After the client has the <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a> used for deriving its <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a> secret, it can compute its <a class='glossary' title='The client secret, 𝑥, used by the Secure Remote Password (SRP) protocol. Derived from the user’s account password and Secret Key.'>SRP-𝑥</a> from that salt, the <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a>, and the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>. During authentication, neither the client nor server reveals any secrets to the other, and after authentication is complete, our own transport layer encryption is invoked on top of what is provided by <a class='glossary' title='The successor to SSL. It puts the “S” in HTTPS.'>TLS</a>. In the discussion here, however, we’ll ignore those two layers of transport encryption and present the data as seen by the client and server after both transport encryption layers have been handled.</p>
+<p>After successful <a class='glossary' title='The process of one entity proving its identity to another. Typically the authenticating party does this by proving to the verifier that it knows a particular secret that only the authenticator should know.'>authentication</a>, the client requests its encrypted personal <a class='glossary' title='How collections of keys and their metadata are organized within 1Password.'>key set</a> from the server. If the client has successfully authenticated, the server allows it to fetch the key sets associated with the account. The personal key set has the overall structure shown in Figure <a href="deepKeys.html#fig:key-set">8.5</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:key-set"></span>
+<img src="images/figure_20_personal_key_set.png" alt="Overview of personal key set. The value of `encryptedBy` here indicates the encrypted symmetric key is encrypted with the Account Unlock Key." width="45%" />
+<p class="caption">
+Figure 8.5: Overview of personal key set. The value of <code>encryptedBy</code> here indicates the encrypted symmetric key is encrypted with the Account Unlock Key.
+</p>
+</div>
+</div>
+<p>This contains an encrypted private key, the associated public key, and an encrypted symmetric key that’s used to encrypt the private key. The
+encrypted symmetric key is encrypted with the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a>, using the parameters and <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a> that are included with the encrypted symmetric key as shown in Figure <a href="deepKeys.html#fig:encryp-keys">8.6</a></p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:encryp-keys"></span>
+<img src="images/figure_21_encrypted_keys.png" alt="The encrypted symmetric key is encrypted with the AUK, which in turn is derived using the salt in the p2s field, and using the methods indicated in the fields alg and p2c. The encrypted symmetric key itself is encrypted using AES256-GCM." width="75%" />
+<p class="caption">
+Figure 8.6: The encrypted symmetric key is encrypted with the AUK, which in turn is derived using the salt in the p2s field, and using the methods indicated in the fields alg and p2c. The encrypted symmetric key itself is encrypted using AES256-GCM.
+</p>
+</div>
+</div>
+<p>The details of the public and private keys are illustrated in Figure <a href="deepKeys.html#fig:ppkeys">8.7</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:ppkeys"></span>
+<img src="images/figure_22_public_private_keys.png" alt="The public/private parts are specified using JWK." width="50%" />
+<p class="caption">
+Figure 8.7: The public/private parts are specified using JWK.
+</p>
+</div>
+</div>
+</div>
+<div id="normal-unlock-and-sign-in" class="section level2 hasAnchor" number="8.5">
+<h2><span class="header-section-number">8.5</span> Normal unlock and sign-in<a href="deepKeys.html#normal-unlock-and-sign-in" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<p>When you unlock and and sign in to 1Password from a client that has previously signed in, the client may<a href="#fn16" class="footnote-ref" id="fnref16"><sup>16</sup></a> have everything it needs locally to compute its <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a> and to compute or decrypt <a class='glossary' title='The client secret, 𝑥, used by the Secure Remote Password (SRP) protocol. Derived from the user’s account password and Secret Key.'>SRP-𝑥</a>. The client may already have the <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salts</a>, encryption parameters, and its encrypted personal <a class='glossary' title='How collections of keys and their metadata are organized within 1Password.'>key set</a>.</p>
+<p>After the user enters a correct <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and the client reads the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>, it computes the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>AUK</a>, decrypts the user’s private key, then decrypts any locally cached data. Depending on the completeness of the cached data, the client may be able to function offline.</p>
+
+</div>
+</div>
+<div class="footnotes">
+<hr />
+<ol start="12">
+<li id="fn12"><p>HKDF places no security requirements on its salt, which may even be a constant or zero.<a href="deepKeys.html#fnref12" class="footnote-back">↩︎</a></p></li>
+<li id="fn13"><p><span class="citation">Pornin (<a href="bibliography.html#ref-pornin:MAKWA">2015</a>)</span><a href="deepKeys.html#fnref13" class="footnote-back">↩︎</a></p></li>
+<li id="fn14"><p>Accounts created prior to January 27, 2023 and have not changed their account password or Secret Key since this date, will use a lower iteration count. The iteration count can be updated to the current standard value by changing either the account password or Secret Key.<a href="deepKeys.html#fnref14" class="footnote-back">↩︎</a></p></li>
+<li id="fn15"><p><span class="citation">Goldberg (<a href="bibliography.html#ref-Goldberg21:crackingupdate">2021</a>)</span><a href="deepKeys.html#fnref15" class="footnote-back">↩︎</a></p></li>
+<li id="fn16"><p>The use of the word “may” here reflects the fact that different 1Password clients take different approaches to what they store locally and what they recompute. The current version of the web client, for example, caches much less data locally than the mobile clients do.<a href="deepKeys.html#fnref16" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+<a href="share.html" class="navigation navigation-prev " aria-label="Previous page"><i class="fa fa-angle-left"></i></a>
+<a href="passkeySSO.html" class="navigation navigation-next " aria-label="Next page"><i class="fa fa-angle-right"></i></a>
+    </div>
+  </div>
+<script src="libs/gitbook-2.6.7/js/app.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/clipboard.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-search.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-sharing.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-fontsettings.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-bookdown.js"></script>
+<script src="libs/gitbook-2.6.7/js/jquery.highlight.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-clipboard.js"></script>
+<script>
+gitbook.require(["gitbook"], function(gitbook) {
+gitbook.start({
+  "sharing": {
+    "github": false,
+    "facebook": false,
+    "twitter": false,
+    "linkedin": false,
+    "weibo": false,
+    "instapaper": false,
+    "vk": false,
+    "whatsapp": false,
+    "all": ["facebook", "twitter", "linkedin", "weibo", "instapaper"]
+  },
+  "fontsettings": {
+    "theme": "white",
+    "family": "sans",
+    "size": 2
+  },
+  "edit": {
+    "link": null,
+    "text": null
+  },
+  "history": {
+    "link": null,
+    "text": null
+  },
+  "view": {
+    "link": null,
+    "text": null
+  },
+  "download": ["1Password_Security_Design.pdf"],
+  "search": {
+    "engine": "fuse",
+    "options": null
+  },
+  "toc": {
+    "collapse": "none"
+  }
+});
+});
+</script>
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    var src = "true";
+    if (src === "" || src === "true") src = "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/latest.js?config=TeX-MML-AM_CHTML";
+    if (location.protocol !== "file:")
+      if (/^https?:/.test(src))
+        src = src.replace(/^https?:/, '');
+    script.src = src;
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+</body>
+
+</html>

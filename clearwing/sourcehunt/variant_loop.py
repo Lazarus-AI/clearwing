@@ -114,7 +114,7 @@ class VariantPatternGenerator:
                 system=PATTERN_GEN_SYSTEM_PROMPT,
                 user=user_msg,
             )
-            content = response.first_text() or ""
+            content = response.first_text or ""
         except Exception:
             logger.debug("Variant pattern LLM call failed", exc_info=True)
             return None

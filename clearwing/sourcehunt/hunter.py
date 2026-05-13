@@ -1309,7 +1309,7 @@ class NativeHunter:
                 tools=self.tools,
             )
             # Preserve the provider's reasoning_content alongside the
-            # visible text. `response.first_text()` only returns the
+            # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate
             # and used to be dropped, which silently hid the most useful
             # part of the trace for reasoning models (GPT-5.x, o-series,
@@ -1322,8 +1322,8 @@ class NativeHunter:
                     "message": _serialize_message(
                         ChatMessage(
                             "assistant",
-                            response.first_text() or "",
-                            tool_calls=response.tool_calls(),
+                            response.first_text or "",
+                            tool_calls=response.tool_calls,
                         )
                     ),
                     "reasoning_content": response.reasoning_content,
@@ -1343,13 +1343,13 @@ class NativeHunter:
                 self.llm.model_name,
             )
 
-            last_assistant_text = response.first_text() or ""
-            tool_calls_in_response = response.tool_calls()
+            last_assistant_text = response.first_text or ""
+            tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
                 messages.append(
                     ChatMessage(
                         "assistant",
-                        response.first_text() or "",
+                        response.first_text or "",
                         tool_calls=tool_calls_in_response,
                     )
                 )

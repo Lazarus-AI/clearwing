@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+<head>
+
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>B Appendix B: Secure Remote Password | 1Password Security Design White Paper</title>
+  <meta name="description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="generator" content="bookdown 0.46 and GitBook 2.6.7" />
+
+  <meta property="og:title" content="B Appendix B: Secure Remote Password | 1Password Security Design White Paper" />
+  <meta property="og:type" content="book" />
+  <meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+  <meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="github-repo" content="https://github.com/agilebits/security-design/" />
+
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="B Appendix B: Secure Remote Password | 1Password Security Design White Paper" />
+  
+  <meta name="twitter:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+  <meta name="twitter:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  
+  <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon" />
+<link rel="prev" href="leopard.html"/>
+<link rel="next" href="mitm.html"/>
+<script src="libs/jquery-3.6.0/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@6.4.6/dist/fuse.min.js"></script>
+<link href="libs/gitbook-2.6.7/css/style.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-table.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-bookdown.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-highlight.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-search.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-fontsettings.css" rel="stylesheet" />
+<link href="libs/gitbook-2.6.7/css/plugin-clipboard.css" rel="stylesheet" />
+
+
+
+
+
+
+
+
+<link href="libs/anchor-sections-1.1.0/anchor-sections.css" rel="stylesheet" />
+<link href="libs/anchor-sections-1.1.0/anchor-sections-hash.css" rel="stylesheet" />
+<script src="libs/anchor-sections-1.1.0/anchor-sections.js"></script>
+<script>
+// Fix glossary tooltips: create tooltip span and remove title to prevent browser's native delayed tooltip
+function fixGlossaryTooltips() {
+  document.querySelectorAll('a.glossary[title]').forEach(function(el) {
+    // Skip if already processed
+    if (el.querySelector('.glossary-tooltip')) return;
+    
+    var definition = el.getAttribute('title');
+    if (definition) {
+      // Create tooltip span
+      var tooltip = document.createElement('span');
+      tooltip.className = 'glossary-tooltip';
+      tooltip.textContent = definition;
+      el.appendChild(tooltip);
+      
+      // Remove title to prevent browser's native tooltip
+      el.removeAttribute('title');
+    }
+  });
+}
+
+// Run on initial load
+document.addEventListener('DOMContentLoaded', fixGlossaryTooltips);
+
+// Also run when gitbook navigates to a new page (handles AJAX page loads)
+document.addEventListener('DOMContentLoaded', function() {
+  if (typeof gitbook !== 'undefined' && gitbook.events) {
+    gitbook.events.bind('page.change', fixGlossaryTooltips);
+  }
+});
+
+// Fallback: watch for DOM changes and fix any new glossary elements
+var glossaryObserver = new MutationObserver(function(mutations) {
+  var shouldFix = false;
+  mutations.forEach(function(mutation) {
+    if (mutation.addedNodes.length) shouldFix = true;
+  });
+  if (shouldFix) fixGlossaryTooltips();
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  glossaryObserver.observe(document.body, { childList: true, subtree: true });
+});
+</script>
+<link rel="canonical" href="https://1pw.ca/whitepaper/" />
+
+<meta property="og:url" content="https://1pw.ca/whitepaper/" />
+<meta property="og:title" content="B Appendix B: Secure Remote Password | 1Password Security Design White Paper" />
+<meta property="og:site_name" content="1password.com" />
+<meta property="og:description" content="White paper documenting the security design and architecture of 1Password enterprise password manager memberships." />
+<meta property="og:image" content="https://1pw.ca/whitepaper/images/coverpage-image.png" />
+
+
+
+<style type="text/css">
+  
+  div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+</style>
+<style type="text/css">
+/* Used with Pandoc 2.11+ new --citeproc when CSL is used */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}
+</style>
+
+<link rel="stylesheet" href="assets/style.css" type="text/css" />
+</head>
+
+<body>
+
+
+
+  <div class="book without-animation with-summary font-size-2 font-family-1" data-basepath=".">
+
+    <div class="book-summary">
+      <nav role="navigation">
+
+<ul class="summary">
+<li class="chapter" data-level="" data-path="index.html"><a href="index.html"><i class="fa fa-check"></i>1Password Memberships</a></li>
+<li class="chapter" data-level="1" data-path="key-security-features.html"><a href="key-security-features.html"><i class="fa fa-check"></i><b>1</b> Key security features</a></li>
+<li class="chapter" data-level="2" data-path="principles.html"><a href="principles.html"><i class="fa fa-check"></i><b>2</b> Principles</a></li>
+<li class="chapter" data-level="3" data-path="apsk.html"><a href="apsk.html"><i class="fa fa-check"></i><b>3</b> Account password and Secret Key</a>
+<ul>
+<li class="chapter" data-level="3.1" data-path="apsk.html"><a href="apsk.html#account-password"><i class="fa fa-check"></i><b>3.1</b> Account password</a></li>
+<li class="chapter" data-level="3.2" data-path="apsk.html"><a href="apsk.html#sec:sk"><i class="fa fa-check"></i><b>3.2</b> Secret Key</a></li>
+<li class="chapter" data-level="3.3" data-path="apsk.html"><a href="apsk.html#emergency-kit"><i class="fa fa-check"></i><b>3.3</b> Emergency Kit</a></li>
+</ul></li>
+<li class="chapter" data-level="4" data-path="modernauth.html"><a href="modernauth.html"><i class="fa fa-check"></i><b>4</b> A modern approach to authentication</a>
+<ul>
+<li class="chapter" data-level="4.1" data-path="modernauth.html"><a href="modernauth.html#what-we-want-from-authentication"><i class="fa fa-check"></i><b>4.1</b> What we want from authentication</a>
+<ul>
+<li class="chapter" data-level="4.1.1" data-path="modernauth.html"><a href="modernauth.html#traditional-authentication"><i class="fa fa-check"></i><b>4.1.1</b> Traditional authentication</a></li>
+<li class="chapter" data-level="4.1.2" data-path="modernauth.html"><a href="modernauth.html#password-authenticated-key-exchange"><i class="fa fa-check"></i><b>4.1.2</b> Password-Authenticated Key Exchange</a></li>
+<li class="chapter" data-level="4.1.3" data-path="modernauth.html"><a href="modernauth.html#sec:2SKD"><i class="fa fa-check"></i><b>4.1.3</b> Making verifiers uncrackable with 2SKD</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="5" data-path="secureItems.html"><a href="secureItems.html"><i class="fa fa-check"></i><b>5</b> How vault items are secured</a>
+<ul>
+<li class="chapter" data-level="5.1" data-path="secureItems.html"><a href="secureItems.html#key-derivation-overview"><i class="fa fa-check"></i><b>5.1</b> Key derivation overview</a></li>
+<li class="chapter" data-level="5.2" data-path="secureItems.html"><a href="secureItems.html#a-first-look-at-key-sets"><i class="fa fa-check"></i><b>5.2</b> A first look at key sets</a>
+<ul>
+<li class="chapter" data-level="5.2.1" data-path="secureItems.html"><a href="secureItems.html#flexible-yet-firm"><i class="fa fa-check"></i><b>5.2.1</b> Flexible, yet firm</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="6" data-path="sharedVaults.html"><a href="sharedVaults.html"><i class="fa fa-check"></i><b>6</b> How vaults are shared securely</a>
+<ul>
+<li class="chapter" data-level="6.1" data-path="sharedVaults.html"><a href="sharedVaults.html#getting-the-message-to-the-right-people"><i class="fa fa-check"></i><b>6.1</b> Getting the message (to the right people)</a></li>
+</ul></li>
+<li class="chapter" data-level="7" data-path="share.html"><a href="share.html"><i class="fa fa-check"></i><b>7</b> How items are shared with anyone</a>
+<ul>
+<li class="chapter" data-level="7.1" data-path="share.html"><a href="share.html#overview"><i class="fa fa-check"></i><b>7.1</b> Overview</a></li>
+<li class="chapter" data-level="7.2" data-path="share.html"><a href="share.html#password-client"><i class="fa fa-check"></i><b>7.2</b> 1Password client</a>
+<ul>
+<li class="chapter" data-level="7.2.1" data-path="share.html"><a href="share.html#making-a-share-link"><i class="fa fa-check"></i><b>7.2.1</b> Making a share link</a></li>
+<li class="chapter" data-level="7.2.2" data-path="share.html"><a href="share.html#clients-first-steps"><i class="fa fa-check"></i><b>7.2.2</b> Client’s first steps</a></li>
+<li class="chapter" data-level="7.2.3" data-path="share.html"><a href="share.html#encryption-and-key-generation"><i class="fa fa-check"></i><b>7.2.3</b> Encryption and key generation</a></li>
+<li class="chapter" data-level="7.2.4" data-path="share.html"><a href="share.html#uploading-the-share"><i class="fa fa-check"></i><b>7.2.4</b> Uploading the share</a></li>
+<li class="chapter" data-level="7.2.5" data-path="share.html"><a href="share.html#sharing-the-share-link"><i class="fa fa-check"></i><b>7.2.5</b> Sharing the share link</a></li>
+</ul></li>
+<li class="chapter" data-level="7.3" data-path="share.html"><a href="share.html#server-to-server"><i class="fa fa-check"></i><b>7.3</b> Server to server</a>
+<ul>
+<li class="chapter" data-level="7.3.1" data-path="share.html"><a href="share.html#audit-and-status-queries"><i class="fa fa-check"></i><b>7.3.1</b> Audit and status queries</a></li>
+</ul></li>
+<li class="chapter" data-level="7.4" data-path="share.html"><a href="share.html#share-pickup"><i class="fa fa-check"></i><b>7.4</b> Share pickup</a>
+<ul>
+<li class="chapter" data-level="7.4.1" data-path="share.html"><a href="share.html#additional-authentication"><i class="fa fa-check"></i><b>7.4.1</b> Additional authentication</a></li>
+<li class="chapter" data-level="7.4.2" data-path="share.html"><a href="share.html#client-analytics"><i class="fa fa-check"></i><b>7.4.2</b> Client analytics</a></li>
+</ul></li>
+<li class="chapter" data-level="7.5" data-path="share.html"><a href="share.html#caveats"><i class="fa fa-check"></i><b>7.5</b> Caveats</a></li>
+</ul></li>
+<li class="chapter" data-level="8" data-path="deepKeys.html"><a href="deepKeys.html"><i class="fa fa-check"></i><b>8</b> A deeper look at keys</a>
+<ul>
+<li class="chapter" data-level="8.1" data-path="deepKeys.html"><a href="deepKeys.html#key-creation"><i class="fa fa-check"></i><b>8.1</b> Key creation</a></li>
+<li class="chapter" data-level="8.2" data-path="deepKeys.html"><a href="deepKeys.html#sec:keyderiv"><i class="fa fa-check"></i><b>8.2</b> Key derivation</a>
+<ul>
+<li class="chapter" data-level="8.2.1" data-path="deepKeys.html"><a href="deepKeys.html#deriving-two-keys-from-two-secrets"><i class="fa fa-check"></i><b>8.2.1</b> Deriving two keys from two secrets</a></li>
+<li class="chapter" data-level="8.2.2" data-path="deepKeys.html"><a href="deepKeys.html#preprocessing-the-account-password"><i class="fa fa-check"></i><b>8.2.2</b> Preprocessing the account password</a></li>
+<li class="chapter" data-level="8.2.3" data-path="deepKeys.html"><a href="deepKeys.html#preparing-the-salt"><i class="fa fa-check"></i><b>8.2.3</b> Preparing the salt</a></li>
+<li class="chapter" data-level="8.2.4" data-path="deepKeys.html"><a href="deepKeys.html#slow-hashing"><i class="fa fa-check"></i><b>8.2.4</b> Slow hashing</a></li>
+<li class="chapter" data-level="8.2.5" data-path="deepKeys.html"><a href="deepKeys.html#combining-with-the-secret-key"><i class="fa fa-check"></i><b>8.2.5</b> Combining with the Secret Key</a></li>
+<li class="chapter" data-level="8.2.6" data-path="deepKeys.html"><a href="deepKeys.html#deriving-the-authentication-key"><i class="fa fa-check"></i><b>8.2.6</b> Deriving the authentication key</a></li>
+</ul></li>
+<li class="chapter" data-level="8.3" data-path="deepKeys.html"><a href="deepKeys.html#initial-sign-up"><i class="fa fa-check"></i><b>8.3</b> Initial sign-up</a>
+<ul>
+<li class="chapter" data-level="8.3.1" data-path="deepKeys.html"><a href="deepKeys.html#protecting-email-invitations"><i class="fa fa-check"></i><b>8.3.1</b> Protecting email invitations</a></li>
+</ul></li>
+<li class="chapter" data-level="8.4" data-path="deepKeys.html"><a href="deepKeys.html#enrolling-a-new-client"><i class="fa fa-check"></i><b>8.4</b> Enrolling a new client</a></li>
+<li class="chapter" data-level="8.5" data-path="deepKeys.html"><a href="deepKeys.html#normal-unlock-and-sign-in"><i class="fa fa-check"></i><b>8.5</b> Normal unlock and sign-in</a></li>
+</ul></li>
+<li class="chapter" data-level="9" data-path="passkeySSO.html"><a href="passkeySSO.html"><i class="fa fa-check"></i><b>9</b> Unlock with a passkey or single sign-on</a>
+<ul>
+<li class="chapter" data-level="9.1" data-path="passkeySSO.html"><a href="passkeySSO.html#unlocking-without-an-account-password"><i class="fa fa-check"></i><b>9.1</b> Unlocking without an account password</a>
+<ul>
+<li class="chapter" data-level="9.1.1" data-path="passkeySSO.html"><a href="passkeySSO.html#sec:authCred"><i class="fa fa-check"></i><b>9.1.1</b> Authorization and the credential bundle</a></li>
+</ul></li>
+<li class="chapter" data-level="9.2" data-path="passkeySSO.html"><a href="passkeySSO.html#linked-apps-and-browsers"><i class="fa fa-check"></i><b>9.2</b> Linked apps and browsers</a></li>
+<li class="chapter" data-level="9.3" data-path="passkeySSO.html"><a href="passkeySSO.html#linking-other-devices"><i class="fa fa-check"></i><b>9.3</b> Linking other devices</a></li>
+<li class="chapter" data-level="9.4" data-path="passkeySSO.html"><a href="passkeySSO.html#quick-on-device-access-with-biometrics"><i class="fa fa-check"></i><b>9.4</b> Quick on-device access with biometrics</a></li>
+</ul></li>
+<li class="chapter" data-level="10" data-path="revoke-access.html"><a href="revoke-access.html"><i class="fa fa-check"></i><b>10</b> Revoking access</a></li>
+<li class="chapter" data-level="11" data-path="access-control.html"><a href="access-control.html"><i class="fa fa-check"></i><b>11</b> Access control enforcement</a>
+<ul>
+<li class="chapter" data-level="11.1" data-path="access-control.html"><a href="access-control.html#cryptographically-enforced-controls"><i class="fa fa-check"></i><b>11.1</b> Cryptographically enforced controls</a></li>
+<li class="chapter" data-level="11.2" data-path="access-control.html"><a href="access-control.html#server-enforced-controls"><i class="fa fa-check"></i><b>11.2</b> Server-enforced controls</a></li>
+<li class="chapter" data-level="11.3" data-path="access-control.html"><a href="access-control.html#client-enforced-controls"><i class="fa fa-check"></i><b>11.3</b> Client-enforced controls</a>
+<ul>
+<li class="chapter" data-level="11.3.1" data-path="access-control.html"><a href="access-control.html#controls-enforced-by-client-policy"><i class="fa fa-check"></i><b>11.3.1</b> Controls enforced by client policy</a></li>
+</ul></li>
+<li class="chapter" data-level="11.4" data-path="access-control.html"><a href="access-control.html#multiple-layers-of-enforcement"><i class="fa fa-check"></i><b>11.4</b> Multiple layers of enforcement</a></li>
+</ul></li>
+<li class="chapter" data-level="12" data-path="restore.html"><a href="restore.html"><i class="fa fa-check"></i><b>12</b> Restoring a user’s access to a vault</a>
+<ul>
+<li class="chapter" data-level="12.1" data-path="restore.html"><a href="restore.html#overview-of-groups"><i class="fa fa-check"></i><b>12.1</b> Overview of groups</a></li>
+<li class="chapter" data-level="12.2" data-path="restore.html"><a href="restore.html#recovery-groups"><i class="fa fa-check"></i><b>12.2</b> Recovery groups</a></li>
+<li class="chapter" data-level="12.3" data-path="restore.html"><a href="restore.html#implicit-sharing"><i class="fa fa-check"></i><b>12.3</b> Implicit sharing</a></li>
+<li class="chapter" data-level="12.4" data-path="restore.html"><a href="restore.html#protecting-vaults-from-recovery-group-members"><i class="fa fa-check"></i><b>12.4</b> Protecting vaults from recovery group members</a></li>
+<li class="chapter" data-level="12.5" data-path="restore.html"><a href="restore.html#recovery-risks"><i class="fa fa-check"></i><b>12.5</b> Recovery risks</a></li>
+<li class="chapter" data-level="12.6" data-path="restore.html"><a href="restore.html#recovery-keys"><i class="fa fa-check"></i><b>12.6</b> Recovery keys</a>
+<ul>
+<li class="chapter" data-level="12.6.1" data-path="restore.html"><a href="restore.html#recovery-key-generation"><i class="fa fa-check"></i><b>12.6.1</b> Recovery key generation</a></li>
+<li class="chapter" data-level="12.6.2" data-path="restore.html"><a href="restore.html#recovery-key-authentication"><i class="fa fa-check"></i><b>12.6.2</b> Recovery key authentication</a></li>
+<li class="chapter" data-level="12.6.3" data-path="restore.html"><a href="restore.html#recovery-key-policies"><i class="fa fa-check"></i><b>12.6.3</b> Recovery key policies</a></li>
+<li class="chapter" data-level="12.6.4" data-path="restore.html"><a href="restore.html#recovery-key-use"><i class="fa fa-check"></i><b>12.6.4</b> Recovery key use</a></li>
+<li class="chapter" data-level="12.6.5" data-path="restore.html"><a href="restore.html#recovery-codes"><i class="fa fa-check"></i><b>12.6.5</b> Recovery codes</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="13" data-path="secrets.html"><a href="secrets.html"><i class="fa fa-check"></i><b>13</b> Secrets Automation</a>
+<ul>
+<li class="chapter" data-level="13.1" data-path="secrets.html"><a href="secrets.html#the-connect-server"><i class="fa fa-check"></i><b>13.1</b> The Connect server</a>
+<ul>
+<li class="chapter" data-level="13.1.1" data-path="secrets.html"><a href="secrets.html#service-account"><i class="fa fa-check"></i><b>13.1.1</b> Service account</a></li>
+<li class="chapter" data-level="13.1.2" data-path="secrets.html"><a href="secrets.html#local-deployment"><i class="fa fa-check"></i><b>13.1.2</b> Local deployment</a></li>
+<li class="chapter" data-level="13.1.3" data-path="secrets.html"><a href="secrets.html#credential-store"><i class="fa fa-check"></i><b>13.1.3</b> Credential store</a></li>
+<li class="chapter" data-level="13.1.4" data-path="secrets.html"><a href="secrets.html#the-credentials-file"><i class="fa fa-check"></i><b>13.1.4</b> The credentials file</a></li>
+<li class="chapter" data-level="13.1.5" data-path="secrets.html"><a href="secrets.html#encrypted-credentials"><i class="fa fa-check"></i><b>13.1.5</b> Encrypted credentials</a></li>
+<li class="chapter" data-level="13.1.6" data-path="secrets.html"><a href="secrets.html#verifier"><i class="fa fa-check"></i><b>13.1.6</b> Verifier</a></li>
+<li class="chapter" data-level="13.1.7" data-path="secrets.html"><a href="secrets.html#interprocess-key"><i class="fa fa-check"></i><b>13.1.7</b> Interprocess key</a></li>
+</ul></li>
+<li class="chapter" data-level="13.2" data-path="secrets.html"><a href="secrets.html#bearer-token"><i class="fa fa-check"></i><b>13.2</b> Bearer token</a></li>
+<li class="chapter" data-level="13.3" data-path="secrets.html"><a href="secrets.html#header"><i class="fa fa-check"></i><b>13.3</b> Header</a>
+<ul>
+<li class="chapter" data-level="13.3.1" data-path="secrets.html"><a href="secrets.html#payload"><i class="fa fa-check"></i><b>13.3.1</b> Payload</a></li>
+<li class="chapter" data-level="13.3.2" data-path="secrets.html"><a href="secrets.html#signature"><i class="fa fa-check"></i><b>13.3.2</b> Signature</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="14" data-path="transport.html"><a href="transport.html"><i class="fa fa-check"></i><b>14</b> Transport security</a>
+<ul>
+<li class="chapter" data-level="14.1" data-path="transport.html"><a href="transport.html#data-at-rest"><i class="fa fa-check"></i><b>14.1</b> Data at rest</a></li>
+<li class="chapter" data-level="14.2" data-path="transport.html"><a href="transport.html#tls"><i class="fa fa-check"></i><b>14.2</b> TLS</a></li>
+<li class="chapter" data-level="14.3" data-path="transport.html"><a href="transport.html#our-transport-security"><i class="fa fa-check"></i><b>14.3</b> Our transport security</a>
+<ul>
+<li class="chapter" data-level="14.3.1" data-path="transport.html"><a href="transport.html#client-delivery"><i class="fa fa-check"></i><b>14.3.1</b> Client delivery</a></li>
+<li class="chapter" data-level="14.3.2" data-path="transport.html"><a href="transport.html#passkey-and-single-sign-on-unlock-caveats"><i class="fa fa-check"></i><b>14.3.2</b> Passkey and single sign-on unlock caveats</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="15" data-path="infra.html"><a href="infra.html"><i class="fa fa-check"></i><b>15</b> Server infrastructure</a>
+<ul>
+<li class="chapter" data-level="15.1" data-path="infra.html"><a href="infra.html#what-the-server-stores"><i class="fa fa-check"></i><b>15.1</b> What the server stores</a></li>
+<li class="chapter" data-level="15.2" data-path="infra.html"><a href="infra.html#how-your-data-is-stored"><i class="fa fa-check"></i><b>15.2</b> How your data is stored</a></li>
+</ul></li>
+<li class="appendix"><span><b>Appendix</b></span></li>
+<li class="chapter" data-level="A" data-path="leopard.html"><a href="leopard.html"><i class="fa fa-check"></i><b>A</b> Appendix A: Beware of the leopard</a>
+<ul>
+<li class="chapter" data-level="A.1" data-path="leopard.html"><a href="leopard.html#sec:cryptoHTTPS"><i class="fa fa-check"></i><b>A.1</b> Crypto over HTTPS</a>
+<ul>
+<li class="chapter" data-level="A.1.1" data-path="leopard.html"><a href="leopard.html#crypto-in-the-browser"><i class="fa fa-check"></i><b>A.1.1</b> Crypto in the browser</a></li>
+</ul></li>
+<li class="chapter" data-level="A.2" data-path="leopard.html"><a href="leopard.html#recovery-group-powers"><i class="fa fa-check"></i><b>A.2</b> Recovery Group powers</a></li>
+<li class="chapter" data-level="A.3" data-path="leopard.html"><a href="leopard.html#no-public-key-verification"><i class="fa fa-check"></i><b>A.3</b> No public key verification</a></li>
+<li class="chapter" data-level="A.4" data-path="leopard.html"><a href="leopard.html#limited-re-encryption-secrecy"><i class="fa fa-check"></i><b>A.4</b> Limited re-encryption secrecy</a>
+<ul>
+<li class="chapter" data-level="A.4.1" data-path="leopard.html"><a href="leopard.html#revocation"><i class="fa fa-check"></i><b>A.4.1</b> Revocation</a></li>
+<li class="chapter" data-level="A.4.2" data-path="leopard.html"><a href="leopard.html#your-mitigations"><i class="fa fa-check"></i><b>A.4.2</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.5" data-path="leopard.html"><a href="leopard.html#account-password-changes-dont-change-keysets"><i class="fa fa-check"></i><b>A.5</b> Account password changes don’t change keysets</a>
+<ul>
+<li class="chapter" data-level="A.5.1" data-path="leopard.html"><a href="leopard.html#your-mitigations-1"><i class="fa fa-check"></i><b>A.5.1</b> Your mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.6" data-path="leopard.html"><a href="leopard.html#local-client-account-password-has-control-of-other-account-passwords"><i class="fa fa-check"></i><b>A.6</b> Local client account password has control of other account passwords</a>
+<ul>
+<li class="chapter" data-level="A.6.1" data-path="leopard.html"><a href="leopard.html#mitigations"><i class="fa fa-check"></i><b>A.6.1</b> Mitigations</a></li>
+</ul></li>
+<li class="chapter" data-level="A.7" data-path="leopard.html"><a href="leopard.html#policy-enforcement-mechanisms-not-always-clear-to-user"><i class="fa fa-check"></i><b>A.7</b> Policy enforcement mechanisms not always clear to user</a></li>
+<li class="chapter" data-level="A.8" data-path="leopard.html"><a href="leopard.html#malicious-client"><i class="fa fa-check"></i><b>A.8</b> Malicious client</a></li>
+<li class="chapter" data-level="A.9" data-path="leopard.html"><a href="leopard.html#vulnerability-of-server-data"><i class="fa fa-check"></i><b>A.9</b> Vulnerability of server data</a></li>
+<li class="chapter" data-level="A.10" data-path="leopard.html"><a href="leopard.html#malicious-processes-on-your-devices"><i class="fa fa-check"></i><b>A.10</b> Malicious processes on your devices</a>
+<ul>
+<li class="chapter" data-level="A.10.1" data-path="leopard.html"><a href="leopard.html#malicious-or-undesired-browser-components"><i class="fa fa-check"></i><b>A.10.1</b> Malicious or undesired browser components</a></li>
+<li class="chapter" data-level="A.10.2" data-path="leopard.html"><a href="leopard.html#sec:localKeys"><i class="fa fa-check"></i><b>A.10.2</b> Locally exposed Secret Keys</a></li>
+<li class="chapter" data-level="A.10.3" data-path="leopard.html"><a href="leopard.html#sec:deviceKeys"><i class="fa fa-check"></i><b>A.10.3</b> Device keys used with passkey and single sign-on unlock</a></li>
+</ul></li>
+<li class="chapter" data-level="A.11" data-path="leopard.html"><a href="leopard.html#revealing-who-is-registered"><i class="fa fa-check"></i><b>A.11</b> Revealing who is registered</a></li>
+<li class="chapter" data-level="A.12" data-path="leopard.html"><a href="leopard.html#use-of-email"><i class="fa fa-check"></i><b>A.12</b> Use of email</a></li>
+</ul></li>
+<li class="chapter" data-level="B" data-path="srp.html"><a href="srp.html"><i class="fa fa-check"></i><b>B</b> Appendix B: Secure Remote Password</a>
+<ul>
+<li class="chapter" data-level="B.0.1" data-path="srp.html"><a href="srp.html#registration"><i class="fa fa-check"></i><b>B.0.1</b> Registration</a></li>
+<li class="chapter" data-level="B.0.2" data-path="srp.html"><a href="srp.html#sign-in"><i class="fa fa-check"></i><b>B.0.2</b> Sign-in</a></li>
+<li class="chapter" data-level="B.0.3" data-path="srp.html"><a href="srp.html#sec:strongKDF"><i class="fa fa-check"></i><b>B.0.3</b> With a strong KDF</a></li>
+<li class="chapter" data-level="B.1" data-path="srp.html"><a href="srp.html#srpmath"><i class="fa fa-check"></i><b>B.1</b> The math of SRP</a>
+<ul>
+<li class="chapter" data-level="B.1.1" data-path="srp.html"><a href="srp.html#math-background"><i class="fa fa-check"></i><b>B.1.1</b> Math background</a></li>
+<li class="chapter" data-level="B.1.2" data-path="srp.html"><a href="srp.html#sec:dhe"><i class="fa fa-check"></i><b>B.1.2</b> Diffie-Hellman key exchange</a></li>
+<li class="chapter" data-level="B.1.3" data-path="srp.html"><a href="srp.html#authenticated-key-exchange"><i class="fa fa-check"></i><b>B.1.3</b> Authenticated key exchange</a></li>
+</ul></li>
+</ul></li>
+<li class="chapter" data-level="C" data-path="mitm.html"><a href="mitm.html"><i class="fa fa-check"></i><b>C</b> Appendix C: Verifying public keys</a>
+<ul>
+<li class="chapter" data-level="C.1" data-path="mitm.html"><a href="mitm.html#types-of-defenses"><i class="fa fa-check"></i><b>C.1</b> Types of defenses</a>
+<ul>
+<li class="chapter" data-level="C.1.1" data-path="mitm.html"><a href="mitm.html#trust-hierarchy"><i class="fa fa-check"></i><b>C.1.1</b> Trust hierarchy</a></li>
+<li class="chapter" data-level="C.1.2" data-path="mitm.html"><a href="mitm.html#user-to-user-verification"><i class="fa fa-check"></i><b>C.1.2</b> User-to-user verification</a></li>
+</ul></li>
+<li class="chapter" data-level="C.2" data-path="mitm.html"><a href="mitm.html#the-problem-remains"><i class="fa fa-check"></i><b>C.2</b> The problem remains</a></li>
+</ul></li>
+<li class="chapter" data-level="" data-path="glossary.html"><a href="glossary.html"><i class="fa fa-check"></i>Glossary</a></li>
+<li class="chapter" data-level="" data-path="changelog.html"><a href="changelog.html"><i class="fa fa-check"></i>Changelog</a></li>
+<li class="chapter" data-level="" data-path="bibliography.html"><a href="bibliography.html"><i class="fa fa-check"></i>Bibliography</a></li>
+<li class="chapter" data-level="" data-path="acknowledgments.html"><a href="acknowledgments.html"><i class="fa fa-check"></i>Acknowledgments</a></li>
+</ul>
+
+      </nav>
+    </div>
+
+    <div class="book-body">
+      <div class="body-inner">
+        <div class="book-header" role="navigation">
+          <h1>
+            <i class="fa fa-circle-o-notch fa-spin"></i><a href="./">1Password Security Design White Paper</a>
+          </h1>
+        </div>
+
+        <div class="page-wrapper" tabindex="-1" role="main">
+          <div class="page-inner">
+
+            <section class="normal" id="section-">
+<div id="srp" class="section level1 hasAnchor" number="17">
+<h1><span class="header-section-number">B</span> Appendix B: Secure Remote Password<a href="srp.html#srp" class="anchor-section" aria-label="Anchor link to header"></a></h1>
+<p>In <a href="modernauth.html#modernauth">“A modern approach to authentication,”</a> we spoke of mathematical magic.</p>
+<blockquote>
+<p>Using some mathematical magic the server and the client are able to send each other puzzles that can only be solved with knowledge of the appropriate secrets, but no secrets are transmitted during this exchange.</p>
+</blockquote>
+<p>This appendix offers some insight into that magic.</p>
+<p>We insist on this magic even though 1Password’s principle source of security is through <a class='glossary' title='Data is only encrypted or decrypted locally on the users’ devices with keys that only the end users possess. This protects the data confidentiality and integrity from compromises during transport or remote storage.'>end-to-end</a> encryption instead of authentication. We need to ensure our authentication system would never provide an attacker the means to learn anything about the secrets needed to decrypt someone’s data — even if it were compromised.</p>
+<p>We use <a class='glossary' title='A method for both a client and server to authenticate each other without either revealing any secrets. In the process, they also agree on an encryption key to be used for the current session. We’re using Version 6 with a modified key derivation function.'>Secure Remote Password (SRP)</a> as our <a class='glossary' title='Password-based key exchange protocol allows for a client and server to mutually authenticate each other and establish a key for their session. It relies on either a secret each have or related secrets that each have.'>password-authenticated key exchange (PAKE)</a> to achieve the authentication goals set out in Figure <a href="modernauth.html#tab:authDesiderata">4.1</a>. With SRP, the client can compute from a password (and a few other things) a number that is imaginatively called <span class="math inline">\(x\)</span>. This secret <span class="math inline">\(x\)</span> is never transmitted.</p>
+<div id="registration" class="section level3 hasAnchor" number="17.0.1">
+<h3><span class="header-section-number">B.0.1</span> Registration<a href="srp.html#registration" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The client computes <span class="math inline">\(x\)</span> from the user’s <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> and from some non-secret information as described in section <a href="srp.html#sec:strongKDF">B.0.3</a>.</p>
+<p>During first registration, the client will compute from <span class="math inline">\(x\)</span> a verifier, <span class="math inline">\(v\)</span>. During initial registration, the client sends <span class="math inline">\(v\)</span> to the server, along with a non-secret <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a>. The client and the server also need to agree on some other non-secret parameters. The verifier is the only sensitive information ever transmitted, and it’s sent only during initial registration.</p>
+<div style="divBend">
+Dangerous bend
+</div>
+<div style="infobox">
+<p>The verifier <span class="math inline">\(v\)</span> cannot be used directly to compute either <span class="math inline">\(x\)</span> or the password that was used to generate <span class="math inline">\(x\)</span>; however, it’s similar to a password hash in that it can be used in password cracking attempts. That is, an attacker who has acquired <span class="math inline">\(v\)</span> can make a password guess and see if processing that guess yields an <span class="math inline">\(x\)</span> that produces the <span class="math inline">\(v\)</span>. Our use of <a class='glossary' title='Two different secrets, each with their own security properties, are used in deriving encryption and authentication keys. In 1Password, these are your account password (something you know) and your Secret Key (a high-entropy secret you have on your device).'>two-secret key derivation (2SKD)</a> makes it impossible to launch such a cracking attack without also having the user’s <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>.</p>
+</div>
+</div>
+<div id="sign-in" class="section level3 hasAnchor" number="17.0.2">
+<h3><span class="header-section-number">B.0.2</span> Sign-in<a href="srp.html#sign-in" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The client will be able to compute <span class="math inline">\(x\)</span> from the <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a>, <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>, and <a class='glossary' title='A non-secret value added to either an encryption process or hashing to ensure the result of the encryption is unique. Salts are typically random and unique.'>salt</a> as described in <a href="deepKeys.html#sec:keyderiv">8.2</a>.<a href="#fn39" class="footnote-ref" id="fnref39"><sup>39</sup></a> The server has <span class="math inline">\(v\)</span>. Because of the special relationship between <span class="math inline">\(x\)</span> and <span class="math inline">\(v\)</span>, the server and client can present each other mathematical challenges that achieve the following:</p>
+<ul>
+<li>Prove to the server the client has the <span class="math inline">\(x\)</span> associated with <span class="math inline">\(v\)</span>.</li>
+<li>Prove to the client the server has the <span class="math inline">\(v\)</span> associated with <span class="math inline">\(x\)</span>.</li>
+<li>Let the client and server agree on a key <span class="math inline">\(S\)</span> which can be used for further encrypting the session.</li>
+</ul>
+<p>During that exchange, no information about the user’s password is revealed, nor is any information about <span class="math inline">\(x\)</span> or <span class="math inline">\(v\)</span> or <span class="math inline">\(S\)</span> revealed to someone listening in. Furthermore, the mathematical challenge the client and server present to each other is different each time, so one session cannot be replayed.</p>
+</div>
+<div id="sec:strongKDF" class="section level3 hasAnchor" number="17.0.3">
+<h3><span class="header-section-number">B.0.3</span> With a strong KDF<a href="srp.html#sec:strongKDF" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The standards documents describing <a class='glossary' title='A method for both a client and server to authenticate each other without either revealing any secrets. In the process, they also agree on an encryption key to be used for the current session. We’re using Version 6 with a modified key derivation function.'>SRP</a> offer the generation of <span class="math inline">\(x\)</span> from the password, <span class="math inline">\(P\)</span>; salt, <span class="math inline">\(s\)</span>; and username, <span class="math inline">\(I\)</span>; as in Figure <a href="srp.html#fig:srpkdf5054">B.1</a>. The values of <span class="math inline">\(g\)</span> and <span class="math inline">\(N\)</span> are public parameters that will be further described in <a href="srp.html#srpmath">B.1</a>.</p>
+<div>
+<div class="figure" style="text-align: center"><span style="display:block;" id="fig:srpkdf5054"></span>
+<img src="images/srpkdf5054.png" alt="Deriving 𝑥 and 𝑣 as given in RFC 5054, where H represents a cryptographic hash function (for example, SHA256)." width="75%" />
+<p class="caption">
+Figure B.1: Deriving 𝑥 and 𝑣 as given in RFC 5054, where H represents a cryptographic hash function (for example, SHA256).
+</p>
+</div>
+</div>
+<!---
+Deriving $x$ and $v$ as given in RFC5054, where H represents a cryptographic hash function (for example, SHA-256)
+$$  x = H(s | H(I | ":" | P))
+    v = g^x % N
+\pseudocode
+  [nodraft,syntaxhighlight=auto,addkeywords={H}]
+  %
+    x \gets H(s \concat H(I \concat \mathtt{":"} \concat P )) \\
+    v \gets g^x \mod N} $$
+     (\#eq:srpkdf5054)
+---->
+<p>Although it’s <a class='glossary' title='Effectively impossible. It’s not technically impossible for a single monkey placed in front of a manual typewriter for six weeks to produce the complete works of Shakespeare. It is, however, infeasible, meaning that the probability of it happening is so outrageously low that can be treated as impossible.'>infeasible</a> to compute <span class="math inline">\(P\)</span> from <span class="math inline">\(x\)</span> or <span class="math inline">\(x\)</span> from <span class="math inline">\(v\)</span>, it’s possible to use knowledge of <span class="math inline">\(v\)</span> (and the public parameters) to test a candidate password, <span class="math inline">\(P&#39;\)</span>. All an opponent needs to do is compute <span class="math inline">\(v&#39;\)</span> from <span class="math inline">\(P&#39;\)</span> and see if <span class="math inline">\(v&#39;\)</span> equals <span class="math inline">\(v\)</span>. If <span class="math inline">\(v&#39; = v\)</span> then the guessed password <span class="math inline">\(P&#39;\)</span> is (almost certainly) the correct password.</p>
+<p>As discussed elsewhere, we offer three defenses against such an attack if an attacker obtains <span class="math inline">\(v\)</span> (which is stored on our server and transmitted during initial registrations).</p>
+<ul>
+<li><p>We use <a class='glossary' title='Two different secrets, each with their own security properties, are used in deriving encryption and authentication keys. In 1Password, these are your account password (something you know) and your Secret Key (a high-entropy secret you have on your device).'>two-secret key derivation (2SKD)</a> with the completely random <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> as one of the secrets in deriving <span class="math inline">\(x\)</span>. Password cracking isn’t a feasible approach for an attacker without the Secret Key. For a discussion of this point, see <a href="apsk.html#sec:sk">3.2</a>.</p></li>
+<li><p>We use a slower key derivation function for deriving <span class="math inline">\(x\)</span> than the one shown in Figure <a href="srp.html#fig:srpkdf5054">B.1</a>, so even if an attacker
+obtains both <span class="math inline">\(v\)</span> and the user’s <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>, each guess is computationally expensive.</p></li>
+<li><p>We encourage the use of strong account passwords. Thus an attacker who has both <span class="math inline">\(v\)</span> and the <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> will need to make a very large number of guesses.</p></li>
+</ul>
+<p>The latter two mechanisms come into play only if the <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a> is acquired from the user’s device.</p>
+<p>It should be noted that although the password processing shown in Figure <a href="srp.html#fig:srpkdf5054">B.1</a> is presented in RFC 5054<a href="#fn40" class="footnote-ref" id="fnref40"><sup>40</sup></a>, the standard does not insist on it. Indeed, RFC 5054 refers to RFC 2954<a href="#fn41" class="footnote-ref" id="fnref41"><sup>41</sup></a> S3.1 which states</p>
+<blockquote>
+<p>SRP can be used with hash functions other than [SHA1]. If the hash function produces an output of a different length than [SHA1] (20 bytes), it may change the length of some of the messages in the protocol, but the fundamental operation will be unaffected…</p>
+</blockquote>
+<blockquote>
+<p>Any hash function used with SRP should produce an output of at least 16 bytes and have the property that small changes in the input cause significant nonlinear changes in the output. [SRP] covers these issues in more depth.</p>
+</blockquote>
+<p>So in our usage, we compute <span class="math inline">\(x\)</span> using the key derivation method described in detail in <a href="deepKeys.html#sec:keyderiv">8.2</a>.</p>
+</div>
+<div id="srpmath" class="section level2 hasAnchor" number="17.1">
+<h2><span class="header-section-number">B.1</span> The math of SRP<a href="srp.html#srpmath" class="anchor-section" aria-label="Anchor link to header"></a></h2>
+<div id="math-background" class="section level3 hasAnchor" number="17.1.1">
+<h3><span class="header-section-number">B.1.1</span> Math background<a href="srp.html#math-background" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>The client will have its derived secret <span class="math inline">\(x\)</span>, and the server will have its verifier, <span class="math inline">\(v\)</span>. The mathematics that allow for the client and server
+to mutually authenticate and arrive at a key without exposing either secret is an extension of <a class='glossary' title='An application of the discrete logarithm problem (DLP) to provide a way for parties to decide upon a secret key without revealing any secrets during the communication. It’s named after Whitfield Diffie and Martin Hellman who published it in 1976.'>Diffie-Hellman key exchange (DHE)</a>. This key exchange protocol is, in turn, based on the <a class='glossary' title='If 𝑦≡𝑔𝑥 mod𝑝 (for a carefully chosen𝑝and some other conditions) it’s possible to perform exponentiation to compute 𝑦 from the other variables, but it’s thought to be infeasible to compute 𝑥 from 𝑦. Computing 𝑥 from 𝑦 (and the other parameters) is reversing the exponentiation and is taking a logarithm.'>discrete logarithm problem (DLP)</a>.</p>
+<p>Recall (or relearn) from high school math:</p>
+<span class="math display" id="eq:explaw">\[\begin{equation}
+(b^n)^m = b^{nm}\tag{B.1}
+\end{equation}\]</span>
+<p>Equation <a href="srp.html#eq:explaw">(B.1)</a> holds true even if we restrict ourselves to integers and do all of this exponentiation modulo some number <span class="math inline">\(N\)</span>.</p>
+<p>The crux of the <a class='glossary' title='If 𝑦≡𝑔𝑥 mod𝑝 (for a carefully chosen𝑝and some other conditions) it’s possible to perform exponentiation to compute 𝑦 from the other variables, but it’s thought to be infeasible to compute 𝑥 from 𝑦. Computing 𝑥 from 𝑦 (and the other parameters) is reversing the exponentiation and is taking a logarithm.'>DLP</a> is that if we pick <span class="math inline">\(N\)</span> and <span class="math inline">\(g\)</span> appropriately in equation <a href="srp.html#eq:modexp">(B.2)</a></p>
+<span class="math display" id="eq:modexp">\[\begin{equation}
+v = g^x (\text{mod} N) \tag{B.2}
+\end{equation}\]</span>
+<p>It’s easy (for a computer) to calculate <span class="math inline">\(v\)</span> when given <span class="math inline">\(x\)</span>, but <a class='glossary' title='Effectively impossible. It’s not technically impossible for a single monkey placed in front of a manual typewriter for six weeks to produce the complete works of Shakespeare. It is, however, infeasible, meaning that the probability of it happening is so outrageously low that can be treated as impossible.'>infeasible</a> to compute <span class="math inline">\(x\)</span> when given <span class="math inline">\(v\)</span>.</p>
+<p>Calculating <span class="math inline">\(x\)</span> from <span class="math inline">\(v\)</span> (given <span class="math inline">\(g\)</span> and <span class="math inline">\(N\)</span>) is computing the discrete logarithm of <span class="math inline">\(v\)</span>. To ensure calculating the discrete logarithm is, indeed, infeasible, <span class="math inline">\(N\)</span> must be chosen carefully. The particular values of <span class="math inline">\(N\)</span> and <span class="math inline">\(g\)</span> used in 1Password are drawn from the groups defined in
+RFC 3526.<a href="#fn42" class="footnote-ref" id="fnref42"><sup>42</sup></a> Given current and anticipated computing power, <span class="math inline">\(N\)</span> should be at least 2048 bits.</p>
+<div class="right-figure" style="float: right; width: 25%;">
+<div class="figure"><span style="display:block;" id="fig:germain"></span>
+<img src="images/germain2.jpg" alt="Sophie Germain (1776--1831) proved that Fermat's Last Theorem holds for exponents $n = 2q + 1$ where both $q$ and $n$ are prime. Primes like $q$ are now called 'Sophie Germain primes.' Germain stole the identity of a male mathematics dropout to enter into correspondence with mathematicians in France and elsewhere in Europe. It's only after they'd come to respect her work that she could reveal her true identity. Her fame at the time was mostly for her work in mathematical physics, but it her work in number theory that plays a role in cryptography today." style="padding:10px" />
+<p class="caption">
+Figure B.2: Sophie Germain (1776–1831) proved that Fermat’s Last Theorem holds for exponents <span class="math inline">\(n = 2q + 1\)</span> where both <span class="math inline">\(q\)</span> and <span class="math inline">\(n\)</span> are prime. Primes like <span class="math inline">\(q\)</span> are now called ‘Sophie Germain primes.’ Germain stole the identity of a male mathematics dropout to enter into correspondence with mathematicians in France and elsewhere in Europe. It’s only after they’d come to respect her work that she could reveal her true identity. Her fame at the time was mostly for her work in mathematical physics, but it her work in number theory that plays a role in cryptography today.
+</p>
+</div>
+</div>
+</div>
+<div id="sec:dhe" class="section level3 hasAnchor" number="17.1.2">
+<h3><span class="header-section-number">B.1.2</span> Diffie-Hellman key exchange<a href="srp.html#sec:dhe" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p>If Alice and Bob have agreed on some <span class="math inline">\(g\)</span> and <span class="math inline">\(N\)</span>, neither of which need to be secret, Alice can pick a secret random number <span class="math inline">\(a\)</span> and calculate
+<span class="math inline">\(A = g^a (\text{mod} N)\)</span>. Bob can pick his own secret, <span class="math inline">\(b\)</span>, and calculate <span class="math inline">\(B = g^b (\text{mod} N)\)</span>. Alice can send <span class="math inline">\(A\)</span> to Bob, and Bob can send <span class="math inline">\(B\)</span> to Alice.</p>
+<p>Assuming an appropriate <span class="math inline">\(N\)</span> and <span class="math inline">\(g\)</span>, Alice won’t be able to determine Bob’s secret exponent <span class="math inline">\(b\)</span>, and Bob won’t be able to determine Alice’s
+secret exponent <span class="math inline">\(a\)</span>. No one listening in – even with full knowledge of <span class="math inline">\(g\)</span>, <span class="math inline">\(N\)</span>, <span class="math inline">\(A\)</span>, and <span class="math inline">\(B\)</span> – will be able to determine <span class="math inline">\(a\)</span> or
+<span class="math inline">\(b\)</span>.<a href="#fn43" class="footnote-ref" id="fnref43"><sup>43</sup></a> There is, however, something that both Alice and Bob can calculate that no one else can. In what follows, it goes without saying (or writing) that all operations are performed modulo <span class="math inline">\(N\)</span>.</p>
+<p>Alice can compute:</p>
+<span class="math display" id="eq:SBa">\[\begin{equation}
+S=B^a
+\tag{B.3}
+\end{equation}\]</span>
+<span class="math display">\[\begin{equation}
+  = (g^b)^a\ \ \ \ \ \ \ because\ \ 𝐵=𝑔^b
+\end{equation}\]</span>
+<span class="math display" id="eq:Sba">\[\begin{equation}
+  = g^{ba}\ \ \ \ \ \ \ because\ \ (B.1)
+\tag{B.4}
+\end{equation}\]</span>
+<!---
+\begin{equation}
+S &= B^a  (\#eq:SBa) \\
+  &= (g^b)^a && because $B = g^b$ \\
+  &= g^{ba} && because of \@ref(eq:explaw) (\#eq:Sba)
+\end{equation}--->
+<p>Equation <a href="srp.html#eq:SBa">(B.3)</a> is what Alice actually computes because she knows her secret <span class="math inline">\(a\)</span> and has been given Bob’s public exponent. But note that the secret, <span class="math inline">\(S\)</span>, that Alice computes is the same as what we see in <a href="srp.html#eq:Sba">(B.4)</a>.</p>
+<p>Bob can compute:</p>
+<span class="math display">\[\begin{equation}
+S = A^b
+\end{equation}\]</span>
+<span class="math display">\[\begin{equation}
+  = (g^a)^b\ \ \ \ \ \ \ because\ \ A = g^a
+\end{equation}\]</span>
+<span class="math display" id="eq:Sab">\[\begin{equation}
+  = g^{ab}\ \ \ \ \ \ \ because\ \ (B.1)
+\tag{B.5}
+\end{equation}\]</span>
+<p>From equations <a href="srp.html#eq:Sab">(B.5)</a> and <a href="srp.html#eq:Sba">(B.4)</a> we see that both Alice and Bob are computing the same secret, <span class="math inline">\(S\)</span>. They do so without revealing any secrets to each other or anyone listening in.</p>
+<p>We use the session key, <span class="math inline">\(S\)</span>, as an additional encryption and authentication layer on the client/server communication for that session. This is in addition to the encryption and authentication provided by TLS and the authenticated encryption of the user data.</p>
+<p>All the secrets used and derived during <a class='glossary' title='An application of the discrete logarithm problem (DLP) to provide a way for parties to decide upon a secret key without revealing any secrets during the communication. It’s named after Whitfield Diffie and Martin Hellman who published it in 1976.'>DHE</a> are ephemeral: They’re created for the individual session alone. Alice will create a new <span class="math inline">\(a\)</span> for each session; Bob will create a new <span class="math inline">\(b\)</span> for each session; the derived session key, <span class="math inline">\(S\)</span>, will be unique to that session. One advantage of this is that a successful break of these secrets by some attacker will allow the attacker to decrypt the messages of that session only.</p>
+<div class="right-figure" style="float: right; width: 40%;">
+<div class="figure"><span style="display:block;" id="fig:dhe"></span>
+<img src="images/dhe.png" alt="In Diffie-Hellman key exchange, N and g are already known to all parties and all exponentiation is done mod N. The form given here is somewhat less general than it could be in order to avoid having to introduce more notation and abstractions." style="padding:10px" />
+<p class="caption">
+Figure B.3: In Diffie-Hellman key exchange, N and g are already known to all parties and all exponentiation is done mod N. The form given here is somewhat less general than it could be in order to avoid having to introduce more notation and abstractions.
+</p>
+</div>
+</div>
+<!---
+  \begin{mybox}
+\procedure{Diffie-Hellman key exchange}{%
+\textbf{ Alice} \>  \> \textbf{ Bob} \\
+a \sample \ZZ_N \>                   \>  \\
+A \gets g^a \>                       \> \\
+            \>\sendmessageright*[0.8cm]{A}\> \\
+            \>                        \> b \sample \ZZ_N \\
+            \>                        \> B \gets g^b \\
+            \>\sendmessageleft*[0.8cm]{B}\> \\
+\key \gets B^a\>                              \> \key \gets A^b }
+\end{mybox}
+\caption[Diffie-Hellman key exchange]{In Diffie-Hellman key exchange, $N$ and $g$ are already known to all parties and all exponentiation is done $\bmod N$.
+The form given here is somewhat less general than it could be in order to avoid having to introduce more notation and abstractions.}\label{fig:dhe}
+\end{marginfigure}
+--->
+</div>
+<div id="authenticated-key-exchange" class="section level3 hasAnchor" number="17.1.3">
+<h3><span class="header-section-number">B.1.3</span> Authenticated key exchange<a href="srp.html#authenticated-key-exchange" class="anchor-section" aria-label="Anchor link to header"></a></h3>
+<p><a class='glossary' title='An application of the discrete logarithm problem (DLP) to provide a way for parties to decide upon a secret key without revealing any secrets during the communication. It’s named after Whitfield Diffie and Martin Hellman who published it in 1976.'>DHE</a>, as described in the previous section, allows Alice and Bob to agree on an encryption key for their communication. It doesn’t, however, include a mechanism by which either Alice or Bob can prove to the other they are Alice and Bob. Our goal, however, is to have <a class='glossary' title='Mutual authentication is a process in which all parties prove their identity to each other.'>mutual authentication</a> between the 1Password client and server.</p>
+<p>In order for Alice to prove to Bob she’s the same “Alice” he has corresponded with previously, she needs to hold (or regenerate) a long-term secret. At the same time, we don’t want to transmit any secrets during authentication.</p>
+<p><a class='glossary' title='A method for both a client and server to authenticate each other without either revealing any secrets. In the process, they also agree on an encryption key to be used for the current session. We’re using Version 6 with a modified key derivation function.'>SRP</a> builds upon <a class='glossary' title='An application of the discrete logarithm problem (DLP) to provide a way for parties to decide upon a secret key without revealing any secrets during the communication. It’s named after Whitfield Diffie and Martin Hellman who published it in 1976.'>DHE</a>, but adds two
+long-term secrets. <span class="math inline">\(x\)</span> is held (or regenerated) by the client and <span class="math inline">\(v\)</span>, the verifier, is stored by the server. The verifier is created by the
+client from <span class="math inline">\(x\)</span> and transmitted only during initial enrollment, and that’s the only time a secret is transmitted.</p>
+<p>As described in detail in <a href="deepKeys.html#sec:keyderiv">“Key derivation,”</a> <span class="math inline">\(x\)</span> is derived from a <a class='glossary' title='Something you must remember and type when unlocking 1Password. It’s never transmitted from your devices. Previously known as Master Password.'>account password</a> and <a class='glossary' title='A randomly generated user secret key that is created upon first signup. It’s created and stored locally. Along with the user’s account password, it’s required both for decrypting data and for authenticating to the server. The Secret Key prevents an attacker who has acquired remotely stored data from attempting to guess a user’s account password. Previously known as the Account Key.'>Secret Key</a>. The client computes <span class="math inline">\(v = g^x\)</span> and sends <span class="math inline">\(v\)</span> to the server during initial enrollment.</p>
+<p>During a normal sign-in, the client picks a secret random number <span class="math inline">\(a\)</span> and computes <span class="math inline">\(A = g^a\)</span> as described above in <a href="srp.html#sec:dhe">“Diffie-Hellman key exchange.”</a> It sends <span class="math inline">\(A\)</span> to the server (along with its email address).</p>
+<p>The server picks a random number, <span class="math inline">\(b\)</span>, but unlike unauthenticated <a class='glossary' title='An application of the discrete logarithm problem (DLP) to provide a way for parties to decide upon a secret key without revealing any secrets during the communication. It’s named after Whitfield Diffie and Martin Hellman who published it in 1976.'>DHE</a>, it computes <span class="math inline">\(B\)</span> as <span class="math inline">\(B = kv + g^b\)</span> and sends that to the client.</p>
+<p>Everyone (including a possible attacker) can now compute a non-secret <span class="math inline">\(u\)</span> from <span class="math inline">\(A\)</span> and <span class="math inline">\(B\)</span> by using a hash.<a href="#fn44" class="footnote-ref" id="fnref44"><sup>44</sup></a> The server will
+calculate a raw <span class="math inline">\(S\)</span> as</p>
+<p><span class="math display">\[\begin{equation}
+    S = {\left(Av^u\right)}^b
+\end{equation}\]</span> The client will calculate the same raw <span class="math inline">\(S\)</span> as
+<span class="math display">\[\begin{equation}
+    S = {\left(B - kg^x\right)}^{a + ux}
+\end{equation}\]</span></p>
+<p>The client and server will calculate the the same raw <span class="math inline">\(S\)</span> if <span class="math inline">\(v\)</span> is constructed from <span class="math inline">\(x\)</span> as in equation <a href="srp.html#eq:modexp">(B.2)</a> and <span class="math inline">\(A\)</span> and <span class="math inline">\(B\)</span> are constructed as described above. The proof is left as an exercise to the reader. (And the proof this is the only feasible way for the values to be the same is left for advanced texts.)</p>
+
+</div>
+</div>
+</div>
+<div class="footnotes">
+<hr />
+<ol start="39">
+<li id="fn39"><p>The client may locally store <span class="math inline">\(x\)</span> in a way that’s encrypted with keys that depend on the <a class='glossary' title='Key used to decrypt a user’s personal key set. It’s derived from the user’s account password and Secret Key. Previously known as the Master Unlock Key.'>Account Unlock Key (AUK)</a> instead of recalculating it afresh each time.<a href="srp.html#fnref39" class="footnote-back">↩︎</a></p></li>
+<li id="fn40"><p><span class="citation">Taylor et al. (<a href="bibliography.html#ref-rfc5054">2007</a>)</span><a href="srp.html#fnref40" class="footnote-back">↩︎</a></p></li>
+<li id="fn41"><p><span class="citation">Rehbehn and Fowler (<a href="bibliography.html#ref-rfc2954">2000</a>)</span><a href="srp.html#fnref41" class="footnote-back">↩︎</a></p></li>
+<li id="fn42"><p><span class="citation">Kivinen and Kojo (<a href="bibliography.html#ref-rfc3526">2003</a>)</span><a href="srp.html#fnref42" class="footnote-back">↩︎</a></p></li>
+<li id="fn43"><p>There are numerous mathematical assumptions behind the claim that it’s infeasible to determine <span class="math inline">\(a\)</span> from <span class="math inline">\(A\)</span>. Mathematicians are confident that some things involved are “hard” to compute but lack full mathematical proof. There are also some physical assumptions behind the security claims. We know the relevant computations we want to be difficult are not hard using large quantum computers of a certain sort. We’re assuming, with some justification, that constructing the appropriate sort of quantum computer is beyond anyone’s reach for at least a decade. We anticipate the development of post-quantum cryptographic algorithms over the next decade or so, but nothing is yet suitably mature to be of use to us now.<a href="srp.html#fnref43" class="footnote-back">↩︎</a></p></li>
+<li id="fn44"><p>It doesn’t matter too much how <span class="math inline">\(u\)</span> is created, but it must be standardized so the server and client do it the same way. We use the SHA256 hash of <span class="math inline">\(A | B\)</span>.<a href="srp.html#fnref44" class="footnote-back">↩︎</a></p></li>
+</ol>
+</div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+<a href="leopard.html" class="navigation navigation-prev " aria-label="Previous page"><i class="fa fa-angle-left"></i></a>
+<a href="mitm.html" class="navigation navigation-next " aria-label="Next page"><i class="fa fa-angle-right"></i></a>
+    </div>
+  </div>
+<script src="libs/gitbook-2.6.7/js/app.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/clipboard.min.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-search.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-sharing.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-fontsettings.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-bookdown.js"></script>
+<script src="libs/gitbook-2.6.7/js/jquery.highlight.js"></script>
+<script src="libs/gitbook-2.6.7/js/plugin-clipboard.js"></script>
+<script>
+gitbook.require(["gitbook"], function(gitbook) {
+gitbook.start({
+  "sharing": {
+    "github": false,
+    "facebook": false,
+    "twitter": false,
+    "linkedin": false,
+    "weibo": false,
+    "instapaper": false,
+    "vk": false,
+    "whatsapp": false,
+    "all": ["facebook", "twitter", "linkedin", "weibo", "instapaper"]
+  },
+  "fontsettings": {
+    "theme": "white",
+    "family": "sans",
+    "size": 2
+  },
+  "edit": {
+    "link": null,
+    "text": null
+  },
+  "history": {
+    "link": null,
+    "text": null
+  },
+  "view": {
+    "link": null,
+    "text": null
+  },
+  "download": ["1Password_Security_Design.pdf"],
+  "search": {
+    "engine": "fuse",
+    "options": null
+  },
+  "toc": {
+    "collapse": "none"
+  }
+});
+});
+</script>
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    var src = "true";
+    if (src === "" || src === "true") src = "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.9/latest.js?config=TeX-MML-AM_CHTML";
+    if (location.protocol !== "file:")
+      if (/^https?:/.test(src))
+        src = src.replace(/^https?:/, '');
+    script.src = src;
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+</body>
+
+</html>

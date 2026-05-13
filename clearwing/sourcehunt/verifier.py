@@ -201,7 +201,7 @@ class Verifier:
         system_prompt = self._prompt_for_finding(finding)
         try:
             response = await self.llm.aask_text(system=system_prompt, user=user_msg)
-            content = response.first_text() or ""
+            content = response.first_text or ""
         except Exception as e:
             logger.warning("Verifier LLM call failed", exc_info=True)
             return VerifierResult(
@@ -394,7 +394,7 @@ class Verifier:
         user_msg = self._build_patch_oracle_message(finding, file_content)
         try:
             response = await self.llm.aask_text(system=PATCH_ORACLE_PROMPT, user=user_msg)
-            content = response.first_text() or ""
+            content = response.first_text or ""
         except Exception as e:
             logger.debug("Patch-oracle LLM call failed", exc_info=True)
             return False, "", f"llm error: {e}"
