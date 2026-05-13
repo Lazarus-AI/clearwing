@@ -208,6 +208,10 @@ def _prompt_base_url(console: Console, preset: ProviderPreset) -> str:
         )
         return preset.default_base_url or "https://chatgpt.com/backend-api"
 
+    if preset.auth_flow == "anthropic_oauth":
+        console.print("[dim]Anthropic OAuth uses api.anthropic.com (no base URL to set).[/dim]")
+        return ""
+
     if preset.default_base_url is None:
         # Anthropic direct — no base_url to configure
         console.print("[dim]Anthropic direct uses api.anthropic.com (no base URL to set).[/dim]")
@@ -250,11 +254,16 @@ def _prompt_api_key(
         if existing:
             try:
                 creds = ensure_fresh_openai_oauth_credentials()
-                console.print(
-                    f"[dim]Using stored OpenAI OAuth credentials for "
-                    f"account_id={creds.account_id}.[/dim]"
+                reuse = Confirm.ask(
+                    f"Found existing OpenAI OAuth credentials (account_id={creds.account_id}). Use them?",
+                    default=True,
                 )
-                return ""
+                if reuse:
+                    console.print(
+                        f"[dim]Using stored OpenAI OAuth credentials for "
+                        f"account_id={creds.account_id}.[/dim]"
+                    )
+                    return ""
             except Exception as exc:
                 console.print(
                     f"[yellow]Stored OpenAI OAuth credentials need renewal: {exc}[/yellow]"
@@ -269,6 +278,40 @@ def _prompt_api_key(
             print_fn=console.print,
         )
         console.print(f"[green]OpenAI OAuth login complete.[/green] account_id={creds.account_id}")
+        return ""
+
+    if preset.auth_flow == "anthropic_oauth":
+        from clearwing.providers.openai_oauth import (
+            ensure_fresh_anthropic_oauth_credentials,
+            load_anthropic_oauth_credentials,
+            login_anthropic_oauth,
+        )
+
+        existing = load_anthropic_oauth_credentials()
+        if existing:
+            try:
+                creds = ensure_fresh_anthropic_oauth_credentials()
+                reuse = Confirm.ask(
+                    "Found existing Anthropic OAuth credentials. Use them?",
+                    default=True,
+                )
+                if reuse:
+                    console.print("[dim]Using stored Anthropic OAuth credentials.[/dim]")
+                    return ""
+            except Exception as exc:
+                console.print(
+                    f"[yellow]Stored Anthropic OAuth credentials need renewal: {exc}[/yellow]"
+                )
+
+        console.print(
+            "[dim]Starting Anthropic browser OAuth. Credentials are stored under ~/.clearwing/auth/.[/dim]"
+        )
+        creds = login_anthropic_oauth(
+            no_open=no_open,
+            timeout_seconds=timeout_seconds,
+            print_fn=console.print,
+        )
+        console.print("[green]Anthropic OAuth login complete.[/green]")
         return ""
 
     if preset.is_local and preset.api_key_env_var is None:
@@ -424,11 +467,12 @@ def _run_test_invoke(
     """
     from clearwing.providers import LLMEndpoint, ProviderManager
 
-    if preset.auth_flow == "openai_codex":
+    if preset.auth_flow in ("openai_codex", "anthropic_oauth"):
+        provider_name = "openai_codex" if preset.auth_flow == "openai_codex" else "anthropic_oauth"
         endpoint = LLMEndpoint(
-            provider="openai_codex",
+            provider=provider_name,
             model=model,
-            base_url=base_url,
+            base_url=base_url or None,
             api_key=None,
             source="cli",
         )

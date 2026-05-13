@@ -515,6 +515,8 @@ def _adapter_for_endpoint(endpoint: LLMEndpoint) -> str:
     # `provider:` config block) wins over every other rule.
     if endpoint.adapter:
         return endpoint.adapter.strip()
+    if endpoint.provider == "anthropic_oauth":
+        return "anthropic_oauth"
     if endpoint.provider == "anthropic":
         return "anthropic"
     if endpoint.provider == "openai_codex":
@@ -529,6 +531,8 @@ def _adapter_for_provider_config(provider: str, config: ProviderConfig | None) -
     if config is not None and config.adapter:
         return config.adapter.strip()
     explicit = provider.lower().strip()
+    if explicit in {"anthropic_oauth", "anthropic-oauth"}:
+        return "anthropic_oauth"
     if explicit == "anthropic":
         return "anthropic"
     if explicit in {"openai_codex", "openai-codex", "openai_oauth", "openai-oauth"}:
