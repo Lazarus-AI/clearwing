@@ -255,29 +255,23 @@ def _prompt_api_key(
             try:
                 creds = ensure_fresh_openai_oauth_credentials()
                 reuse = Confirm.ask(
-                    f"Found existing OpenAI OAuth credentials (account_id={creds.account_id}). Use them?",
+                    f"Found existing OpenAI OAuth credentials "
+                    f"(account [dim]{creds.account_id[:8]}...[/dim]). Use them?",
                     default=True,
                 )
                 if reuse:
-                    console.print(
-                        f"[dim]Using stored OpenAI OAuth credentials for "
-                        f"account_id={creds.account_id}.[/dim]"
-                    )
+                    console.print("[dim]Using stored credentials.[/dim]")
                     return ""
             except Exception as exc:
-                console.print(
-                    f"[yellow]Stored OpenAI OAuth credentials need renewal: {exc}[/yellow]"
-                )
+                console.print(f"[yellow]Stored credentials expired: {exc}[/yellow]")
 
-        console.print(
-            "[dim]Starting OpenAI browser OAuth. Credentials are stored under ~/.clearwing/auth/.[/dim]"
-        )
+        console.print("")
         creds = login_openai_oauth(
             no_open=no_open,
             timeout_seconds=timeout_seconds,
             print_fn=console.print,
         )
-        console.print(f"[green]OpenAI OAuth login complete.[/green] account_id={creds.account_id}")
+        console.print(f"\n[green]Signed in.[/green] account_id={creds.account_id}")
         return ""
 
     if preset.auth_flow == "anthropic_oauth":
@@ -296,22 +290,18 @@ def _prompt_api_key(
                     default=True,
                 )
                 if reuse:
-                    console.print("[dim]Using stored Anthropic OAuth credentials.[/dim]")
+                    console.print("[dim]Using stored credentials.[/dim]")
                     return ""
             except Exception as exc:
-                console.print(
-                    f"[yellow]Stored Anthropic OAuth credentials need renewal: {exc}[/yellow]"
-                )
+                console.print(f"[yellow]Stored credentials expired: {exc}[/yellow]")
 
-        console.print(
-            "[dim]Starting Anthropic browser OAuth. Credentials are stored under ~/.clearwing/auth/.[/dim]"
-        )
+        console.print("")
         creds = login_anthropic_oauth(
             no_open=no_open,
             timeout_seconds=timeout_seconds,
             print_fn=console.print,
         )
-        console.print("[green]Anthropic OAuth login complete.[/green]")
+        console.print("\n[green]Signed in.[/green]")
         return ""
 
     if preset.is_local and preset.api_key_env_var is None:

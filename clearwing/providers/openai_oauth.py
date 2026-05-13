@@ -19,7 +19,6 @@ import os
 import queue
 import secrets
 import select
-import socket
 import sys
 import tempfile
 import threading
@@ -92,13 +91,27 @@ AUTH_DIR = clearwing_home() / "auth"
 
 
 def _flush_stdin() -> None:
-    """Discard any buffered stdin so leftover paste input doesn't poison later prompts."""
+    """Discard any buffered stdin so leftover input doesn't poison later prompts."""
+    if not sys.stdin.isatty():
+        return
     try:
-        if hasattr(select, "select"):
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        try:
             while select.select([sys.stdin], [], [], 0.0)[0]:
                 sys.stdin.readline()
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+
+def _is_remote_session() -> bool:
+    return bool(
+        os.environ.get("SSH_CLIENT")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("SSH_CONNECTION")
+    )
 
 
 @dataclass(frozen=True)
@@ -428,11 +441,32 @@ def ensure_fresh_openai_oauth_credentials(
         return refreshed
 
 
+_CALLBACK_SUCCESS_HTML = b"""\
+<!doctype html><html><head><style>
+body{font-family:system-ui,sans-serif;display:flex;justify-content:center;
+align-items:center;min-height:80vh;background:#f8f9fa}
+.box{text-align:center;padding:2rem}
+h2{color:#16a34a}
+</style></head><body><div class="box">
+<h2>Signed in to Clearwing</h2>
+<p>You can close this tab and return to your terminal.</p>
+</div></body></html>"""
+
+
+def _cancel_existing_server(port: int) -> None:
+    """Send /cancel to a stale callback server occupying our port."""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/cancel")
+        urllib.request.urlopen(req, timeout=2)
+    except Exception:
+        pass
+
+
 def run_callback_server(
     *,
     port: int = OPENAI_CODEX_CALLBACK_PORT,
     callback_path: str = OPENAI_CODEX_CALLBACK_PATH,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = 120,
     expected_state: str | None = None,
 ) -> dict[str, str] | None:
     result_queue: queue.Queue[dict[str, str]] = queue.Queue(maxsize=1)
@@ -443,6 +477,14 @@ def run_callback_server(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path or "")
+
+            if parsed.path == "/cancel":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"cancelled")
+                result_queue.put_nowait({})
+                return
+
             if parsed.path != callback_path:
                 self.send_response(404)
                 self.end_headers()
@@ -466,20 +508,22 @@ def run_callback_server(
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(
-                b"<!doctype html><html><body>"
-                b"<p>Authentication successful. Return to your terminal.</p>"
-                b"</body></html>"
-            )
+            self.wfile.write(_CALLBACK_SUCCESS_HTML)
             try:
                 result_queue.put_nowait({"code": code, "state": state})
             except Exception:
                 pass
 
     server: TCPServer | None = None
-    try:
-        server = TCPServer(("127.0.0.1", port), Handler)
-    except OSError:
+    for attempt in range(3):
+        try:
+            server = TCPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError:
+            if attempt == 0:
+                _cancel_existing_server(port)
+            time.sleep(0.3)
+    if server is None:
         return None
 
     def _serve() -> None:
@@ -501,56 +545,77 @@ def run_callback_server(
         thread.join(timeout=1.0)
 
 
-def is_callback_port_available() -> bool:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", OPENAI_CODEX_CALLBACK_PORT))
-        return True
-    except OSError:
-        return False
-
-
 def login_openai_oauth(
     *,
     no_open: bool = False,
-    timeout_seconds: int = 60,
-    allow_manual_fallback: bool = True,
+    timeout_seconds: int = 120,
     input_fn=input,
     print_fn=print,
 ) -> OpenAIOAuthCredentials:
-    """Run the browser OAuth flow and persist credentials."""
-    if not is_callback_port_available():
-        raise RuntimeError("Port 1455 is required for OpenAI OAuth but is already in use.")
+    """Run the browser OAuth flow and persist credentials.
+
+    The flow mirrors Codex CLI: open browser → localhost callback server
+    receives the redirect → exchange code for tokens.  Stdin is never
+    read while the callback server is running.  If the callback times
+    out, the URL is shown for manual paste as a fallback.
+    """
+    remote = _is_remote_session() or no_open
 
     verifier, challenge = generate_pkce()
     state = create_state()
     auth_url = build_authorize_url(challenge=challenge, state=state)
 
-    print_fn("OpenAI OAuth")
-    print_fn("1. A browser window should open. Sign in to ChatGPT and approve.")
-    print_fn("2. If the callback page fails to load, paste the browser URL here.")
-    print_fn(auth_url)
+    if remote:
+        print_fn("Open this URL in your browser:")
+        print_fn(f"  {auth_url}")
+        print_fn("")
+        pasted = input_fn("Paste the redirect URL after signing in: ").strip()
+        parsed_code, parsed_state = parse_authorization_input(pasted)
+        if parsed_state and parsed_state != state:
+            raise RuntimeError("State mismatch — paste the URL from this login attempt.")
+        if not parsed_code:
+            raise RuntimeError("Could not extract authorization code from input.")
+        creds = exchange_authorization_code(code=parsed_code, verifier=verifier)
+        save_openai_oauth_credentials(creds)
+        return ensure_fresh_openai_oauth_credentials(skew_seconds=0)
 
+    # Local flow: browser + localhost callback, no stdin reading.
+    browser_opened = False
     if not no_open:
         try:
             webbrowser.open(auth_url)
+            browser_opened = True
         except Exception:
             pass
+
+    if browser_opened:
+        print_fn("Waiting for sign-in in browser...")
+    else:
+        print_fn("Could not open browser. Open this URL manually:")
+        print_fn(f"  {auth_url}")
+        print_fn("Waiting for callback...")
+
+    print_fn(f"(listening on http://localhost:{OPENAI_CODEX_CALLBACK_PORT})")
 
     result = run_callback_server(timeout_seconds=timeout_seconds, expected_state=state)
     code: str | None = result.get("code") if result else None
 
-    if code:
-        _flush_stdin()
-
-    if not code and not allow_manual_fallback:
-        raise RuntimeError("Authorization callback not received.")
+    # Drain any accidental keystrokes that accumulated while waiting.
+    _flush_stdin()
 
     if not code:
-        pasted = input_fn("Paste the authorization code (or full redirect URL): ").strip()
+        # Callback server timed out or failed — fall back to manual paste.
+        print_fn("")
+        print_fn("Browser callback was not received.")
+        if browser_opened:
+            print_fn("If the page didn't load, copy the URL from your browser.")
+        else:
+            print_fn("Open the URL above, sign in, then paste the redirect URL.")
+        print_fn("")
+        pasted = input_fn("Paste the redirect URL: ").strip()
         parsed_code, parsed_state = parse_authorization_input(pasted)
         if parsed_state and parsed_state != state:
-            raise RuntimeError("State mismatch. Paste the redirect URL from this login attempt.")
+            raise RuntimeError("State mismatch — paste the URL from this login attempt.")
         code = parsed_code
 
     if not code:
@@ -827,6 +892,12 @@ def login_anthropic_oauth(
     input_fn=input,
     print_fn=print,
 ) -> AnthropicOAuthCredentials:
+    """Anthropic OAuth via the hosted callback page (paste flow).
+
+    Unlike OpenAI, Anthropic's OAuth redirects to a hosted page at
+    console.anthropic.com that displays the authorization code for the
+    user to copy-paste.  No localhost callback server is needed.
+    """
     verifier, challenge = generate_pkce()
     state = verifier
     auth_url = build_anthropic_authorize_url(
@@ -835,21 +906,29 @@ def login_anthropic_oauth(
         redirect_uri=ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI,
     )
 
-    print_fn("Anthropic OAuth / Claude Code")
-    print_fn("Open this link, sign in to Claude, approve Clearwing, then paste the code shown:")
-    print_fn(auth_url)
-    if not no_open:
+    browser_opened = False
+    if not (no_open or _is_remote_session()):
         try:
             webbrowser.open(auth_url)
+            browser_opened = True
         except Exception:
             pass
 
-    pasted = input_fn("Paste the authorization code or full redirect URL: ").strip()
+    if browser_opened:
+        print_fn("Opening browser to sign in to Claude...")
+    else:
+        print_fn("Open this URL in your browser:")
+    print_fn(f"  {auth_url}")
+    print_fn("")
+    print_fn("After signing in, you'll see a code. Paste it below.")
+    print_fn("")
+
+    pasted = input_fn("Paste code: ").strip()
     code, parsed_state = parse_authorization_input(pasted)
     if parsed_state and parsed_state != state:
-        raise RuntimeError("State mismatch. Paste the code from this login attempt.")
+        raise RuntimeError("State mismatch — paste the code from this login attempt.")
     if not code:
-        raise RuntimeError("Missing Anthropic authorization code.")
+        raise RuntimeError("Missing authorization code.")
     creds = exchange_anthropic_authorization_code(
         code=code,
         state=parsed_state or state,
