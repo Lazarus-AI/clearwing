@@ -18,7 +18,9 @@ import json
 import os
 import queue
 import secrets
+import select
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -87,6 +89,16 @@ _anthropic_claude_code_version_cache: str | None = None
 from clearwing.core.config import clearwing_home
 
 AUTH_DIR = clearwing_home() / "auth"
+
+
+def _flush_stdin() -> None:
+    """Discard any buffered stdin so leftover paste input doesn't poison later prompts."""
+    try:
+        if hasattr(select, "select"):
+            while select.select([sys.stdin], [], [], 0.0)[0]:
+                sys.stdin.readline()
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -527,6 +539,9 @@ def login_openai_oauth(
 
     result = run_callback_server(timeout_seconds=timeout_seconds, expected_state=state)
     code: str | None = result.get("code") if result else None
+
+    if code:
+        _flush_stdin()
 
     if not code and not allow_manual_fallback:
         raise RuntimeError("Authorization callback not received.")
