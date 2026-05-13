@@ -433,9 +433,29 @@ class SourceHuntRunner:
         self._injected_historical_db = None
         self._enable_behavior_monitor = enable_behavior_monitor
         self._enable_artifact_store = enable_artifact_store
-        self._gvisor_runtime = gvisor_runtime
+        self._gvisor_runtime = self._check_runtime_available(gvisor_runtime)
         self._preprocessing = preprocessing
         self._seed_harness_crashes = seed_harness_crashes
+
+    @staticmethod
+    def _check_runtime_available(runtime: str | None) -> str | None:
+        if not runtime:
+            return None
+        try:
+            import docker
+            info = docker.from_env().info()
+            runtimes = info.get("Runtimes") or {}
+            if runtime in runtimes:
+                return runtime
+            logger.warning(
+                "Docker runtime %r not installed (available: %s) — "
+                "sandboxes will use the default runtime instead",
+                runtime,
+                ", ".join(runtimes) or "runc",
+            )
+        except Exception:
+            logger.debug("Could not query Docker runtimes", exc_info=True)
+        return None
 
     def _inject_campaign_pool(
         self,

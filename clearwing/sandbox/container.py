@@ -138,7 +138,21 @@ class SandboxContainer:
         # auto_remove conflicts with detached non-restart containers in some
         # docker versions; we'll handle removal manually in stop()
 
-        self._container = client.containers.run(**kwargs)
+        try:
+            self._container = client.containers.run(**kwargs)
+        except Exception as exc:
+            if self.config.runtime and "runtime" in str(exc).lower():
+                rt = self.config.runtime
+                logger.warning(
+                    "Docker runtime %r unavailable — falling back to default runtime. "
+                    "Drop --gvisor or install %s to silence this.",
+                    rt, rt,
+                )
+                kwargs.pop("runtime", None)
+                self.config.runtime = None
+                self._container = client.containers.run(**kwargs)
+            else:
+                raise
         logger.debug("Sandbox container started: %s", self._container.short_id)
 
         from .registry import ContainerRegistry
