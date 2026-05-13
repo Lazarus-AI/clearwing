@@ -217,7 +217,7 @@ def _prompt_base_url(console: Console, preset: ProviderPreset) -> str:
             "[dim]OpenAI OAuth uses the ChatGPT Codex backend "
             "(no Platform API key or /v1 base URL).[/dim]"
         )
-        return preset.default_base_url or "https://chatgpt.com/backend-api"
+        return ""
 
     if preset.auth_flow == "anthropic_oauth":
         console.print("[dim]Anthropic OAuth uses api.anthropic.com (no base URL to set).[/dim]")
@@ -493,7 +493,7 @@ def _run_test_invoke(
                 model_name=model,
                 provider_name=provider_name,
                 api_key="",
-                base_url=base_url or None,
+                base_url=None,
             )
             from genai_pyo3 import ChatMessage
 
