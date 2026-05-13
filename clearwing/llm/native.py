@@ -501,7 +501,7 @@ class AsyncLLMClient:
         if options.reasoning_effort:
             body["reasoning"] = {"effort": options.reasoning_effort, "summary": "detailed"}
         if request.tools:
-            body["tools"] = [self._openai_tool_body(tool) for tool in request.tools]
+            body["tools"] = [self._responses_api_tool_body(tool) for tool in request.tools]
         if options.response_json_spec is not None:
             body["text"] = {"format": self._responses_api_text_format(options.response_json_spec)}
 
@@ -788,6 +788,23 @@ class AsyncLLMClient:
         if spec.description:
             fmt["description"] = spec.description
         return fmt
+
+    def _responses_api_tool_body(self, tool: Tool) -> dict[str, Any]:
+        """Build tool definition for the Responses API.
+
+        The Responses API puts name/description/parameters at the top level,
+        unlike Chat Completions which nests them inside a ``function`` key.
+        """
+        try:
+            parameters = json.loads(tool.schema_json or "{}")
+        except json.JSONDecodeError:
+            parameters = {"type": "object", "properties": {}}
+        return {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": parameters,
+        }
 
     async def _collect_openai_sse_response(
         self,
