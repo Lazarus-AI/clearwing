@@ -75,9 +75,10 @@ class ScanConfig:
     target: str = ""
     ports: list = field(default_factory=lambda: list(range(1, 1025)))
     # Default to "connect" (TCP connect / nmap -sT): works without root on
-    # every OS. "syn" (raw-socket SYN scan via scapy) needs root + a route
-    # to a usable IP source; without it scapy silently drops every probe
-    # and the report looks empty. Users can opt back into SYN explicitly.
+    # every OS. "syn" (raw-socket SYN scan via libpnet_pyo3) needs root + a
+    # route to a usable IP source; without it every probe raises
+    # PermissionError and the report looks empty. Users can opt back into
+    # SYN explicitly.
     scan_type: str = "connect"
     threads: int = 100
     timeout: int = 1

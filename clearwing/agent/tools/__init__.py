@@ -2,7 +2,7 @@
 
 Importing one tool subpackage should not initialize the entire scanning stack.
 Sourcehunt imports `clearwing.agent.tools.hunt`, and that path must stay free
-of OT/scapy side effects.
+of OT / raw-socket side effects.
 """
 
 from typing import Any
