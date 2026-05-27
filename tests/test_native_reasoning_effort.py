@@ -9,9 +9,9 @@ from unittest.mock import patch
 import pytest
 
 from clearwing.llm.native import (
-    AsyncLLMClient,
-    _REASONING_EFFORT_UNSUPPORTED_PATTERNS,
     _REASONING_EFFORT_OVERRIDE_ALLOW,
+    _REASONING_EFFORT_UNSUPPORTED_PATTERNS,
+    AsyncLLMClient,
 )
 
 
@@ -101,15 +101,11 @@ class TestConstructorAutoBehavior:
         assert client.reasoning_effort == "medium"
 
     def test_explicit_none_passes_through_on_allowed_model(self):
-        client = AsyncLLMClient(
-            **self._kwargs(model_name="gpt-4o", reasoning_effort=None)
-        )
+        client = AsyncLLMClient(**self._kwargs(model_name="gpt-4o", reasoning_effort=None))
         assert client.reasoning_effort is None
 
     def test_explicit_high_passes_through(self):
-        client = AsyncLLMClient(
-            **self._kwargs(model_name="o1-preview", reasoning_effort="high")
-        )
+        client = AsyncLLMClient(**self._kwargs(model_name="o1-preview", reasoning_effort="high"))
         assert client.reasoning_effort == "high"
 
 
@@ -207,23 +203,22 @@ class TestAchatRetryOnUnsupportedReasoning:
             call_log.append("called")
             if len(call_log) == 1:
                 raise first_exc
-            assert options.reasoning_effort is None, (
-                "Second call must drop reasoning_effort"
-            )
+            assert options.reasoning_effort is None, "Second call must drop reasoning_effort"
             return success_response
 
-        with patch.object(
-            AsyncLLMClient,
-            "_achat_with_provider_policy",
-            new=fake_policy,
-        ), patch.object(
-            AsyncLLMClient,
-            "_build_client",
-            new=lambda self, cls: object(),
+        with (
+            patch.object(
+                AsyncLLMClient,
+                "_achat_with_provider_policy",
+                new=fake_policy,
+            ),
+            patch.object(
+                AsyncLLMClient,
+                "_build_client",
+                new=lambda self, cls: object(),
+            ),
         ):
-            result = asyncio.run(
-                client.achat(messages=[], system=None, tools=None)
-            )
+            result = asyncio.run(client.achat(messages=[], system=None, tools=None))
 
         assert result is success_response
         assert len(call_log) == 2, "Retry should have happened exactly once"
@@ -238,14 +233,17 @@ class TestAchatRetryOnUnsupportedReasoning:
         async def always_raise(self_, client_obj, request, options):
             raise unrelated
 
-        with patch.object(
-            AsyncLLMClient,
-            "_achat_with_provider_policy",
-            new=always_raise,
-        ), patch.object(
-            AsyncLLMClient,
-            "_build_client",
-            new=lambda self, cls: object(),
+        with (
+            patch.object(
+                AsyncLLMClient,
+                "_achat_with_provider_policy",
+                new=always_raise,
+            ),
+            patch.object(
+                AsyncLLMClient,
+                "_build_client",
+                new=lambda self, cls: object(),
+            ),
         ):
             with pytest.raises(RuntimeError) as exc_info:
                 asyncio.run(client.achat(messages=[], system=None, tools=None))
