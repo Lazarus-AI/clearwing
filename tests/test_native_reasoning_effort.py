@@ -1,6 +1,7 @@
 """Tests for the reasoning_effort auto-detection added to AsyncLLMClient.
 
-See: docs/specs/2026-05-27-clearwing-reasoning-effort-patch-design.md
+Covers Layer 1 (model-name denylist + sentinel-default constructor) and
+Layer 2 (retry-on-400 fallback in achat / achat_stream).
 """
 
 import asyncio
