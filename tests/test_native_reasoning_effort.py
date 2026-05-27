@@ -144,3 +144,32 @@ class TestIsUnsupportedReasoningEffortError:
         # isn't actually a 400 or "unsupported" message
         exc = RuntimeError("reasoning_effort defaulted to medium for unknown model")
         assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False
+
+
+class TestRebuildOptionsWithoutReasoning:
+    """Layer 2 helper: reconstruct ChatOptions with reasoning_effort dropped."""
+
+    def test_drops_reasoning_effort_preserves_everything_else(self):
+        from genai_pyo3 import ChatOptions
+
+        original = ChatOptions(
+            temperature=0.7,
+            max_tokens=2048,
+            capture_content=True,
+            capture_usage=True,
+            capture_tool_calls=True,
+            capture_reasoning_content=True,
+            normalize_reasoning_content=True,
+            reasoning_effort="medium",
+        )
+
+        rebuilt = AsyncLLMClient._rebuild_options_without_reasoning(original)
+
+        assert rebuilt.reasoning_effort is None
+        assert rebuilt.temperature == 0.7
+        assert rebuilt.max_tokens == 2048
+        assert rebuilt.capture_content is True
+        assert rebuilt.capture_usage is True
+        assert rebuilt.capture_tool_calls is True
+        assert rebuilt.capture_reasoning_content is True
+        assert rebuilt.normalize_reasoning_content is True

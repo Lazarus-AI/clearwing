@@ -471,6 +471,26 @@ class AsyncLLMClient:
                 await asyncio.sleep(delay)
 
     @staticmethod
+    def _rebuild_options_without_reasoning(options: ChatOptions) -> ChatOptions:
+        """Return a copy of *options* with ``reasoning_effort=None``.
+
+        ``ChatOptions`` is a frozen Rust struct from genai-pyo3, so we
+        reconstruct it from scratch. ``response_json_spec`` is preserved
+        when present.
+        """
+        return ChatOptions(
+            temperature=options.temperature,
+            max_tokens=options.max_tokens,
+            capture_content=options.capture_content,
+            capture_usage=options.capture_usage,
+            capture_tool_calls=options.capture_tool_calls,
+            capture_reasoning_content=options.capture_reasoning_content,
+            normalize_reasoning_content=options.normalize_reasoning_content,
+            reasoning_effort=None,
+            response_json_spec=getattr(options, "response_json_spec", None),
+        )
+
+    @staticmethod
     def _is_unsupported_reasoning_effort_error(exc: BaseException) -> bool:
         """True when *exc* indicates the provider rejected ``reasoning_effort``.
 
