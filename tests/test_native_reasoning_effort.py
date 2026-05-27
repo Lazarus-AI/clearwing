@@ -60,3 +60,51 @@ class TestAutoResolveReasoningEffort:
         assert isinstance(_REASONING_EFFORT_UNSUPPORTED_PATTERNS, tuple)
         assert "llama-3" in _REASONING_EFFORT_UNSUPPORTED_PATTERNS
         assert isinstance(_REASONING_EFFORT_OVERRIDE_ALLOW, frozenset)
+
+
+class TestConstructorAutoBehavior:
+    """Layer 1, wired into __init__.
+
+    These tests verify that with the new sentinel default ('auto'), the
+    constructor calls _auto_resolve_reasoning_effort and stores the result.
+    Explicit values (including None and "medium") must pass through untouched.
+    """
+
+    def _kwargs(self, **overrides):
+        """Minimal kwargs to satisfy AsyncLLMClient.__init__."""
+        base = dict(
+            model_name="llama-3.3-70b-versatile",
+            provider_name="openai_compat",
+            api_key="sk-test",
+        )
+        base.update(overrides)
+        return base
+
+    def test_default_for_groq_llama_resolves_to_none(self):
+        client = AsyncLLMClient(**self._kwargs(model_name="llama-3.3-70b-versatile"))
+        assert client.reasoning_effort is None
+
+    def test_default_for_gpt_4o_resolves_to_medium(self):
+        client = AsyncLLMClient(**self._kwargs(model_name="gpt-4o"))
+        assert client.reasoning_effort == "medium"
+
+    def test_explicit_medium_passes_through_on_denylist_model(self):
+        client = AsyncLLMClient(
+            **self._kwargs(
+                model_name="llama-3.3-70b-versatile",
+                reasoning_effort="medium",
+            )
+        )
+        assert client.reasoning_effort == "medium"
+
+    def test_explicit_none_passes_through_on_allowed_model(self):
+        client = AsyncLLMClient(
+            **self._kwargs(model_name="gpt-4o", reasoning_effort=None)
+        )
+        assert client.reasoning_effort is None
+
+    def test_explicit_high_passes_through(self):
+        client = AsyncLLMClient(
+            **self._kwargs(model_name="o1-preview", reasoning_effort="high")
+        )
+        assert client.reasoning_effort == "high"

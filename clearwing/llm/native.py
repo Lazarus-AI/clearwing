@@ -148,7 +148,7 @@ class AsyncLLMClient:
         rate_limit_max_retries: int = 6,
         rate_limit_initial_backoff_seconds: float = 1.0,
         rate_limit_max_backoff_seconds: float = 60.0,
-        reasoning_effort: str | None = "medium",
+        reasoning_effort: str | None | Literal["auto"] = "auto",
     ) -> None:
         self.model_name = model_name
         self.provider_name = provider_name
@@ -208,11 +208,18 @@ class AsyncLLMClient:
 
         self.default_system = default_system
         # `reasoning_effort` controls how much reasoning the provider
-        # runs (for models that support it). "medium" is a sensible
-        # default — higher for deeper-reasoning tasks, "none"/None to
-        # opt out entirely. Accepted values: "none" | "minimal" | "low"
-        # | "medium" | "high" | "xhigh" | "max" | "budget:<n>".
-        self.reasoning_effort = reasoning_effort
+        # runs (for models that support it). Accepted values: "none" |
+        # "minimal" | "low" | "medium" | "high" | "xhigh" | "max" |
+        # "budget:<n>" | None.
+        #
+        # The sentinel "auto" (the default) lets the client decide based
+        # on the model name — most non-OpenAI OpenAI-compat models reject
+        # this param entirely (see _REASONING_EFFORT_UNSUPPORTED_PATTERNS).
+        # Explicit values (including None) bypass the auto-resolution.
+        if reasoning_effort == "auto":
+            self.reasoning_effort = self._auto_resolve_reasoning_effort(model_name)
+        else:
+            self.reasoning_effort = reasoning_effort
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
