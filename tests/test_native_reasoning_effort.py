@@ -254,3 +254,67 @@ class TestAchatRetryOnUnsupportedReasoning:
         assert client.reasoning_effort == "medium", (
             "Instance state must not be touched on unrelated errors"
         )
+
+
+class TestAchatStreamRetryOnUnsupportedReasoning:
+    """Same Layer 2 behavior, on the streaming path."""
+
+    def _make_client(self):
+        return AsyncLLMClient(
+            model_name="some-future-model-2030",
+            provider_name="openai_compat",
+            api_key="sk-test",
+            reasoning_effort="medium",
+        )
+
+    def test_streaming_path_retries_once(self):
+        client = self._make_client()
+        first_exc = RuntimeError(
+            "Status: 400 Bad Request. "
+            'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
+        )
+        success_end = object()
+        on_text = lambda chunk: None  # noqa: E731
+
+        call_log: list[str] = []
+
+        class FakeEvent:
+            content = None
+            end = success_end
+
+        async def fake_stream(model_name, request, options):
+            call_log.append("called")
+            if len(call_log) == 1:
+                raise first_exc
+            assert options.reasoning_effort is None, (
+                "Second streaming call must drop reasoning_effort"
+            )
+
+            async def gen():
+                yield FakeEvent()
+
+            return gen()
+
+        fake_client = type(
+            "FakeClient",
+            (),
+            {"astream_chat": staticmethod(fake_stream)},
+        )()
+
+        with patch.object(
+            AsyncLLMClient,
+            "_build_client",
+            new=lambda self, cls: fake_client,
+        ):
+            result = asyncio.run(
+                client.achat_stream(
+                    messages=[],
+                    system=None,
+                    tools=None,
+                    on_text_delta=on_text,
+                )
+            )
+
+        assert result is success_end
+        assert len(call_log) == 2
+        assert client.reasoning_effort is None

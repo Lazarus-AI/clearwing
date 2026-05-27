@@ -349,14 +349,33 @@ class AsyncLLMClient:
             reasoning_effort=self.reasoning_effort,
         )
 
-        async with self._semaphore:
-            client = self._build_client(Client)
-            stream = await client.astream_chat(self.model_name, request, options)
+        async def _consume(opts: ChatOptions) -> ChatResponse | None:
+            stream = await client.astream_chat(self.model_name, request, opts)
             async for event in stream:
                 if event.content:
                     on_text_delta(event.content)
                 if event.end is not None:
                     return event.end
+            return None
+
+        async with self._semaphore:
+            client = self._build_client(Client)
+            try:
+                end_event = await _consume(options)
+            except RuntimeError as exc:
+                if not self._is_unsupported_reasoning_effort_error(exc):
+                    raise
+                logger.warning(
+                    "Provider rejected reasoning_effort (streaming) for model "
+                    "%r; retrying with reasoning_effort=None and disabling for "
+                    "this session.",
+                    self.model_name,
+                )
+                self.reasoning_effort = None
+                options = self._rebuild_options_without_reasoning(options)
+                end_event = await _consume(options)
+            if end_event is not None:
+                return end_event
         # Fallback if stream ends without an end event
         return await self.achat(
             messages=messages,
