@@ -284,9 +284,24 @@ class AsyncLLMClient:
 
         async with self._semaphore:
             client = self._build_client(Client)
-            response = await self._with_rate_limit_retries(
-                lambda: self._achat_with_provider_policy(client, request, options)
-            )
+            try:
+                response = await self._with_rate_limit_retries(
+                    lambda: self._achat_with_provider_policy(client, request, options)
+                )
+            except RuntimeError as exc:
+                if not self._is_unsupported_reasoning_effort_error(exc):
+                    raise
+                logger.warning(
+                    "Provider rejected reasoning_effort for model %r; "
+                    "retrying with reasoning_effort=None and disabling for "
+                    "this session.",
+                    self.model_name,
+                )
+                self.reasoning_effort = None
+                options = self._rebuild_options_without_reasoning(options)
+                response = await self._with_rate_limit_retries(
+                    lambda: self._achat_with_provider_policy(client, request, options)
+                )
         return response
 
     async def achat_stream(

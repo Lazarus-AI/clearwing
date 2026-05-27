@@ -3,6 +3,9 @@
 See: docs/specs/2026-05-27-clearwing-reasoning-effort-patch-design.md
 """
 
+import asyncio
+from unittest.mock import patch
+
 import pytest
 
 from clearwing.llm.native import (
@@ -173,3 +176,81 @@ class TestRebuildOptionsWithoutReasoning:
         assert rebuilt.capture_tool_calls is True
         assert rebuilt.capture_reasoning_content is True
         assert rebuilt.normalize_reasoning_content is True
+
+
+class TestAchatRetryOnUnsupportedReasoning:
+    """Layer 2 in the non-streaming path: catch the 400, retry once, mutate state."""
+
+    def _make_client(self):
+        # Pass explicit reasoning_effort="medium" to bypass auto-detection,
+        # so we can prove the retry path runs even when Layer 1 didn't catch it.
+        return AsyncLLMClient(
+            model_name="some-future-model-2030",
+            provider_name="openai_compat",
+            api_key="sk-test",
+            reasoning_effort="medium",
+        )
+
+    def test_retries_once_and_mutates_self(self):
+        client = self._make_client()
+        first_exc = RuntimeError(
+            "Status: 400 Bad Request. "
+            'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
+        )
+        success_response = object()  # Sentinel — we don't assert its shape
+
+        # Replace the private call helper. _achat_with_provider_policy is the
+        # narrowest seam: raises on first call, returns on second.
+        call_log: list[str] = []
+
+        async def fake_policy(self_, client_obj, request, options):
+            call_log.append("called")
+            if len(call_log) == 1:
+                raise first_exc
+            assert options.reasoning_effort is None, (
+                "Second call must drop reasoning_effort"
+            )
+            return success_response
+
+        with patch.object(
+            AsyncLLMClient,
+            "_achat_with_provider_policy",
+            new=fake_policy,
+        ), patch.object(
+            AsyncLLMClient,
+            "_build_client",
+            new=lambda self, cls: object(),
+        ):
+            result = asyncio.run(
+                client.achat(messages=[], system=None, tools=None)
+            )
+
+        assert result is success_response
+        assert len(call_log) == 2, "Retry should have happened exactly once"
+        assert client.reasoning_effort is None, (
+            "Instance state must be mutated so future calls skip the param"
+        )
+
+    def test_unrelated_runtime_error_propagates(self):
+        client = self._make_client()
+        unrelated = RuntimeError("Status: 500 Internal Server Error")
+
+        async def always_raise(self_, client_obj, request, options):
+            raise unrelated
+
+        with patch.object(
+            AsyncLLMClient,
+            "_achat_with_provider_policy",
+            new=always_raise,
+        ), patch.object(
+            AsyncLLMClient,
+            "_build_client",
+            new=lambda self, cls: object(),
+        ):
+            with pytest.raises(RuntimeError) as exc_info:
+                asyncio.run(client.achat(messages=[], system=None, tools=None))
+
+        assert exc_info.value is unrelated
+        assert client.reasoning_effort == "medium", (
+            "Instance state must not be touched on unrelated errors"
+        )
