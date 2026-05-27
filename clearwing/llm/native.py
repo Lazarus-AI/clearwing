@@ -7,7 +7,7 @@ import random
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from genai_pyo3 import (
     ChatMessage,
@@ -21,6 +21,34 @@ from genai_pyo3 import (
 from pydantic import BaseModel, RootModel
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort auto-detection
+# ---------------------------------------------------------------------------
+#
+# `reasoning_effort` is an OpenAI-reasoning-only parameter. Most non-OpenAI
+# OpenAI-compat endpoints reject it with HTTP 400 when the configured model is
+# not reasoning-capable. We default to omitting it for models we know reject
+# it, while preserving the current "medium" default for everything else.
+#
+# Match semantics: case-insensitive substring against the model name. First
+# match wins. Order is not significant.
+
+_REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
+    "llama-3",
+    "llama-4",
+    "mistral",
+    "mixtral",
+    "qwen2",
+    "gemma",
+)
+
+# Explicit re-enable list for model names that contain an unsupported pattern
+# above but actually *do* support reasoning_effort (e.g. reasoning-tuned
+# variants of denylisted model families). Intentionally empty today; populate
+# as such models ship.
+_REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 
 
 def _run_coro_sync(coro):
@@ -85,6 +113,28 @@ class AsyncLLMClient:
     only the pieces Clearwing actually needs: text, tool calls, usage, and
     bounded concurrency.
     """
+
+    @staticmethod
+    def _auto_resolve_reasoning_effort(model_name: str) -> str | None:
+        """Return the effective reasoning_effort for *model_name*.
+
+        Returns ``None`` (i.e. omit the parameter) when the model name matches
+        a pattern in :data:`_REASONING_EFFORT_UNSUPPORTED_PATTERNS` and is not
+        in :data:`_REASONING_EFFORT_OVERRIDE_ALLOW`. Returns ``"medium"``
+        otherwise (the previous default for all callers).
+        """
+        lower = model_name.lower()
+        if lower in _REASONING_EFFORT_OVERRIDE_ALLOW:
+            return "medium"
+        for pattern in _REASONING_EFFORT_UNSUPPORTED_PATTERNS:
+            if pattern in lower:
+                logger.info(
+                    "reasoning_effort=None: model %r matches non-reasoning pattern %r",
+                    model_name,
+                    pattern,
+                )
+                return None
+        return "medium"
 
     def __init__(
         self,
