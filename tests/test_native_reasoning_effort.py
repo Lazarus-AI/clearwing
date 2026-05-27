@@ -108,3 +108,39 @@ class TestConstructorAutoBehavior:
             **self._kwargs(model_name="o1-preview", reasoning_effort="high")
         )
         assert client.reasoning_effort == "high"
+
+
+class TestIsUnsupportedReasoningEffortError:
+    """Layer 2 helper: classifying the exception so we only retry the right ones."""
+
+    def test_matches_real_groq_400_body(self):
+        # Verbatim from the original session log
+        exc = RuntimeError(
+            "Web stream error for model 'llama-3.3-70b-versatile (adapter: OpenAI)'. "
+            "Status: 400 Bad Request. "
+            'Body: {"error":{"message":"`reasoning_effort` is not supported with '
+            'this model","type":"invalid_request_error","code":"unknown_parameter"}}'
+        )
+        assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is True
+
+    def test_matches_unsupported_word_without_400(self):
+        exc = RuntimeError("reasoning_effort: unsupported parameter")
+        assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is True
+
+    def test_rejects_429_rate_limit(self):
+        exc = RuntimeError("Status: 429 Too Many Requests. rate limit exceeded")
+        assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False
+
+    def test_rejects_400_for_other_param(self):
+        exc = RuntimeError("Status: 400 Bad Request. unknown parameter 'frobnicator'")
+        assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False
+
+    def test_rejects_500_server_error(self):
+        exc = RuntimeError("Status: 500 Internal Server Error")
+        assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False
+
+    def test_rejects_non_400_message_mentioning_param(self):
+        # Defensive: a stringified exception that mentions reasoning_effort but
+        # isn't actually a 400 or "unsupported" message
+        exc = RuntimeError("reasoning_effort defaulted to medium for unknown model")
+        assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False

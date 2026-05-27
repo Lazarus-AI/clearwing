@@ -470,6 +470,20 @@ class AsyncLLMClient:
                 )
                 await asyncio.sleep(delay)
 
+    @staticmethod
+    def _is_unsupported_reasoning_effort_error(exc: BaseException) -> bool:
+        """True when *exc* indicates the provider rejected ``reasoning_effort``.
+
+        Both conditions required: ``"reasoning_effort"`` must appear in the
+        message AND either ``"400"`` (the HTTP status) or ``"unsupported"``.
+        This avoids false positives on log messages or unrelated errors that
+        happen to mention the parameter name.
+        """
+        text = str(exc).lower()
+        if "reasoning_effort" not in text:
+            return False
+        return "400" in text or "unsupported" in text
+
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return (
