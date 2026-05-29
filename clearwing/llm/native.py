@@ -163,6 +163,13 @@ class AsyncLLMClient:
         # opt out entirely. Accepted values: "none" | "minimal" | "low"
         # | "medium" | "high" | "xhigh" | "max" | "budget:<n>".
         self.reasoning_effort = reasoning_effort
+        # Some providers/models reject the reasoning/thinking request param
+        # genai-pyo3 emits for a given `reasoning_effort` (e.g. current
+        # Anthropic Opus models 400 on the legacy `thinking.type.enabled`
+        # shape, demanding the newer adaptive thinking API). Once we see
+        # that error we flip this and stop sending reasoning_effort for the
+        # lifetime of the client.
+        self._thinking_unsupported = False
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
@@ -199,37 +206,51 @@ class AsyncLLMClient:
             system=system or self.default_system,
             tools=request_tools,
         )
-        options = ChatOptions(
-            temperature=temperature,
-            max_tokens=max_tokens,
-            capture_content=True,
-            capture_usage=True,
-            capture_tool_calls=True,
-            # Ask genai-pyo3 to surface the provider's reasoning output
-            # (OpenAI Responses `reasoning.summary`, Anthropic thinking
-            # blocks, etc.). `normalize_reasoning_content` unifies the
-            # varied provider shapes into ChatResponse.reasoning_content,
-            # so hunter transcripts see a single string regardless of
-            # backend.
-            capture_reasoning_content=True,
-            normalize_reasoning_content=True,
-            reasoning_effort=self.reasoning_effort,
-            response_json_spec=(
-                _json_spec_from_model(
-                    response_schema,
-                    name=response_schema_name,
-                    description=response_schema_description,
-                )
-                if response_schema is not None
-                else None
-            ),
+        json_spec = (
+            _json_spec_from_model(
+                response_schema,
+                name=response_schema_name,
+                description=response_schema_description,
+            )
+            if response_schema is not None
+            else None
         )
+
+        def _build_options(effort: str | None) -> ChatOptions:
+            return ChatOptions(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                capture_content=True,
+                capture_usage=True,
+                capture_tool_calls=True,
+                # Ask genai-pyo3 to surface the provider's reasoning output
+                # (OpenAI Responses `reasoning.summary`, Anthropic thinking
+                # blocks, etc.). `normalize_reasoning_content` unifies the
+                # varied provider shapes into ChatResponse.reasoning_content,
+                # so hunter transcripts see a single string regardless of
+                # backend.
+                capture_reasoning_content=True,
+                normalize_reasoning_content=True,
+                reasoning_effort=effort,
+                response_json_spec=json_spec,
+            )
 
         async with self._semaphore:
             client = self._build_client(Client)
-            response = await self._with_rate_limit_retries(
-                lambda: self._achat_with_provider_policy(client, request, options)
-            )
+            options = _build_options(self._effective_reasoning_effort())
+            try:
+                response = await self._with_rate_limit_retries(
+                    lambda: self._achat_with_provider_policy(client, request, options)
+                )
+            except Exception as exc:
+                # If the model rejected the thinking param, drop it and retry
+                # once (and for the rest of this client's life).
+                if not self._handle_thinking_unsupported(exc):
+                    raise
+                options = _build_options(None)
+                response = await self._with_rate_limit_retries(
+                    lambda: self._achat_with_provider_policy(client, request, options)
+                )
         return response
 
     async def achat_stream(
@@ -274,7 +295,7 @@ class AsyncLLMClient:
             capture_tool_calls=True,
             capture_reasoning_content=True,
             normalize_reasoning_content=True,
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=self._effective_reasoning_effort(),
         )
 
         async with self._semaphore:
@@ -390,6 +411,37 @@ class AsyncLLMClient:
         # API with certain models), harmless for everyone else — every
         # adapter genai-pyo3 supports speaks SSE.
         return await client.achat_via_stream(self.model_name, request, options)
+
+    def _effective_reasoning_effort(self) -> str | None:
+        """`reasoning_effort`, unless we've learned the model rejects it."""
+        if self._thinking_unsupported:
+            return None
+        return self.reasoning_effort
+
+    def _handle_thinking_unsupported(self, exc: Exception) -> bool:
+        """If *exc* is a "thinking param unsupported" 400, latch the flag so
+        future calls drop `reasoning_effort`, and report that a no-thinking
+        retry is worthwhile. Returns False for any other error."""
+        if self._thinking_unsupported or not self.reasoning_effort:
+            return False
+        if not self._is_thinking_unsupported_error(exc):
+            return False
+        self._thinking_unsupported = True
+        logger.warning(
+            "Model=%s provider=%s rejected the reasoning/thinking request param; "
+            "disabling reasoning_effort and retrying without it. (%s)",
+            self.model_name,
+            self.provider_name,
+            exc,
+        )
+        return True
+
+    @staticmethod
+    def _is_thinking_unsupported_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "thinking" in text and (
+            "not supported" in text or "unsupported" in text or "adaptive" in text
+        )
 
     async def _with_rate_limit_retries(self, op) -> ChatResponse:
         attempt = 0
