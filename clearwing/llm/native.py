@@ -481,11 +481,38 @@ def _json_spec_from_model(
     description: str | None = None,
 ) -> JsonSpec:
     schema = schema_model.model_json_schema()
+    _strip_unsupported_schema_keywords(schema)
     return JsonSpec(
         name=name or _schema_name_for_model(schema_model),
         schema_json=json.dumps(schema),
         description=description,
     )
+
+
+# Anthropic's structured-output JSON-schema validator rejects numeric-range
+# keywords ("For 'integer' type, properties maximum, minimum are not
+# supported"). Pydantic emits these from Field(ge=, le=, gt=, lt=). Strip
+# them recursively so bounded-int fields (e.g. the ranker's 1..5 scores)
+# don't 400. The bounds are advisory for the model anyway; clamp post-parse
+# if strictness is required.
+_UNSUPPORTED_SCHEMA_KEYWORDS = (
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+)
+
+
+def _strip_unsupported_schema_keywords(node: Any) -> None:
+    if isinstance(node, dict):
+        for kw in _UNSUPPORTED_SCHEMA_KEYWORDS:
+            node.pop(kw, None)
+        for value in node.values():
+            _strip_unsupported_schema_keywords(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strip_unsupported_schema_keywords(item)
 
 
 def _schema_name_for_model(schema_model: type[BaseModel]) -> str:
