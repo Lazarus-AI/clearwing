@@ -40,7 +40,12 @@ dependencies = [
     # Reporting
     "jinja2>=3.1.0",
     "reportlab>=4.0.0",
-    "genai-pyo3>=0.1.16",
+    # Upper-bound: 0.2+ changed ChatResponse.first_text / tool_calls from methods
+    # to attributes, which breaks every call site here ("'str' object is not
+    # callable"). Stay on the 0.1.x API the code is written against until the
+    # call sites are migrated. uv users already get 0.1.16 from uv.lock; this
+    # protects plain-pip installs too.
+    "genai-pyo3>=0.1.16,<0.2",
     "pydantic>=2.0.0",
     "docker>=7.0.0",
     # TUI
