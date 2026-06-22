@@ -1,0 +1,6 @@
+# CODEOWNERS — required reviewers for clearwing.
+# Matched bottom-to-top; last matching pattern wins.
+# Docs: https://docs.github.com/articles/about-code-owners
+
+# Global owners — requested for review on every PR.
+*       @ropoctl @ehartford
