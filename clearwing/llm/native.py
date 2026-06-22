@@ -7,7 +7,7 @@ import random
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urljoin
 
 import aiohttp
@@ -24,6 +24,34 @@ from genai_pyo3 import (
 from pydantic import BaseModel, RootModel
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort auto-detection
+# ---------------------------------------------------------------------------
+#
+# `reasoning_effort` is an OpenAI-reasoning-only parameter. Most non-OpenAI
+# OpenAI-compat endpoints reject it with HTTP 400 when the configured model is
+# not reasoning-capable (Groq + Llama is the common case). We default to
+# omitting it for model families we know reject it, while preserving the
+# previous "medium" default for everything else.
+#
+# Match semantics: case-insensitive substring against the model name. First
+# match wins; order is not significant.
+_REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
+    "llama-3",
+    "llama-4",
+    "mistral",
+    "mixtral",
+    "qwen2",
+    "gemma",
+)
+
+# Explicit re-enable list for model names that contain an unsupported pattern
+# above but actually *do* support reasoning_effort (e.g. reasoning-tuned
+# variants of a denylisted family). Compared against the full lowercased model
+# name. Intentionally empty today; populate as such models ship.
+_REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 
 
 def _run_coro_sync(coro):
@@ -89,6 +117,28 @@ class AsyncLLMClient:
     bounded concurrency.
     """
 
+    @staticmethod
+    def _auto_resolve_reasoning_effort(model_name: str) -> str | None:
+        """Return the effective reasoning_effort for *model_name*.
+
+        Returns ``None`` (i.e. omit the parameter) when the model name matches
+        a pattern in :data:`_REASONING_EFFORT_UNSUPPORTED_PATTERNS` and is not
+        in :data:`_REASONING_EFFORT_OVERRIDE_ALLOW`. Returns ``"medium"``
+        otherwise — the previous default for all callers.
+        """
+        lower = model_name.lower()
+        if lower in _REASONING_EFFORT_OVERRIDE_ALLOW:
+            return "medium"
+        for pattern in _REASONING_EFFORT_UNSUPPORTED_PATTERNS:
+            if pattern in lower:
+                logger.info(
+                    "reasoning_effort=None: model %r matches non-reasoning pattern %r",
+                    model_name,
+                    pattern,
+                )
+                return None
+        return "medium"
+
     def __init__(
         self,
         *,
@@ -101,7 +151,7 @@ class AsyncLLMClient:
         rate_limit_max_retries: int = 6,
         rate_limit_initial_backoff_seconds: float = 1.0,
         rate_limit_max_backoff_seconds: float = 60.0,
-        reasoning_effort: str | None = "medium",
+        reasoning_effort: str | None | Literal["auto"] = "auto",
     ) -> None:
         self.model_name = model_name
         self.provider_name = provider_name
@@ -183,12 +233,19 @@ class AsyncLLMClient:
             self._anthropic_oauth_url = "https://api.anthropic.com/v1/messages"
 
         self.default_system = default_system
-        # `reasoning_effort` controls how much reasoning the provider
-        # runs (for models that support it). "medium" is a sensible
-        # default — higher for deeper-reasoning tasks, "none"/None to
-        # opt out entirely. Accepted values: "none" | "minimal" | "low"
-        # | "medium" | "high" | "xhigh" | "max" | "budget:<n>".
-        self.reasoning_effort = reasoning_effort
+        # `reasoning_effort` controls how much reasoning the provider runs
+        # (for models that support it). Accepted values: "none" | "minimal"
+        # | "low" | "medium" | "high" | "xhigh" | "max" | "budget:<n>" | None.
+        #
+        # The sentinel "auto" (the default) lets the client pick based on the
+        # model name — most non-OpenAI OpenAI-compat models reject this param
+        # outright (see _REASONING_EFFORT_UNSUPPORTED_PATTERNS), so we omit it
+        # for them while keeping "medium" everywhere else. Any explicit value
+        # (including None) bypasses auto-resolution.
+        if reasoning_effort == "auto":
+            self.reasoning_effort = self._auto_resolve_reasoning_effort(model_name)
+        else:
+            self.reasoning_effort = reasoning_effort
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
@@ -253,9 +310,23 @@ class AsyncLLMClient:
 
         async with self._semaphore:
             client = self._build_client(Client)
-            response = await self._with_rate_limit_retries(
-                lambda: self._achat_with_provider_policy(client, request, options)
-            )
+            try:
+                response = await self._with_rate_limit_retries(
+                    lambda: self._achat_with_provider_policy(client, request, options)
+                )
+            except Exception as exc:
+                if not self._is_unsupported_reasoning_effort_error(exc):
+                    raise
+                logger.warning(
+                    "Provider rejected reasoning_effort for model %r; retrying "
+                    "with reasoning_effort=None and disabling it for this session.",
+                    self.model_name,
+                )
+                self.reasoning_effort = None
+                options = self._rebuild_options_without_reasoning(options)
+                response = await self._with_rate_limit_retries(
+                    lambda: self._achat_with_provider_policy(client, request, options)
+                )
         return response
 
     async def achat_stream(
@@ -310,26 +381,44 @@ class AsyncLLMClient:
                 )
 
             client = self._build_client(Client)
-            try:
-                stream = await client.astream_chat(self.model_name, request, options)
+
+            async def _consume(opts: ChatOptions) -> ChatResponse | None:
+                stream = await client.astream_chat(self.model_name, request, opts)
                 async for event in stream:
                     if event.content:
                         on_text_delta(event.content)
                     if event.end is not None:
                         return event.end
+                return None
+
+            try:
+                end_event = await _consume(options)
             except Exception as exc:
-                if not self._should_try_openai_http_fallback(exc):
+                if self._is_unsupported_reasoning_effort_error(exc):
+                    logger.warning(
+                        "Provider rejected reasoning_effort (streaming) for model "
+                        "%r; retrying with reasoning_effort=None and disabling it "
+                        "for this session.",
+                        self.model_name,
+                    )
+                    self.reasoning_effort = None
+                    options = self._rebuild_options_without_reasoning(options)
+                    end_event = await _consume(options)
+                elif self._should_try_openai_http_fallback(exc):
+                    logger.debug(
+                        "Native OpenAI async stream failed for model=%s base_url=%s; "
+                        "falling back to aiohttp chat/completions: %s",
+                        self.model_name,
+                        self.base_url,
+                        exc,
+                    )
+                    return await self._openai_chat_http_fallback(
+                        request, options, on_text_delta=on_text_delta
+                    )
+                else:
                     raise
-                logger.debug(
-                    "Native OpenAI async stream failed for model=%s base_url=%s; "
-                    "falling back to aiohttp chat/completions: %s",
-                    self.model_name,
-                    self.base_url,
-                    exc,
-                )
-                return await self._openai_chat_http_fallback(
-                    request, options, on_text_delta=on_text_delta
-                )
+            if end_event is not None:
+                return end_event
         # Fallback if stream ends without an end event
         return await self.achat(
             messages=messages,
@@ -1010,6 +1099,40 @@ class AsyncLLMClient:
                     exc,
                 )
                 await asyncio.sleep(delay)
+
+    @staticmethod
+    def _rebuild_options_without_reasoning(options: ChatOptions) -> ChatOptions:
+        """Return a copy of *options* with ``reasoning_effort=None``.
+
+        ``ChatOptions`` is a frozen Rust struct from genai-pyo3, so we
+        reconstruct it from scratch. ``response_json_spec`` is preserved when
+        present.
+        """
+        return ChatOptions(
+            temperature=options.temperature,
+            max_tokens=options.max_tokens,
+            capture_content=options.capture_content,
+            capture_usage=options.capture_usage,
+            capture_tool_calls=options.capture_tool_calls,
+            capture_reasoning_content=options.capture_reasoning_content,
+            normalize_reasoning_content=options.normalize_reasoning_content,
+            reasoning_effort=None,
+            response_json_spec=getattr(options, "response_json_spec", None),
+        )
+
+    @staticmethod
+    def _is_unsupported_reasoning_effort_error(exc: BaseException) -> bool:
+        """True when *exc* indicates the provider rejected ``reasoning_effort``.
+
+        Both conditions required: ``"reasoning_effort"`` must appear in the
+        message AND either ``"400"`` (the HTTP status) or ``"unsupported"``.
+        This avoids false positives on log lines or unrelated errors that
+        merely mention the parameter name.
+        """
+        text = str(exc).lower()
+        if "reasoning_effort" not in text:
+            return False
+        return "400" in text or "unsupported" in text
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
