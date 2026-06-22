@@ -197,9 +197,10 @@ class AsyncLLMClient:
                     "OpenAI OAuth access token is missing the ChatGPT account id."
                 )
 
-            # rust-genai's openai_resp adapter joins "responses" onto the
-            # base_url, so set base to `.../codex/` and let it produce
-            # `.../codex/responses`.
+            # Store the `.../codex/` base; `_build_client` derives the full
+            # `.../codex/responses` URL and passes it (plus the OAuth headers)
+            # to genai-pyo3 via `with_request_override`, so the native
+            # transport talks to the ChatGPT backend directly.
             if not self.base_url:
                 self.base_url = f"{OPENAI_CODEX_DEFAULT_BASE_URL}/codex/"
             elif not self.base_url.rstrip("/").endswith("/codex"):
@@ -282,6 +283,7 @@ class AsyncLLMClient:
             system=system or self.default_system,
             tools=request_tools,
         )
+        temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
         options = ChatOptions(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -363,6 +365,7 @@ class AsyncLLMClient:
             system=system or self.default_system,
             tools=request_tools,
         )
+        temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
         options = ChatOptions(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -375,11 +378,6 @@ class AsyncLLMClient:
         )
 
         async with self._semaphore:
-            if self.provider_name == "openai_codex":
-                return await self._codex_responses_via_aiohttp(
-                    request, options, on_text_delta=on_text_delta
-                )
-
             client = self._build_client(Client)
 
             async def _consume(opts: ChatOptions) -> ChatResponse | None:
@@ -483,6 +481,15 @@ class AsyncLLMClient:
             return extract_json_array(text), response
         return extract_json_object(text), response
 
+    def _codex_safe_params(
+        self, temperature: float | None, max_tokens: int | None
+    ) -> tuple[float | None, int | None]:
+        # The ChatGPT Codex (openai_codex) backend rejects `temperature` and
+        # `max_output_tokens`, so omit both for that provider.
+        if self.provider_name == "openai_codex":
+            return None, None
+        return temperature, max_tokens
+
     def _build_client(self, client_cls):
         # anthropic_oauth bypasses the normal auth resolver entirely —
         # with_request_override sends only our explicit headers (Bearer
@@ -494,13 +501,24 @@ class AsyncLLMClient:
                 self._default_headers or {},
             )
 
-        # openai_codex is not a rust-genai adapter — it's the openai_resp
-        # adapter plus the extra headers __init__ stashed on
-        # `self._default_headers`. Map the name here so genai-pyo3's
-        # adapter-kind validator accepts it.
-        rust_provider = (
-            "openai_resp" if self.provider_name == "openai_codex" else self.provider_name
-        )
+        # openai_codex (ChatGPT OAuth) is the openai_resp adapter pointed at
+        # the ChatGPT backend's Responses endpoint. with_request_override sends
+        # our exact URL + headers (Bearer token, ChatGPT-Account-ID, originator)
+        # through genai-pyo3's native transport — verified to work end-to-end.
+        # (The old aiohttp fallback blamed "Cloudflare 404s reqwest/HTTP2"; that
+        # was a misdiagnosis — the real failures were missing headers and
+        # unsupported body params, both handled here / in achat.)
+        if self.provider_name == "openai_codex":
+            base = (self.base_url or "https://chatgpt.com/backend-api/codex/").rstrip("/")
+            if not base.endswith("/codex"):
+                base = f"{base}/codex"
+            responses_url = f"{base}/responses"
+            headers = dict(self._default_headers or {})
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            return client_cls.with_request_override("openai_resp", responses_url, headers)
+
+        rust_provider = self.provider_name
         default_headers = self._default_headers
         base_url = self.base_url
         if base_url:
@@ -531,11 +549,6 @@ class AsyncLLMClient:
         request: ChatRequest,
         options: ChatOptions,
     ) -> ChatResponse:
-        # openai_codex (ChatGPT OAuth) requires aiohttp: genai-pyo3's
-        # reqwest/HTTP2 transport gets 404'd by Cloudflare's edge proxy.
-        if self.provider_name == "openai_codex":
-            return await self._codex_responses_via_aiohttp(request, options)
-
         # Always go through `achat_via_stream`: it streams internally and
         # returns a fully-collected ChatResponse, so callers never see
         # chunk events. Necessary for backends that require `stream=true`
@@ -558,156 +571,6 @@ class AsyncLLMClient:
                 exc,
             )
             return await self._openai_chat_http_fallback(request, options)
-
-    async def _codex_responses_via_aiohttp(
-        self,
-        request: ChatRequest,
-        options: ChatOptions,
-        *,
-        on_text_delta: Callable[[str], None] | None = None,
-    ) -> ChatResponse:
-        """OpenAI Codex Responses API transport using aiohttp.
-
-        genai-pyo3's reqwest/HTTP2 transport is 404'd by Cloudflare's
-        edge proxy in front of chatgpt.com. This method speaks the
-        Responses API wire format over HTTP/1.1 via aiohttp.
-        """
-        input_msgs: list[dict[str, Any]] = []
-        for msg in request.messages():
-            if msg.role == "tool":
-                input_msgs.append({
-                    "type": "function_call_output",
-                    "call_id": msg.tool_response_call_id or "",
-                    "output": msg.content or "",
-                })
-            elif msg.role == "assistant" and msg.tool_calls:
-                input_msgs.append({"role": "assistant", "content": msg.content or ""})
-                for call in msg.tool_calls:
-                    input_msgs.append({
-                        "type": "function_call",
-                        "call_id": call.call_id,
-                        "name": call.fn_name,
-                        "arguments": json.dumps(call.fn_arguments) if isinstance(call.fn_arguments, dict) else (call.fn_arguments or "{}"),
-                    })
-            else:
-                input_msgs.append({"role": msg.role, "content": msg.content or ""})
-
-        body: dict[str, Any] = {
-            "model": self.model_name,
-            "instructions": request.system or self.default_system or "",
-            "input": input_msgs,
-            "stream": True,
-            "store": False,
-        }
-        if options.temperature is not None:
-            body["temperature"] = options.temperature
-        if options.max_tokens is not None:
-            body["max_output_tokens"] = options.max_tokens
-        if options.reasoning_effort:
-            body["reasoning"] = {"effort": options.reasoning_effort, "summary": "detailed"}
-        if request.tools:
-            body["tools"] = [self._responses_api_tool_body(tool) for tool in request.tools]
-        if options.response_json_spec is not None:
-            body["text"] = {"format": self._responses_api_text_format(options.response_json_spec)}
-
-        base = self.base_url or "https://chatgpt.com/backend-api"
-        if not base.rstrip("/").endswith("/codex"):
-            base = base.rstrip("/") + "/codex"
-        url = urljoin(
-            base if base.endswith("/") else f"{base}/",
-            "responses",
-        )
-        headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        if self._default_headers:
-            headers.update(self._default_headers)
-
-        timeout = aiohttp.ClientTimeout(total=600, sock_connect=30, sock_read=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=body, headers=headers) as resp:
-                if resp.status >= 400:
-                    detail = (await resp.text())[:1000]
-                    raise RuntimeError(
-                        f"Codex Responses API failed with HTTP {resp.status}: {detail}"
-                    )
-                return await self._collect_codex_sse_response(resp, on_text_delta)
-
-    async def _collect_codex_sse_response(
-        self,
-        resp: aiohttp.ClientResponse,
-        on_text_delta: Callable[[str], None] | None,
-    ) -> ChatResponse:
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_call_parts: dict[int, dict[str, Any]] = {}
-        usage: dict[str, Any] | None = None
-        provider_model = self.model_name
-
-        async for raw_line in resp.content:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line or not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                event = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-
-            etype = event.get("type", "")
-
-            if etype == "response.output_text.delta":
-                delta = event.get("delta", "")
-                if delta:
-                    content_parts.append(delta)
-                    if on_text_delta:
-                        on_text_delta(delta)
-
-            elif etype == "response.reasoning.delta":
-                delta = event.get("delta", "")
-                if delta:
-                    reasoning_parts.append(delta)
-
-            elif etype == "response.function_call_arguments.delta":
-                idx = event.get("output_index", 0)
-                acc = tool_call_parts.setdefault(idx, {"arguments": ""})
-                acc["arguments"] += event.get("delta", "")
-                if event.get("call_id"):
-                    acc["id"] = event["call_id"]
-                if event.get("name"):
-                    acc["name"] = event["name"]
-
-            elif etype == "response.output_item.done":
-                item = event.get("item", {})
-                if item.get("type") == "function_call":
-                    idx = event.get("output_index", 0)
-                    acc = tool_call_parts.setdefault(idx, {"arguments": ""})
-                    acc.setdefault("id", item.get("call_id", ""))
-                    acc.setdefault("name", item.get("name", ""))
-                    if item.get("arguments"):
-                        acc["arguments"] = item["arguments"]
-
-            elif etype == "response.completed":
-                r = event.get("response", {})
-                provider_model = r.get("model") or provider_model
-                usage = r.get("usage")
-
-        text = "".join(content_parts)
-        reasoning = "".join(reasoning_parts) or None
-        tool_calls = self._finalize_openai_tool_calls(tool_call_parts)
-
-        return self._chat_response_from_parts(
-            text=text,
-            reasoning_content=reasoning,
-            tool_calls=tool_calls,
-            usage=usage,
-            provider_model=provider_model,
-        )
 
     def _should_try_openai_http_fallback(self, exc: Exception) -> bool:
         if self.provider_name != "openai" or not self.base_url:
@@ -873,43 +736,6 @@ class AsyncLLMClient:
         if spec.description:
             json_schema["description"] = spec.description
         return {"type": "json_schema", "json_schema": json_schema}
-
-    def _responses_api_text_format(self, spec: JsonSpec) -> dict[str, Any]:
-        """Build the Responses API `text.format` object.
-
-        The Responses API puts `name` at the top level of the format
-        object, unlike Chat Completions which nests it inside
-        `json_schema`.
-        """
-        try:
-            schema = json.loads(spec.schema_json)
-        except json.JSONDecodeError:
-            schema = {"type": "object"}
-        fmt: dict[str, Any] = {
-            "type": "json_schema",
-            "name": spec.name,
-            "schema": schema,
-        }
-        if spec.description:
-            fmt["description"] = spec.description
-        return fmt
-
-    def _responses_api_tool_body(self, tool: Tool) -> dict[str, Any]:
-        """Build tool definition for the Responses API.
-
-        The Responses API puts name/description/parameters at the top level,
-        unlike Chat Completions which nests them inside a ``function`` key.
-        """
-        try:
-            parameters = json.loads(tool.schema_json or "{}")
-        except json.JSONDecodeError:
-            parameters = {"type": "object", "properties": {}}
-        return {
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": parameters,
-        }
 
     async def _collect_openai_sse_response(
         self,
