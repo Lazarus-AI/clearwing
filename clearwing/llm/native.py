@@ -18,6 +18,7 @@ from genai_pyo3 import (
     ChatResponse,
     Client,
     JsonSpec,
+    StreamEnd,
     Tool,
     Usage,
 )
@@ -386,7 +387,7 @@ class AsyncLLMClient:
                     if event.content:
                         on_text_delta(event.content)
                     if event.end is not None:
-                        return event.end
+                        return self._chat_response_from_stream_end(event.end)
                 return None
 
             try:
@@ -870,6 +871,24 @@ class AsyncLLMClient:
             except json.JSONDecodeError:
                 return value
         return value
+
+    def _chat_response_from_stream_end(self, end: StreamEnd) -> ChatResponse:
+        """Adapt a genai-pyo3 ``StreamEnd`` into a ``ChatResponse``.
+
+        ``astream_chat`` yields a ``StreamEnd`` (whose fields are named
+        ``captured_*``) at the end of the stream — not a ``ChatResponse``.
+        Callers expect the same interface ``achat`` returns (``first_text``,
+        ``tool_calls``, ``usage`` …), so rebuild a ``ChatResponse`` from the
+        captured content rather than leaking the ``StreamEnd`` shape.
+        """
+        return ChatResponse(
+            content=end.captured_content,
+            reasoning_content=end.captured_reasoning_content,
+            response_id=end.captured_response_id,
+            model_name=self.model_name,
+            provider_model_name=self.model_name,
+            usage=end.captured_usage,
+        )
 
     def _chat_response_from_parts(
         self,
