@@ -22,4 +22,4 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 USER clearwing
 
-ENTRYPOINT ["python", "-m", "clearwing"]
+ENTRYPOINT ["clearwing"]

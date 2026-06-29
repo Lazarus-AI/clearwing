@@ -110,6 +110,7 @@ clearwing = [
     "py.typed",                              # PEP 561 — ship type info to consumers
     "core/config_data/*.yaml",
     "core/skills/vulnerabilities/*.md",
+    "ui/web/static/**/*",
 ]
 
 [tool.pytest.ini_options]
