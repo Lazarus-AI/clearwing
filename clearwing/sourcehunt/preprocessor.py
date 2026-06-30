@@ -245,8 +245,14 @@ class Preprocessor:
 
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")
-        self._analyzer = SourceAnalyzer(repo_path=repo_path)
-        analysis_result = self._analyzer.analyze()
+        # Preserve the analyzer instance returned from clone().
+        # Replacing it here drops the TemporaryDirectory owner, which
+        # immediately deletes the cloned repository and yields 0 files.
+        if self._analyzer is None:
+            self._analyzer = SourceAnalyzer(repo_path=repo_path)
+        else:
+            self._analyzer.repo_path = repo_path
+        analysis_result = self._analyzer.analyze(path=repo_path)
         static_findings = analysis_result.findings
         logger.info(
             "Preprocessor: static analyzer complete (%d findings)",

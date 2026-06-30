@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from clearwing.llm import AsyncLLMClient
+from clearwing.llm.native import response_text
 
 from .state import Finding
 
@@ -154,7 +155,7 @@ class MechanismExtractor:
                 system=MECHANISM_EXTRACTION_PROMPT,
                 user=user_msg,
             )
-            content = response.first_text() or ""
+            content = response_text(response)
         except Exception:
             logger.debug("Mechanism extraction LLM call failed", exc_info=True)
             return None

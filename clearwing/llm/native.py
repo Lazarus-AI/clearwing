@@ -38,10 +38,28 @@ def response_text(response: ChatResponse) -> str:
     every non-empty segment in ``texts()``. Returns ``""`` when the
     response carries no text at all (e.g. a pure tool-call response).
     """
-    first = response.first_text()
+    first_accessor = getattr(response, "first_text", None)
+    first = first_accessor() if callable(first_accessor) else first_accessor
     if first:
         return first
-    return "\n".join(segment for segment in response.texts() if segment)
+
+    texts_accessor = getattr(response, "texts", None)
+    if callable(texts_accessor):
+        segments = texts_accessor()
+    elif isinstance(texts_accessor, (list, tuple)):
+        segments = texts_accessor
+    else:
+        segments = []
+    return "\n".join(str(segment) for segment in segments if segment)
+
+
+def response_tool_calls(response: ChatResponse) -> list[Any]:
+    """Return tool calls from either method-style or property-style SDKs."""
+    accessor = getattr(response, "tool_calls", None)
+    calls = accessor() if callable(accessor) else accessor
+    if not calls:
+        return []
+    return list(calls)
 
 
 def _is_root_model_type(schema_model: type[BaseModel]) -> bool:

@@ -43,10 +43,19 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     plus the shared reporting + findings-pool tools.
     """
 
-    def execute(command: str, timeout: int = 300) -> dict:
+    def execute(
+        command: str | None = None,
+        timeout: int = 300,
+        cmd: str | None = None,
+        workdir: str | None = None,
+    ) -> dict:
+        # Some providers (e.g. Cerebras) emit cmd/workdir instead of command.
+        resolved = command if command is not None else cmd
+        if not resolved:
+            return {"error": "missing command"}
         if ctx.sandbox is None:
             return {"error": "no sandbox available"}
-        result = ctx.sandbox.exec(command, timeout=timeout)
+        result = ctx.sandbox.exec(resolved, timeout=timeout, workdir=workdir)
         return {
             "exit_code": result.exit_code,
             "stdout": _cap_output(result.stdout, "stdout"),

@@ -296,7 +296,7 @@ class FindingsPool:
         return "unknown"
 
     async def _llm_classify(self, finding: Finding) -> str:
-        from clearwing.llm.native import ChatMessage
+        from clearwing.llm.native import ChatMessage, response_text
 
         prompt = CLASSIFY_PROMPT.format(
             cwe=finding.get("cwe", ""),
@@ -309,7 +309,7 @@ class FindingsPool:
             system="You are a vulnerability classification expert. Return only JSON.",
             tools=[],
         )
-        text = response.first_text() or ""
+        text = response_text(response)
         match = re.search(r'"primitive_type"\s*:\s*"([^"]+)"', text)
         if match and match.group(1) in PRIMITIVE_TYPES:
             return match.group(1)
@@ -361,7 +361,7 @@ class FindingsPool:
     async def _dedup_check(
         self, finding: Finding, candidates: list[FindingCluster],
     ) -> str | None:
-        from clearwing.llm.native import ChatMessage
+        from clearwing.llm.native import ChatMessage, response_text
 
         summaries = []
         for c in candidates:
@@ -384,7 +384,7 @@ class FindingsPool:
             system="You are a vulnerability deduplication expert. Return only JSON.",
             tools=[],
         )
-        text = response.first_text() or ""
+        text = response_text(response)
         match = re.search(r'"duplicate_of"\s*:\s*"([^"]+)"', text)
         if match:
             candidate_id = match.group(1)

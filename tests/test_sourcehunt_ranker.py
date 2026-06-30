@@ -24,6 +24,7 @@ from clearwing.sourcehunt.ranker import (
     RANKER_SYSTEM_PROMPT,
     Ranker,
     RankerConfig,
+    RankedFileScore,
 )
 
 
@@ -619,3 +620,11 @@ class TestRankerSystemPrompt:
         assert "constants.h" in RANKER_SYSTEM_PROMPT or "propagat" in RANKER_SYSTEM_PROMPT.lower()
         # Must request JSON output
         assert "JSON" in RANKER_SYSTEM_PROMPT
+
+    def test_ranked_file_score_schema_avoids_integer_bounds(self):
+        """Anthropic tool schemas reject integer minimum/maximum properties."""
+        schema = RankedFileScore.model_json_schema()
+        surface = schema["properties"]["surface"]
+        influence = schema["properties"]["influence"]
+        assert "minimum" not in surface and "maximum" not in surface
+        assert "minimum" not in influence and "maximum" not in influence

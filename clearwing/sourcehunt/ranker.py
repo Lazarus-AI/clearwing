@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from clearwing.llm import AsyncLLMClient
 from clearwing.llm.native import extract_json_array, extract_json_object
@@ -33,8 +33,11 @@ class RankedFileScore(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str
-    surface: int = Field(ge=1, le=5)
-    influence: int = Field(ge=1, le=5)
+    # Keep raw ints in schema; Anthropic tool schemas reject integer
+    # minimum/maximum in this response-format path. We clamp to 1..5 when
+    # applying scores.
+    surface: int
+    influence: int
     surface_rationale: str
     influence_rationale: str
 

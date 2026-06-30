@@ -19,6 +19,7 @@ from typing import Any, cast
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
 from clearwing.llm import AsyncLLMClient
+from clearwing.llm.native import response_text
 
 from .state import (
     EVIDENCE_LEVELS,
@@ -179,7 +180,7 @@ class Validator:
             response = await self.llm.aask_text(
                 system=system_prompt, user=user_msg,
             )
-            content = response.first_text() or ""
+            content = response_text(response)
         except Exception as e:
             logger.warning("Validator LLM call failed", exc_info=True)
             return self._error_verdict(finding, f"validator error: {e}")

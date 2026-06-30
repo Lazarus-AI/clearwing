@@ -154,7 +154,15 @@ class NdayFilter:
             response = await self._llm.aask(
                 user_msg, system=FILTER_SYSTEM_PROMPT,
             )
-            text = response.first_text() if hasattr(response, "first_text") else str(response)
+            from clearwing.llm.native import response_text
+
+            text = (
+                response_text(response)
+                if hasattr(response, "first_text") or hasattr(response, "texts")
+                else str(response)
+            )
+            if not text:
+                text = str(response)
             results = self._parse_response(text)
             by_cve = {r["cve_id"]: r for r in results}
             for c in batch:

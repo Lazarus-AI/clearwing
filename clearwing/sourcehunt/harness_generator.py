@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from clearwing.llm import AsyncLLMClient
+from clearwing.llm.native import response_text
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 from .state import FileTarget
@@ -320,11 +321,11 @@ class HarnessGenerator:
                     user=user_msg,
                 )
             )
-            response_text = response.first_text() or ""
+            response_body = response_text(response)
         except Exception:
             logger.debug("Harness-gen LLM call failed", exc_info=True)
             return None
-        return _strip_markdown_fences(response_text)
+        return _strip_markdown_fences(response_body)
 
 
 # --- Helpers ----------------------------------------------------------------

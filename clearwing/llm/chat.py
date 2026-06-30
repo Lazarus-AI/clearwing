@@ -7,7 +7,7 @@ from typing import Any
 from genai_pyo3 import ChatMessage
 
 from clearwing.agent.tooling import ensure_agent_tool
-from clearwing.llm.native import AsyncLLMClient
+from clearwing.llm.native import AsyncLLMClient, response_text, response_tool_calls
 
 
 def extract_text_content(content: Any) -> str:
@@ -213,8 +213,9 @@ class ChatModel:
             system=system or self.default_system,
             tools=self.bound_tools or None,
         )
+        tool_calls = response_tool_calls(response)
         return AIMessage(
-            content=response.first_text() or "",
+            content=response_text(response),
             tool_calls=[
                 {
                     "id": tool_call.call_id,
@@ -222,7 +223,7 @@ class ChatModel:
                     "args": tool_call.fn_arguments,
                     "type": "tool_call",
                 }
-                for tool_call in response.tool_calls()
+                for tool_call in tool_calls
             ],
             response_metadata={
                 "usage": {
@@ -249,8 +250,9 @@ class ChatModel:
                 system=system or self.default_system,
                 tools=self.bound_tools or None,
             )
+        tool_calls = response_tool_calls(response)
         return AIMessage(
-            content=response.first_text() or "",
+            content=response_text(response),
             tool_calls=[
                 {
                     "id": tool_call.call_id,
@@ -258,7 +260,7 @@ class ChatModel:
                     "args": tool_call.fn_arguments,
                     "type": "tool_call",
                 }
-                for tool_call in response.tool_calls()
+                for tool_call in tool_calls
             ],
             response_metadata={
                 "usage": {

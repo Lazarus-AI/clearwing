@@ -8,9 +8,11 @@ semgrep_findings, fuzz_corpora) are present and default to None/empty.
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 
 import pytest
 
+from clearwing.analysis.source_analyzer import SourceAnalyzer
 from clearwing.sourcehunt.preprocessor import (
     Preprocessor,
     PreprocessResult,
@@ -228,6 +230,27 @@ class TestPreprocessorRun:
         result = pp.run()
         summary = result.language_summary
         assert summary.get("c", 0) == 4  # codec_a/b/c.c plus codec_limits.h
+
+    def test_git_clone_repo_survives_through_run(self, monkeypatch):
+        """Regression: keep clone-owner analyzer alive during run().
+
+        If run() replaces the analyzer instance after clone(), the temporary
+        clone directory is deleted early and file enumeration drops to zero.
+        """
+
+        def fake_clone(self, git_url: str, branch: str = "main") -> str:
+            tmp = tempfile.TemporaryDirectory(prefix="clearwing-test-clone-")
+            repo = Path(tmp.name)
+            (repo / "demo.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+            self._temp_dir = tmp
+            self.repo_path = str(repo)
+            return str(repo)
+
+        monkeypatch.setattr(SourceAnalyzer, "clone", fake_clone)
+
+        pp = Preprocessor(repo_url="https://example.com/repo.git")
+        result = pp.run()
+        assert result.file_count >= 1
 
 
 class TestPreprocessorErrorPaths:

@@ -25,6 +25,7 @@ from clearwing.agent.tools.hunt import (
     build_propagation_auditor_tools,
 )
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
+from clearwing.llm.native import response_text, response_tool_calls
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
@@ -1315,6 +1316,8 @@ class NativeHunter:
             # part of the trace for reasoning models (GPT-5.x, o-series,
             # Claude thinking). The hunter's old `think()` scratchpad
             # tool tried to compensate; native reasoning obsoletes it.
+            assistant_text = response_text(response)
+            tool_calls_in_response = response_tool_calls(response)
             trajectory.log(
                 "message",
                 {
@@ -1322,8 +1325,8 @@ class NativeHunter:
                     "message": _serialize_message(
                         ChatMessage(
                             "assistant",
-                            response.first_text() or "",
-                            tool_calls=response.tool_calls(),
+                            assistant_text,
+                            tool_calls=tool_calls_in_response,
                         )
                     ),
                     "reasoning_content": response.reasoning_content,
@@ -1343,13 +1346,12 @@ class NativeHunter:
                 self.llm.model_name,
             )
 
-            last_assistant_text = response.first_text() or ""
-            tool_calls_in_response = response.tool_calls()
+            last_assistant_text = assistant_text
             if tool_calls_in_response:
                 messages.append(
                     ChatMessage(
                         "assistant",
-                        response.first_text() or "",
+                        assistant_text,
                         tool_calls=tool_calls_in_response,
                     )
                 )

@@ -175,7 +175,15 @@ class CrashClassifier:
         response = await self._llm.aask(
             user_msg, system=CLASSIFIER_SYSTEM_PROMPT,
         )
-        text = response.first_text() if hasattr(response, "first_text") else str(response)
+        from clearwing.llm.native import response_text
+
+        text = (
+            response_text(response)
+            if hasattr(response, "first_text") or hasattr(response, "texts")
+            else str(response)
+        )
+        if not text:
+            text = str(response)
         cost = getattr(response, "cost_usd", 0.0) or 0.0
 
         tier, rationale = self._parse_llm_response(text)
