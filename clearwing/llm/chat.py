@@ -235,6 +235,22 @@ class ChatModel:
             },
         )
 
+    async def aask(
+        self,
+        user: str,
+        system: str | None = None,
+        **_kwargs: Any,
+    ):
+        """Compat shim — three sourcehunt sites
+        (nday_filter / reveng_reconstructor / bench.crash_classifier)
+        call this positional/keyword signature. Delegates to the
+        underlying client's aask_text.
+        """
+        return await self._client.aask_text(
+            system=system or self.default_system,
+            user=user,
+        )
+
     async def ainvoke(self, messages: Any, on_text_delta: Callable[[str], None] | None = None) -> AIMessage:
         system, chat_messages = _coerce_chat_messages(messages)
         if on_text_delta is not None:
