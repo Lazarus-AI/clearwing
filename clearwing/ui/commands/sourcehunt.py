@@ -468,16 +468,28 @@ def handle(cli, args):
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
 
-    # Resolve the LLM endpoint once at the top of the command.
-    # CLI > env > ~/.clearwing/config.yaml > ANTHROPIC_API_KEY default.
-    endpoint = resolve_llm_endpoint(
-        cli_model=args.model,
-        cli_base_url=getattr(args, "base_url", None),
-        cli_api_key=getattr(args, "api_key", None),
-        config_provider=cli.config.get_provider_section() or None,
+    # Build the provider manager.
+    #   - A multi-endpoint config (`providers:`/`routes:`/`task_models:`) enables
+    #     per-task model routing (e.g. cheap ranker, strong hunter, independent
+    #     verifier) — used when present and no CLI endpoint override is given.
+    #   - Otherwise resolve a single endpoint (CLI > env > singular `provider:`
+    #     block > ANTHROPIC_API_KEY default) that serves every task.
+    providers_cfg = cli.config.get_providers_config()
+    cli_override = bool(
+        args.model or getattr(args, "base_url", None) or getattr(args, "api_key", None)
     )
-    cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
-    provider_manager = ProviderManager.for_endpoint(endpoint)
+    if providers_cfg.get("providers") and not cli_override:
+        provider_manager = ProviderManager.from_config(providers_cfg)
+        cli.console.print("[dim]LLM: multi-endpoint per-task routing[/dim]")
+    else:
+        endpoint = resolve_llm_endpoint(
+            cli_model=args.model,
+            cli_base_url=getattr(args, "base_url", None),
+            cli_api_key=getattr(args, "api_key", None),
+            config_provider=cli.config.get_provider_section() or None,
+        )
+        cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
+        provider_manager = ProviderManager.for_endpoint(endpoint)
 
     # Parse tier-split
     try:
