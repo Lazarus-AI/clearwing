@@ -272,7 +272,16 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
             "Status: 400 Bad Request. "
             'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
         )
-        success_end = object()
+        # A minimal stand-in for genai's StreamEnd (captured_* fields);
+        # achat_stream rebuilds a ChatResponse from it via
+        # _chat_response_from_stream_end.
+        class _FakeStreamEnd:
+            captured_content = [{"text": "streamed-ok"}]
+            captured_reasoning_content = None
+            captured_response_id = None
+            captured_usage = None
+
+        success_end = _FakeStreamEnd()
         on_text = lambda chunk: None  # noqa: E731
 
         call_log: list[str] = []
@@ -314,6 +323,8 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
                 )
             )
 
-        assert result is success_end
+        # achat_stream now returns a real ChatResponse rebuilt from the
+        # StreamEnd (not the raw end object), so assert on its content.
+        assert result.first_text == "streamed-ok"
         assert len(call_log) == 2
         assert client.reasoning_effort is None
