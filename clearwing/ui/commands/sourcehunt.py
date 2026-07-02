@@ -517,7 +517,7 @@ def handle(cli, args):
         # Build an LLM for rule generation via the same resolved
         # endpoint as the rest of the pipeline.
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             cli.console.print(
@@ -576,7 +576,7 @@ def handle(cli, args):
             sys.exit(0)
 
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             sys.exit(1)
@@ -631,7 +631,7 @@ def handle(cli, args):
             sys.exit(1)
 
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             sys.exit(1)
@@ -988,18 +988,25 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     cli.console.print("\nType your guidance to upgrade the exploit. Type 'quit' to end.\n")
 
     try:
-        llm = provider_manager.get_llm("default")
+        llm = provider_manager.get_native_client("default")
     except Exception as e:
         cli.console.print(f"[red]Could not build LLM: {e}[/red]")
         sys.exit(1)
 
     system_prompt = _build_elaboration_prompt(finding)
-    messages: list[dict] = [
-        {"role": "user", "content": (
-            f"I'm working with you to upgrade the exploit for finding {finding.get('id', '?')}. "
-            f"The current impact is {finding.get('exploit_impact') or 'unknown'}. "
-            f"Let's start by reviewing what we have."
-        )},
+    from clearwing.llm import ChatMessage
+    from clearwing.llm.native import response_text
+
+    messages: list[ChatMessage] = [
+        ChatMessage(
+            "user",
+            (
+                f"I'm working with you to upgrade the exploit for finding "
+                f"{finding.get('id', '?')}. "
+                f"The current impact is {finding.get('exploit_impact') or 'unknown'}. "
+                f"Let's start by reviewing what we have."
+            ),
+        ),
     ]
 
     from ...agent.tools.hunt.sandbox import HunterContext
@@ -1011,45 +1018,48 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
         specialist="elaboration",
     )
     tools = build_elaboration_tools(ctx, finding)
-    tool_schemas = [{"name": t.name, "description": t.description, "input_schema": t.schema} for t in tools]
     tool_handlers = {t.name: t.handler for t in tools}
 
     total_cost = 0.0
 
     async def _chat_turn(user_input: str) -> str:
         nonlocal total_cost
-        messages.append({"role": "user", "content": user_input})
+        messages.append(ChatMessage("user", user_input))
         try:
+            # Native client takes NativeToolSpec objects directly and threads
+            # them through the call; tool calls come back on
+            # `response.tool_calls` as genai ToolCall objects.
             response = await llm.achat(
                 messages=messages,
                 system=system_prompt,
-                tools=tool_schemas,
+                tools=tools,
             )
         except Exception as e:
             return f"[red]LLM error: {e}[/red]"
 
-        assistant_text = ""
-        content_blocks = response.content if hasattr(response, "content") else []
-        for block in content_blocks:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    assistant_text += block.get("text", "")
-                elif block.get("type") == "tool_use":
-                    tool_name = block.get("name", "")
-                    tool_input = block.get("input", {})
-                    handler = tool_handlers.get(tool_name)
-                    if handler:
-                        try:
-                            tool_result = handler(**tool_input)
-                            cli.console.print(f"  [dim]Tool {tool_name}: {tool_result}[/dim]")
-                        except Exception as e:
-                            cli.console.print(f"  [red]Tool {tool_name} error: {e}[/red]")
+        assistant_text = response_text(response)
+        tool_calls = list(response.tool_calls)
+        for tool_call in tool_calls:
+            tool_name = tool_call.fn_name
+            tool_input = tool_call.fn_arguments
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            handler = tool_handlers.get(tool_name)
+            if handler:
+                try:
+                    tool_result = handler(**tool_input)
+                    cli.console.print(f"  [dim]Tool {tool_name}: {tool_result}[/dim]")
+                except Exception as e:
+                    cli.console.print(f"  [red]Tool {tool_name} error: {e}[/red]")
 
-        messages.append({"role": "assistant", "content": content_blocks})
-        if hasattr(response, "usage"):
-            usage = response.usage
-            if hasattr(usage, "cost_usd"):
-                total_cost += usage.cost_usd
+        # Round-trip the assistant turn (carrying its tool_calls) so the next
+        # turn's history is well-formed for strict providers.
+        messages.append(
+            ChatMessage("assistant", assistant_text, tool_calls=tool_calls or None)
+        )
+        usage = getattr(response, "usage", None)
+        if usage is not None and getattr(usage, "cost_usd", None) is not None:
+            total_cost += usage.cost_usd
 
         return assistant_text
 
@@ -1107,7 +1117,7 @@ def _run_elaborate_auto(cli, args, targets, session_id, endpoint, provider_manag
     )
 
     try:
-        llm = provider_manager.get_llm("default")
+        llm = provider_manager.get_native_client("default")
     except Exception as e:
         cli.console.print(f"[red]Could not build LLM: {e}[/red]")
         sys.exit(1)
