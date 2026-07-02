@@ -259,7 +259,7 @@ class TestContextSummarizer:
         messages.insert(2, AIMessage(content="Found flag{test_flag_123}"))
 
         mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = MagicMock(content="Summary of findings")
+        mock_llm.aask_text.return_value = MagicMock(first_text="Summary of findings")
 
         result = await self.summarizer.summarize(messages, mock_llm)
 
@@ -277,7 +277,7 @@ class TestContextSummarizer:
         messages = [HumanMessage(content=f"Msg {i}") for i in range(10)]
 
         mock_llm = AsyncMock()
-        mock_llm.ainvoke.return_value = MagicMock(content="Summary")
+        mock_llm.aask_text.return_value = MagicMock(first_text="Summary")
 
         result = await self.summarizer.summarize(messages, mock_llm)
 
