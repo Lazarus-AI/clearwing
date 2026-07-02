@@ -71,7 +71,7 @@ async def test_add_unknown_cwe_no_llm_falls_back_to_unknown():
 async def test_add_with_llm_classification():
     mock_llm = AsyncMock()
     mock_response = MagicMock()
-    mock_response.first_text.return_value = '{"primitive_type": "race_condition"}'
+    mock_response.first_text = '{"primitive_type": "race_condition"}'
     mock_llm.achat.return_value = mock_response
 
     pool = FindingsPool(llm=mock_llm)
@@ -113,11 +113,11 @@ async def test_dedup_same_root_cause():
         resp = MagicMock()
         if call_count <= 2:
             # Classification calls
-            resp.first_text.return_value = '{"primitive_type": "bounded_write"}'
+            resp.first_text = '{"primitive_type": "bounded_write"}'
         else:
             # Dedup call — return the cluster of the first finding
             cluster_id = list(pool._clusters.keys())[0]
-            resp.first_text.return_value = f'{{"duplicate_of": "{cluster_id}"}}'
+            resp.first_text = f'{{"duplicate_of": "{cluster_id}"}}'
         return resp
 
     mock_llm.achat = mock_achat
