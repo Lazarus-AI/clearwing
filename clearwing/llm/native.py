@@ -451,21 +451,6 @@ class AsyncLLMClient:
             response_schema_description=response_schema_description,
         )
 
-    async def aask(
-        self,
-        user: str,
-        system: str | None = None,
-        **_kwargs: Any,
-    ) -> ChatResponse:
-        """Compat shim — three sourcehunt sites
-        (nday_filter / reveng_reconstructor / bench.crash_classifier)
-        call this positional/keyword signature. Delegates to aask_text.
-        """
-        return await self.aask_text(
-            system=system or self.default_system,
-            user=user,
-        )
-
     async def aask_json(
         self,
         *,

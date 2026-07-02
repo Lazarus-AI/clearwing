@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from genai_pyo3 import ChatMessage
+from genai_pyo3 import ChatMessage, ChatResponse
 
 from clearwing.llm.native import AsyncLLMClient
 
@@ -235,21 +235,18 @@ class ChatModel:
             },
         )
 
-    async def aask(
-        self,
-        user: str,
-        system: str | None = None,
-        **_kwargs: Any,
-    ):
-        """Compat shim — three sourcehunt sites
-        (nday_filter / reveng_reconstructor / bench.crash_classifier)
-        call this positional/keyword signature. Delegates to the
-        underlying client's aask_text.
+    async def aask_text(self, **kwargs: Any) -> ChatResponse:
+        """Delegate to the underlying native client's ``aask_text``.
+
+        Gives ChatModel the same text-ask surface as AsyncLLMClient, so callers
+        holding either type share one API (and returns a ``ChatResponse``, not
+        an ``AIMessage`` like ``ainvoke``).
         """
-        return await self._client.aask_text(
-            system=system or self.default_system,
-            user=user,
-        )
+        return await self._client.aask_text(**kwargs)
+
+    async def aask_json(self, **kwargs: Any) -> tuple[Any, ChatResponse]:
+        """Delegate to the underlying native client's ``aask_json``."""
+        return await self._client.aask_json(**kwargs)
 
     async def ainvoke(self, messages: Any, on_text_delta: Callable[[str], None] | None = None) -> AIMessage:
         system, chat_messages = _coerce_chat_messages(messages)
