@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from clearwing.llm import ChatModel
+from clearwing.llm import AsyncLLMClient
 from clearwing.providers.manager import (
     DEFAULT_ROUTES,
     PROVIDER_PRESETS,
@@ -140,38 +140,38 @@ class TestProviderManager:
         assert len(route_list) == 1
         assert route_list[0].provider == "openai"
 
-    def test_get_llm_default_returns_anthropic(self):
+    def test_get_native_client_default_returns_anthropic(self):
         mgr = ProviderManager()
-        llm = mgr.get_llm("default")
+        llm = mgr.get_native_client("default")
 
-        assert isinstance(llm, ChatModel)
+        assert isinstance(llm, AsyncLLMClient)
         assert llm.provider_name == "anthropic"
         assert llm.model_name == "claude-sonnet-4-6"
 
-    def test_get_llm_recon_returns_llm(self):
+    def test_get_native_client_recon_returns_llm(self):
         mgr = ProviderManager()
-        llm = mgr.get_llm("recon")
+        llm = mgr.get_native_client("recon")
 
-        assert isinstance(llm, ChatModel)
+        assert isinstance(llm, AsyncLLMClient)
         assert llm.provider_name == "anthropic"
         assert llm.model_name == "claude-haiku-4-5-20251001"
 
-    def test_get_llm_unknown_task_falls_back_to_default(self):
+    def test_get_native_client_unknown_task_falls_back_to_default(self):
         mgr = ProviderManager()
-        llm = mgr.get_llm("nonexistent_task")
+        llm = mgr.get_native_client("nonexistent_task")
 
-        assert isinstance(llm, ChatModel)
+        assert isinstance(llm, AsyncLLMClient)
         assert llm.provider_name == "anthropic"
         assert llm.model_name == "claude-sonnet-4-6"
 
-    def test_get_llm_no_route_raises(self):
+    def test_get_native_client_no_route_raises(self):
         mgr = ProviderManager(
             routes=[
                 ModelRoute(task="recon", provider="anthropic", model="claude-haiku-4-5-20251001"),
             ]
         )
         with pytest.raises(ValueError, match="No route configured"):
-            mgr.get_llm("nonexistent_task")
+            mgr.get_native_client("nonexistent_task")
 
     def test_set_route(self):
         mgr = ProviderManager()
@@ -197,45 +197,45 @@ class TestProviderManager:
 
     def test_llm_caching_same_instance(self):
         mgr = ProviderManager()
-        llm1 = mgr.get_llm("default")
-        llm2 = mgr.get_llm("default")
+        llm1 = mgr.get_native_client("default")
+        llm2 = mgr.get_native_client("default")
         assert llm1 is llm2
 
     def test_llm_caching_shared_across_tasks(self):
         """If two tasks route to the same provider/model, they share the cached instance."""
         mgr = ProviderManager()
         # exploit and planning both use claude-sonnet-4-6
-        llm_exploit = mgr.get_llm("exploit")
-        llm_planning = mgr.get_llm("planning")
+        llm_exploit = mgr.get_native_client("exploit")
+        llm_planning = mgr.get_native_client("planning")
         assert llm_exploit is llm_planning
 
 
-# --- _create_llm error cases ---
+# --- _create_native error cases ---
 
 
 class TestCreateLlmErrors:
     def test_unknown_provider_raises_value_error(self):
         mgr = ProviderManager()
         with pytest.raises(ValueError, match="Unknown provider"):
-            mgr._create_llm("fakeprovider", "some-model")
+            mgr._create_native("fakeprovider", "some-model")
 
     def test_openai_provider_uses_native_chat_model(self):
         mgr = ProviderManager()
-        llm = mgr._create_llm("openai", "gpt-4o")
-        assert isinstance(llm, ChatModel)
+        llm = mgr._create_native("openai", "gpt-4o")
+        assert isinstance(llm, AsyncLLMClient)
         assert llm.provider_name == "openai"
         assert llm.model_name == "gpt-4o"
 
     def test_google_provider_uses_native_chat_model(self):
         mgr = ProviderManager()
-        llm = mgr._create_llm("google", "gemini-2.0-flash")
-        assert isinstance(llm, ChatModel)
+        llm = mgr._create_native("google", "gemini-2.0-flash")
+        assert isinstance(llm, AsyncLLMClient)
         assert llm.provider_name == "gemini"
         assert llm.model_name == "gemini-2.0-flash"
 
     def test_ollama_provider_uses_native_chat_model(self):
         mgr = ProviderManager()
-        llm = mgr._create_llm("ollama", "llama3")
-        assert isinstance(llm, ChatModel)
+        llm = mgr._create_native("ollama", "llama3")
+        assert isinstance(llm, AsyncLLMClient)
         assert llm.provider_name == "ollama"
         assert llm.base_url == "http://localhost:11434"

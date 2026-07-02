@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, replace
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient, ChatModel
+from clearwing.llm import AsyncLLMClient
 
 from .env import LLMEndpoint, resolve_llm_endpoint
 
@@ -154,10 +154,9 @@ class ProviderManager:
     ):
         self._configs: dict[str, ProviderConfig] = {}
         self._routes: dict[str, ModelRoute] = {}
-        self._llm_cache: dict[str, ChatModel] = {}
         self._native_cache: dict[str, AsyncLLMClient] = {}
-        # When `endpoint` is set, every get_llm() call returns the
-        # same model instance for identical resolved endpoints. Task-
+        # When `endpoint` is set, every get_native_client() call returns the
+        # same client instance for identical resolved endpoints. Task-
         # specific model overrides still produce separate cache entries.
         self._global_endpoint: LLMEndpoint | None = endpoint
         self._task_model_overrides: dict[str, str] = dict(task_model_overrides or {})
@@ -270,26 +269,6 @@ class ProviderManager:
 
     # --- Get an LLM for a task --------------------------------------------
 
-    def get_llm(self, task: str = "default") -> ChatModel:
-        """Get the appropriate LLM for a task type."""
-        # Single-endpoint mode: every task gets the same LLM
-        if self._global_endpoint is not None:
-            endpoint = self._endpoint_for_task(task)
-            cache_key = self._global_cache_key("chat", endpoint)
-            if cache_key not in self._llm_cache:
-                self._llm_cache[cache_key] = self._create_llm_from_endpoint(endpoint)
-            return self._llm_cache[cache_key]
-
-        route = self._routes.get(task, self._routes.get("default"))
-        if not route:
-            raise ValueError(f"No route configured for task: {task}")
-
-        cache_key = f"{route.provider}:{route.model}"
-        if cache_key not in self._llm_cache:
-            self._llm_cache[cache_key] = self._create_llm(route.provider, route.model)
-
-        return self._llm_cache[cache_key]
-
     def get_native_client(self, task: str = "default") -> AsyncLLMClient:
         """Get the native async LLM client for a task type."""
         if self._global_endpoint is not None:
@@ -307,25 +286,6 @@ class ProviderManager:
         if cache_key not in self._native_cache:
             self._native_cache[cache_key] = self._create_native(route.provider, route.model, task)
         return self._native_cache[cache_key]
-
-    def _create_llm_from_endpoint(self, endpoint: LLMEndpoint) -> ChatModel:
-        """Build a native ChatModel from a resolved LLMEndpoint."""
-        if endpoint.is_openai_compat:
-            return ChatModel(
-                model_name=endpoint.model,
-                base_url=endpoint.base_url,
-                api_key=endpoint.api_key or "",
-                provider_name=_adapter_for_endpoint(endpoint),
-            )
-
-        # Anthropic direct, or an Anthropic-compatible gateway (e.g. MiniMax's
-        # api.minimax.io/anthropic). base_url is None for the direct case.
-        return ChatModel(
-            model_name=endpoint.model,
-            base_url=endpoint.base_url,
-            api_key=endpoint.api_key or "",
-            provider_name=_adapter_for_endpoint(endpoint),
-        )
 
     def _create_native_from_endpoint(
         self, endpoint: LLMEndpoint, task: str = "default"
@@ -360,56 +320,6 @@ class ProviderManager:
                 endpoint.api_key or "",
             ]
         )
-
-    def _create_llm(self, provider: str, model: str) -> ChatModel:
-        """Create a native chat model for a given provider and model."""
-        config = self._configs.get(provider)
-        preset = PROVIDER_PRESETS.get(provider)
-
-        if provider == "anthropic":
-            return ChatModel(
-                model_name=model,
-                api_key=config.api_key if config else "",
-                provider_name="anthropic",
-            )
-
-        elif provider == "openai":
-            return ChatModel(
-                model_name=model,
-                base_url=config.base_url if config else None,
-                api_key=config.api_key if config else "",
-                provider_name=_adapter_for_provider_config(provider, config),
-            )
-
-        elif provider == "google":
-            return ChatModel(
-                model_name=model,
-                api_key=config.api_key if config else "",
-                provider_name="gemini",
-            )
-
-        elif provider == "ollama":
-            base_url = (
-                config.base_url
-                if config and config.base_url
-                else preset.get("default_base_url", "http://localhost:11434")
-            )
-            return ChatModel(
-                model_name=model,
-                base_url=base_url,
-                api_key=config.api_key if config else "",
-                provider_name="ollama",
-            )
-
-        else:
-            if config and config.base_url:
-                return ChatModel(
-                    model_name=model,
-                    base_url=config.base_url,
-                    api_key=config.api_key,
-                    provider_name=_adapter_for_provider_config(provider, config),
-                )
-            raise ValueError(f"Unknown provider: {provider}")
 
     def _create_native(self, provider: str, model: str, task: str = "default") -> AsyncLLMClient:
         config = self._configs.get(provider)
@@ -478,8 +388,8 @@ class ProviderManager:
         """Update or add a route for a task type."""
         self._routes[task] = ModelRoute(task=task, provider=provider, model=model, reason=reason)
         # Invalidate cache for this route
-        cache_key = f"{provider}:{model}"
-        self._llm_cache.pop(cache_key, None)
+        cache_key = f"{provider}:{model}:native"
+        self._native_cache.pop(cache_key, None)
 
     def get_route_info(self) -> str:
         """Human-readable summary of current routing."""
