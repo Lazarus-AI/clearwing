@@ -440,7 +440,7 @@ class TestAvalidate:
     async def test_avalidate_parses_response(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = json.dumps({
+        mock_response.first_text = json.dumps({
             "axes": {
                 "REAL": {"passed": True, "confidence": "high", "rationale": "yes"},
                 "TRIGGERABLE": {"passed": True, "confidence": "medium", "rationale": "likely"},
