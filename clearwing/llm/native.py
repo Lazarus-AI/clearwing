@@ -54,6 +54,21 @@ _REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
 # name. Intentionally empty today; populate as such models ship.
 _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 
+# Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
+# genai-pyo3 / the backend errors when reasoning capture is requested for them.
+# Everything else supports it, so we capture reasoning by default and only skip
+# for names matching this list. Case-insensitive substring match on the model
+# name. Add new offenders here as they surface.
+_REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
+    "gpt-5.3-codex-spark",
+)
+
+
+def _model_supports_reasoning_capture(model_name: str) -> bool:
+    """False when *model_name* rejects reasoning-content capture (blacklist)."""
+    lower = model_name.lower()
+    return not any(pattern in lower for pattern in _REASONING_CAPTURE_UNSUPPORTED_PATTERNS)
+
 
 def _run_coro_sync(coro):
     try:
@@ -248,6 +263,10 @@ class AsyncLLMClient:
             self.reasoning_effort = self._auto_resolve_reasoning_effort(model_name)
         else:
             self.reasoning_effort = reasoning_effort
+        # Whether to request reasoning-content capture in ChatOptions. On for
+        # every model except the blacklisted ones (see
+        # _REASONING_CAPTURE_UNSUPPORTED_PATTERNS), which error if it's set.
+        self.capture_reasoning_content = _model_supports_reasoning_capture(model_name)
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
@@ -297,8 +316,8 @@ class AsyncLLMClient:
             # varied provider shapes into ChatResponse.reasoning_content,
             # so hunter transcripts see a single string regardless of
             # backend.
-            capture_reasoning_content=True,
-            normalize_reasoning_content=True,
+            capture_reasoning_content=self.capture_reasoning_content,
+            normalize_reasoning_content=self.capture_reasoning_content,
             reasoning_effort=self.reasoning_effort,
             response_json_spec=(
                 _json_spec_from_model(
@@ -373,8 +392,8 @@ class AsyncLLMClient:
             capture_content=True,
             capture_usage=True,
             capture_tool_calls=True,
-            capture_reasoning_content=True,
-            normalize_reasoning_content=True,
+            capture_reasoning_content=self.capture_reasoning_content,
+            normalize_reasoning_content=self.capture_reasoning_content,
             reasoning_effort=self.reasoning_effort,
         )
 
