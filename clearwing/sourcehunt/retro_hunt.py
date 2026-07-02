@@ -25,7 +25,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from clearwing.llm import ChatModel
+from clearwing.llm import AsyncLLMClient, ChatMessage
+from clearwing.llm.native import response_text
 
 from .semgrep_sidecar import SemgrepSidecar
 from .state import Finding
@@ -135,7 +136,7 @@ class RetroHunter:
 
     def __init__(
         self,
-        llm: ChatModel,
+        llm: AsyncLLMClient,
         sidecar: SemgrepSidecar | None = None,
     ):
         self.llm = llm
@@ -186,16 +187,14 @@ class RetroHunter:
     def _generate_rule(self, cve_id: str, diff_text: str) -> dict | None:
         user_msg = f"CVE: {cve_id}\n\nPatch diff:\n\n{diff_text}"
         try:
-            response = self.llm.invoke(
-                [
-                    {"role": "system", "content": RULE_GEN_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ]
+            response = self.llm.chat(
+                messages=[ChatMessage("user", user_msg)],
+                system=RULE_GEN_SYSTEM_PROMPT,
             )
         except Exception:
             logger.debug("Retro-hunt rule-gen LLM call failed", exc_info=True)
             return None
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        content = response_text(response)
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None

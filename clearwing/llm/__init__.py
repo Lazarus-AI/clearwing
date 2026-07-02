@@ -1,9 +1,9 @@
 from genai_pyo3 import ChatMessage, ChatResponse, ToolCall, Usage
 
-from .chat import (
+from .chat import ChatModel
+from .messages import (
     AIMessage,
     BaseMessage,
-    ChatModel,
     HumanMessage,
     SystemMessage,
     ToolMessage,
