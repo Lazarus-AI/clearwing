@@ -1801,35 +1801,6 @@ class SourceHuntRunner:
 
     # --- LLM resolution -----------------------------------------------------
 
-    def _get_llm(self, task: str, override: Any) -> Any:
-        """Return an LLM for the given task, or None if not available.
-
-        Resolution order:
-          1. Explicit kwarg override (ranker_llm=, hunter_llm=, etc.)
-          2. self.provider_manager — the centralized source of truth.
-             When set, ALL tasks use the same configured provider.
-             Failures propagate (no silent fallthrough to defaults).
-          3. self.model_override → resolve_llm_endpoint(cli_model=...)
-          4. resolve_llm_endpoint() from env/config
-          5. None — caller falls back to a no-LLM path
-        """
-        if override is not None:
-            return override
-
-        if self.provider_manager is not None:
-            return self.provider_manager.get_llm(task)
-
-        if self.model_override:
-            return self._build_llm_from_model_string(self.model_override)
-
-        try:
-            endpoint = resolve_llm_endpoint()
-            if endpoint.api_key:
-                return ProviderManager.for_endpoint(endpoint).get_llm(task)
-        except Exception:
-            logger.debug("Default endpoint resolution failed for task=%s", task, exc_info=True)
-        return None
-
     def _get_native_client(
         self,
         task: str,
@@ -1857,20 +1828,6 @@ class SourceHuntRunner:
         except Exception:
             logger.debug("Default endpoint native resolution failed for task=%s", task, exc_info=True)
         return None
-
-    def _build_llm_from_model_string(self, model: str) -> Any:
-        """Build a single LLM from a model string. Used by --model override.
-
-        Honors CLEARWING_BASE_URL / CLEARWING_API_KEY — so `--model
-        anthropic/claude-opus-4` + CLEARWING_BASE_URL=https://openrouter.ai/api/v1
-        lands on OpenRouter, not on Anthropic direct.
-        """
-        try:
-            endpoint = resolve_llm_endpoint(cli_model=model)
-            return ProviderManager.for_endpoint(endpoint).get_llm("default")
-        except Exception:
-            logger.warning("Failed to build LLM from model string", exc_info=True)
-            return None
 
     def _build_native_from_model_string(self, model: str) -> AsyncLLMClient | None:
         try:
