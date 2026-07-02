@@ -1,6 +1,5 @@
 from genai_pyo3 import ChatMessage, ChatResponse, ToolCall, Usage
 
-from .chat import ChatModel
 from .messages import (
     AIMessage,
     BaseMessage,
@@ -18,7 +17,6 @@ from .native import (
 
 __all__ = [
     "AsyncLLMClient",
-    "ChatModel",
     "BaseMessage",
     "HumanMessage",
     "SystemMessage",
