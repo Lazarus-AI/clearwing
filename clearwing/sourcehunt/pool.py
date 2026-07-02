@@ -279,6 +279,16 @@ class HunterPool:
         for item in self.config.files:
             by_tier[item.get("tier", "C")].append(item)
 
+        # The ranker computes a per-file priority but returns files in
+        # enumeration order; it does not sort. Without this, hunters within a
+        # tier run in filesystem (roughly alphabetical) order, so the most
+        # suspicious files are not hunted first and can be starved when a tier
+        # budget is exhausted. Sort each tier by priority descending (stable,
+        # so equal-priority files keep their enumeration order) to make the
+        # ranker's scores actually drive hunt order.
+        for _tier_files in by_tier.values():
+            _tier_files.sort(key=lambda ft: ft.get("priority", 0.0), reverse=True)
+
         total_budget = self.config.budget_usd
         tb = self.config.tier_budget
         if total_budget <= 0:
