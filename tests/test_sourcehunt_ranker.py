@@ -330,10 +330,57 @@ class TestFallbackOnLLMSilence:
         llm.aask_json.side_effect = Exception("rate limited")
         files = [_make_file("foo.c", tags=["parser"], static_hint=2, imports_by=15)]
         Ranker(llm).rank(files)
+        assert llm.aask_json.call_count == 1
         # Failure → fallback — surface should be at least 3 from static_hint floor
         assert files[0]["surface"] >= 3
         # imports_by=15 → fallback influence 4 (15 > 5 but ≤ 20)
         assert files[0]["influence"] >= 3
+
+    def test_retries_empty_structured_response_then_applies_success(self):
+        llm = AsyncMock()
+        llm.aask_json.side_effect = [
+            ValueError(
+                "LLM returned empty response; expected JSON matching RankedFileScoreResponse"
+            ),
+            (
+                {
+                    "results": [
+                        {
+                            "path": "foo.c",
+                            "surface": 5,
+                            "influence": 4,
+                            "surface_rationale": "parses untrusted input",
+                            "influence_rationale": "security critical",
+                        }
+                    ]
+                },
+                ChatResponse(),
+            ),
+        ]
+        files = [_make_file("foo.c")]
+
+        Ranker(llm, RankerConfig(chunk_retry_backoff_seconds=0)).rank(files)
+
+        assert llm.aask_json.call_count == 2
+        assert files[0]["surface"] == 5
+        assert files[0]["influence"] == 4
+
+    def test_timeout_falls_back_without_ranker_retry(self):
+        llm = AsyncMock()
+        llm.aask_json.side_effect = TimeoutError()
+        files = [_make_file("foo.c", tags=["parser"])]
+
+        Ranker(
+            llm,
+            RankerConfig(
+                chunk_max_retries=3,
+                chunk_retry_backoff_seconds=0,
+                llm_timeout_seconds=1,
+            ),
+        ).rank(files)
+
+        assert llm.aask_json.call_count == 1
+        assert files[0]["surface"] == 4
 
 
 # --- The FFmpeg-style propagation case --------------------------------------
