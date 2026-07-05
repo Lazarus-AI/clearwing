@@ -96,6 +96,8 @@ def _is_root_model_type(schema_model: type[BaseModel]) -> bool:
 
 
 def _validate_schema_response(schema_model: type[BaseModel], text: str) -> BaseModel:
+    if not text or not text.strip():
+        raise ValueError("LLM returned empty response; expected JSON matching " + schema_model.__name__)
     try:
         return schema_model.model_validate_json(text)
     except Exception:
