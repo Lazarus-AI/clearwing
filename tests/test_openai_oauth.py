@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import urllib.parse
 
+from clearwing.providers import openai_oauth as oauth
 from clearwing.providers.openai_oauth import (
     OPENAI_AUTH_JWT_CLAIM_PATH,
+    build_anthropic_authorize_url,
     build_authorize_url,
     credentials_from_value,
     extract_account_id,
@@ -35,6 +38,48 @@ def test_build_authorize_url_contains_expected_params():
     assert "code_challenge=CHALLENGE" in url
     assert "state=STATE" in url
     assert "codex_cli_simplified_flow=true" in url
+
+
+def test_build_anthropic_authorize_url_uses_platform_callback():
+    url = build_anthropic_authorize_url(challenge="CHALLENGE", state="STATE")
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qs(parsed.query)
+
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "platform.claude.com"
+    assert parsed.path == "/oauth/authorize"
+    assert params["redirect_uri"] == ["https://platform.claude.com/oauth/code/callback"]
+    assert params["code_challenge"] == ["CHALLENGE"]
+    assert params["state"] == ["STATE"]
+
+
+def test_exchange_anthropic_authorization_code_posts_to_platform(monkeypatch):
+    calls = []
+
+    def fake_post_json(url, data, **kwargs):
+        calls.append((url, data, kwargs))
+        return {
+            "access_token": "sk-ant-oat01-" + ("a" * 80),
+            "refresh_token": "refresh",
+            "expires_in": 3600,
+        }
+
+    monkeypatch.setattr(oauth, "_post_json", fake_post_json)
+    monkeypatch.setattr(oauth, "anthropic_claude_code_user_agent", lambda: "ua")
+
+    creds = oauth.exchange_anthropic_authorization_code(
+        code="CODE",
+        state="STATE",
+        verifier="VERIFIER",
+    )
+
+    assert creds.token.startswith("sk-ant-oat01-")
+    assert creds.refresh == "refresh"
+    assert calls[0][0] == "https://platform.claude.com/v1/oauth/token"
+    assert calls[0][1]["redirect_uri"] == "https://platform.claude.com/oauth/code/callback"
+    assert calls[0][1]["code"] == "CODE"
+    assert calls[0][1]["code_verifier"] == "VERIFIER"
+    assert calls[0][2]["headers"] == {"User-Agent": "ua"}
 
 
 def test_parse_authorization_input_url():
