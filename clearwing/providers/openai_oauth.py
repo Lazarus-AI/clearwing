@@ -5,8 +5,8 @@ Codex CLI — browser PKCE login on localhost, refresh-token persistence
 under ``~/.clearwing/auth/``, and authenticated calls to the ChatGPT
 backend API.
 
-Anthropic Claude Code: PKCE browser login against ``claude.ai``, with
-token exchange and refresh via ``console.anthropic.com``. Credentials
+Anthropic Claude Code: PKCE browser login against ``platform.claude.com``,
+with token exchange and refresh via the same host. Credentials
 are stored alongside the OpenAI ones and auto-refreshed on demand.
 """
 
@@ -35,6 +35,8 @@ from pathlib import Path
 from socketserver import TCPServer
 from typing import Any
 
+from clearwing.core.config import clearwing_home
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-Unix fallback
@@ -57,13 +59,13 @@ OPENAI_AUTH_JWT_CLAIM_PATH = "https://api.openai.com/auth"
 # --- Anthropic Claude Code OAuth constants ----------------------------------
 
 ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-ANTHROPIC_OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
-ANTHROPIC_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"  # noqa: S105
+ANTHROPIC_OAUTH_AUTHORIZE_URL = "https://platform.claude.com/oauth/authorize"
+ANTHROPIC_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"  # noqa: S105
 ANTHROPIC_OAUTH_REFRESH_TOKEN_URLS = (
     "https://platform.claude.com/v1/oauth/token",
     "https://console.anthropic.com/v1/oauth/token",
 )
-ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
+ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 ANTHROPIC_OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
 ANTHROPIC_SETUP_TOKEN_PREFIX = "sk-ant-oat01-"  # noqa: S105
 ANTHROPIC_SETUP_TOKEN_MIN_LENGTH = 80
@@ -84,8 +86,6 @@ ANTHROPIC_CLAUDE_CODE_VERSION_FALLBACK = "2.1.74"
 _anthropic_claude_code_version_cache: str | None = None
 
 # --- Common infrastructure --------------------------------------------------
-
-from clearwing.core.config import clearwing_home
 
 AUTH_DIR = clearwing_home() / "auth"
 
@@ -932,8 +932,8 @@ def login_anthropic_oauth(
 ) -> AnthropicOAuthCredentials:
     """Anthropic OAuth via the hosted callback page (paste flow).
 
-    Unlike OpenAI, Anthropic's OAuth redirects to a hosted page at
-    console.anthropic.com that displays the authorization code for the
+    Unlike OpenAI, Anthropic's OAuth redirects to a hosted page that displays
+    the authorization code for the
     user to copy-paste.  No localhost callback server is needed.
     """
     verifier, challenge = generate_pkce()
