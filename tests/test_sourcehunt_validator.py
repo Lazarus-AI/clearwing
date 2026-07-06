@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from clearwing.sourcehunt.calibration import CalibrationRecord, CalibrationStore
-from clearwing.sourcehunt.state import AxisResult, ValidatorVerdict
+from clearwing.sourcehunt.state import Axes, AxisResult, ValidatorVerdict
 from clearwing.sourcehunt.validator import (
     VALIDATOR_QUICK_PROMPT,
     VALIDATOR_SYSTEM_PROMPT,
@@ -53,12 +53,12 @@ def _make_finding(**kwargs) -> dict:
 def _make_verdict(**kwargs) -> ValidatorVerdict:
     defaults = dict(
         finding_id="hunter-abc",
-        axes={
-            "REAL": AxisResult(axis="REAL", passed=True, confidence="high", rationale="confirmed"),
-            "TRIGGERABLE": AxisResult(axis="TRIGGERABLE", passed=True, confidence="high", rationale="reachable"),
-            "IMPACTFUL": AxisResult(axis="IMPACTFUL", passed=True, confidence="high", rationale="crosses boundary", boundary_crossed="user"),
-            "GENERAL": AxisResult(axis="GENERAL", passed=True, confidence="high", rationale="default config"),
-        },
+        axes=Axes(
+            real=AxisResult(passed=True, confidence="high", rationale="confirmed"),
+            triggerable=AxisResult(passed=True, confidence="high", rationale="reachable"),
+            impactful=AxisResult(passed=True, confidence="high", rationale="crosses boundary", boundary_crossed="user"),
+            general=AxisResult(passed=True, confidence="high", rationale="default config"),
+        ),
         advance=True,
         severity_validated="high",
         evidence_level="crash_reproduced",
@@ -77,7 +77,7 @@ def _make_verdict(**kwargs) -> ValidatorVerdict:
 class TestValidatorVerdict:
     def test_defaults(self):
         v = ValidatorVerdict(
-            finding_id="x", axes={}, advance=False,
+            finding_id="x", axes=Axes(), advance=False,
             severity_validated=None, evidence_level="suspicion",
             pro_argument="", counter_argument="", tie_breaker="",
             duplicate_cve=None,
@@ -89,8 +89,8 @@ class TestValidatorVerdict:
     def test_all_axes_pass(self):
         v = _make_verdict()
         assert v.advance is True
-        assert len(v.axes) == 4
-        assert all(ax.passed for ax in v.axes.values())
+        assert len(list(v.axes.items())) == 4
+        assert all(ax.passed for _, ax in v.axes.items())
 
     def test_to_verifier_result(self):
         v = _make_verdict()
@@ -159,10 +159,10 @@ class TestResponseParsing:
     def test_full_4axis_maps_to_verdict(self):
         schema = _VerdictSchema.model_validate({
             "axes": {
-                "REAL": {"passed": True, "confidence": "high", "rationale": "confirmed"},
-                "TRIGGERABLE": {"passed": True, "confidence": "medium", "rationale": "likely"},
-                "IMPACTFUL": {"passed": True, "confidence": "high", "rationale": "boundary crossed", "boundary_crossed": "user"},
-                "GENERAL": {"passed": True, "confidence": "high", "rationale": "default config"},
+                "real": {"passed": True, "confidence": "high", "rationale": "confirmed"},
+                "triggerable": {"passed": True, "confidence": "medium", "rationale": "likely"},
+                "impactful": {"passed": True, "confidence": "high", "rationale": "boundary crossed", "boundary_crossed": "user"},
+                "general": {"passed": True, "confidence": "high", "rationale": "default config"},
             },
             "advance": True,
             "severity": "high",
@@ -174,18 +174,18 @@ class TestResponseParsing:
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is True
         assert verdict.finding_id == "hunter-abc"
-        assert len(verdict.axes) == 4
-        assert verdict.axes["REAL"].passed is True
-        assert verdict.axes["IMPACTFUL"].boundary_crossed == "user"
+        assert len(list(verdict.axes.items())) == 4
+        assert verdict.axes.real.passed is True
+        assert verdict.axes.impactful.boundary_crossed == "user"
         assert verdict.severity_validated == "high"
 
     def test_partial_pass_clears_severity(self):
         schema = _VerdictSchema.model_validate({
             "axes": {
-                "REAL": {"passed": True, "confidence": "high", "rationale": "confirmed"},
-                "TRIGGERABLE": {"passed": False, "confidence": "low", "rationale": "dead code"},
-                "IMPACTFUL": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "GENERAL": {"passed": True, "confidence": "medium", "rationale": "yes"},
+                "real": {"passed": True, "confidence": "high", "rationale": "confirmed"},
+                "triggerable": {"passed": False, "confidence": "low", "rationale": "dead code"},
+                "impactful": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "general": {"passed": True, "confidence": "medium", "rationale": "yes"},
             },
             "advance": False,
             "severity": "high",
@@ -193,16 +193,16 @@ class TestResponseParsing:
         })
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is False
-        assert verdict.axes["TRIGGERABLE"].passed is False
+        assert verdict.axes.triggerable.passed is False
         assert verdict.severity_validated is None  # cleared when advance is False
 
     def test_quick_pass_two_axes_only(self):
-        # IMPACTFUL/GENERAL are optional (quick-pass prompt); to_verdict maps
+        # impactful/general are optional (quick-pass prompt); to_verdict maps
         # only the axes that are present.
         schema = _VerdictSchema.model_validate({
             "axes": {
-                "REAL": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "TRIGGERABLE": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
             },
             "advance": True,
             "severity": "critical",
@@ -210,7 +210,8 @@ class TestResponseParsing:
         })
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is True
-        assert set(verdict.axes) == {"REAL", "TRIGGERABLE"}
+        assert {name for name, _ in verdict.axes.items()} == {"real", "triggerable"}
+        assert verdict.axes.impactful is None
 
     def test_schema_rejects_invalid_enums(self):
         # Constrained decoding can't emit these; assert the schema enforces them
@@ -219,16 +220,16 @@ class TestResponseParsing:
         with pytest.raises(ValidationError):
             _VerdictSchema.model_validate({
                 "axes": {
-                    "REAL": {"passed": True, "confidence": "high", "rationale": "y"},
-                    "TRIGGERABLE": {"passed": True, "confidence": "high", "rationale": "y"},
+                    "real": {"passed": True, "confidence": "high", "rationale": "y"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "y"},
                 },
                 "advance": True, "severity": "apocalyptic", "evidence_level": "crash_reproduced",
             })
         with pytest.raises(ValidationError):
             _VerdictSchema.model_validate({
                 "axes": {
-                    "REAL": {"passed": True, "confidence": "ultra_high", "rationale": "y"},
-                    "TRIGGERABLE": {"passed": True, "confidence": "high", "rationale": "y"},
+                    "real": {"passed": True, "confidence": "ultra_high", "rationale": "y"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "y"},
                 },
                 "advance": True, "severity": "high", "evidence_level": "crash_reproduced",
             })
@@ -265,9 +266,9 @@ class TestApplyValidatorVerdict:
         verdict = _make_verdict()
         apply_validator_verdict(finding, verdict)
         axes = finding["validator_axes"]
-        assert "REAL" in axes
-        assert axes["REAL"]["passed"] is True
-        assert axes["REAL"]["confidence"] == "high"
+        assert "real" in axes
+        assert axes["real"]["passed"] is True
+        assert axes["real"]["confidence"] == "high"
 
     def test_tier_disagreement_detected(self):
         finding = _make_finding(severity="low")
@@ -316,22 +317,22 @@ class TestRejectedFindings:
         finding = _make_finding()
         verdict = _make_verdict(
             advance=False,
-            axes={
-                "REAL": AxisResult(axis="REAL", passed=True, confidence="high", rationale="yes"),
-                "TRIGGERABLE": AxisResult(axis="TRIGGERABLE", passed=False, confidence="low", rationale="dead code"),
-                "IMPACTFUL": AxisResult(axis="IMPACTFUL", passed=True, confidence="high", rationale="yes"),
-                "GENERAL": AxisResult(axis="GENERAL", passed=False, confidence="low", rationale="exotic config"),
-            },
+            axes=Axes(
+                real=AxisResult(passed=True, confidence="high", rationale="yes"),
+                triggerable=AxisResult(passed=False, confidence="low", rationale="dead code"),
+                impactful=AxisResult(passed=True, confidence="high", rationale="yes"),
+                general=AxisResult(passed=False, confidence="low", rationale="exotic config"),
+            ),
         )
         apply_validator_verdict(finding, verdict)
         assert finding["verified"] is False
-        assert set(finding["rejected_axes"]) == {"TRIGGERABLE", "GENERAL"}
+        assert set(finding["rejected_axes"]) == {"triggerable", "general"}
 
     def test_rejected_finding_severity_cleared(self):
         schema = _VerdictSchema.model_validate({
             "axes": {
-                "REAL": {"passed": False, "confidence": "high", "rationale": "not real"},
-                "TRIGGERABLE": {"passed": False, "confidence": "low", "rationale": "n/a"},
+                "real": {"passed": False, "confidence": "high", "rationale": "not real"},
+                "triggerable": {"passed": False, "confidence": "low", "rationale": "n/a"},
             },
             "advance": False,
             "severity": "high",
@@ -414,10 +415,10 @@ class TestAvalidate:
         mock_llm = AsyncMock()
         verdict_json = json.dumps({
             "axes": {
-                "REAL": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "TRIGGERABLE": {"passed": True, "confidence": "medium", "rationale": "likely"},
-                "IMPACTFUL": {"passed": True, "confidence": "high", "rationale": "yes", "boundary_crossed": "privilege"},
-                "GENERAL": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "triggerable": {"passed": True, "confidence": "medium", "rationale": "likely"},
+                "impactful": {"passed": True, "confidence": "high", "rationale": "yes", "boundary_crossed": "privilege"},
+                "general": {"passed": True, "confidence": "high", "rationale": "yes"},
             },
             "advance": True,
             "severity": "high",
@@ -434,7 +435,7 @@ class TestAvalidate:
         verdict = await val.avalidate(_make_finding())
         assert verdict.advance is True
         assert verdict.severity_validated == "high"
-        assert verdict.axes["IMPACTFUL"].boundary_crossed == "privilege"
+        assert verdict.axes.impactful.boundary_crossed == "privilege"
 
     @pytest.mark.asyncio
     async def test_avalidate_llm_error_returns_error_verdict(self):

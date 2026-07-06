@@ -25,6 +25,7 @@ from clearwing.llm.native import response_text
 
 from .state import (
     EVIDENCE_LEVELS,
+    Axes,
     AxisResult,
     EvidenceLevel,
     Finding,
@@ -78,14 +79,14 @@ If a PoC is provided, you MUST attempt to reproduce it. Report the exact result.
 ## OUTPUT — return ONLY this JSON:
 {
   "axes": {
-    "REAL": {"passed": true|false, "confidence": "high|medium|low", \
+    "real": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."},
-    "TRIGGERABLE": {"passed": true|false, "confidence": "high|medium|low", \
+    "triggerable": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."},
-    "IMPACTFUL": {"passed": true|false, "confidence": "high|medium|low", \
+    "impactful": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "...", \
 "boundary_crossed": "privilege|tenant|origin|user|kernel|sandbox|none"},
-    "GENERAL": {"passed": true|false, "confidence": "high|medium|low", \
+    "general": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."}
   },
   "advance": true|false,
@@ -114,9 +115,9 @@ If BOTH pass, the finding advances to full validation. If either fails, reject.
 Return ONLY this JSON:
 {
   "axes": {
-    "REAL": {"passed": true|false, "confidence": "high|medium|low", \
+    "real": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."},
-    "TRIGGERABLE": {"passed": true|false, "confidence": "high|medium|low", \
+    "triggerable": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."}
   },
   "advance": true|false,
@@ -133,71 +134,40 @@ Return ONLY this JSON:
 # The prompts already ask for exactly this JSON; passing it as a schema_model to
 # aask_json turns it into a genai-pyo3 response_json_spec so the gateway emits it
 # via constrained decoding. That eliminates the "empty first_text / no JSON"
-# failure mode reasoning models hit with free-form aask_text. IMPACTFUL/GENERAL
-# are optional so the same schema fits the quick-pass prompt (REAL+TRIGGERABLE).
-
-
-class _AxisSchema(BaseModel):
-    """One validation axis: pass/fail with a confidence and short rationale.
-
-    The class docstring and per-field descriptions are emitted into the JSON
-    schema (schema `description` / property `description`), so the guidance
-    reaches the model inline through constrained decoding, not only via the
-    prose prompt.
-    """
-
-    passed: bool = Field(
-        description="True if this axis is satisfied, false if it fails."
-    )
-    confidence: Literal["high", "medium", "low"] = Field(
-        description="Confidence in this axis's pass/fail judgment."
-    )
-    rationale: str = Field(
-        default="",
-        description="One to three sentences justifying the decision.",
-    )
-    # Only the IMPACTFUL axis is asked to populate this (see the prompt); the
-    # others omit it and it defaults to "none". Declared on the single axis
-    # schema — not an IMPACTFUL-only subclass — so every axis object carries the
-    # attribute and to_verdict maps it with a plain ax.boundary_crossed.
-    boundary_crossed: Literal[
-        "privilege", "tenant", "origin", "user", "kernel", "sandbox", "none"
-    ] = Field(
-        default="none",
-        description=(
-            "Security boundary the bug crosses. Set only for the IMPACTFUL "
-            "axis; leave as 'none' for the others."
-        ),
-    )
+# failure mode reasoning models hit with free-form aask_text. The per-axis value
+# is the shared AxisResult (state.py) — used verbatim by the domain verdict too,
+# so there is no wire-to-domain axis mapper. This wire container only makes real
+# + triggerable required and impactful/general optional (the quick pass omits
+# them); the domain Axes container is all-optional to also cover the error case.
 
 
 class _AxesSchema(BaseModel):
     """The four validation axes.
 
-    REAL and TRIGGERABLE are always required. IMPACTFUL and GENERAL are omitted
+    real and triggerable are always required. impactful and general are omitted
     on the two-axis quick pass, so they are optional here.
     """
 
-    REAL: _AxisSchema = Field(
+    real: AxisResult = Field(
         description=(
             "Does the bug exist in the code as described? Reproduce the crash "
             "or behavior if a PoC is provided."
         )
     )
-    TRIGGERABLE: _AxisSchema = Field(
+    triggerable: AxisResult = Field(
         description=(
             "Can attacker-controlled input reach this code path in a production "
             "deployment, or do callers/entry points prevent it?"
         )
     )
-    IMPACTFUL: _AxisSchema | None = Field(
+    impactful: AxisResult | None = Field(
         default=None,
         description=(
             "Does the bug cross a meaningful security boundary? Omit on the "
             "quick pass."
         ),
     )
-    GENERAL: _AxisSchema | None = Field(
+    general: AxisResult | None = Field(
         default=None,
         description=(
             "Is it exploitable in realistic default configurations rather than "
@@ -217,8 +187,8 @@ class _VerdictSchema(BaseModel):
     axes: _AxesSchema = Field(description="Per-axis judgments.")
     advance: bool = Field(
         description=(
-            "True only if all provided axes pass, or REAL + IMPACTFUL pass and "
-            "TRIGGERABLE + GENERAL have confidence >= medium."
+            "True only if all provided axes pass, or real + impactful pass and "
+            "triggerable + general have confidence >= medium."
         )
     )
     severity: Literal["critical", "high", "medium", "low", "info"] = Field(
@@ -247,20 +217,16 @@ class _VerdictSchema(BaseModel):
         The LLM only produces judgment fields; the domain fields it must not
         own — finding_id, severity_validated (derived), raw_response, and the
         patch-oracle results (a later stage) — are supplied here, not by the
-        model. No dict round-trip and no re-validation: the schema's Literal
-        enums already guarantee the categorical values.
+        model. The axes are the shared AxisResult objects, passed straight into
+        the domain container; only the container shape differs (this wire schema
+        requires real+triggerable, the domain Axes is all-optional).
         """
-        axes: dict[str, AxisResult] = {}
-        for name, ax in self.axes:  # pydantic models iterate as (field_name, value)
-            if ax is None:
-                continue
-            axes[name] = AxisResult(
-                axis=name,
-                passed=ax.passed,
-                confidence=ax.confidence,
-                rationale=ax.rationale[:500],
-                boundary_crossed=ax.boundary_crossed,
-            )
+        axes = Axes(
+            real=self.axes.real,
+            triggerable=self.axes.triggerable,
+            impactful=self.axes.impactful,
+            general=self.axes.general,
+        )
         return ValidatorVerdict(
             finding_id=finding_id,
             axes=axes,
@@ -444,7 +410,7 @@ class Validator:
     ) -> ValidatorVerdict:
         return ValidatorVerdict(
             finding_id=finding.get("id", "unknown"),
-            axes={},
+            axes=Axes(),
             advance=False,
             severity_validated=None,
             evidence_level="suspicion",
