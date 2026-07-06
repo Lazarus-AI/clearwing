@@ -14,11 +14,14 @@ import json
 import logging
 import re
 from itertools import islice
-from typing import Any, cast
+from typing import Any, Literal, cast
+
+from pydantic import BaseModel, Field
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
 from clearwing.llm import AsyncLLMClient
+from clearwing.llm.native import response_text
 
 from .state import (
     EVIDENCE_LEVELS,
@@ -34,14 +37,6 @@ logger = logging.getLogger(__name__)
 _LINE_REF_RE = re.compile(r"\blines?\s+(\d+)(?:\s*-\s*(\d+))?")
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
-
-_VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
-
-_VALID_CONFIDENCES = {"high", "medium", "low"}
-
-_VALID_BOUNDARIES = {
-    "privilege", "tenant", "origin", "user", "kernel", "sandbox", "none",
-}
 
 
 # --- Prompts -----------------------------------------------------------------
@@ -134,6 +129,151 @@ Return ONLY this JSON:
 }"""
 
 
+# --- Enforced structured output schema ---------------------------------------
+# The prompts already ask for exactly this JSON; passing it as a schema_model to
+# aask_json turns it into a genai-pyo3 response_json_spec so the gateway emits it
+# via constrained decoding. That eliminates the "empty first_text / no JSON"
+# failure mode reasoning models hit with free-form aask_text. IMPACTFUL/GENERAL
+# are optional so the same schema fits the quick-pass prompt (REAL+TRIGGERABLE).
+
+
+class _AxisSchema(BaseModel):
+    """One validation axis: pass/fail with a confidence and short rationale.
+
+    The class docstring and per-field descriptions are emitted into the JSON
+    schema (schema `description` / property `description`), so the guidance
+    reaches the model inline through constrained decoding, not only via the
+    prose prompt.
+    """
+
+    passed: bool = Field(
+        description="True if this axis is satisfied, false if it fails."
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence in this axis's pass/fail judgment."
+    )
+    rationale: str = Field(
+        default="",
+        description="One to three sentences justifying the decision.",
+    )
+    # Only the IMPACTFUL axis is asked to populate this (see the prompt); the
+    # others omit it and it defaults to "none". Declared on the single axis
+    # schema — not an IMPACTFUL-only subclass — so every axis object carries the
+    # attribute and to_verdict maps it with a plain ax.boundary_crossed.
+    boundary_crossed: Literal[
+        "privilege", "tenant", "origin", "user", "kernel", "sandbox", "none"
+    ] = Field(
+        default="none",
+        description=(
+            "Security boundary the bug crosses. Set only for the IMPACTFUL "
+            "axis; leave as 'none' for the others."
+        ),
+    )
+
+
+class _AxesSchema(BaseModel):
+    """The four validation axes.
+
+    REAL and TRIGGERABLE are always required. IMPACTFUL and GENERAL are omitted
+    on the two-axis quick pass, so they are optional here.
+    """
+
+    REAL: _AxisSchema = Field(
+        description=(
+            "Does the bug exist in the code as described? Reproduce the crash "
+            "or behavior if a PoC is provided."
+        )
+    )
+    TRIGGERABLE: _AxisSchema = Field(
+        description=(
+            "Can attacker-controlled input reach this code path in a production "
+            "deployment, or do callers/entry points prevent it?"
+        )
+    )
+    IMPACTFUL: _AxisSchema | None = Field(
+        default=None,
+        description=(
+            "Does the bug cross a meaningful security boundary? Omit on the "
+            "quick pass."
+        ),
+    )
+    GENERAL: _AxisSchema | None = Field(
+        default=None,
+        description=(
+            "Is it exploitable in realistic default configurations rather than "
+            "exotic setups? Omit on the quick pass."
+        ),
+    )
+
+
+class _VerdictSchema(BaseModel):
+    """Independent validator verdict for a single reported finding.
+
+    The model produces only the judgment fields below. Domain-owned fields
+    (finding_id, the derived severity, raw_response, and the patch-oracle
+    results) are supplied by to_verdict, not by the model.
+    """
+
+    axes: _AxesSchema = Field(description="Per-axis judgments.")
+    advance: bool = Field(
+        description=(
+            "True only if all provided axes pass, or REAL + IMPACTFUL pass and "
+            "TRIGGERABLE + GENERAL have confidence >= medium."
+        )
+    )
+    severity: Literal["critical", "high", "medium", "low", "info"] = Field(
+        description="Validated severity of the finding."
+    )
+    evidence_level: Literal[
+        "static_corroboration", "crash_reproduced", "root_cause_explained"
+    ] = Field(description="Strength of the evidence gathered during validation.")
+    pro_argument: str = Field(
+        default="", description="Strongest case FOR the vulnerability."
+    )
+    counter_argument: str = Field(
+        default="", description="Strongest case AGAINST the vulnerability."
+    )
+    tie_breaker: str = Field(
+        default="", description="The single piece of evidence that resolved it."
+    )
+    duplicate_cve: str | None = Field(
+        default=None,
+        description="CVE id if this duplicates a known issue, else null.",
+    )
+
+    def to_verdict(self, finding_id: str) -> ValidatorVerdict:
+        """Map this validated wire object to the domain ValidatorVerdict.
+
+        The LLM only produces judgment fields; the domain fields it must not
+        own — finding_id, severity_validated (derived), raw_response, and the
+        patch-oracle results (a later stage) — are supplied here, not by the
+        model. No dict round-trip and no re-validation: the schema's Literal
+        enums already guarantee the categorical values.
+        """
+        axes: dict[str, AxisResult] = {}
+        for name, ax in self.axes:  # pydantic models iterate as (field_name, value)
+            if ax is None:
+                continue
+            axes[name] = AxisResult(
+                axis=name,
+                passed=ax.passed,
+                confidence=ax.confidence,
+                rationale=ax.rationale[:500],
+                boundary_crossed=ax.boundary_crossed,
+            )
+        return ValidatorVerdict(
+            finding_id=finding_id,
+            axes=axes,
+            advance=self.advance,
+            severity_validated=self.severity if self.advance else None,
+            evidence_level=self.evidence_level,
+            pro_argument=self.pro_argument,
+            counter_argument=self.counter_argument,
+            tie_breaker=self.tie_breaker,
+            duplicate_cve=self.duplicate_cve,
+        )
+
+
 # --- Validator class ---------------------------------------------------------
 
 
@@ -175,16 +315,25 @@ class Validator:
     ) -> ValidatorVerdict:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
+
+        # Enforced structured output. response_schema becomes a genai-pyo3
+        # response_json_spec (constrained decoding), so the model emits a JSON
+        # object matching _VerdictSchema — even reasoning models that would
+        # otherwise return empty text under free-form prompting. We validate to
+        # the typed wire object and map it to the domain verdict directly (no
+        # dict round-trip). Requires a model/gateway with constrained decoding.
         try:
             response = await self.llm.aask_text(
-                system=system_prompt, user=user_msg,
+                system=system_prompt,
+                user=user_msg,
+                response_schema=_VerdictSchema,
+                response_schema_name="ValidatorVerdict",
             )
-            content = response.first_text or ""
+            schema = _VerdictSchema.model_validate_json(response_text(response))
+            verdict = schema.to_verdict(finding.get("id", "unknown"))
         except Exception as e:
             logger.warning("Validator LLM call failed", exc_info=True)
-            return self._error_verdict(finding, f"validator error: {e}")
-
-        verdict = self._parse_response(finding, content)
+            verdict = self._error_verdict(finding, f"validator error: {e}")
 
         EventBus().emit_validation_result(ValidationResultPayload(
             finding_id=verdict.finding_id,
@@ -289,64 +438,6 @@ class Validator:
             prev_start, prev_end = merged[-1]
             merged[-1] = (prev_start, max(prev_end, end))
         return merged
-
-    def _parse_response(
-        self, finding: Finding, content: str,
-    ) -> ValidatorVerdict:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            logger.warning(
-                "Validator response had no JSON; got: %s", content[:300],
-            )
-            return self._error_verdict(finding, "no JSON in response")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return self._error_verdict(finding, "JSON parse failed")
-
-        axes = self._parse_axes(parsed.get("axes", {}))
-        advance = bool(parsed.get("advance", False))
-
-        severity = parsed.get("severity")
-        if severity not in _VALID_SEVERITIES:
-            severity = None
-
-        evidence_level = parsed.get("evidence_level", "suspicion")
-        if evidence_level not in EVIDENCE_LEVELS:
-            evidence_level = "suspicion"
-
-        return ValidatorVerdict(
-            finding_id=finding.get("id", "unknown"),
-            axes=axes,
-            advance=advance,
-            severity_validated=severity if advance else None,
-            evidence_level=evidence_level,
-            pro_argument=str(parsed.get("pro_argument", "")),
-            counter_argument=str(parsed.get("counter_argument", "")),
-            tie_breaker=str(parsed.get("tie_breaker", "")),
-            duplicate_cve=parsed.get("duplicate_cve"),
-            raw_response=content,
-        )
-
-    def _parse_axes(self, axes_raw: dict) -> dict[str, AxisResult]:
-        axes: dict[str, AxisResult] = {}
-        for name in ("REAL", "TRIGGERABLE", "IMPACTFUL", "GENERAL"):
-            data = axes_raw.get(name)
-            if data and isinstance(data, dict):
-                conf = data.get("confidence", "low")
-                if conf not in _VALID_CONFIDENCES:
-                    conf = "low"
-                boundary = data.get("boundary_crossed", "")
-                if boundary and boundary not in _VALID_BOUNDARIES:
-                    boundary = ""
-                axes[name] = AxisResult(
-                    axis=name,
-                    passed=bool(data.get("passed", False)),
-                    confidence=conf,
-                    rationale=str(data.get("rationale", ""))[:500],
-                    boundary_crossed=boundary,
-                )
-        return axes
 
     def _error_verdict(
         self, finding: Finding, reason: str,

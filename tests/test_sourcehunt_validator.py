@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +27,7 @@ from clearwing.sourcehunt.validator import (
     VALIDATOR_QUICK_PROMPT,
     VALIDATOR_SYSTEM_PROMPT,
     Validator,
+    _VerdictSchema,
     apply_validator_verdict,
 )
 
@@ -156,9 +156,8 @@ class TestIndependentContext:
 
 
 class TestResponseParsing:
-    def test_parse_full_4axis_response(self):
-        val = Validator(MagicMock())
-        response = json.dumps({
+    def test_full_4axis_maps_to_verdict(self):
+        schema = _VerdictSchema.model_validate({
             "axes": {
                 "REAL": {"passed": True, "confidence": "high", "rationale": "confirmed"},
                 "TRIGGERABLE": {"passed": True, "confidence": "medium", "rationale": "likely"},
@@ -171,18 +170,17 @@ class TestResponseParsing:
             "pro_argument": "strong case",
             "counter_argument": "weak counter",
             "tie_breaker": "crash log",
-            "duplicate_cve": None,
         })
-        verdict = val._parse_response(_make_finding(), response)
+        verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is True
+        assert verdict.finding_id == "hunter-abc"
         assert len(verdict.axes) == 4
         assert verdict.axes["REAL"].passed is True
         assert verdict.axes["IMPACTFUL"].boundary_crossed == "user"
         assert verdict.severity_validated == "high"
 
-    def test_parse_partial_pass(self):
-        val = Validator(MagicMock())
-        response = json.dumps({
+    def test_partial_pass_clears_severity(self):
+        schema = _VerdictSchema.model_validate({
             "axes": {
                 "REAL": {"passed": True, "confidence": "high", "rationale": "confirmed"},
                 "TRIGGERABLE": {"passed": False, "confidence": "low", "rationale": "dead code"},
@@ -192,71 +190,48 @@ class TestResponseParsing:
             "advance": False,
             "severity": "high",
             "evidence_level": "static_corroboration",
-            "pro_argument": "real but dead",
-            "counter_argument": "unreachable",
-            "tie_breaker": "triggerable failed",
-            "duplicate_cve": None,
         })
-        verdict = val._parse_response(_make_finding(), response)
+        verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is False
         assert verdict.axes["TRIGGERABLE"].passed is False
+        assert verdict.severity_validated is None  # cleared when advance is False
 
-    def test_advance_logic_all_pass(self):
-        val = Validator(MagicMock())
-        response = json.dumps({
+    def test_quick_pass_two_axes_only(self):
+        # IMPACTFUL/GENERAL are optional (quick-pass prompt); to_verdict maps
+        # only the axes that are present.
+        schema = _VerdictSchema.model_validate({
             "axes": {
                 "REAL": {"passed": True, "confidence": "high", "rationale": "yes"},
                 "TRIGGERABLE": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "IMPACTFUL": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "GENERAL": {"passed": True, "confidence": "high", "rationale": "yes"},
             },
             "advance": True,
             "severity": "critical",
             "evidence_level": "crash_reproduced",
-            "pro_argument": "yes",
-            "counter_argument": "no",
-            "tie_breaker": "obvious",
-            "duplicate_cve": None,
         })
-        verdict = val._parse_response(_make_finding(), response)
+        verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is True
+        assert set(verdict.axes) == {"REAL", "TRIGGERABLE"}
 
-    def test_no_json_returns_error(self):
-        val = Validator(MagicMock())
-        verdict = val._parse_response(_make_finding(), "I cannot produce JSON")
-        assert verdict.advance is False
-        assert verdict.axes == {}
-
-    def test_invalid_json_returns_error(self):
-        val = Validator(MagicMock())
-        verdict = val._parse_response(_make_finding(), "{broken json!!")
-        assert verdict.advance is False
-
-    def test_invalid_severity_ignored(self):
-        val = Validator(MagicMock())
-        response = json.dumps({
-            "axes": {"REAL": {"passed": True, "confidence": "high", "rationale": "yes"}},
-            "advance": True,
-            "severity": "apocalyptic",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "", "counter_argument": "", "tie_breaker": "",
-            "duplicate_cve": None,
-        })
-        verdict = val._parse_response(_make_finding(), response)
-        assert verdict.severity_validated is None
-
-    def test_invalid_confidence_defaults_to_low(self):
-        val = Validator(MagicMock())
-        response = json.dumps({
-            "axes": {"REAL": {"passed": True, "confidence": "ultra_high", "rationale": "yes"}},
-            "advance": True,
-            "severity": "high",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "", "counter_argument": "", "tie_breaker": "",
-            "duplicate_cve": None,
-        })
-        verdict = val._parse_response(_make_finding(), response)
-        assert verdict.axes["REAL"].confidence == "low"
+    def test_schema_rejects_invalid_enums(self):
+        # Constrained decoding can't emit these; assert the schema enforces them
+        # (so we never have to defensively re-validate downstream).
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            _VerdictSchema.model_validate({
+                "axes": {
+                    "REAL": {"passed": True, "confidence": "high", "rationale": "y"},
+                    "TRIGGERABLE": {"passed": True, "confidence": "high", "rationale": "y"},
+                },
+                "advance": True, "severity": "apocalyptic", "evidence_level": "crash_reproduced",
+            })
+        with pytest.raises(ValidationError):
+            _VerdictSchema.model_validate({
+                "axes": {
+                    "REAL": {"passed": True, "confidence": "ultra_high", "rationale": "y"},
+                    "TRIGGERABLE": {"passed": True, "confidence": "high", "rationale": "y"},
+                },
+                "advance": True, "severity": "high", "evidence_level": "crash_reproduced",
+            })
 
 
 # --- apply_validator_verdict tests -------------------------------------------
@@ -352,19 +327,17 @@ class TestRejectedFindings:
         assert finding["verified"] is False
         assert set(finding["rejected_axes"]) == {"TRIGGERABLE", "GENERAL"}
 
-    def test_rejected_finding_severity_cleared_at_parse(self):
-        val = Validator(MagicMock())
-        response = json.dumps({
+    def test_rejected_finding_severity_cleared(self):
+        schema = _VerdictSchema.model_validate({
             "axes": {
                 "REAL": {"passed": False, "confidence": "high", "rationale": "not real"},
+                "TRIGGERABLE": {"passed": False, "confidence": "low", "rationale": "n/a"},
             },
             "advance": False,
             "severity": "high",
             "evidence_level": "static_corroboration",
-            "pro_argument": "", "counter_argument": "", "tie_breaker": "",
-            "duplicate_cve": None,
         })
-        verdict = val._parse_response(_make_finding(), response)
+        verdict = schema.to_verdict("hunter-abc")
         assert verdict.severity_validated is None
 
 
@@ -439,8 +412,7 @@ class TestAvalidate:
     @pytest.mark.asyncio
     async def test_avalidate_parses_response(self):
         mock_llm = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.first_text = json.dumps({
+        verdict_json = json.dumps({
             "axes": {
                 "REAL": {"passed": True, "confidence": "high", "rationale": "yes"},
                 "TRIGGERABLE": {"passed": True, "confidence": "medium", "rationale": "likely"},
@@ -453,8 +425,9 @@ class TestAvalidate:
             "pro_argument": "strong",
             "counter_argument": "weak",
             "tie_breaker": "crash",
-            "duplicate_cve": None,
         })
+        mock_response = MagicMock()
+        mock_response.first_text = verdict_json
         mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         val = Validator(mock_llm)
