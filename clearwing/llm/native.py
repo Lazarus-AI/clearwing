@@ -330,6 +330,12 @@ class AsyncLLMClient:
                 if response_schema is not None
                 else None
             ),
+            # Opt into genai-pyo3's per-adapter strict-schema sanitizer so the
+            # pydantic schema is rewritten to satisfy the provider's constrained
+            # decoding (e.g. OpenAI strict: inject required + additional
+            # Properties:false, collapse $ref siblings). No-op when there is no
+            # response_json_spec. Requires genai-pyo3 >= 0.7.0b10.dev2.
+            sanitize_schema=True,
         )
 
         async with self._semaphore:
@@ -971,8 +977,8 @@ class AsyncLLMClient:
         """Return a copy of *options* with ``reasoning_effort=None``.
 
         ``ChatOptions`` is a frozen Rust struct from genai-pyo3, so we
-        reconstruct it from scratch. ``response_json_spec`` is preserved when
-        present.
+        reconstruct it from scratch. ``response_json_spec`` and
+        ``sanitize_schema`` are preserved when present.
         """
         return ChatOptions(
             temperature=options.temperature,
@@ -983,7 +989,8 @@ class AsyncLLMClient:
             capture_reasoning_content=options.capture_reasoning_content,
             normalize_reasoning_content=options.normalize_reasoning_content,
             reasoning_effort=None,
-            response_json_spec=getattr(options, "response_json_spec", None),
+            response_json_spec=options.response_json_spec,
+            sanitize_schema=options.sanitize_schema,
         )
 
     @staticmethod
