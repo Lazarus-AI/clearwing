@@ -1089,9 +1089,7 @@ class SourceHuntRunner:
                                         exploit_result.primitive_type
                                         or finding.get("primitive_type", "")
                                     )
-                                    await findings_pool.add(
-                                        finding, session_id=self._session_id,
-                                    )
+                                    await findings_pool.add(finding)
                             except Exception:
                                 logger.warning(
                                     "Agentic exploiter failed for %s",
