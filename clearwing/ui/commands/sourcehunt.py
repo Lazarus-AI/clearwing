@@ -453,6 +453,12 @@ def add_parser(subparsers):
         default=["all"],
         help="Output formats to write (default: all)",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Show a live LLM-activity panel (token counts, cost, latency) while running",
+    )
     return parser
 
 
@@ -920,6 +926,7 @@ def handle(cli, args):
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
         respect_gitignore=args.respect_gitignore,
+        live=args.live,
     )
 
     cli.console.print(

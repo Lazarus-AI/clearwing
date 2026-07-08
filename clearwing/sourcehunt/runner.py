@@ -216,6 +216,7 @@ class SourceHuntRunner:
         preprocessing: bool = True,
         seed_harness_crashes: bool = False,
         respect_gitignore: bool = False,
+        live: bool = False,
         *,
         config: SourceHuntConfig | None = None,
     ):
@@ -438,6 +439,7 @@ class SourceHuntRunner:
         self._preprocessing = preprocessing
         self._seed_harness_crashes = seed_harness_crashes
         self._respect_gitignore = respect_gitignore
+        self._live = live
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -519,7 +521,10 @@ class SourceHuntRunner:
         ))
 
     def run(self) -> SourceHuntResult:
-        return asyncio.run(self.arun())
+        from clearwing.ui.llm_activity import llm_activity_panel
+
+        with llm_activity_panel(live=self._live, budget_usd=self.budget_usd or None):
+            return asyncio.run(self.arun())
 
     async def arun(self) -> SourceHuntResult:
         start_time = time.monotonic()

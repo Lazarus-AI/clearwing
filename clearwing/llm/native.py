@@ -3,8 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import re
+import threading
+import time
+from datetime import datetime
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -25,6 +30,74 @@ from genai_pyo3 import (
 from pydantic import BaseModel, RootModel
 
 logger = logging.getLogger(__name__)
+
+# Per-call LLM progress logging. Off by default so the 26 other callers stay
+# quiet; flip on with CLEARWING_LLM_LOG=1 to log every achat with timing +
+# token usage at INFO.
+_LOG_CALLS = os.environ.get("CLEARWING_LLM_LOG") not in (None, "", "0")
+
+# Ring buffer of the most recent calls + running totals, populated only when
+# _LOG_CALLS is set. Feeds the live rich activity panel (ui/llm_activity.py).
+# Guarded by a lock since sourcehunt fans hunters out concurrently and the
+# panel repaints from a separate refresh thread.
+_CALL_LOCK = threading.Lock()
+_RECENT_CALLS: deque[dict[str, Any]] = deque(maxlen=5)
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_IDX: int = 0
+_CALL_TOTALS = {
+    "calls": 0,
+    "input_tokens": 0,
+    "cached_tokens": 0,
+    "output_tokens": 0,
+    "failures": 0,
+}
+
+
+def _record_call(
+    model: str,
+    elapsed_ms: int,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    tool_calls: int,
+    ok: bool,
+    cached_tokens: int | None = 0,
+) -> None:
+    """Append one call to the ring buffer and bump running totals.
+
+    ``cached_tokens`` is the subset of ``input_tokens`` served from the
+    provider's prompt cache; the panel bills those at the cheaper cached rate.
+    """
+    with _CALL_LOCK:
+        _CALL_TOTALS["calls"] += 1
+        if ok:
+            _CALL_TOTALS["input_tokens"] += input_tokens or 0
+            _CALL_TOTALS["cached_tokens"] += cached_tokens or 0
+            _CALL_TOTALS["output_tokens"] += output_tokens or 0
+        else:
+            _CALL_TOTALS["failures"] += 1
+        _RECENT_CALLS.append(
+            {
+                "model": model,
+                "elapsed_ms": elapsed_ms,
+                "input_tokens": input_tokens,
+                "cached_tokens": cached_tokens,
+                "output_tokens": output_tokens,
+                "tool_calls": tool_calls,
+                "ok": ok,
+                "ts": datetime.now().strftime("%H:%M:%S.%f")[:11],
+            }
+        )
+
+
+def recent_call_stats() -> dict[str, Any]:
+    """Snapshot of running totals + the last few calls, for live display."""
+    with _CALL_LOCK:
+        return {"totals": dict(_CALL_TOTALS), "recent": list(_RECENT_CALLS)}
+
+
+def call_logging_enabled() -> bool:
+    """True when CLEARWING_LLM_LOG is set (per-call logging + live panel)."""
+    return _LOG_CALLS
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +411,7 @@ class AsyncLLMClient:
             sanitize_schema=True,
         )
 
+        started = time.monotonic()
         async with self._semaphore:
             client = self._build_client(Client)
             try:
@@ -346,6 +420,15 @@ class AsyncLLMClient:
                 )
             except Exception as exc:
                 if not self._is_unsupported_reasoning_effort_error(exc):
+                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                    if _LOG_CALLS:
+                        logger.info(
+                            "LLM %s failed in %dms: %s",
+                            self.model_name,
+                            elapsed_ms,
+                            exc,
+                        )
+                    _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
                     raise
                 logger.warning(
                     "Provider rejected reasoning_effort for model %r; retrying "
@@ -357,6 +440,35 @@ class AsyncLLMClient:
                 response = await self._with_rate_limit_retries(
                     lambda: self._achat_with_provider_policy(client, request, options)
                 )
+        usage = getattr(response, "usage", None)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached_tokens = getattr(details, "cached_tokens", None) if details else None
+        n_tool_calls = len(response.tool_calls or [])
+        if _LOG_CALLS:
+            # The live LLM-activity panel already surfaces this per-call; keep
+            # the line at DEBUG so it doesn't scroll over the pinned panel.
+            logger.debug(
+                "LLM %s %dms | msgs=%d tools=%d | in=%s out=%s | tool_calls=%d",
+                self.model_name,
+                elapsed_ms,
+                len(messages),
+                len(request_tools or []),
+                prompt_tokens,
+                completion_tokens,
+                n_tool_calls,
+            )
+        _record_call(
+            self.model_name,
+            elapsed_ms,
+            prompt_tokens,
+            completion_tokens,
+            n_tool_calls,
+            ok=True,
+            cached_tokens=cached_tokens,
+        )
         return response
 
     async def achat_stream(
@@ -577,16 +689,21 @@ class AsyncLLMClient:
         request: ChatRequest,
         options: ChatOptions,
     ) -> ChatResponse:
-        # Always go through `achat_via_stream`: it streams internally and
-        # returns a fully-collected ChatResponse, so callers never see
-        # chunk events. Necessary for backends that require `stream=true`
-        # on the wire (our local openai_resp gateway, OpenAI's Responses
-        # API with certain models), harmless for everyone else — every
-        # adapter genai-pyo3 supports speaks SSE. Some OpenAI-compatible
-        # gateways are only compatible at the JSON shape level and fail on
-        # reqwest/HTTP2/SSE details, so OpenAI chat-completions gets an
-        # aiohttp fallback below.
+        # openai_resp / openai_codex (the Responses API + ChatGPT gateway)
+        # require `stream=true` on the wire, so they go through
+        # `achat_via_stream`: it streams internally and returns a fully
+        # collected ChatResponse, so callers never see chunk events.
+        #
+        # Plain `openai` chat-completions is the exception. genai's streaming
+        # path never sets stream_options.include_usage, so litellm/vLLM/OpenAI
+        # gateways drop the terminal usage chunk and ChatResponse.usage comes
+        # back all-None (zeroing hunter totals, CostTracker, the activity
+        # panel). A non-stream achat returns usage, so use it here. These
+        # gateways can also be brittle on reqwest/HTTP2/SSE, so they keep the
+        # aiohttp chat/completions fallback below.
         try:
+            if self.provider_name == "openai":
+                return await client.achat(self.model_name, request, options)
             return await client.achat_via_stream(self.model_name, request, options)
         except Exception as exc:
             if not self._should_try_openai_http_fallback(exc):
