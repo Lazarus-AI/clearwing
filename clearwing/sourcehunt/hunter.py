@@ -1337,10 +1337,14 @@ class NativeHunter:
             )
             total_input_tokens += response.usage.prompt_tokens or 0
             total_output_tokens += response.usage.completion_tokens or 0
+            # prompt_tokens_details is None when nothing was cache-served.
+            details = response.usage.prompt_tokens_details
+            cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
             total_cost_usd += _estimate_cost_usd(
                 response.usage.prompt_tokens or 0,
                 response.usage.completion_tokens or 0,
                 self.llm.model_name,
+                cached_tokens,
             )
 
             last_assistant_text = response.first_text or ""
@@ -1470,10 +1474,12 @@ class NativeHunter:
             return await tool.ainvoke(arguments)
         except Exception as exc:
             logger.warning(
-                "Hunter tool %s failed for %s: %s",
+                "Hunter tool %s failed for %s: %s | fn_arguments=%r fn_arguments_json=%r",
                 tool_call.fn_name,
                 self.ctx.file_path,
                 exc,
+                getattr(tool_call, "fn_arguments", None),
+                getattr(tool_call, "fn_arguments_json", None),
             )
             return {"error": f"{type(exc).__name__}: {exc}"}
         finally:
@@ -1573,9 +1579,10 @@ def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> 
         return _clip_text(str(value), 3000)
 
 
-def _estimate_cost_usd(input_tokens: int, output_tokens: int, model: str) -> float:
-    pricing = CostTracker.PRICING.get(model, CostTracker.PRICING[CostTracker._DEFAULT_MODEL])
-    return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+def _estimate_cost_usd(
+    input_tokens: int, output_tokens: int, model: str, cached_tokens: int = 0
+) -> float:
+    return CostTracker.estimate_cost(input_tokens, output_tokens, model, cached_tokens)
 
 
 def build_hunter_agent(

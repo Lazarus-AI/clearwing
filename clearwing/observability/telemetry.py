@@ -37,14 +37,42 @@ class CostTracker:
     _instance: CostTracker | None = None
     _lock_cls = threading.Lock  # used only for singleton creation
 
+    # USD per 1M tokens. Adjust non-Claude rows to match your provider's
+    # billing (glm-5.2 below is a self-hosted/gateway estimate).
     PRICING: dict[str, dict[str, float]] = {
         "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
         "claude-opus-4-7": {"input": 15.0, "output": 75.0},
         "claude-opus-4-6": {"input": 15.0, "output": 75.0},
         "claude-haiku-4-5": {"input": 0.80, "output": 4.0},
+        # Fireworks "Standard" serving path. cached_input applies to the subset
+        # of input tokens served from the provider's prompt cache.
+        "glm-5.2": {"input": 1.40, "cached_input": 0.14, "output": 4.40},
     }
 
     _DEFAULT_MODEL = "claude-sonnet-4-6"
+
+    @classmethod
+    def estimate_cost(
+        cls,
+        input_tokens: int,
+        output_tokens: int,
+        model: str,
+        cached_tokens: int = 0,
+    ) -> float:
+        """USD cost for one call. Prices are per 1M tokens.
+
+        ``cached_tokens`` (a subset of ``input_tokens``) bills at the model's
+        ``cached_input`` rate when defined, else at the full input rate. Unknown
+        models fall back to the default (Sonnet) pricing.
+        """
+        pricing = cls.PRICING.get(model, cls.PRICING[cls._DEFAULT_MODEL])
+        cached_rate = pricing.get("cached_input", pricing["input"])
+        uncached = max(input_tokens - cached_tokens, 0)
+        return (
+            uncached * pricing["input"]
+            + cached_tokens * cached_rate
+            + output_tokens * pricing["output"]
+        ) / 1_000_000
 
     def __new__(cls) -> CostTracker:
         if cls._instance is None:
@@ -68,16 +96,21 @@ class CostTracker:
     # Public API
     # ------------------------------------------------------------------
 
-    def record_llm_call(self, input_tokens: int, output_tokens: int, model: str) -> None:
+    def record_llm_call(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        model: str,
+        cached_tokens: int = 0,
+    ) -> None:
         """Record token usage for a single LLM call and update the running cost.
 
         If *model* is not present in the pricing table the default Sonnet
-        pricing is used.  When an ``EventBus`` is available a
-        ``COST_UPDATE`` event is emitted after updating counters.
+        pricing is used.  ``cached_tokens`` bills at the model's cached rate.
+        When an ``EventBus`` is available a ``COST_UPDATE`` event is emitted
+        after updating counters.
         """
-        pricing = self.PRICING.get(model, self.PRICING[self._DEFAULT_MODEL])
-        # Pricing is expressed as USD per 1 million tokens.
-        cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+        cost = self.estimate_cost(input_tokens, output_tokens, model, cached_tokens)
 
         with self._lock:
             self.input_tokens += input_tokens

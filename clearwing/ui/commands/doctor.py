@@ -255,11 +255,12 @@ def _invoke_test_native(endpoint) -> DoctorCheck:
     import asyncio
 
     from clearwing.llm.native import AsyncLLMClient, response_text
+    from clearwing.providers.manager import _adapter_for_endpoint
 
     try:
         client = AsyncLLMClient(
             model_name=endpoint.model,
-            provider_name=endpoint.provider,
+            provider_name=_adapter_for_endpoint(endpoint),
             api_key=endpoint.api_key or "",
             base_url=endpoint.base_url or None,
         )
