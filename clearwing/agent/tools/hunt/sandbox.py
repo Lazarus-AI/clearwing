@@ -30,6 +30,8 @@ class HunterContext:
     repo_path: str  # absolute host path
     sandbox: SandboxContainer | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
+    trace_steps: list = field(default_factory=list)  # accumulator for TraceStep dicts
+    files_read: set = field(default_factory=set)  # files accessed via read_source_file
     file_path: str | None = None  # the file this hunter is scoped to
     session_id: str | None = None
     specialist: str = "general"  # "general" | "memory_safety" | "logic_auth" | "propagation"

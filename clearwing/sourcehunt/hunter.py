@@ -787,6 +787,34 @@ Web frameworks have many legitimate idioms that look dangerous. When in doubt, c
 """
 
 
+TRACE_BUILDING_INSTRUCTIONS = """
+## Building a Vulnerability Trace
+
+As you investigate, call `record_trace_step` at each key location in the
+dataflow AFTER reading the code with `read_source_file`. This builds a
+structured trace that downstream validation can independently verify.
+
+Workflow:
+1. read_source_file → find attacker-controlled entry point
+2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")
+3. read_source_file → follow the tainted data through calls/assignments
+4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")
+5. record_trace_step(..., note="CONDITION: check Y is bypassed because ...")
+6. record_trace_step(..., note="SINK: vulnerable operation on tainted data")
+7. record_finding(..., trace_summary="attacker-controlled X flows to Y unchecked")
+
+Rules:
+- code_snippet in each trace step MUST come from a read_source_file result.
+  Do not paraphrase or reconstruct from memory.
+- Note should describe: what role this step plays, what data is tainted,
+  and what assumptions must hold for execution to reach this point.
+- Assumptions must be consistent with your PoC inputs. If your trace says
+  "field==2" but your PoC sets "field=1", you have a contradiction —
+  resolve it before calling record_finding.
+- Record at least one ENTRY step and one SINK step before record_finding.
+"""
+
+
 _SPECIALIST_PROMPTS = {
     "general": GENERAL_HUNTER_PROMPT,
     "memory_safety": MEMORY_SAFETY_HUNTER_PROMPT,
@@ -836,7 +864,7 @@ def _build_hunter_prompt(
         seeded_crash_block=seeded_crash_block,
         semgrep_hints_block=semgrep_hints_block,
     )
-    return prompt + HUNTER_EXECUTION_RULES
+    return prompt + HUNTER_EXECUTION_RULES + TRACE_BUILDING_INSTRUCTIONS
 
 
 def _build_propagation_prompt(file_target: FileTarget) -> str:
@@ -1031,6 +1059,7 @@ def _build_unconstrained_prompt(
             prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
 
     prompt += "\n" + SELF_CHECK
+    prompt += "\n" + TRACE_BUILDING_INSTRUCTIONS
 
     return prompt
 
@@ -1156,7 +1185,7 @@ def _build_subsystem_prompt(
             ep_lines.append(f"  ... and {len(subsystem.entry_points) - 20} more")
         entry_points_block = "\n".join(ep_lines) + "\n"
 
-    return SUBSYSTEM_HUNT_PROMPT.format(
+    prompt = SUBSYSTEM_HUNT_PROMPT.format(
         subsystem_name=subsystem.name,
         project_name=project_name,
         file_count=len(subsystem.files),
@@ -1166,6 +1195,7 @@ def _build_subsystem_prompt(
         existing_findings_block=existing_findings_block,
         entry_points_block=entry_points_block,
     )
+    return prompt + TRACE_BUILDING_INSTRUCTIONS
 
 
 def build_subsystem_hunter_agent(

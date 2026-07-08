@@ -156,6 +156,7 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             rel = _normalize_path(ctx.repo_path, path)
         except ValueError as e:
             return f"Error: {e}"
+        ctx.files_read.add(rel)
         host_path = os.path.join(ctx.repo_path, rel)
         try:
             with open(host_path, encoding="utf-8", errors="replace") as f:
