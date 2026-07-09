@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from clearwing.core.event_payloads import HuntProgressPayload
-from clearwing.core.events import EventBus
+from clearwing.core.events import EventBus, EventType
 from clearwing.runners.parallel.executor import (
     TargetResult,
 )

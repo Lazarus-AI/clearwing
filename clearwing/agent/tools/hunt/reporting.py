@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 
+from clearwing.core.events import EventBus, EventType
 from clearwing.findings.types import TraceStep, VulnerabilityTrace
 from clearwing.llm import NativeToolSpec
 from clearwing.sourcehunt.state import Finding
@@ -60,7 +61,24 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         )
         ctx.trace_steps.append(step)
         n = len(ctx.trace_steps)
-        return f"Trace step {n} recorded: {file}:{line} ({function or 'unknown'})"
+        EventBus().emit(EventType.TRACE_STEP, {
+            "hunter_target": ctx.file_path,
+            "file": file,
+            "line": line,
+            "function": function,
+            "note": note,
+            "step_number": n,
+        })
+        # Echo the full accumulated trace back into the conversation so the
+        # growing dataflow path stays part of the message sequence the model
+        # reasons over before calling record_finding.
+        lines = [f"Trace step {n} recorded. Trace so far ({n} step(s)):"]
+        for i, s in enumerate(ctx.trace_steps, 1):
+            loc = f"{s.file}:{s.line}"
+            fn = f" {s.function}()" if s.function else ""
+            note_str = f" — {s.note}" if s.note else ""
+            lines.append(f"  {i}. {loc}{fn}{note_str}")
+        return "\n".join(lines)
 
     def record_finding(
         file: str,
@@ -144,6 +162,17 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             vulnerability_trace=trace_dict,
         )
         ctx.findings.append(finding)
+        EventBus().emit(EventType.FINDING_RECORDED, {
+            "file": file,
+            "line_number": line_number,
+            "finding_type": finding_type,
+            "severity": severity,
+            "cwe": cwe,
+            "description": description,
+            "confidence": confidence,
+            "evidence_level": evidence_level,
+            "hunter_target": ctx.file_path,
+        })
         trace_msg = f", trace={len(trace_dict['steps'])} steps" if trace_dict else ""
         return (
             f"Finding recorded: {finding_type} at {file}:{line_number} "
@@ -192,6 +221,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     },
                 },
                 "required": ["file", "line"],
+                "additionalProperties": False,
             },
             handler=record_trace_step,
         ),
@@ -230,6 +260,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "cwe",
                     "description",
                 ],
+                "additionalProperties": False,
             },
             handler=record_finding,
         ),

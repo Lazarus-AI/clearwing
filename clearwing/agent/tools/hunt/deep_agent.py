@@ -111,7 +111,11 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         ),
         NativeToolSpec(
             name="read_file",
-            description="Read lines from a file in the container.",
+            description=(
+                "Read lines from a file in the container. "
+                "Parameters: path (required), offset (line offset, default 0), "
+                "limit (max lines, default 2000). No other parameters exist."
+            ),
             schema={
                 "type": "object",
                 "properties": {

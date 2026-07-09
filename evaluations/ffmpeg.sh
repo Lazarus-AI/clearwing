@@ -31,7 +31,13 @@ clearwing sourcehunt ./working-directory \
     --elaborate-pipeline \
     --exploit \
     --campaign-hint "integer overflows and type mismatches in media codec parsers" \
+    --subsystem libavcodec \
+    --subsystem libavutil \
+    --subsystem libavformat \
     --no-mechanism-memory \
+    --budget 50 \
+    --tier-split 60/35/5 \
+    --gvisor \
     --max-parallel 8 \
     --format json \
     --live \

@@ -714,6 +714,11 @@ vector = [
     { name = "sentence-transformers" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
@@ -766,6 +771,9 @@ requires-dist = [
     { name = "websockets", specifier = ">=11.0" },
 ]
 provides-extras = ["python-llm", "metasploit", "browser", "vector", "dev", "docs", "all"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.15.10" }]
 
 [[package]]
 name = "click"

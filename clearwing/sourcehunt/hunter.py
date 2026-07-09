@@ -24,6 +24,7 @@ from clearwing.agent.tools.hunt import (
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
+from clearwing.core.events import EventBus, EventType
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
@@ -815,6 +816,36 @@ Rules:
 """
 
 
+DEEP_TRACE_INSTRUCTIONS = """
+## Building a Vulnerability Trace
+
+As you investigate, call `record_trace_step` at each key location in the
+dataflow AFTER reading the code with `read_file`. Each step you record is
+echoed back into this conversation, so the growing trace stays part of the
+message sequence you can reason over before submitting a finding. Downstream
+validation independently re-checks the assembled trace.
+
+Workflow:
+1. read_file → find attacker-controlled entry point
+2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")
+3. read_file → follow the tainted data through calls/assignments
+4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")
+5. record_trace_step(..., note="CONDITION: check Y is bypassed because ...")
+6. record_trace_step(..., note="SINK: vulnerable operation on tainted data")
+7. record_finding(..., trace_summary="attacker-controlled X flows to Y unchecked")
+
+Rules:
+- code_snippet in each trace step MUST come from a read_file result. Do not
+  paraphrase or reconstruct from memory.
+- Note should describe: what role this step plays, what data is tainted, and
+  what assumptions must hold for execution to reach this point.
+- Assumptions must be consistent with your PoC inputs. If your trace says
+  "field==2" but your PoC sets "field=1", resolve the contradiction before
+  calling record_finding.
+- Record at least one ENTRY step and one SINK step before record_finding.
+"""
+
+
 _SPECIALIST_PROMPTS = {
     "general": GENERAL_HUNTER_PROMPT,
     "memory_safety": MEMORY_SAFETY_HUNTER_PROMPT,
@@ -886,7 +917,7 @@ Tools:
 - execute(command): Run any shell command. gcc, gdb, strace, valgrind, make are all available.
 - read_file(path): Read a file from the container.
 - write_file(path, contents): Write a file in the container.
-- think(notes): Record your reasoning (visible in the audit trail).
+- record_trace_step(file, line, function, code_snippet, note): Record one step in the vulnerability dataflow trace as you read code. Build the trace incrementally from attacker entry to sink.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
 
 Project: {project_name}
@@ -995,7 +1026,7 @@ def _build_deep_agent_prompt(
         if count > 0:
             prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
 
-    return prompt
+    return prompt + DEEP_TRACE_INSTRUCTIONS
 
 
 def _build_unconstrained_prompt(
@@ -1380,6 +1411,12 @@ class NativeHunter:
             )
 
             last_assistant_text = response.first_text or ""
+            if last_assistant_text:
+                EventBus().emit(EventType.HUNTER_STATUS, {
+                    "hunter_target": self.ctx.file_path,
+                    "text": last_assistant_text,
+                    "step": step,
+                })
             tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
                 messages.append(
@@ -1503,6 +1540,47 @@ class NativeHunter:
             arguments = tool_call.fn_arguments
             if not isinstance(arguments, dict):
                 arguments = {}
+            # Strip hallucinated/mangled keys the model may emit (XML noise,
+            # invented params). Only pass keys declared in the tool schema.
+            allowed_keys = set(tool.schema.get("properties", {}).keys()) if tool.schema else None
+            if allowed_keys is not None:
+                arguments = {k: v for k, v in arguments.items() if k in allowed_keys}
+            # Reject calls missing required params (model emitted empty/partial args).
+            # Return an error string so the model can self-correct on next turn.
+            required = set(tool.schema.get("required", [])) if tool.schema else set()
+            missing = required - set(arguments.keys())
+            if missing:
+                logger.info(
+                    "Hunter tool %s missing required args %s for %s (retry expected)",
+                    tool_call.fn_name,
+                    sorted(missing),
+                    self.ctx.file_path,
+                )
+                return {
+                    "error": f"missing required arguments: {', '.join(sorted(missing))}. "
+                    f"Required: {', '.join(sorted(required))}. Please retry with all required params."
+                }
+            sandbox_id = (
+                self.ctx.sandbox.short_id if self.ctx.sandbox else None
+            )
+            if tool_call.fn_name in ("read_source_file", "read_file"):
+                offset = arguments.get("offset", 0)
+                limit = arguments.get("limit", 500)
+                EventBus().emit(EventType.TOOL_START, {
+                    "tool_name": tool_call.fn_name,
+                    "file": arguments.get("path", ""),
+                    "start_line": arguments.get("start_line", offset + 1),
+                    "end_line": arguments.get("end_line", offset + limit),
+                    "hunter_target": self.ctx.file_path,
+                    "sandbox_id": sandbox_id,
+                })
+            elif tool_call.fn_name == "execute":
+                EventBus().emit(EventType.TOOL_START, {
+                    "tool_name": "execute",
+                    "command": arguments.get("command", ""),
+                    "hunter_target": self.ctx.file_path,
+                    "sandbox_id": sandbox_id,
+                })
             return await tool.ainvoke(arguments)
         except Exception as exc:
             logger.warning(

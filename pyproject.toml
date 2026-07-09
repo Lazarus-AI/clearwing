@@ -203,3 +203,8 @@ module = [
 ]
 disallow_untyped_defs = true
 warn_unused_ignores = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+]
