@@ -42,6 +42,11 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     """Build the deep agent tool set: execute, read_file, write_file,
     plus the shared reporting + findings-pool tools.
     """
+    # Deep hunters read source via read_file/execute (cat/sed/grep), not the
+    # constrained read_source_file that populates ctx.files_read. Mark the
+    # context so the reporting guard doesn't reject every trace step for a
+    # file it never saw a read_source_file call for.
+    ctx.agent_mode = "deep"
 
     def execute(command: str, timeout: int = 300, **_: object) -> dict:
         if ctx.sandbox is None:

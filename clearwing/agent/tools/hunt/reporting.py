@@ -47,7 +47,12 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             code_snippet: Exact code from read_source_file (do NOT fabricate).
             note: Free-form reasoning — role, taint state, assumptions.
         """
-        if file not in ctx.files_read:
+        # The files_read set is only populated by the constrained
+        # read_source_file tool. Deep hunters read via read_file/execute
+        # (cat/sed/grep), so files_read is not authoritative there — enforcing
+        # it would reject every trace step. Skip the guard in deep mode;
+        # downstream validators independently re-verify the assembled trace.
+        if ctx.agent_mode != "deep" and file not in ctx.files_read:
             return (
                 f"ERROR: file '{file}' has not been read yet. "
                 "Call read_source_file first."
@@ -96,7 +101,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         algorithm: str = "",
         crypto_attack_class: str = "",
         key_material_exposed: str = "",
-        trace_summary: str = "",
+        trace: dict | None = None,
         **_: object,
     ) -> str:
         """Record a finding into the hunter's state.
@@ -104,8 +109,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         The hunter MUST call this tool to report a vulnerability. Findings
         are appended to ctx.findings and surfaced via the hunter's output.
 
-        If trace steps have been recorded via record_trace_step, they are
-        consumed and attached as a structured vulnerability_trace.
+        The `trace` argument is the authoritative vulnerability_trace stored
+        on the finding. Steps streamed via record_trace_step are live-panel
+        telemetry only and are NOT persisted here.
 
         Args:
             file: Repo-relative file path where the finding lives.
@@ -127,17 +133,38 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             crypto_attack_class: Attack class (e.g. timing_side_channel,
                 parameter_validation, nonce_reuse, padding_oracle).
             key_material_exposed: Description of key material at risk.
-            trace_summary: One-line summary of the dataflow trace.
+            trace: Authoritative dataflow trace as {"steps": [...],
+                "summary": "..."}, ordered from attacker-controlled entry to
+                the vulnerable sink. Each step is
+                {file, line, function?, code_snippet?, note?}.
         """
-        # Consume accumulated trace steps into a VulnerabilityTrace
-        trace_dict = None
-        if ctx.trace_steps:
-            trace = VulnerabilityTrace(
-                steps=list(ctx.trace_steps),
-                summary=trace_summary,
+        # Build the authoritative VulnerabilityTrace from the explicit `trace`
+        # argument. Steps streamed via record_trace_step are live-panel
+        # telemetry only — record_finding does NOT harvest them, so the model
+        # must assemble and pass the full trace here.
+        if not trace or not trace.get("steps"):
+            return (
+                "ERROR: record_finding requires a `trace` argument with at "
+                "least one step — an ordered path from attacker-controlled "
+                "entry to the vulnerable sink. Steps you streamed via "
+                "record_trace_step are shown live but are NOT stored. "
+                'Assemble and pass the full trace: trace={"steps": [{"file": '
+                '..., "line": ..., "note": "ENTRY: ..."}, ...], "summary": "..."}.'
             )
-            trace_dict = trace.model_dump()
-            ctx.trace_steps.clear()
+        try:
+            vuln_trace = VulnerabilityTrace(
+                steps=[TraceStep(**s) for s in trace["steps"]],
+                summary=trace.get("summary", ""),
+            )
+        except Exception as exc:
+            return (
+                f"ERROR: invalid trace ({exc}). Each step needs at least "
+                "`file` and `line`; optional `function`, `code_snippet`, `note`."
+            )
+        trace_dict = vuln_trace.model_dump()
+        # Reset the live-panel accumulator so the next finding's streamed trace
+        # starts fresh (these steps were never persisted onto the finding).
+        ctx.trace_steps.clear()
 
         finding = Finding(
             id=f"hunter-{uuid.uuid4().hex[:8]}",
@@ -246,10 +273,62 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "algorithm": {"type": "string", "default": ""},
                     "crypto_attack_class": {"type": "string", "default": ""},
                     "key_material_exposed": {"type": "string", "default": ""},
-                    "trace_summary": {
-                        "type": "string",
-                        "description": "One-line summary of the dataflow trace",
-                        "default": "",
+                    "trace": {
+                        "type": "object",
+                        "description": (
+                            "Authoritative dataflow trace: an ordered path from "
+                            "attacker-controlled entry to the vulnerable sink. "
+                            "Stored on the finding and independently re-verified. "
+                            "Steps streamed via record_trace_step are live-only "
+                            "and are NOT persisted."
+                        ),
+                        "properties": {
+                            "steps": {
+                                "type": "array",
+                                "description": (
+                                    "Ordered steps from entry to sink; include at "
+                                    "least one ENTRY step and one SINK step."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {
+                                            "type": "string",
+                                            "description": "Repo-relative file path",
+                                        },
+                                        "line": {
+                                            "type": "integer",
+                                            "description": "1-indexed line number",
+                                        },
+                                        "function": {
+                                            "type": "string",
+                                            "default": "",
+                                        },
+                                        "code_snippet": {
+                                            "type": "string",
+                                            "default": "",
+                                        },
+                                        "note": {
+                                            "type": "string",
+                                            "description": (
+                                                "Role (ENTRY/PROPAGATION/CONDITION/"
+                                                "SINK), taint state, assumptions"
+                                            ),
+                                            "default": "",
+                                        },
+                                    },
+                                    "required": ["file", "line"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "One-line dataflow summary",
+                                "default": "",
+                            },
+                        },
+                        "required": ["steps"],
+                        "additionalProperties": False,
                     },
                 },
                 "required": [
@@ -259,6 +338,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "severity",
                     "cwe",
                     "description",
+                    "trace",
                 ],
                 "additionalProperties": False,
             },

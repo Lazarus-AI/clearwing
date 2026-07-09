@@ -792,27 +792,43 @@ TRACE_BUILDING_INSTRUCTIONS = """
 ## Building a Vulnerability Trace
 
 As you investigate, call `record_trace_step` at each key location in the
-dataflow AFTER reading the code with `read_source_file`. This builds a
-structured trace that downstream validation can independently verify.
+dataflow AFTER reading the code with `read_source_file`. These streamed
+steps are echoed back and shown live for visibility — they are NOT stored
+on the finding.
+
+When you submit the finding you MUST pass the complete, authoritative trace
+as the `trace` argument to `record_finding`. That is what gets stored and
+independently re-verified. record_finding does NOT harvest your streamed
+steps — assemble the full trace explicitly.
 
 Workflow:
 1. read_source_file → find attacker-controlled entry point
-2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")
+2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")   # live only
 3. read_source_file → follow the tainted data through calls/assignments
-4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")
-5. record_trace_step(..., note="CONDITION: check Y is bypassed because ...")
-6. record_trace_step(..., note="SINK: vulnerable operation on tainted data")
-7. record_finding(..., trace_summary="attacker-controlled X flows to Y unchecked")
+4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")      # live only
+5. record_trace_step(..., note="SINK: vulnerable operation on tainted data")   # live only
+6. record_finding(
+     ...,
+     trace={
+       "steps": [
+         {"file": "...", "line": 12, "function": "...", "code_snippet": "...", "note": "ENTRY: ..."},
+         {"file": "...", "line": 40, "function": "...", "code_snippet": "...", "note": "PROPAGATION: ..."},
+         {"file": "...", "line": 88, "function": "...", "code_snippet": "...", "note": "SINK: ..."}
+       ],
+       "summary": "attacker-controlled X flows to Y unchecked"
+     }
+   )
 
 Rules:
-- code_snippet in each trace step MUST come from a read_source_file result.
-  Do not paraphrase or reconstruct from memory.
-- Note should describe: what role this step plays, what data is tainted,
+- code_snippet in each step MUST come from a read_source_file result. Do
+  not paraphrase or reconstruct from memory.
+- note should describe: what role this step plays, what data is tainted,
   and what assumptions must hold for execution to reach this point.
 - Assumptions must be consistent with your PoC inputs. If your trace says
   "field==2" but your PoC sets "field=1", you have a contradiction —
   resolve it before calling record_finding.
-- Record at least one ENTRY step and one SINK step before record_finding.
+- The `trace` passed to record_finding must contain at least one ENTRY step
+  and one SINK step.
 """
 
 
@@ -820,29 +836,44 @@ DEEP_TRACE_INSTRUCTIONS = """
 ## Building a Vulnerability Trace
 
 As you investigate, call `record_trace_step` at each key location in the
-dataflow AFTER reading the code with `read_file`. Each step you record is
-echoed back into this conversation, so the growing trace stays part of the
-message sequence you can reason over before submitting a finding. Downstream
-validation independently re-checks the assembled trace.
+dataflow AFTER reading the code with `read_file`. Each step is echoed back
+into this conversation and shown live, so the growing trace stays part of
+the message sequence you reason over. These streamed steps are for
+visibility only — they are NOT stored on the finding.
+
+When you submit the finding you MUST pass the complete, authoritative trace
+as the `trace` argument to `record_finding`. That is what gets stored and
+independently re-verified. record_finding does NOT harvest your streamed
+steps — assemble the full trace explicitly.
 
 Workflow:
 1. read_file → find attacker-controlled entry point
-2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")
+2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")   # live only
 3. read_file → follow the tainted data through calls/assignments
-4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")
-5. record_trace_step(..., note="CONDITION: check Y is bypassed because ...")
-6. record_trace_step(..., note="SINK: vulnerable operation on tainted data")
-7. record_finding(..., trace_summary="attacker-controlled X flows to Y unchecked")
+4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")      # live only
+5. record_trace_step(..., note="SINK: vulnerable operation on tainted data")   # live only
+6. record_finding(
+     ...,
+     trace={
+       "steps": [
+         {"file": "...", "line": 12, "function": "...", "code_snippet": "...", "note": "ENTRY: ..."},
+         {"file": "...", "line": 40, "function": "...", "code_snippet": "...", "note": "PROPAGATION: ..."},
+         {"file": "...", "line": 88, "function": "...", "code_snippet": "...", "note": "SINK: ..."}
+       ],
+       "summary": "attacker-controlled X flows to Y unchecked"
+     }
+   )
 
 Rules:
-- code_snippet in each trace step MUST come from a read_file result. Do not
+- code_snippet in each step MUST come from a read_file result. Do not
   paraphrase or reconstruct from memory.
-- Note should describe: what role this step plays, what data is tainted, and
+- note should describe: what role this step plays, what data is tainted, and
   what assumptions must hold for execution to reach this point.
 - Assumptions must be consistent with your PoC inputs. If your trace says
   "field==2" but your PoC sets "field=1", resolve the contradiction before
   calling record_finding.
-- Record at least one ENTRY step and one SINK step before record_finding.
+- The `trace` passed to record_finding must contain at least one ENTRY step
+  and one SINK step.
 """
 
 
@@ -1039,6 +1070,7 @@ def _build_unconstrained_prompt(
     entry_point: Any = None,
     seed_context: str | None = None,
     findings_pool: Any = None,
+    agent_mode: str = "constrained",
 ) -> str:
     """Build the unconstrained discovery prompt for any agent mode."""
     seed_parts: list[str] = []
@@ -1090,7 +1122,13 @@ def _build_unconstrained_prompt(
             prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
 
     prompt += "\n" + SELF_CHECK
-    prompt += "\n" + TRACE_BUILDING_INSTRUCTIONS
+    # Deep mode reads via read_file/execute; the constrained instructions gate
+    # tracing on read_source_file (which deep hunters don't have), so route the
+    # deep path to the read_file-aware variant.
+    prompt += "\n" + (
+        DEEP_TRACE_INSTRUCTIONS if agent_mode == "deep"
+        else TRACE_BUILDING_INSTRUCTIONS
+    )
 
     return prompt
 
@@ -1790,6 +1828,7 @@ def build_hunter_agent(
             entry_point=entry_point,
             seed_context=seed_context,
             findings_pool=findings_pool,
+            agent_mode=agent_mode,
         )
         if agent_mode == "deep":
             tools = build_deep_agent_tools(ctx)
