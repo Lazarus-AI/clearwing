@@ -161,18 +161,60 @@
   repo: jqlang/jq
   clone_url: https://github.com/jqlang/jq.git
   language: C
-  vulnerable_commit: null
-  fix_commit: null
-  files: []
-  vuln_class: null
-  title: jq int overflow in jvp_string_append / jvp_string_copy_replace_bad.
-  severity: High
+  vulnerable_commit: 9f778b4a4f0f34f7bf15d00fcf9ff5d7f66534a4
+  fix_commit: e47e56d226519635768e6aab2f38f0ab037c09e5
+  files:
+    - src/jv.c
+  vuln_class: >-
+    CWE-190 Integer Overflow leading to CWE-122 Heap-based Buffer Overflow
+    (32-bit unsigned arithmetic wraps on combined string length ≥ 2^31,
+    producing undersized heap allocation before full-size memcpy)
+  title: >-
+    jq: integer overflow in jvp_string_append / jvp_string_copy_replace_bad
+    leads to heap buffer overflow
+  severity: High (CVSS 3.1: 8.2 — AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H)
   difficulty: easy
-  description: jq int overflow in jvp_string_append / jvp_string_copy_replace_bad.
+  description: >-
+    In `src/jv.c`, both `jvp_string_append` and `jvp_string_copy_replace_bad`
+    compute buffer allocation sizes using `uint32_t` arithmetic without bounds
+    checks. In `jvp_string_append`, when concatenating two strings whose
+    combined length approaches or exceeds 2^31, the expression
+    `(currlen + len) * 2` wraps to a tiny value (as low as 32 bytes), yet the
+    subsequent `memcpy` writes the full concatenated data into the undersized
+    buffer, producing a heap buffer overflow. Similarly, in
+    `jvp_string_copy_replace_bad`, the worst-case size `length * 3 + 1` for
+    invalid-UTF-8 replacement can wrap past 2^32, allocating a far smaller
+    buffer than required. The public-facing entry point `jv_string_append_buf`
+    delegates to both functions and is reachable from raw-file loading
+    (`jv_load_file` in `jv_file.c`) as well as any jq expression that builds
+    large strings. The fix widens the size calculation to `uint64_t` and adds
+    an `INT_MAX` guard that returns `jv_invalid_with_msg` early; a follow-on
+    commit (`e987df0d`) propagates this invalid-jv sentinel in `jv_load_file`
+    by checking `jv_is_valid` after each `jv_string_append_buf` call. Any
+    system evaluating untrusted jq queries against large inputs is at risk of
+    process crash or heap corruption.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/jv.c
+      - src/jv_file.c
+    symbols:
+      - jvp_string_append
+      - jvp_string_copy_replace_bad
+      - jv_string_append_buf
+      - jv_load_file
+      - jvp_string_alloc
+      - jvp_string_remaining_space
+      - jv_invalid_with_msg
+      - INT_MAX
+    keywords:
+      - integer overflow
+      - uint32_t wrap
+      - heap buffer overflow
+      - undersized allocation
+      - memcpy overflow
+      - string length bounds check
+      - jv_is_valid propagation
+      - untrusted jq query
 
 - cve: CVE-2026-4600
   repo: kjur/jsrsasign
