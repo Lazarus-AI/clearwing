@@ -19,18 +19,50 @@
   repo: TYPO3/html-sanitizer
   clone_url: https://github.com/TYPO3/html-sanitizer.git
   language: PHP
-  vulnerable_commit: null
+  vulnerable_commit: bd1a88d9b5a5f67f1120ec41084e9c1a0675641c
   fix_commit: 8b5d0be44ded457ca993ec9ca93d859941c63764
-  files: []
-  vuln_class: null
-  title: typo3/html-sanitizer namespace-attr XSS bypass.
+  files:
+    - src/Serializer/Rules.php
+    - tests/CommonBuilderTest.php
+  vuln_class: >-
+    CWE-79 Improper Neutralization of Input During Web Page Generation (namespace attribute
+    values written unencoded during HTML serialization bypass XSS sanitizer)
+  title: >-
+    typo3/html-sanitizer: XSS bypass via unencoded namespace attribute values in HTML serialization
   severity: Medium
   difficulty: easy
-  description: typo3/html-sanitizer namespace-attr XSS bypass.
+  description: >-
+    TYPO3's html-sanitizer extends Masterminds\HTML5\Serializer\OutputRules with a custom
+    Rules class (src/Serializer/Rules.php) that overrides attribute encoding to properly escape
+    HTML entities. However, it did not override the inherited namespaceAttrs() method from the
+    parent library. The parent's namespaceAttrs() writes namespace attribute values (xmlns:*)
+    directly via $this->wr($nsNode->nodeValue) without encoding, while all other attributes
+    pass through $this->enc() for HTML entity escaping. An attacker can craft an element with
+    a namespace declaration like xmlns:x="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;" — the
+    HTML parser decodes the entities on input, and on re-serialization the raw characters
+    (quotes, angle brackets) are emitted unescaped into the output HTML, breaking out of the
+    attribute context and injecting arbitrary HTML/JavaScript. The fix adds an #[\Override] of
+    namespaceAttrs() in the Rules class that passes namespace values through $this->enc($nsNode->nodeValue, true),
+    applying the same htmlspecialchars() encoding used for regular attributes.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/Serializer/Rules.php
+    symbols:
+      - namespaceAttrs
+      - enc
+      - OutputRules
+      - wr
+      - implicitNamespaces
+      - htmlspecialchars
+    keywords:
+      - namespace attribute
+      - xmlns
+      - unencoded serialization
+      - XSS sanitizer bypass
+      - HTML entity encoding
+      - re-serialization
+      - attribute context breakout
+      - OutputRules inheritance
 
 - cve: CVE-2026-28208
   repo: junrar/junrar
