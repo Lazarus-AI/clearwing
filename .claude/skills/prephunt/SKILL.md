@@ -181,7 +181,7 @@ Flag any field where:
 - A user-provided value contradicts what you found
 - A field is inferred rather than externally corroborated
 
-Ask the user to confirm or investigate uncertain fields before finalizing.
+Provide the CVE DB entry URL, as well as the github diff for the fix commit. Update evaluations/cves.yaml with your corrected entry. Then create a shell script to run a sourcehunt as defined by the pattern in evaluations/cve*.sh. Ask the user to confirm or investigate uncertain fields before finalizing.
 
 ## Important notes
 
