@@ -220,18 +220,56 @@
   repo: kjur/jsrsasign
   clone_url: https://github.com/kjur/jsrsasign.git
   language: JS
-  vulnerable_commit: null
-  fix_commit: null
-  files: []
-  vuln_class: null
-  title: jsrsasign improper DSA domain-parameter signature verify.
+  vulnerable_commit: ca5b027240287a1e71fe63019fc4400332594323
+  fix_commit: 37b4c06b145c7bfd6bc2a6df5d0a12c56b15ef60
+  files:
+    - src/dsa-2.0.js
+    - test/qunit-do-dsa.html
+    - test/qunit-do-x509.html
+  vuln_class: >-
+    CWE-347 Improper Verification of Cryptographic Signature (DSA public key
+    domain parameters accepted without FIPS 186-4 §4.7 bounds or group-order
+    checks, enabling universal forgery
+  title: >-
+    jsrsasign: DSA domain-parameter vaiversal
+    signature forgery
   severity: Critical
   difficulty: medium
-  description: jsrsasign improper DSA domain-parameter signature verify.
+  description: >-
+    The `KJUR.crypto.DSA.setPublic()` function in `src/dsa-2.0.js` accepted
+    arbitrary DSA domain parameters (ping any
+    FIPS 186-4 §4.7 validation: it performed no range checks, did not verify
+    that g > 1 or y > 1, and did not cation
+    g^q ≡ 1 (mod p). An attacker who can supply a crafted DSA public key —
+    for example via an adversarially cte presented
+    to `X509.verifySignature()` — can set g=1 and y=1 with a fixed r=1,
+    making the DSA verification equatihash value,
+    constituting a universal signature forgery on any message. The fix
+    introduces a `_validatePublicArgs(nforces all
+    FIPS 186-4 domain parameter bounds and the group-order relation
+    (`g.modPow(q, p).compareTo(BigIntetPublic`
+    accepts and stores the key material, throwing an error on any degenerate
+    or out-of-range values.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/dsa-2.0.js
+    symbols:
+      - setPublic
+      - _validatePublicArgs
+      - setPublicHex
+      - verifyWithMessageHash
+      - modPow
+      - _BI_ONE
+      - X509.verifySignature
+    keywords:
+      - DSA domain parameter validation
+      - FIPS 186-4 section 4.7
+      - universal signature forgery
+      - degenerate generator g=1
+      - group order verification
+      - g^q mod p equals one
+      - X.509 certificate verification bypass
+      - r equals one forgery
 
 - cve: CVE-2026-27775
   repo: go-gitea/gitea
