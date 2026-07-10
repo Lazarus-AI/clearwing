@@ -444,18 +444,56 @@
   repo: OpenSC/OpenSC
   clone_url: https://github.com/OpenSC/OpenSC.git
   language: C
-  vulnerable_commit: null
+  vulnerable_commit: 65fc211015cfcac27b10d0876054156c97225f50
   fix_commit: 0358817ec74aeca654f83e7709c7720b14c5db59
-  files: []
-  vuln_class: null
-  title: OpenSC do_key_value() stack/heap overrun.
-  severity: Low
+  files:
+    - src/pkcs15init/profile.c
+  vuln_class: >-
+    CWE-121 / CWE-122 Stack-based and Heap-based Buffer Overflow (unbounded
+    memcpy into a fixed-size 32-byte stack buffer, then a second memcpy into a
+    heap-allocated struct field, both using an attacker-controlled length)
+  title: >-
+    OpenSC do_key_value(): stack and heap buffer overrun via crafted profile
+    configuration file
+  severity: Low (CVSS 3.1: 3.8 AV:P per CNA; NVD primary 7.8 HIGH AV:L)
   difficulty: medium
-  description: OpenSC do_key_value() stack/heap overrun.
+  description: >-
+    In OpenSC before 0.27.0, the `do_key_value()` function in
+    `src/pkcs15init/profile.c` parses key-value entries from a pkcs15 profile
+    configuration file. When the first character of the key argument is `=`,
+    the code strips the prefix, computes `key_len = strlen(key)`, and
+    immediately calls `memcpy(keybuf, key, key_len)` where `keybuf` is a
+    32-byte stack-allocated buffer — with no bounds check on `key_len`. An
+    attacker who supplies a crafted profile file containing a `=`-prefixed
+    value longer than 32 bytes overruns the stack buffer. Because the
+    overrun value of `key_len` is then used in a second
+    `memcpy(ai->key, keybuf, key_len)` into the heap-allocated `auth_info`
+    struct field, both a stack and a heap buffer overrun result, corrupting
+    adjacent memory in both regions. The fix (commit 0358817) adds a length
+    guard — `if (key_len > sizeof(keybuf)) { parse_error(...); return 1; }` —
+    immediately before the first `memcpy`, rejecting oversized values before
+    either copy occurs.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/pkcs15init/profile.c
+    symbols:
+      - do_key_value
+      - keybuf
+      - key_len
+      - memcpy
+      - parse_error
+      - auth_info
+      - ai->key
+      - sizeof(keybuf)
+    keywords:
+      - stack buffer overrun
+      - heap buffer overrun
+      - unbounded memcpy
+      - crafted profile configuration
+      - pkcs15-init
+      - missing length check
+      - key value entry
+      - fixed-size stack buffer
 
 - cve: CVE-2026-5194
   repo: wolfSSL/wolfssl
