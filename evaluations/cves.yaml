@@ -1,0 +1,349 @@
+- cve: CVE-2026-45445
+  repo: openssl/openssl
+  clone_url: https://github.com/openssl/openssl.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: 843c9b94ca9c2ed248bb30127bb4f3d7af0d607c
+  files: []
+  vuln_class: null
+  title: OpenSSL EVP_Cipher AES-OCB silently discards IV.
+  severity: High
+  difficulty: easy
+  description: OpenSSL EVP_Cipher AES-OCB silently discards IV.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-47345
+  repo: TYPO3/html-sanitizer
+  clone_url: https://github.com/TYPO3/html-sanitizer.git
+  language: PHP
+  vulnerable_commit: null
+  fix_commit: 8b5d0be44ded457ca993ec9ca93d859941c63764
+  files: []
+  vuln_class: null
+  title: typo3/html-sanitizer namespace-attr XSS bypass.
+  severity: Medium
+  difficulty: easy
+  description: typo3/html-sanitizer namespace-attr XSS bypass.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-28208
+  repo: junrar/junrar
+  clone_url: https://github.com/junrar/junrar.git
+  language: Java
+  vulnerable_commit: null
+  fix_commit: 947ff1d33f00f940aa68ae2593500291d799d954
+  files: []
+  vuln_class: null
+  title: Junrar LocalFolderExtractor backslash path traversal.
+  severity: Medium
+  difficulty: easy
+  description: Junrar LocalFolderExtractor backslash path traversal.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-40034
+  repo: GitoxideLabs/gitoxide
+  clone_url: https://github.com/GitoxideLabs/gitoxide.git
+  language: Rust
+  vulnerable_commit: 95b0399abca3e040686591388991b08c794050cd
+  fix_commit: 6a2e6a436f76c8bbf2487f9967413a51356667a0
+  files:
+    - gix-submodule/src/access.rs
+  sourcehunt:
+    subsystem: gix-submodule/src/access.rs
+    flags: [--subsystem-hunt, --no-per-file-hunt, --auto-patch]
+  vuln_class: null
+  title: gix-submodule .gitmodules update-field validation bypass.
+  severity: High
+  difficulty: easy
+  description: gix-submodule .gitmodules update-field validation bypass.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-32316
+  repo: jqlang/jq
+  clone_url: https://github.com/jqlang/jq.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: null
+  files: []
+  vuln_class: null
+  title: jq int overflow in jvp_string_append / jvp_string_copy_replace_bad.
+  severity: High
+  difficulty: easy
+  description: jq int overflow in jvp_string_append / jvp_string_copy_replace_bad.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-4600
+  repo: kjur/jsrsasign
+  clone_url: https://github.com/kjur/jsrsasign.git
+  language: JS
+  vulnerable_commit: null
+  fix_commit: null
+  files: []
+  vuln_class: null
+  title: jsrsasign improper DSA domain-parameter signature verify.
+  severity: Critical
+  difficulty: medium
+  description: jsrsasign improper DSA domain-parameter signature verify.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-27775
+  repo: go-gitea/gitea
+  clone_url: https://github.com/go-gitea/gitea.git
+  language: Go
+  vulnerable_commit: null
+  fix_commit: null
+  fix_pr: https://github.com/go-gitea/gitea/pull/38151
+  files: []
+  vuln_class: null
+  title: Gitea pre-receive hook caches branch write-perm across refs.
+  severity: High
+  difficulty: medium
+  description: Gitea pre-receive hook caches branch write-perm across refs.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-41401
+  repo: CESNET/libyang
+  clone_url: https://github.com/CESNET/libyang.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: 6b5ed47ee674fbe86b31bbebc4ff26889aeff38c
+  files: []
+  vuln_class: null
+  title: libyang lyd_parser_set_data_flags heap-UAF write.
+  severity: Medium
+  difficulty: medium
+  description: libyang lyd_parser_set_data_flags heap-UAF write.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-40033
+  repo: FreeRDP/FreeRDP
+  clone_url: https://github.com/FreeRDP/FreeRDP.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: d7508ebcd82842a691ae4941e5104d14240a89ae
+  files: []
+  vuln_class: null
+  title: FreeRDP gdi_CacheToSurface OOB heap write.
+  severity: High
+  difficulty: medium
+  description: FreeRDP gdi_CacheToSurface OOB heap write.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-40528
+  repo: OpenSC/OpenSC
+  clone_url: https://github.com/OpenSC/OpenSC.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: 0358817ec74aeca654f83e7709c7720b14c5db59
+  files: []
+  vuln_class: null
+  title: OpenSC do_key_value() stack/heap overrun.
+  severity: Low
+  difficulty: medium
+  description: OpenSC do_key_value() stack/heap overrun.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-5194
+  repo: wolfSSL/wolfssl
+  clone_url: https://github.com/wolfSSL/wolfssl.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: null
+  fix_pr: https://github.com/wolfSSL/wolfssl/pull/10131
+  files: []
+  vuln_class: null
+  title: wolfSSL ECDSA verify missing hash-size/OID checks.
+  severity: Critical
+  difficulty: medium
+  description: wolfSSL ECDSA verify missing hash-size/OID checks.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-5588
+  repo: bcgit/bc-java
+  clone_url: https://github.com/bcgit/bc-java.git
+  language: Java
+  vulnerable_commit: null
+  fix_commit: 656bae0dbd9b1521f840521ff786e78749fe3057
+  files: []
+  vuln_class: null
+  title: Bouncy Castle bcpkix broken/risky crypto algorithm.
+  severity: Medium
+  difficulty: medium
+  description: Bouncy Castle bcpkix broken/risky crypto algorithm.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-47391
+  repo: MervinPraison/PraisonAI
+  clone_url: https://github.com/MervinPraison/PraisonAI.git
+  language: Python
+  vulnerable_commit: bc73dd1db9089ea93648c5266b2d6ad9dcf85484
+  fix_commit: e0fb8e7dd1ee6759c18ed07f436c21dbd9c20747
+  fix_pr: https://github.com/MervinPraison/PraisonAI/pull/1183
+  files:
+    - examples/python/a2a/a2a-server.py
+    - examples/mcp/multi_server.py
+    - examples/mcp_server/custom_tools_server.py
+    - examples/python/custom_tools/tools_with_latency.py
+    - examples/python/mcp/mcp-tools-server-sse.py
+    - examples/python/mcp/mcp-tools-server.py
+    - examples/python/mcp_server_example.py
+    - examples/eval/reliability_example.py
+    - src/praisonai-agents/benchmarks/real_benchmark.py
+    - src/praisonai-agents/praisonai_platform/services/auth_service.py
+  vuln_class: >-
+    CWE-95 Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection'),
+    reachable via CWE-306 Missing Authentication for Critical Function
+  title: PraisonAI unauthenticated A2A example reaches LLM-driven eval() code execution
+  severity: Critical
+  difficulty: medium
+  description: >-
+    PraisonAI's first-party A2A server example (examples/python/a2a/a2a-server.py) registers a
+    calculate(expression) tool implemented with Python eval(expression), and the A2A framework's
+    serve() binds to 0.0.0.0 while /a2a authentication is disabled whenever auth_token is None. An
+    unauthenticated remote client can POST a JSON-RPC message/send request to /a2a; the handler
+    forwards the attacker-controlled text to agent.chat(), and the LLM invokes the calculate tool,
+    whose eval() sink executes arbitrary Python in the server process. The fix replaces eval() in
+    the example (and other example/benchmark files) with an AST-based safe arithmetic evaluator
+    that only permits numeric literals and arithmetic operators.
+  judge_signal:
+    files:
+      - examples/python/a2a/a2a-server.py
+    symbols:
+      - calculate
+      - eval
+      - agent.chat
+      - message/send
+      - A2A.serve
+    keywords:
+      - eval
+      - eval injection
+      - arbitrary code execution
+      - unauthenticated
+      - auth_token None
+      - 0.0.0.0
+      - A2A
+      - calculate tool
+      - AST safe evaluator
+
+- cve: CVE-2026-34182
+  repo: openssl/openssl
+  clone_url: https://github.com/openssl/openssl.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: 9fd97f8cfdc2c0be214998de3b2b55c8edf6c7ac
+  files: []
+  vuln_class: null
+  title: OpenSSL CMS AuthEnvelopedData cipher/tag-length validation.
+  severity: Critical
+  difficulty: hard
+  description: OpenSSL CMS AuthEnvelopedData cipher/tag-length validation.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-42768
+  repo: openssl/openssl
+  clone_url: https://github.com/openssl/openssl.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: f04b377be3d821741c86d1f4bf84dee09f3d5c3e
+  files: []
+  vuln_class: null
+  title: OpenSSL CMS/PKCS7 Bleichenbacher-style decrypt oracle.
+  severity: Low
+  difficulty: hard
+  description: OpenSSL CMS/PKCS7 Bleichenbacher-style decrypt oracle.
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-6679
+  repo: wolfSSL/wolfssl
+  clone_url: https://github.com/wolfSSL/wolfssl.git
+  language: C
+  vulnerable_commit: null
+  fix_commit: null
+  fix_pr: https://github.com/wolfSSL/wolfssl/pull/10116
+  files: []
+  vuln_class: null
+  title: wolfSSL DTLS 1.3 ACK pre-auth heap overflow (int trunc).
+  severity: High
+  difficulty: hard
+  description: null
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-28386
+  repo: openssl/openssl
+  clone_url: https://github.com/openssl/openssl.git
+  language: C+asm
+  vulnerable_commit: null
+  fix_commit: 61f428a2fc6671ede184a19f71e6e495f0689621
+  files: []
+  vuln_class: null
+  title: OpenSSL AES-CFB128 OOB read on AVX-512+VAES partial blocks.
+  severity: Critical
+  difficulty: hard
+  description: null
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
+
+- cve: CVE-2026-5747
+  repo: firecracker-microvm/firecracker
+  clone_url: https://github.com/firecracker-microvm/firecracker.git
+  language: Rust
+  vulnerable_commit: null
+  fix_commit: null
+  fix_release: https://github.com/firecracker-microvm/firecracker/releases/tag/v1.15.1
+  files: []
+  vuln_class: null
+  title: Firecracker virtio PCI OOB write, guest-root escape.
+  severity: High
+  difficulty: hard
+  description: null
+  judge_signal:
+    files: []
+    symbols: []
+    keywords: []
