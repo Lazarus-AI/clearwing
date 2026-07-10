@@ -158,7 +158,7 @@ Fill in all missing fields. Guidelines:
 - `title`: Keep the user's title if provided and accurate. Otherwise: `<project> <component>: <what goes wrong> via <attack vector>`
 - `severity`: Keep the user's value if consistent with CVSS. Otherwise note the discrepancy.
 - `difficulty`: Keep the user's value. Only flag if your analysis suggests otherwise.
-- `files`: From `git diff-tree` on the fix commit.
+- `files`: From `git diff-tree` on the fix commit that are relevant to the vulnerability.
 - `judge_signal.files`: Same as `files` unless additional files are needed for context.
 - `judge_signal.symbols`: Include symbols from BOTH the vulnerable code (what a hunter would find) and the fix (proves they found the right thing). Aim for 4-8 symbols.
 - `judge_signal.keywords`: Domain phrases that demonstrate understanding, not just function names. Aim for 5-8 keywords.
