@@ -499,19 +499,63 @@
   repo: wolfSSL/wolfssl
   clone_url: https://github.com/wolfSSL/wolfssl.git
   language: C
-  vulnerable_commit: null
-  fix_commit: null
+  vulnerable_commit: 0c9b6397be463c0e5bd7d0c8c1bd8619dc9b3aa8
+  fix_commit: abce5be989ccd0665e2b9445abb856886975dfd1
   fix_pr: https://github.com/wolfSSL/wolfssl/pull/10131
-  files: []
-  vuln_class: null
-  title: wolfSSL ECDSA verify missing hash-size/OID checks.
-  severity: Critical
+  files:
+    - wolfcrypt/src/ecc.c
+    - wolfcrypt/src/asn.c
+  vuln_class: >-
+    CWE-295 Improper Certificate Validation (missing lower-bound hash size and
+    signature OID/key-type cross-check before ECDSA verify)
+  title: >-
+    wolfSSL: ECDSA sign/verify accepts undersized digests and mismatched hash
+    OIDs via missing WC_MIN_DIGEST_SIZE / SigOidMatchesKeyOid checks
+  severity: Critical (CVSS 4.0: 9.3 / CVSS 3.1: 9.1)
   difficulty: medium
-  description: wolfSSL ECDSA verify missing hash-size/OID checks.
+  description: >-
+    wolfSSL's ECDSA sign and verify entry points (`wc_ecc_sign_hash`,
+    `wc_ecc_sign_hash_ex`, `wc_ecc_verify_hash`, `wc_ecc_verify_hash_ex` in
+    `wolfcrypt/src/ecc.c`) enforced only an upper-bound check
+    (`hashlen > WC_MAX_DIGEST_SIZE`) on the supplied digest length, never a
+    lower bound. A caller could therefore pass a digest shorter than the
+    minimum acceptable for the key size — including a digest from a weak or
+    truncated algorithm — without being rejected. Compounding this,
+    `wolfcrypt/src/asn.c` lacked any cross-check between the certificate's
+    signatureAlgorithm OID and the issuer's key type OID, so an ECDSA key
+    could be paired with an EdDSA or ML-DSA signature OID when those families
+    were also compiled in. An attacker who knows the public CA key can craft a
+    certificate whose signature is computed over a truncated or weak digest,
+    reducing the effective security of ECDSA verification to whatever the
+    undersized digest provides. The fix introduces `WC_MIN_DIGEST_SIZE`
+    (defined in `wolfssl/wolfcrypt/hash.h`, defaulting to the smallest enabled
+    hash's output), adds symmetric lower-bound guards in all four ECC
+    sign/verify entry points, and adds a new `SigOidMatchesKeyOid()` helper in
+    `asn.c` that rejects any signature OID incompatible with the issuer key OID
+    during certificate chain verification.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - wolfcrypt/src/ecc.c
+      - wolfcrypt/src/asn.c
+      - wolfssl/wolfcrypt/hash.h
+    symbols:
+      - wc_ecc_verify_hash
+      - wc_ecc_verify_hash_ex
+      - wc_ecc_sign_hash
+      - wc_ecc_sign_hash_ex
+      - SigOidMatchesKeyOid
+      - WC_MIN_DIGEST_SIZE
+      - WC_MAX_DIGEST_SIZE
+      - BAD_LENGTH_E
+      - ASN_SIG_OID_E
+    keywords:
+      - minimum digest size
+      - hash length lower bound
+      - signature OID key OID mismatch
+      - ECDSA certificate verification
+      - WC_MIN_DIGEST_SIZE
+      - undersized digest
+      - FIPS 186-5
 
 - cve: CVE-2026-5588
   repo: bcgit/bc-java
