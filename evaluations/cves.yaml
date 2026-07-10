@@ -36,18 +36,35 @@
   repo: junrar/junrar
   clone_url: https://github.com/junrar/junrar.git
   language: Java
-  vulnerable_commit: null
+  vulnerable_commit: c7041fc07df2cc397ea46ba516933ee9725af250
   fix_commit: 947ff1d33f00f940aa68ae2593500291d799d954
-  files: []
-  vuln_class: null
+  files:
+    - src/main/java/com/github/junrar/LocalFolderExtractor.java
+  vuln_class: path-traversal
   title: Junrar LocalFolderExtractor backslash path traversal.
   severity: Medium
   difficulty: easy
-  description: Junrar LocalFolderExtractor backslash path traversal.
+  description: >
+    Junrar's LocalFolderExtractor performed its destination-containment check
+    on the raw archive entry name without normalizing backslashes to forward
+    slashes. On non-Windows hosts a crafted RAR entry containing "..\..\"
+    bypassed the getCanonicalPath().startsWith(destination) guard and wrote
+    files outside the target directory. Fixed by normalizing separators
+    (invariantSeparatorsPathString) before the containment check and splitting
+    on "/" uniformly.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/main/java/com/github/junrar/LocalFolderExtractor.java
+    symbols:
+      - LocalFolderExtractor
+      - makeFile
+      - invariantSeparatorsPathString
+    keywords:
+      - path traversal
+      - backslash
+      - "..\\"
+      - canonical path
+      - zip slip
 
 - cve: CVE-2026-40034
   repo: GitoxideLabs/gitoxide
