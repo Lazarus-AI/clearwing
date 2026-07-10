@@ -391,18 +391,54 @@
   repo: FreeRDP/FreeRDP
   clone_url: https://github.com/FreeRDP/FreeRDP.git
   language: C
-  vulnerable_commit: null
+  vulnerable_commit: 1d67eeb902638ecf1ed6e30e01f4e02e68e396c4
   fix_commit: d7508ebcd82842a691ae4941e5104d14240a89ae
-  files: []
-  vuln_class: null
-  title: FreeRDP gdi_CacheToSurface OOB heap write.
-  severity: High
+  files:
+    - libfreerdp/gdi/gfx.c
+  vuln_class: >-
+    CWE-122 Heap-based Buffer Overflow (validated clamped rect dimensions but
+    copied using unclamped cache entry dimensions, writing past surface allocation)
+  title: >-
+    FreeRDP gdi_CacheToSurface: heap OOB write via unclamped cache entry dimensions
+  severity: High (CVSS:3.1 8.8 / CVSS:4.0 8.7)
   difficulty: medium
-  description: FreeRDP gdi_CacheToSurface OOB heap write.
+  description: >-
+    In `gdi_CacheToSurface` (`libfreerdp/gdi/gfx.c`), a destination rectangle
+    is built by clamping `destPt->x + cacheEntry->width` and
+    `destPt->y + cacheEntry->height` to `UINT16_MAX` before calling
+    `is_rect_valid()`, which verifies the rectangle fits within the target
+    surface. However, the subsequent `freerdp_image_copy_no_overlap` call passes
+    the original, unclamped `cacheEntry->width` and `cacheEntry->height` as the
+    pixel copy dimensions — bypassing the validated bounds entirely. A malicious
+    RDP server can craft a RDPGFX CacheToSurface PDU with cache entry dimensions
+    large enough that their sum with the destination point overflows `UINT16_MAX`,
+    causing the clamped rect to pass validation while the actual copy writes
+    arbitrarily far beyond the allocated surface buffer on the heap. The fix
+    computes the copy extents as `w = rect.right - rect.left` and
+    `h = rect.bottom - rect.top` from the already-validated rectangle and passes
+    those to `freerdp_image_copy_no_overlap`, ensuring copy dimensions can never
+    exceed what was checked.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - libfreerdp/gdi/gfx.c
+    symbols:
+      - gdi_CacheToSurface
+      - freerdp_image_copy_no_overlap
+      - is_rect_valid
+      - cacheEntry->width
+      - cacheEntry->height
+      - destPt
+      - UINT16_MAX
+      - rect.right - rect.left
+    keywords:
+      - heap-buffer-overflow
+      - rectangle validation bypass
+      - UINT16_MAX clamping
+      - unclamped cache entry dimensions
+      - RDPGFX CacheToSurface PDU
+      - out-of-bounds heap write
+      - gfx surface copy
+      - validation mismatch
 
 - cve: CVE-2026-40528
   repo: OpenSC/OpenSC
