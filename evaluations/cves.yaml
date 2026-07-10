@@ -275,19 +275,60 @@
   repo: go-gitea/gitea
   clone_url: https://github.com/go-gitea/gitea.git
   language: Go
-  vulnerable_commit: null
-  fix_commit: null
+  vulnerable_commit: f6e2ca4388a531c4a5996fc8043c38f1cf57897f
+  fix_commit: 99f8b3d9a1d32f4c39828e07971455a18191e0b9
   fix_pr: https://github.com/go-gitea/gitea/pull/38151
-  files: []
-  vuln_class: null
-  title: Gitea pre-receive hook caches branch write-perm across refs.
-  severity: High
+  files:
+    - routers/private/hook_pre_receive.go
+  vuln_class: >-
+    CWE-863 Incorrect Authorization (per-ref permission check bypassed by
+    cross-ref result caching in a single push session)
+  title: >-
+    Gitea: pre-receive hook caches branch write-permission across refs,
+    enabling privilege escalation to full repository write
+  severity: High (CVSS 8.8)
   difficulty: medium
-  description: Gitea pre-receive hook caches branch write-perm across refs.
+  description: >-
+    In Gitea ≤ 1.25.5, the `preReceiveContext` struct in
+    `routers/private/hook_pre_receive.go` held two fields — `canWriteCode` and
+    `checkedCanWriteCode` — that cached the result of `CanWriteCode()` after the
+    first ref processed in a multi-ref `git push`. Because `CanWriteCode()` called
+    `issues_model.CanMaintainerWriteToBranch` against `ctx.branchName` (set to the
+    first ref's branch name) and then short-circuited via `checkedCanWriteCode =
+    true`, all subsequent refs in the same push session inherited that cached
+    decision regardless of which branch they targeted. An attacker who held a
+    legitimate, scoped maintainer-edit grant on one PR branch (e.g.,
+    `feature-branch`) could craft a single push containing that branch first and a
+    target branch (`main`) second; the hook accepted both because the `true` result
+    for `feature-branch` was reused verbatim for `main`. The fix removes the
+    `canWriteCode`/`checkedCanWriteCode` cache entirely, splits permission checking
+    into `canWriteCodeUnit()` (caches only unit-level write, not branch-specific
+    grants) and the new per-ref `canWriteCodeRef(refFullName)`, and replaces every
+    call-site `AssertCanWriteCode()` with `assertCanWriteRef(refFullName)` so that
+    `CanMaintainerWriteToBranch` is re-evaluated fresh against the correct branch
+    name for every ref.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - routers/private/hook_pre_receive.go
+    symbols:
+      - preReceiveContext
+      - canWriteCode
+      - checkedCanWriteCode
+      - CanWriteCode
+      - AssertCanWriteCode
+      - canWriteCodeUnit
+      - canWriteCodeRef
+      - assertCanWriteRef
+      - CanMaintainerWriteToBranch
+      - branchName
+    keywords:
+      - per-ref permission caching
+      - cross-ref privilege escalation
+      - maintainer-edit grant bypass
+      - pre-receive hook authorization
+      - multi-ref push
+      - branch write permission reuse
+      - checkedCanWriteCode flag
 
 - cve: CVE-2026-41401
   repo: CESNET/libyang
