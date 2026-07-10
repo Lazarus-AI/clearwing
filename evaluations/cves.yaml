@@ -2,18 +2,57 @@
   repo: openssl/openssl
   clone_url: https://github.com/openssl/openssl.git
   language: C
-  vulnerable_commit: null
+  vulnerable_commit: ffce42f4807d879586bd3bba8fa93caf13a7b8e4
   fix_commit: 843c9b94ca9c2ed248bb30127bb4f3d7af0d607c
-  files: []
-  vuln_class: null
-  title: OpenSSL EVP_Cipher AES-OCB silently discards IV.
-  severity: High
+  files:
+    - providers/implementations/ciphers/cipher_aes_ocb.c
+  vuln_class: >-
+    CWE-325 Missing Required Cryptographic Step (application-supplied IV never
+    applied to OCB context on the EVP_Cipher() one-shot path)
+  title: >-
+    OpenSSL AES-OCB: EVP_Cipher() one-shot path discards IV, enabling
+    nonce reuse and authentication tag forgery
+  severity: High (CVSS 7.5 — AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
   difficulty: easy
-  description: OpenSSL EVP_Cipher AES-OCB silently discards IV.
+  description: >-
+    In OpenSSL's AES-OCB provider, the one-shot cipher handler aes_ocb_cipher()
+    — dispatched via OSSL_FUNC_CIPHER_CIPHER / EVP_Cipher() — called
+    aes_generic_ocb_cipher() directly without first invoking update_iv() to
+    push the caller-supplied IV into the OCB context. The streaming handlers
+    (EVP_CipherUpdate / EVP_CipherFinal_ex) correctly call update_iv() before
+    processing data; the one-shot handler did not. As a result, every
+    EVP_Cipher() call on an AES-OCB context ran with the all-zero Offset_0
+    state left by cipher initialisation regardless of the IV supplied during
+    EVP_CipherInit_ex(), causing catastrophic (key, nonce) reuse: any two
+    messages encrypted with the same key but different IVs produce identical
+    keystreams. Additionally, if EVP_EncryptFinal_ex() is subsequently called
+    to obtain the authentication tag, the deferred update_iv() fires at that
+    point and clears the accumulated OCB checksum, yielding a tag that is a
+    function of (key, IV) only — allowing universal forgery of arbitrary
+    ciphertext under the same key. The fix adds the missing
+    !ctx->key_set || !update_iv(ctx) guard at the top of aes_ocb_cipher(),
+    mirroring the check already present in the streaming path.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - providers/implementations/ciphers/cipher_aes_ocb.c
+    symbols:
+      - aes_ocb_cipher
+      - update_iv
+      - aes_generic_ocb_cipher
+      - key_set
+      - PROV_AES_OCB_CTX
+      - OSSL_FUNC_CIPHER_CIPHER
+      - CRYPTO_ocb128_encrypt
+      - EVP_Cipher
+    keywords:
+      - nonce reuse
+      - IV discarded
+      - one-shot path
+      - OCB Offset_0
+      - authentication tag forgery
+      - streaming vs one-shot dispatch
+      - AEAD integrity bypass
+      - EVP_Cipher one-shot
 
 - cve: CVE-2026-47345
   repo: TYPO3/html-sanitizer
@@ -23,7 +62,6 @@
   fix_commit: 8b5d0be44ded457ca993ec9ca93d859941c63764
   files:
     - src/Serializer/Rules.php
-    - tests/CommonBuilderTest.php
   vuln_class: >-
     CWE-79 Improper Neutralization of Input During Web Page Generation (namespace attribute
     values written unencoded during HTML serialization bypass XSS sanitizer)
