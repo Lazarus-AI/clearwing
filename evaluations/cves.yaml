@@ -334,18 +334,58 @@
   repo: CESNET/libyang
   clone_url: https://github.com/CESNET/libyang.git
   language: C
-  vulnerable_commit: null
-  fix_commit: 6b5ed47ee674fbe86b31bbebc4ff26889aeff38c
-  files: []
-  vuln_class: null
-  title: libyang lyd_parser_set_data_flags heap-UAF write.
+  vulnerable_commit: a4e3a89f441abcbd216285835e4a89e8f441017f
+  fix_commit: 54c3276d871023da266d4ed3ceaee7e8d71d0b04
+  files:
+    - src/parser_common.c
+  vuln_class: >-
+    CWE-416 Use After Free (stale linked-list head pointer written after node
+    freed in lyd_parser_set_data_flags)
+  title: >-
+    libyang: lyd_parser_set_data_flags heap-UAF write via non-head default
+    metadata removal
   severity: Medium
   difficulty: medium
-  description: libyang lyd_parser_set_data_flags heap-UAF write.
+  description: >-
+    In libyang's XML data parser, `lyd_parser_set_data_flags`
+    (src/parser_common.c) walks the `*meta` linked list looking for a
+    `default` metadata entry to delete when promoting a node's default flag.
+    When the matching `meta2` entry is not the list head (i.e. `meta !=
+    &node->meta`), the pre-fix code unconditionally advanced the caller's
+    `*meta` pointer via `*meta = (*meta)->next` regardless of whether `meta2`
+    was actually the entry `*meta` pointed to. For non-head entries this
+    leaves `*meta` pointing to an already-freed node (`meta2`) while
+    `prev_meta->next` is separately updated to `next_meta`; any subsequent
+    dereference of `*meta` in the caller constitutes a heap-use-after-free
+    write. The fix adds the guard `meta2 == *meta` so the head pointer is only
+    updated when `meta2` is exactly the entry being tracked, and uses the
+    pre-saved `next_meta` rather than `(*meta)->next` (which could now be
+    dangling). A crafted YANG XML document containing a `dflt:default="true"`
+    metadata attribute on a node whose metadata is not the list head is
+    sufficient to trigger the bug; OSS-Fuzz reproduces it via the
+    `lyd_parse_mem_xml` fuzzer with ASAN reporting a heap-UAF WRITE in
+    `lyd_insert_meta`.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/parser_common.c
+    symbols:
+      - lyd_parser_set_data_flags
+      - lyd_free_meta_single
+      - lyd_insert_meta
+      - prev_meta
+      - next_meta
+      - meta2
+      - LYD_DEFAULT
+      - lyd_meta
+    keywords:
+      - heap use-after-free write
+      - metadata list head pointer
+      - non-head default metadata entry
+      - dflt:default
+      - ietf-netconf-with-defaults
+      - lyd_parse_mem_xml
+      - YANG XML metadata parsing
+      - stale linked-list pointer
 
 - cve: CVE-2026-40033
   repo: FreeRDP/FreeRDP
