@@ -794,3 +794,57 @@
     files: []
     symbols: []
     keywords: []
+
+- cve: CVE-2026-5588
+  repo: bcgit/bc-java
+  clone_url: https://github.com/bcgit/bc-java.git
+  language: Java
+  vulnerable_commit: 8a471e58cf7f63bbc78862e44e42494d793e2e12
+  fix_commit: 656bae0dbd9b1521f840521ff786e78749fe3057
+  files:
+    - pkix/src/main/java/org/bouncycastle/operator/jcajce/JcaContentVerifierProviderBuilder.java
+    - pkix/src/test/java/org/bouncycastle/cert/cmp/test/AllTests.java
+  vuln_class: >-
+    CWE-347 Improper Verification of Cryptographic Signature (composite
+    signature verifier returns success when presented with an empty signature
+    sequence, performing zero cryptographic checks)
+  title: >-
+    Bouncy Castle bcpkix: CompositeVerifier accepts empty signature sequence,
+    bypassing all cryptographic verification
+  severity: Medium (CVSS 4.0: 6.3 — primary; CVSS 3.1: 7.5 High — Red Hat secondary)
+  difficulty: medium
+  description: >-
+    In Bouncy Castle's PKIX library, the inner CompositeVerifier class inside
+    JcaContentVerifierProviderBuilder iterates over an ASN.1 SEQUENCE of
+    component signatures and returns `!failed` after the loop. Because `failed`
+    is initialised to false and the loop body only executes when sigSeq.size()
+    is greater than zero, an attacker who submits a composite-type signed
+    artifact (e.g. a CMP PKIMessage) whose protection field wraps an empty DER
+    SEQUENCE (two bytes: 30 00) causes the loop to never execute, `failed`
+    stays false, and verify() returns true without performing any cryptographic
+    operation whatsoever. The fix adds an `atLeastOneChecked` boolean that is
+    set to true inside the loop body and changes the return expression from
+    `!failed` to `!failed & atLeastOneChecked`, ensuring that an empty or
+    all-null signature sequence is always rejected. Affected versions include
+    BC-JAVA 1.67–1.83, BCPKIX-FIPS 2.0.6–2.1.10, and BCPKIX-LTS 2.73.7–2.73.10.
+  judge_signal:
+    files:
+      - pkix/src/main/java/org/bouncycastle/operator/jcajce/JcaContentVerifierProviderBuilder.java
+    symbols:
+      - CompositeVerifier
+      - CompositeVerifier.verify
+      - atLeastOneChecked
+      - createCompositeVerifier
+      - JcaContentVerifierProviderBuilder
+      - sigSeq
+      - sigs
+      - failed
+    keywords:
+      - composite signature
+      - empty signature sequence
+      - signature bypass
+      - zero-length sigSeq
+      - id_alg_composite
+      - CMP PKIMessage forgery
+      - atLeastOneChecked guard
+      - ASN.1 empty SEQUENCE
