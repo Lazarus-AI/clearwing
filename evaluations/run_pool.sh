@@ -23,16 +23,20 @@ log()     { printf '[run_pool] %s\n' "$*"; }
 
 PROVIDERS_FILE=""
 DRY_RUN=0
+CVE_FILTER=""
+TIMEOUT=18000   # 5 hours default
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --providers-file) PROVIDERS_FILE="$2"; shift 2 ;;
         --dry-run)        DRY_RUN=1;           shift   ;;
+        --cves)           CVE_FILTER="$2";     shift 2 ;;
+        --timeout)        TIMEOUT="$2";        shift 2 ;;
         *) printf 'Unknown argument: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
 
-[[ -z "$PROVIDERS_FILE" ]] && { printf 'Usage: %s --providers-file FILE [--dry-run]\n' "$0" >&2; exit 1; }
+[[ -z "$PROVIDERS_FILE" ]] && { printf 'Usage: %s --providers-file FILE [--cves CVE1,CVE2,...] [--timeout SECS] [--dry-run]\n' "$0" >&2; exit 1; }
 [[ -f "$PROVIDERS_FILE" ]] || { printf 'File not found: %s\n'       "$PROVIDERS_FILE" >&2; exit 1; }
 
 # ── load providers ───────────────────────────────────────────────────────────────
@@ -50,16 +54,34 @@ done < "$PROVIDERS_FILE"
 # ── discover CVE scripts ──────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-mapfile -t SCRIPTS < <(ls -1 "$SCRIPT_DIR"/cve-*.sh 2>/dev/null | sort)
+mapfile -t ALL_SCRIPTS < <(ls -1 "$SCRIPT_DIR"/cve-*.sh 2>/dev/null | sort)
 
-[[ ${#SCRIPTS[@]} -eq 0 ]] && { log "No cve-*.sh found in $SCRIPT_DIR" >&2; exit 1; }
+[[ ${#ALL_SCRIPTS[@]} -eq 0 ]] && { log "No cve-*.sh found in $SCRIPT_DIR" >&2; exit 1; }
+
+# Apply --cves filter if provided
+if [[ -n "$CVE_FILTER" ]]; then
+    SCRIPTS=()
+    IFS=',' read -ra WANTED <<< "$CVE_FILTER"
+    for name in "${WANTED[@]}"; do
+        name="${name// /}"   # trim spaces
+        match="$SCRIPT_DIR/${name}.sh"
+        if [[ -f "$match" ]]; then
+            SCRIPTS+=("$match")
+        else
+            log "WARNING: --cves filter: $name.sh not found, skipping" >&2
+        fi
+    done
+    [[ ${#SCRIPTS[@]} -eq 0 ]] && { log "No matching scripts for --cves filter" >&2; exit 1; }
+else
+    SCRIPTS=("${ALL_SCRIPTS[@]}")
+fi
 
 RESULTS_DIR="$SCRIPT_DIR/results"
 N_CVE=${#SCRIPTS[@]}
 N_PROV=${#PROVIDERS[@]}
 WAVES=$N_CVE
 
-log "providers=$N_PROV  cves=$N_CVE  waves-per-provider=$WAVES  results=$RESULTS_DIR"
+log "providers=$N_PROV  cves=$N_CVE  waves-per-provider=$WAVES  timeout=${TIMEOUT}s  results=$RESULTS_DIR"
 
 # ── dry run ───────────────────────────────────────────────────────────────────────
 
@@ -114,7 +136,7 @@ run_provider_worker() {
             CLEARWING_API_KEY="$api_key"   \
             CLEARWING_MODEL="$model"       \
             OUT_DIR="$out_dir"             \
-                bash "$script" >> "$out_dir/run.log" 2>&1 &
+                timeout "$TIMEOUT" bash "$script" >> "$out_dir/run.log" 2>&1 &
 
             pids+=($!)
             printf '[%s] START %s  PID=%d\n' "$model_slug" "$cve_name" "$!"
