@@ -746,19 +746,54 @@
   repo: wolfSSL/wolfssl
   clone_url: https://github.com/wolfSSL/wolfssl.git
   language: C
-  vulnerable_commit: null
-  fix_commit: null
+  vulnerable_commit: 0c9b6397be463c0e5bd7d0c8c1bd8619dc9b3aa8
+  fix_commit: cece804621c454df42a12c377c17faf2b803c413
   fix_pr: https://github.com/wolfSSL/wolfssl/pull/10116
-  files: []
-  vuln_class: null
-  title: wolfSSL DTLS 1.3 ACK pre-auth heap overflow (int trunc).
-  severity: High
+  files:
+    - src/dtls13.c
+  vuln_class: >-
+    CWE-197 Numeric Truncation Error / CWE-787 Out-of-bounds Write
+    (word16 cast of ACK record-number list length causes undersized allocation leading to heap overflow)
+  title: >-
+    wolfSSL DTLS 1.3 ACK pre-auth heap overflow (int trunc).
+  severity: High (CVSS 7.5 / CVSS4 8.8)
   difficulty: hard
-  description: null
+  description: >-
+    In wolfSSL's DTLS 1.3 implementation, the function Dtls13WriteAckMessage computes
+    the ACK message buffer size as msgSz = (word16)(DTLS13_RN_SIZE * recordsCount),
+    where DTLS13_RN_SIZE is 16 bytes and recordsCount is a word16. The seenRecordsCount
+    field tracking list length is itself a word16, meaning if an attacker can cause
+    the linked list to grow beyond what the counter tracks (via desynchronization
+    between the actual list length and the counter, particularly in WOLFSSL_RW_THREADED
+    or HAVE_WRITE_DUP configurations), the multiplication can overflow the word16 cast,
+    producing a truncated (undersized) msgSz. The buffer allocated based on this
+    truncated size is then overrun by the write loop that iterates over the full
+    linked list. An unauthenticated remote peer can trigger this pre-handshake by
+    sending many DTLS records that each invoke Dtls13RtxAddAck. The fix introduces
+    a hard cap (DTLS13_MAX_ACK_RECORDS, default 512) enforced by counting actual
+    linked-list nodes in Dtls13RtxAddAck, independent of the seenRecordsCount field.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/dtls13.c
+      - wolfssl/internal.h
+    symbols:
+      - Dtls13RtxAddAck
+      - Dtls13WriteAckMessage
+      - seenRecordsCount
+      - DTLS13_ACK_MAX_RECORDS
+      - DTLS13_RN_SIZE
+      - msgSz
+      - word16
+      - Dtls13RecordNumber
+    keywords:
+      - integer truncation
+      - word16 overflow
+      - ACK record-number list
+      - heap buffer overflow
+      - pre-authentication
+      - DTLS 1.3
+      - undersized buffer allocation
+      - linked list cap
 
 - cve: CVE-2026-28386
   repo: openssl/openssl
