@@ -2,7 +2,7 @@
 
 Importing one tool subpackage should not initialize the entire scanning stack.
 Sourcehunt imports `clearwing.agent.tools.hunt`, and that path must stay free
-of OT/scapy side effects.
+of OT / raw-socket side effects.
 """
 
 from typing import Any
@@ -28,6 +28,141 @@ def _get_proxy_tools() -> list[Any]:
         from .recon.proxy_tools import get_proxy_tools
 
         return get_proxy_tools()
+    except ImportError:
+        return []
+
+
+def _get_webcrypto_tools() -> list[Any]:
+    try:
+        from .recon.webcrypto_hooks import get_webcrypto_tools
+
+        return get_webcrypto_tools()
+    except ImportError:
+        return []
+
+
+def _get_auth_recorder_tools() -> list[Any]:
+    try:
+        from .recon.auth_recorder import get_auth_recorder_tools
+
+        return get_auth_recorder_tools()
+    except ImportError:
+        return []
+
+
+def _get_mitm_tools() -> list[Any]:
+    try:
+        from .recon.mitm_proxy import get_mitm_tools
+
+        return get_mitm_tools()
+    except ImportError:
+        return []
+
+
+def _get_crypto_tools() -> list[Any]:
+    try:
+        from .crypto.srp_tools import get_srp_tools
+
+        return get_srp_tools()
+    except ImportError:
+        return []
+
+
+def _get_timing_tools() -> list[Any]:
+    try:
+        from .crypto.timing_tools import get_timing_tools
+
+        return get_timing_tools()
+    except ImportError:
+        return []
+
+
+def _get_kdf_tools() -> list[Any]:
+    try:
+        from .crypto.kdf_tools import get_kdf_tools
+
+        return get_kdf_tools()
+    except ImportError:
+        return []
+
+
+def _get_vault_tools() -> list[Any]:
+    try:
+        from .crypto.vault_tools import get_vault_tools
+
+        return get_vault_tools()
+    except ImportError:
+        return []
+
+
+def _get_credential_tools() -> list[Any]:
+    try:
+        from .crypto.credential_tools import get_credential_tools
+
+        return get_credential_tools()
+    except ImportError:
+        return []
+
+
+def _get_mycelium_tools() -> list[Any]:
+    try:
+        from .crypto.mycelium_tools import get_mycelium_tools
+
+        return get_mycelium_tools()
+    except ImportError:
+        return []
+
+
+def _get_recovery_tools() -> list[Any]:
+    try:
+        from .crypto.recovery_tools import get_recovery_tools
+
+        return get_recovery_tools()
+    except ImportError:
+        return []
+
+
+def _get_session_tools() -> list[Any]:
+    try:
+        from .recon.session_tools import get_session_tools
+
+        return get_session_tools()
+    except ImportError:
+        return []
+
+
+def _get_bundle_tools() -> list[Any]:
+    try:
+        from .recon.bundle_tools import get_bundle_tools
+
+        return get_bundle_tools()
+    except ImportError:
+        return []
+
+
+def _get_cc_tools() -> list[Any]:
+    try:
+        from .recon.cc_tools import get_cc_tools
+
+        return get_cc_tools()
+    except ImportError:
+        return []
+
+
+def _get_tls_tools() -> list[Any]:
+    try:
+        from .scan.tls_tools import get_tls_tools
+
+        return get_tls_tools()
+    except ImportError:
+        return []
+
+
+def _get_cve_tools() -> list[Any]:
+    try:
+        from .data.cve_tools import get_cve_tools
+
+        return get_cve_tools()
     except ImportError:
         return []
 
@@ -100,6 +235,21 @@ def get_all_tools() -> list[Any]:
 
     tools.extend(_get_browser_tools())
     tools.extend(_get_proxy_tools())
+    tools.extend(_get_webcrypto_tools())
+    tools.extend(_get_auth_recorder_tools())
+    tools.extend(_get_mitm_tools())
+    tools.extend(_get_crypto_tools())
+    tools.extend(_get_timing_tools())
+    tools.extend(_get_kdf_tools())
+    tools.extend(_get_vault_tools())
+    tools.extend(_get_credential_tools())
+    tools.extend(_get_mycelium_tools())
+    tools.extend(_get_recovery_tools())
+    tools.extend(_get_session_tools())
+    tools.extend(_get_bundle_tools())
+    tools.extend(_get_cc_tools())
+    tools.extend(_get_tls_tools())
+    tools.extend(_get_cve_tools())
     tools.extend(_get_analysis_tools())
     tools.extend(get_mcp_tools())
     tools.extend(get_exploit_search_tools())

@@ -11,9 +11,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import networkx as nx
+
 logger = logging.getLogger(__name__)
 
-import networkx as nx
+
+def _extract_after(text: str, marker: str) -> str:
+    idx = text.lower().find(marker.lower())
+    if idx == -1:
+        return text.strip()
+    return text[idx + len(marker) :].strip()
 
 
 @dataclass
@@ -63,6 +70,12 @@ class KnowledgeGraph:
         "repo",
         "source_file",
         "source_finding",
+        # v0.4: crypto entities
+        "protocol",
+        "algorithm",
+        "key_material",
+        "certificate",
+        "kdf_config",
     )
     RELATIONSHIP_TYPES = (
         "HAS_PORT",
@@ -76,6 +89,14 @@ class KnowledgeGraph:
         "HAS_FINDING",
         "VARIANT_OF",
         "RELATED_TO_CVE",
+        # v0.4: crypto relationships
+        "USES_ALGORITHM",
+        "DERIVES_KEY",
+        "WRAPS_KEY",
+        "DECRYPTS",
+        "AUTHENTICATES_WITH",
+        "PRESENTS_CERT",
+        "VULNERABLE_TO",
     )
 
     def __init__(
@@ -237,6 +258,10 @@ class KnowledgeGraph:
                 return f"No {entity_type} entities found."
             return "\n".join(f"- {e.id}: {e.properties}" for e in entities)
 
+        crypto_result = self._query_crypto(q, query_str.strip())
+        if crypto_result is not None:
+            return crypto_result
+
         if "for" in q or "on" in q:
             # "ports for target 10.0.0.1" or "services on port 80"
             parts = q.replace(" for ", " on ").split(" on ")
@@ -250,6 +275,53 @@ class KnowledgeGraph:
                 return "\n".join(f"- {n.id}: {n.properties}" for n in matched)
 
         return self._get_stats()
+
+    def _query_crypto(self, q: str, original: str) -> str | None:
+        if "algorithms for" in q:
+            proto_name = _extract_after(original, "algorithms for")
+            proto_id = f"protocol:{proto_name}" if not proto_name.startswith("protocol:") else proto_name
+            neighbors = self.get_neighbors(proto_id, rel_type="USES_ALGORITHM")
+            if not neighbors:
+                return f"No algorithms found for {proto_name}."
+            return "\n".join(f"- {n.id}: {n.properties}" for n in neighbors)
+
+        if "key chain" in q:
+            parts = _extract_after(original, "key chain")
+            start_id = _extract_after(parts, "for") if "for" in parts.lower() else parts.split()[-1]
+            chain = self._get_key_chain(start_id)
+            if not chain:
+                return f"No key chain found from {start_id}."
+            lines = [f"Key chain from {start_id}:"]
+            for entity, rel_type, depth in chain:
+                indent = "  " * depth
+                lines.append(f"{indent}--[{rel_type}]--> {entity.id}: {entity.properties}")
+            return "\n".join(lines)
+
+        if "key material for" in q:
+            target = _extract_after(original, "key material for")
+            all_keys = self.get_entities_by_type("key_material")
+            matched = [k for k in all_keys if k.properties.get("target") == target or target in k.id]
+            if not matched:
+                return f"No key material found for {target}."
+            return "\n".join(f"- {k.id}: {k.properties}" for k in matched)
+
+        if "certificates for" in q:
+            target = _extract_after(original, "certificates for")
+            all_certs = self.get_entities_by_type("certificate")
+            matched = [c for c in all_certs if c.properties.get("host") == target or target in c.id]
+            if not matched:
+                return f"No certificates found for {target}."
+            return "\n".join(f"- {c.id}: {c.properties}" for c in matched)
+
+        if "kdf config for" in q:
+            target = _extract_after(original, "kdf config for")
+            all_kdf = self.get_entities_by_type("kdf_config")
+            matched = [k for k in all_kdf if k.properties.get("target") == target or target in k.id]
+            if not matched:
+                return f"No KDF config found for {target}."
+            return "\n".join(f"- {k.id}: {k.properties}" for k in matched)
+
+        return None
 
     def _get_stats(self) -> str:
         with self._lock:
@@ -378,6 +450,54 @@ class KnowledgeGraph:
             self.add_relationship(finding_id, related_cve, "RELATED_TO_CVE")
 
         return entity
+
+    # ------------------------------------------------------------------
+    # v0.4 crypto helpers
+    # ------------------------------------------------------------------
+
+    def add_protocol(self, name: str, **kwargs) -> Entity:
+        """Register a cryptographic protocol (e.g., SRP-6a, TLS)."""
+        return self.add_entity("protocol", f"protocol:{name}", name=name, **kwargs)
+
+    def add_algorithm(self, name: str, **kwargs) -> Entity:
+        """Register a cryptographic algorithm (e.g., AES-256-GCM)."""
+        return self.add_entity("algorithm", f"algorithm:{name}", name=name, **kwargs)
+
+    def add_key_material(self, key_type: str, target: str, **kwargs) -> Entity:
+        """Register key material (e.g., AUK, vault key, SRP verifier)."""
+        key_id = f"key:{key_type}:{target}"
+        return self.add_entity("key_material", key_id, key_type=key_type, target=target, **kwargs)
+
+    def add_certificate(self, host: str, port: int = 443, **kwargs) -> Entity:
+        """Register a TLS certificate. Auto-links to target if it exists."""
+        cert_id = f"cert:{host}:{port}"
+        entity = self.add_entity("certificate", cert_id, host=host, port=port, **kwargs)
+        if self.get_entity(host) is not None:
+            self.add_relationship(host, cert_id, "PRESENTS_CERT")
+        return entity
+
+    def add_kdf_config(self, algorithm: str, iterations: int, target: str, **kwargs) -> Entity:
+        """Register a KDF configuration (algorithm + iteration count + target)."""
+        kdf_id = f"kdf:{algorithm}:{iterations}:{target}"
+        return self.add_entity(
+            "kdf_config", kdf_id, algorithm=algorithm, iterations=iterations, target=target, **kwargs
+        )
+
+    def _get_key_chain(self, start_id: str) -> list[tuple[Entity, str, int]]:
+        """BFS traversal of DERIVES_KEY and WRAPS_KEY edges from a starting entity."""
+        chain: list[tuple[Entity, str, int]] = []
+        visited: set[str] = {start_id}
+        queue: list[tuple[str, int]] = [(start_id, 0)]
+        while queue:
+            current_id, depth = queue.pop(0)
+            for rel in self.get_relationships(current_id, direction="out"):
+                if rel.rel_type in ("DERIVES_KEY", "WRAPS_KEY", "DECRYPTS") and rel.target_id not in visited:
+                    visited.add(rel.target_id)
+                    neighbor = self.get_entity(rel.target_id)
+                    if neighbor:
+                        chain.append((neighbor, rel.rel_type, depth + 1))
+                        queue.append((rel.target_id, depth + 1))
+        return chain
 
     # ------------------------------------------------------------------
     # Persistence

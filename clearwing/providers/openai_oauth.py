@@ -1,8 +1,13 @@
-"""OpenAI ChatGPT/Codex OAuth support.
+"""OAuth support for OpenAI Codex and Anthropic Claude Code.
 
-This mirrors the ChatGPT subscription OAuth flow used by the Codex CLI:
-browser PKCE login on localhost, refresh-token persistence under
-``~/.clearwing/auth/``, and authenticated calls to the ChatGPT backend API.
+OpenAI Codex: mirrors the ChatGPT subscription OAuth flow used by the
+Codex CLI — browser PKCE login on localhost, refresh-token persistence
+under ``~/.clearwing/auth/``, and authenticated calls to the ChatGPT
+backend API.
+
+Anthropic Claude Code: PKCE browser login against ``claude.ai``, with
+token exchange and refresh via ``console.anthropic.com``. Credentials
+are stored alongside the OpenAI ones and auto-refreshed on demand.
 """
 
 from __future__ import annotations
@@ -13,7 +18,8 @@ import json
 import os
 import queue
 import secrets
-import socket
+import select
+import sys
 import tempfile
 import threading
 import time
@@ -44,13 +50,68 @@ OPENAI_CODEX_CALLBACK_PATH = "/auth/callback"
 OPENAI_CODEX_SCOPE = "openid profile email offline_access"
 OPENAI_CODEX_ORIGINATOR = "pi"
 OPENAI_CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api"
-OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.2"
+OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.5"
 OPENAI_CODEX_OAUTH_CONFIG_KEY = "oauth.openai_codex"
 OPENAI_AUTH_JWT_CLAIM_PATH = "https://api.openai.com/auth"
+
+# --- Anthropic Claude Code OAuth constants ----------------------------------
+
+ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+ANTHROPIC_OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
+ANTHROPIC_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"  # noqa: S105
+ANTHROPIC_OAUTH_REFRESH_TOKEN_URLS = (
+    "https://platform.claude.com/v1/oauth/token",
+    "https://console.anthropic.com/v1/oauth/token",
+)
+ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
+ANTHROPIC_OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
+ANTHROPIC_SETUP_TOKEN_PREFIX = "sk-ant-oat01-"  # noqa: S105
+ANTHROPIC_SETUP_TOKEN_MIN_LENGTH = 80
+ANTHROPIC_SETUP_TOKEN_CONFIG_KEY = "token.anthropic_setup_token"  # noqa: S105
+ANTHROPIC_CLAUDE_CODE_COMMON_BETAS = (
+    "interleaved-thinking-2025-05-14",
+    "fine-grained-tool-streaming-2025-05-14",
+    "context-1m-2025-08-07",
+)
+ANTHROPIC_CLAUDE_CODE_OAUTH_BETAS = (
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+)
+ANTHROPIC_CLAUDE_CODE_BETA = ",".join(
+    (*ANTHROPIC_CLAUDE_CODE_COMMON_BETAS, *ANTHROPIC_CLAUDE_CODE_OAUTH_BETAS)
+)
+ANTHROPIC_CLAUDE_CODE_VERSION_FALLBACK = "2.1.74"
+_anthropic_claude_code_version_cache: str | None = None
+
+# --- Common infrastructure --------------------------------------------------
 
 from clearwing.core.config import clearwing_home
 
 AUTH_DIR = clearwing_home() / "auth"
+
+
+def _flush_stdin() -> None:
+    """Discard any buffered stdin so leftover input doesn't poison later prompts."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        try:
+            while select.select([sys.stdin], [], [], 0.0)[0]:
+                sys.stdin.readline()
+        except Exception:
+            pass
+
+
+def _is_remote_session() -> bool:
+    return bool(
+        os.environ.get("SSH_CLIENT")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("SSH_CONNECTION")
+    )
 
 
 @dataclass(frozen=True)
@@ -59,6 +120,13 @@ class OpenAIOAuthCredentials:
     refresh: str
     expires_ms: int
     account_id: str
+
+
+@dataclass(frozen=True)
+class AnthropicOAuthCredentials:
+    token: str
+    refresh: str = ""
+    expires_ms: int = 0
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -144,23 +212,59 @@ def extract_account_id(access_token: str) -> str | None:
     return account_id if isinstance(account_id, str) and account_id else None
 
 
-def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
+def _post_form(
+    url: str,
+    data: dict[str, str],
+    *,
+    error_label: str = "OAuth token request",
+    headers: dict[str, str] | None = None,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
     body = urllib.parse.urlencode(data).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type": "application/x-www-form-urlencoded", **(headers or {})},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI OAuth token request failed: HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"{error_label} failed: HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"OpenAI OAuth token request failed: {exc}") from exc
+        raise RuntimeError(f"{error_label} failed: {exc}") from exc
     return json.loads(raw)
+
+
+def _post_json(
+    url: str,
+    data: dict[str, Any],
+    *,
+    error_label: str = "OAuth token request",
+    headers: dict[str, str] | None = None,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    body = json.dumps(data).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{error_label} failed: HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"{error_label} failed: {exc}") from exc
 
 
 def exchange_authorization_code(
@@ -337,11 +441,67 @@ def ensure_fresh_openai_oauth_credentials(
         return refreshed
 
 
+_CALLBACK_SUCCESS_HTML = b"""\
+<!doctype html><html><head><style>
+body{font-family:system-ui,sans-serif;display:flex;justify-content:center;
+align-items:center;min-height:80vh;background:#f8f9fa}
+.box{text-align:center;padding:2rem}
+h2{color:#16a34a}
+</style></head><body><div class="box">
+<h2>Signed in to Clearwing</h2>
+<p>You can close this tab and return to your terminal.</p>
+</div></body></html>"""
+
+
+def _kill_port_holder(port: int) -> None:
+    """Forcibly free a port held by a stale process.
+
+    First tries a polite /cancel HTTP request.  If the port is still
+    occupied, finds and kills the owning process.
+    """
+    import signal
+    import subprocess
+
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/cancel")
+        urllib.request.urlopen(req, timeout=2)
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+    try:
+        import socket as _sock
+
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+        return
+    except OSError:
+        pass
+
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f":{port}"],
+            text=True,
+            timeout=3,
+        ).strip()
+        for pid_str in out.splitlines():
+            pid = int(pid_str)
+            if pid != os.getpid():
+                os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+
+class _ReuseAddrTCPServer(TCPServer):
+    allow_reuse_address = True
+
+
 def run_callback_server(
     *,
     port: int = OPENAI_CODEX_CALLBACK_PORT,
     callback_path: str = OPENAI_CODEX_CALLBACK_PATH,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = 120,
     expected_state: str | None = None,
 ) -> dict[str, str] | None:
     result_queue: queue.Queue[dict[str, str]] = queue.Queue(maxsize=1)
@@ -352,6 +512,17 @@ def run_callback_server(
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path or "")
+
+            if parsed.path == "/cancel":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"cancelled")
+                try:
+                    result_queue.put_nowait({})
+                except queue.Full:
+                    pass
+                return
+
             if parsed.path != callback_path:
                 self.send_response(404)
                 self.end_headers()
@@ -375,20 +546,22 @@ def run_callback_server(
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(
-                b"<!doctype html><html><body>"
-                b"<p>Authentication successful. Return to your terminal.</p>"
-                b"</body></html>"
-            )
+            self.wfile.write(_CALLBACK_SUCCESS_HTML)
             try:
                 result_queue.put_nowait({"code": code, "state": state})
-            except Exception:
+            except queue.Full:
                 pass
 
-    server: TCPServer | None = None
-    try:
-        server = TCPServer(("127.0.0.1", port), Handler)
-    except OSError:
+    _kill_port_holder(port)
+
+    server: _ReuseAddrTCPServer | None = None
+    for attempt in range(3):
+        try:
+            server = _ReuseAddrTCPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError:
+            time.sleep(0.5 * (attempt + 1))
+    if server is None:
         return None
 
     def _serve() -> None:
@@ -410,53 +583,77 @@ def run_callback_server(
         thread.join(timeout=1.0)
 
 
-def is_callback_port_available() -> bool:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", OPENAI_CODEX_CALLBACK_PORT))
-        return True
-    except OSError:
-        return False
-
-
 def login_openai_oauth(
     *,
     no_open: bool = False,
-    timeout_seconds: int = 60,
-    allow_manual_fallback: bool = True,
+    timeout_seconds: int = 120,
     input_fn=input,
     print_fn=print,
 ) -> OpenAIOAuthCredentials:
-    """Run the browser OAuth flow and persist credentials."""
-    if not is_callback_port_available():
-        raise RuntimeError("Port 1455 is required for OpenAI OAuth but is already in use.")
+    """Run the browser OAuth flow and persist credentials.
+
+    The flow mirrors Codex CLI: open browser → localhost callback server
+    receives the redirect → exchange code for tokens.  Stdin is never
+    read while the callback server is running.  If the callback times
+    out, the URL is shown for manual paste as a fallback.
+    """
+    remote = _is_remote_session() or no_open
 
     verifier, challenge = generate_pkce()
     state = create_state()
     auth_url = build_authorize_url(challenge=challenge, state=state)
 
-    print_fn("OpenAI OAuth")
-    print_fn("1. A browser window should open. Sign in to ChatGPT and approve.")
-    print_fn("2. If the callback page fails to load, paste the browser URL here.")
-    print_fn(auth_url)
+    if remote:
+        print_fn("Open this URL in your browser:")
+        print_fn(f"  {auth_url}")
+        print_fn("")
+        pasted = input_fn("Paste the redirect URL after signing in: ").strip()
+        parsed_code, parsed_state = parse_authorization_input(pasted)
+        if parsed_state and parsed_state != state:
+            raise RuntimeError("State mismatch — paste the URL from this login attempt.")
+        if not parsed_code:
+            raise RuntimeError("Could not extract authorization code from input.")
+        creds = exchange_authorization_code(code=parsed_code, verifier=verifier)
+        save_openai_oauth_credentials(creds)
+        return ensure_fresh_openai_oauth_credentials(skew_seconds=0)
 
+    # Local flow: browser + localhost callback, no stdin reading.
+    browser_opened = False
     if not no_open:
         try:
             webbrowser.open(auth_url)
+            browser_opened = True
         except Exception:
             pass
+
+    if browser_opened:
+        print_fn("Waiting for sign-in in browser...")
+    else:
+        print_fn("Could not open browser. Open this URL manually:")
+        print_fn(f"  {auth_url}")
+        print_fn("Waiting for callback...")
+
+    print_fn(f"(listening on http://localhost:{OPENAI_CODEX_CALLBACK_PORT})")
 
     result = run_callback_server(timeout_seconds=timeout_seconds, expected_state=state)
     code: str | None = result.get("code") if result else None
 
-    if not code and not allow_manual_fallback:
-        raise RuntimeError("Authorization callback not received.")
+    # Drain any accidental keystrokes that accumulated while waiting.
+    _flush_stdin()
 
     if not code:
-        pasted = input_fn("Paste the authorization code (or full redirect URL): ").strip()
+        # Callback server timed out or failed — fall back to manual paste.
+        print_fn("")
+        print_fn("Browser callback was not received.")
+        if browser_opened:
+            print_fn("If the page didn't load, copy the URL from your browser.")
+        else:
+            print_fn("Open the URL above, sign in, then paste the redirect URL.")
+        print_fn("")
+        pasted = input_fn("Paste the redirect URL: ").strip()
         parsed_code, parsed_state = parse_authorization_input(pasted)
         if parsed_state and parsed_state != state:
-            raise RuntimeError("State mismatch. Paste the redirect URL from this login attempt.")
+            raise RuntimeError("State mismatch — paste the URL from this login attempt.")
         code = parsed_code
 
     if not code:
@@ -467,25 +664,351 @@ def login_openai_oauth(
     return ensure_fresh_openai_oauth_credentials(skew_seconds=0)
 
 
+# --- Anthropic Claude Code OAuth flow ---------------------------------------
+
+
+def detect_anthropic_claude_code_version() -> str:
+    import subprocess
+
+    for cmd in ("claude", "claude-code"):
+        try:
+            result = subprocess.run(
+                [cmd, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            continue
+        version = (result.stdout or "").strip().split()
+        if result.returncode == 0 and version and version[0][:1].isdigit():
+            return version[0]
+    return ANTHROPIC_CLAUDE_CODE_VERSION_FALLBACK
+
+
+def anthropic_claude_code_user_agent() -> str:
+    global _anthropic_claude_code_version_cache  # noqa: PLW0603
+    if _anthropic_claude_code_version_cache is None:
+        _anthropic_claude_code_version_cache = detect_anthropic_claude_code_version()
+    return f"claude-cli/{_anthropic_claude_code_version_cache} (external, cli)"
+
+
+def build_anthropic_authorize_url(
+    *,
+    challenge: str,
+    state: str,
+    redirect_uri: str = ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI,
+) -> str:
+    params = {
+        "code": "true",
+        "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": ANTHROPIC_OAUTH_SCOPE,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    return f"{ANTHROPIC_OAUTH_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
+
+
+def exchange_anthropic_authorization_code(
+    *,
+    code: str,
+    state: str,
+    verifier: str,
+    redirect_uri: str = ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI,
+) -> AnthropicOAuthCredentials:
+    data = _post_json(
+        ANTHROPIC_OAUTH_TOKEN_URL,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
+            "code_verifier": verifier,
+            "state": state,
+        },
+        error_label="Anthropic OAuth token exchange",
+        headers={"User-Agent": anthropic_claude_code_user_agent()},
+    )
+    access = data.get("access_token")
+    if not isinstance(access, str) or not access:
+        raise RuntimeError("Anthropic OAuth token exchange failed: missing access_token.")
+    error = validate_anthropic_setup_token(access)
+    if error:
+        raise RuntimeError(f"Anthropic OAuth token exchange returned an invalid token: {error}")
+    refresh = data.get("refresh_token")
+    expires_in = data.get("expires_in")
+    expires_ms = (
+        int(time.time() * 1000) + int(float(expires_in) * 1000)
+        if isinstance(expires_in, int | float)
+        else 0
+    )
+    return AnthropicOAuthCredentials(
+        token=access,
+        refresh=refresh if isinstance(refresh, str) else "",
+        expires_ms=expires_ms,
+    )
+
+
+def refresh_anthropic_token(refresh_token: str) -> AnthropicOAuthCredentials:
+    if not refresh_token:
+        raise RuntimeError("Anthropic OAuth token refresh failed: missing refresh token.")
+
+    last_error: Exception | None = None
+    for endpoint in ANTHROPIC_OAUTH_REFRESH_TOKEN_URLS:
+        try:
+            data = _post_form(
+                endpoint,
+                {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
+                },
+                error_label=f"Anthropic OAuth token refresh at {endpoint}",
+                headers={"User-Agent": anthropic_claude_code_user_agent()},
+                timeout_seconds=10,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            continue
+
+        access = data.get("access_token")
+        if not isinstance(access, str) or not access:
+            raise RuntimeError("Anthropic OAuth token refresh failed: missing access_token.")
+        error = validate_anthropic_setup_token(access)
+        if error:
+            raise RuntimeError(f"Anthropic OAuth token refresh returned an invalid token: {error}")
+        next_refresh = data.get("refresh_token")
+        expires_in = data.get("expires_in", 3600)
+        return AnthropicOAuthCredentials(
+            token=access,
+            refresh=next_refresh if isinstance(next_refresh, str) and next_refresh else refresh_token,
+            expires_ms=int(time.time() * 1000) + int(float(expires_in) * 1000),
+        )
+
+    if last_error is not None:
+        raise RuntimeError(f"Anthropic OAuth token refresh failed: {last_error}") from last_error
+    raise RuntimeError("Anthropic OAuth token refresh failed.")
+
+
+def validate_anthropic_setup_token(token: str) -> str | None:
+    if not token:
+        return "Token is empty."
+    if token.startswith("sk-ant-api"):
+        return "Token is an Anthropic API key, not an OAuth/setup token."
+    if token.startswith(ANTHROPIC_SETUP_TOKEN_PREFIX) and len(token) < ANTHROPIC_SETUP_TOKEN_MIN_LENGTH:
+        return f"Token is too short (min {ANTHROPIC_SETUP_TOKEN_MIN_LENGTH} chars)."
+    if token.startswith("sk-ant-") or token.startswith("eyJ") or token.startswith("cc-"):
+        return None
+    return "Token does not look like an Anthropic OAuth/setup token."
+
+
+def anthropic_credentials_to_dict(creds: AnthropicOAuthCredentials) -> dict[str, Any]:
+    data: dict[str, Any] = {"token": creds.token}
+    if creds.refresh:
+        data["refresh"] = creds.refresh
+    if creds.expires_ms:
+        data["expires_ms"] = int(creds.expires_ms)
+    return data
+
+
+def anthropic_credentials_from_value(value: Any) -> AnthropicOAuthCredentials | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return None
+    if not isinstance(value, dict):
+        return None
+    token = (
+        value.get("token")
+        or value.get("access")
+        or value.get("accessToken")
+        or value.get("access_token")
+    )
+    if not isinstance(token, str) or not token:
+        return None
+    refresh = value.get("refresh") or value.get("refreshToken") or value.get("refresh_token")
+    expires_ms = (
+        value.get("expires_ms")
+        or value.get("expiresAt")
+        or value.get("expires_at_ms")
+        or value.get("expires")
+        or 0
+    )
+    return AnthropicOAuthCredentials(
+        token=token,
+        refresh=refresh if isinstance(refresh, str) else "",
+        expires_ms=int(expires_ms) if isinstance(expires_ms, int | float) else 0,
+    )
+
+
+_CLAUDE_CLI_CREDENTIAL_PATH = Path.home() / ".claude" / ".credentials.json"
+
+
+def load_anthropic_oauth_credentials() -> AnthropicOAuthCredentials | None:
+    path = _auth_file(ANTHROPIC_SETUP_TOKEN_CONFIG_KEY)
+    try:
+        creds = anthropic_credentials_from_value(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        if creds:
+            return creds
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    if _CLAUDE_CLI_CREDENTIAL_PATH.exists():
+        try:
+            data = json.loads(_CLAUDE_CLI_CREDENTIAL_PATH.read_text(encoding="utf-8"))
+            oauth = data.get("claudeAiOauth")
+            if isinstance(oauth, dict):
+                return anthropic_credentials_from_value(oauth)
+        except Exception:
+            pass
+    return None
+
+
+def save_anthropic_oauth_credentials(creds: AnthropicOAuthCredentials) -> None:
+    _ensure_auth_dir()
+    path = _auth_file(ANTHROPIC_SETUP_TOKEN_CONFIG_KEY)
+    fd, tmp = tempfile.mkstemp(dir=AUTH_DIR, suffix=".tmp", prefix=f"{ANTHROPIC_SETUP_TOKEN_CONFIG_KEY}.")
+    try:
+        os.write(fd, json.dumps(anthropic_credentials_to_dict(creds), indent=2).encode("utf-8"))
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def ensure_fresh_anthropic_oauth_credentials(
+    *,
+    skew_seconds: int = 300,
+) -> AnthropicOAuthCredentials:
+    with _auth_lock(ANTHROPIC_SETUP_TOKEN_CONFIG_KEY):
+        creds = load_anthropic_oauth_credentials()
+        if not creds:
+            raise RuntimeError(
+                "Anthropic OAuth is not configured. Run: `clearwing setup --provider anthropic-oauth`"
+            )
+        if not creds.refresh or not creds.expires_ms:
+            return creds
+        now_ms = int(time.time() * 1000)
+        if creds.expires_ms > now_ms + skew_seconds * 1000:
+            return creds
+        refreshed = refresh_anthropic_token(creds.refresh)
+        save_anthropic_oauth_credentials(refreshed)
+        return refreshed
+
+
+def anthropic_oauth_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": ANTHROPIC_CLAUDE_CODE_BETA,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "user-agent": anthropic_claude_code_user_agent(),
+        "x-app": "cli",
+    }
+
+
+def login_anthropic_oauth(
+    *,
+    no_open: bool = False,
+    timeout_seconds: int = 300,
+    input_fn=input,
+    print_fn=print,
+) -> AnthropicOAuthCredentials:
+    """Anthropic OAuth via the hosted callback page (paste flow).
+
+    Unlike OpenAI, Anthropic's OAuth redirects to a hosted page at
+    console.anthropic.com that displays the authorization code for the
+    user to copy-paste.  No localhost callback server is needed.
+    """
+    verifier, challenge = generate_pkce()
+    state = verifier
+    auth_url = build_anthropic_authorize_url(
+        challenge=challenge,
+        state=state,
+        redirect_uri=ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI,
+    )
+
+    browser_opened = False
+    if not (no_open or _is_remote_session()):
+        try:
+            webbrowser.open(auth_url)
+            browser_opened = True
+        except Exception:
+            pass
+
+    if browser_opened:
+        print_fn("Opening browser to sign in to Claude...")
+    else:
+        print_fn("Open this URL in your browser:")
+    print_fn(f"  {auth_url}")
+    print_fn("")
+    print_fn("After signing in, you'll see a code. Paste it below.")
+    print_fn("")
+
+    pasted = input_fn("Paste code: ").strip()
+    code, parsed_state = parse_authorization_input(pasted)
+    if parsed_state and parsed_state != state:
+        raise RuntimeError("State mismatch — paste the code from this login attempt.")
+    if not code:
+        raise RuntimeError("Missing authorization code.")
+    creds = exchange_anthropic_authorization_code(
+        code=code,
+        state=parsed_state or state,
+        verifier=verifier,
+        redirect_uri=ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI,
+    )
+    save_anthropic_oauth_credentials(creds)
+    return creds
+
+
 __all__ = [
+    "ANTHROPIC_CLAUDE_CODE_BETA",
+    "ANTHROPIC_SETUP_TOKEN_CONFIG_KEY",
+    "AnthropicOAuthCredentials",
     "OPENAI_AUTH_JWT_CLAIM_PATH",
     "OPENAI_CODEX_DEFAULT_BASE_URL",
     "OPENAI_CODEX_DEFAULT_MODEL",
     "OPENAI_CODEX_OAUTH_CONFIG_KEY",
     "OpenAIOAuthCredentials",
+    "anthropic_claude_code_user_agent",
+    "anthropic_oauth_headers",
+    "build_anthropic_authorize_url",
     "build_authorize_url",
     "create_state",
     "credentials_from_value",
     "credentials_to_dict",
     "decode_jwt_payload",
     "delete_openai_oauth_credentials",
+    "ensure_fresh_anthropic_oauth_credentials",
     "ensure_fresh_openai_oauth_credentials",
+    "exchange_anthropic_authorization_code",
     "exchange_authorization_code",
     "extract_account_id",
     "generate_pkce",
+    "load_anthropic_oauth_credentials",
     "load_openai_oauth_credentials",
+    "login_anthropic_oauth",
     "login_openai_oauth",
     "parse_authorization_input",
+    "refresh_anthropic_token",
     "refresh_openai_oauth_token",
+    "save_anthropic_oauth_credentials",
     "save_openai_oauth_credentials",
+    "validate_anthropic_setup_token",
 ]

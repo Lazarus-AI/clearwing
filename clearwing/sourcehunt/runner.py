@@ -24,9 +24,6 @@ from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.native import AsyncLLMClient
 from clearwing.providers import (
-    ENV_ANTHROPIC_KEY,
-    ENV_API_KEY,
-    ENV_BASE_URL,
     ProviderManager,
     resolve_llm_endpoint,
 )
@@ -218,6 +215,7 @@ class SourceHuntRunner:
         gvisor_runtime: str | None = None,
         preprocessing: bool = True,
         seed_harness_crashes: bool = False,
+        respect_gitignore: bool = False,
         *,
         config: SourceHuntConfig | None = None,
     ):
@@ -414,6 +412,7 @@ class SourceHuntRunner:
         self.exploiter_llm = exploiter_llm
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
+        self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
@@ -436,9 +435,30 @@ class SourceHuntRunner:
         self._injected_historical_db = None
         self._enable_behavior_monitor = enable_behavior_monitor
         self._enable_artifact_store = enable_artifact_store
-        self._gvisor_runtime = gvisor_runtime
+        self._gvisor_runtime = self._check_runtime_available(gvisor_runtime)
         self._preprocessing = preprocessing
         self._seed_harness_crashes = seed_harness_crashes
+        self._respect_gitignore = respect_gitignore
+
+    @staticmethod
+    def _check_runtime_available(runtime: str | None) -> str | None:
+        if not runtime:
+            return None
+        try:
+            import docker
+            info = docker.from_env().info()
+            runtimes = info.get("Runtimes") or {}
+            if runtime in runtimes:
+                return runtime
+            logger.warning(
+                "Docker runtime %r not installed (available: %s) — "
+                "sandboxes will use the default runtime instead",
+                runtime,
+                ", ".join(runtimes) or "runc",
+            )
+        except Exception:
+            logger.debug("Could not query Docker runtimes", exc_info=True)
+        return None
 
     def _inject_campaign_pool(
         self,
@@ -528,11 +548,12 @@ class SourceHuntRunner:
                     if not self._preprocessing:
                         ranker_config.include_static_hints = False
                         ranker_config.include_imports_by = False
-                    if ranker_llm.provider_name == "openai_resp":
+                    if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
                         ranker_config.chunk_size = 30
                         ranker_config.max_inflight_chunks = self.max_parallel
                         logger.info(
-                            "Ranker tuned for openai_resp backend: chunk_size=%d max_inflight_chunks=%d",
+                            "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
+                            ranker_llm.provider_name,
                             ranker_config.chunk_size,
                             ranker_config.max_inflight_chunks,
                         )
@@ -547,6 +568,9 @@ class SourceHuntRunner:
                         "All files assigned default priority scores (surface=3, influence=2)",
                     )
                     self._emit_stage("rank", "degraded", detail="Default priority scores used")
+            elif not files:
+                logger.info("Ranker skipped; no candidate files")
+                self._emit_stage("rank", "completed", detail="No candidate files")
             else:
                 logger.info("Ranker skipped; no LLM available")
                 pipeline_status.record_degraded(
@@ -760,6 +784,8 @@ class SourceHuntRunner:
                         if p.get("tier") != "C" or self.tier_budget.tier_c_fraction > 0
                     ]
                 )
+            elif not files:
+                logger.info("HunterPool skipped; no candidate files")
             else:
                 logger.info("HunterPool skipped; no LLM available")
 
@@ -1287,6 +1313,12 @@ class SourceHuntRunner:
                     self._sandbox_manager.cleanup(remove_image=False)
                 except Exception:
                     logger.debug("HunterSandbox cleanup failed", exc_info=True)
+            if self._preprocessor is not None:
+                try:
+                    self._preprocessor.cleanup()
+                except Exception:
+                    logger.debug("Preprocessor cleanup failed", exc_info=True)
+                self._preprocessor = None
 
     @property
     def session_id(self) -> str:
@@ -1636,7 +1668,9 @@ class SourceHuntRunner:
             propagate_reachability=(self.depth != "quick" and self._preprocessing),
             run_semgrep=(self.depth != "quick" and self._preprocessing),
             run_taint=(self.depth != "quick" and self._preprocessing),
+            respect_gitignore=self._respect_gitignore,
         )
+        self._preprocessor = pp
         return pp.run()
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
@@ -1684,7 +1718,9 @@ class SourceHuntRunner:
             self.sandbox_factory = lambda **kw: manager.spawn(
                 writable_workspace=True,
                 memory_mb=kw.pop("memory_mb", 16384),
-                cpus=kw.pop("cpus", 8.0),
+                # 0.0 lets Docker schedule up to host capacity; fixed high
+                # CPU caps can fail on constrained daemon setups (e.g. Colima).
+                cpus=kw.pop("cpus", 0.0),
                 timeout_seconds=kw.pop("timeout_seconds", 600),
                 runtime=kw.pop("runtime", gvisor_rt),
                 **kw,
@@ -1785,86 +1821,57 @@ class SourceHuntRunner:
 
         Resolution order:
           1. Explicit kwarg override (ranker_llm=, hunter_llm=, etc.)
-          2. self.provider_manager (injected by the sourcehunt CLI
-             command, which builds one from `resolve_llm_endpoint()`)
-          3. self.model_override (single model for all tasks,
-             resolved through the endpoint layer)
-          4. A default `ProviderManager.for_endpoint(resolve_llm_endpoint())`
-             — which picks up CLEARWING_BASE_URL / CLEARWING_API_KEY /
-             CLEARWING_MODEL env vars or falls through to Anthropic
-             direct via ANTHROPIC_API_KEY.
+          2. self.provider_manager — the centralized source of truth.
+             When set, ALL tasks use the same configured provider.
+             Failures propagate (no silent fallthrough to defaults).
+          3. self.model_override → resolve_llm_endpoint(cli_model=...)
+          4. resolve_llm_endpoint() from env/config
           5. None — caller falls back to a no-LLM path
         """
         if override is not None:
             return override
 
-        # Inject-via-constructor wins (sourcehunt CLI command + tests)
         if self.provider_manager is not None:
-            try:
-                return self.provider_manager.get_llm(task)
-            except Exception:
-                logger.debug("Injected ProviderManager failed for task=%s", task, exc_info=True)
+            return self.provider_manager.get_llm(task)
 
-        # Preflight: does *any* credential / endpoint exist? If not,
-        # skip the LLM entirely so we don't throw a noisy stack trace
-        # at first .invoke().
-        has_creds = any(
-            os.environ.get(name)
-            for name in (ENV_BASE_URL, ENV_API_KEY, ENV_ANTHROPIC_KEY, "OPENAI_API_KEY")
-        )
-        if not has_creds:
-            logger.debug("No API key / endpoint in environment; skipping LLM for task=%s", task)
-            return None
+        if self.model_override:
+            return self._build_llm_from_model_string(self.model_override)
+
+        try:
+            endpoint = resolve_llm_endpoint()
+            if endpoint.api_key:
+                return ProviderManager.for_endpoint(endpoint).get_llm(task)
+        except Exception:
+            logger.debug("Default endpoint resolution failed for task=%s", task, exc_info=True)
+        return None
 
     def _get_native_client(
         self,
         task: str,
         override: AsyncLLMClient | None,
     ) -> AsyncLLMClient | None:
-        """Return a native async LLM client for sourcehunt tasks."""
+        """Return a native async LLM client for sourcehunt tasks.
+
+        When a provider_manager is injected (the normal CLI path), it is
+        the single source of truth — failures propagate instead of
+        silently falling through to a different provider/model.
+        """
         if override is not None:
             return override
 
         if self.provider_manager is not None:
-            try:
-                return self.provider_manager.get_native_client(task)
-            except Exception:
-                logger.debug(
-                    "Injected ProviderManager native client failed for task=%s", task, exc_info=True
-                )
-
-        has_creds = any(
-            os.environ.get(name)
-            for name in (ENV_BASE_URL, ENV_API_KEY, ENV_ANTHROPIC_KEY, "OPENAI_API_KEY")
-        )
-        if not has_creds:
-            logger.debug(
-                "No API key / endpoint in environment; skipping native client for task=%s", task
-            )
-            return None
+            return self.provider_manager.get_native_client(task)
 
         if self.model_override:
             return self._build_native_from_model_string(self.model_override)
 
         try:
             endpoint = resolve_llm_endpoint()
-            return ProviderManager.for_endpoint(endpoint).get_native_client(task)
+            if endpoint.api_key:
+                return ProviderManager.for_endpoint(endpoint).get_native_client(task)
         except Exception:
-            logger.debug("Default endpoint native resolution failed", exc_info=True)
-            return None
-
-        # --model override (single model string, routed through the
-        # same endpoint resolution as --base-url)
-        if self.model_override:
-            return self._build_llm_from_model_string(self.model_override)
-
-        # Last resort — build a default manager from the env triple
-        try:
-            endpoint = resolve_llm_endpoint()
-            return ProviderManager.for_endpoint(endpoint).get_llm(task)
-        except Exception:
-            logger.debug("Default endpoint resolution failed", exc_info=True)
-            return None
+            logger.debug("Default endpoint native resolution failed for task=%s", task, exc_info=True)
+        return None
 
     def _build_llm_from_model_string(self, model: str) -> Any:
         """Build a single LLM from a model string. Used by --model override.

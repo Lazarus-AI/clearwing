@@ -162,6 +162,14 @@ def _details_block(f: Finding) -> str:
         parts.append(
             f"stability: {f['stability_classification']} ({rate:.0f}% reproduction)"
         )
+    if f.get("crypto_protocol"):
+        parts.append(f"crypto_protocol: {f['crypto_protocol']}")
+    if f.get("algorithm"):
+        parts.append(f"algorithm: {f['algorithm']}")
+    if f.get("crypto_attack_class"):
+        parts.append(f"attack_class: {f['crypto_attack_class']}")
+    if f.get("key_material_exposed"):
+        parts.append(f"key_material: {f['key_material_exposed']}")
     return "\n\n".join(parts)
 
 
@@ -268,6 +276,14 @@ def _render_markdown(
         lines.append(f"- **Discovered by:** {f.get('discovered_by', 'unknown')}")
         if f.get("verified") is True:
             lines.append("- **Verified:** yes")
+        if f.get("crypto_protocol"):
+            lines.append(f"- **Crypto protocol:** {f['crypto_protocol']}")
+        if f.get("algorithm"):
+            lines.append(f"- **Algorithm:** {f['algorithm']}")
+        if f.get("crypto_attack_class"):
+            lines.append(f"- **Attack class:** {f['crypto_attack_class']}")
+        if f.get("key_material_exposed"):
+            lines.append(f"- **Key material at risk:** {f['key_material_exposed']}")
         lines.append("")
         lines.append(f.get("description", ""))
         if f.get("code_snippet"):

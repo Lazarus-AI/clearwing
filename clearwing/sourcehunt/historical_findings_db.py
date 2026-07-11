@@ -7,7 +7,6 @@ Read once at campaign start, written once at campaign end.
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -41,6 +40,13 @@ CREATE INDEX IF NOT EXISTS idx_primitive ON findings(primitive_type);
 CREATE INDEX IF NOT EXISTS idx_file ON findings(file);
 """
 
+_MIGRATIONS = [
+    "ALTER TABLE findings ADD COLUMN crypto_protocol TEXT",
+    "ALTER TABLE findings ADD COLUMN algorithm TEXT",
+    "ALTER TABLE findings ADD COLUMN crypto_attack_class TEXT",
+    "ALTER TABLE findings ADD COLUMN key_material_exposed TEXT",
+]
+
 
 def _default_db_path() -> Path:
     from clearwing.core.config import clearwing_home
@@ -60,6 +66,11 @@ class HistoricalFindingsDB:
 
     def _init_schema(self) -> None:
         self._conn.executescript(_SCHEMA)
+        for migration in _MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass
         self._conn.commit()
 
     def close(self) -> None:
@@ -84,8 +95,11 @@ class HistoricalFindingsDB:
                     (id, file, line_number, finding_type, primitive_type,
                      cluster_id, cwe, severity, description, code_snippet,
                      evidence_level, repo_url, campaign_session_id,
-                     discovered_at, verified)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     discovered_at, verified,
+                     crypto_protocol, algorithm, crypto_attack_class,
+                     key_material_exposed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?)""",
                     (
                         fid,
                         f.get("file"),
@@ -102,6 +116,10 @@ class HistoricalFindingsDB:
                         session_id,
                         now,
                         1 if f.get("verified") else 0,
+                        f.get("crypto_protocol"),
+                        f.get("algorithm"),
+                        f.get("crypto_attack_class"),
+                        f.get("key_material_exposed"),
                     ),
                 )
                 count += 1

@@ -6,8 +6,7 @@ from typing import Any
 
 from genai_pyo3 import ChatMessage
 
-from clearwing.agent.tooling import ensure_agent_tool
-from clearwing.llm.native import AsyncLLMClient, response_text, response_tool_calls
+from clearwing.llm.native import AsyncLLMClient
 
 
 def extract_text_content(content: Any) -> str:
@@ -195,6 +194,8 @@ class ChatModel:
         tool_choice: str | None = None,
         **_: Any,
     ) -> ChatModel:
+        from clearwing.agent.tooling import ensure_agent_tool
+
         native_tools = [ensure_agent_tool(tool) for tool in tools]
         return ChatModel(
             model_name=self.model_name,
@@ -213,9 +214,8 @@ class ChatModel:
             system=system or self.default_system,
             tools=self.bound_tools or None,
         )
-        tool_calls = response_tool_calls(response)
         return AIMessage(
-            content=response_text(response),
+            content=response.first_text or "",
             tool_calls=[
                 {
                     "id": tool_call.call_id,
@@ -223,7 +223,7 @@ class ChatModel:
                     "args": tool_call.fn_arguments,
                     "type": "tool_call",
                 }
-                for tool_call in tool_calls
+                for tool_call in response.tool_calls
             ],
             response_metadata={
                 "usage": {
@@ -250,9 +250,8 @@ class ChatModel:
                 system=system or self.default_system,
                 tools=self.bound_tools or None,
             )
-        tool_calls = response_tool_calls(response)
         return AIMessage(
-            content=response_text(response),
+            content=response.first_text or "",
             tool_calls=[
                 {
                     "id": tool_call.call_id,
@@ -260,7 +259,7 @@ class ChatModel:
                     "args": tool_call.fn_arguments,
                     "type": "tool_call",
                 }
-                for tool_call in tool_calls
+                for tool_call in response.tool_calls
             ],
             response_metadata={
                 "usage": {

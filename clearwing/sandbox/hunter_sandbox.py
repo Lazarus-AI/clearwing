@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import shutil
 import tempfile
 
@@ -45,7 +46,11 @@ class HunterSandbox:
     # image, and spawn containers from either one by name.
     DEFAULT_EXTRA_VARIANTS: tuple[tuple[str, ...], ...] = ()
 
-    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git", "ltrace"]
+    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git"]
+    # Some apt packages are architecture/repo-dependent (for example, ltrace is
+    # unavailable in certain debian slim variants). Keep them best-effort so a
+    # missing optional debug tool doesn't disable the entire sandbox pipeline.
+    DEEP_AGENT_OPTIONAL_PACKAGES = ["ltrace"]
     EXPLOIT_AGENT_PACKAGES = ["gdb", "python3-pip", "ruby", "binutils"]
     EXPLOIT_POST_INSTALL = [
         "pip3 install --break-system-packages pwntools ROPgadget seccomp-tools 2>/dev/null || true",
@@ -75,12 +80,16 @@ class HunterSandbox:
         for v in self.extra_variants:
             validate_sanitizer_combo(v)
         self.extra_packages = list(extra_packages or [])
+        self.optional_packages: list[str] = []
         self.post_install_commands = list(post_install_commands or [])
         self.deep_agent_mode = deep_agent_mode
         if deep_agent_mode:
             for pkg in self.DEEP_AGENT_PACKAGES:
                 if pkg not in self.extra_packages:
                     self.extra_packages.append(pkg)
+            for pkg in self.DEEP_AGENT_OPTIONAL_PACKAGES:
+                if pkg not in self.optional_packages:
+                    self.optional_packages.append(pkg)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
         self._image_tag: str | None = None  # primary variant tag
@@ -152,7 +161,7 @@ class HunterSandbox:
                 ",".join(sanitizers),
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True)
+                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64")
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
@@ -321,7 +330,14 @@ class HunterSandbox:
         # Compute the env block for THIS variant (not the recipe's default)
         env_dict = compute_sanitizer_env(recipe, variant)
 
-        apt_packages = " ".join(recipe.apt_packages + self.extra_packages)
+        required_packages = list(
+            dict.fromkeys([*recipe.apt_packages, *self.extra_packages])
+        )
+        optional_packages = [
+            pkg
+            for pkg in dict.fromkeys(self.optional_packages)
+            if pkg not in required_packages
+        ]
         env_lines = []
         for k, v in env_dict.items():
             if " " in v or '"' in v:
@@ -331,12 +347,19 @@ class HunterSandbox:
                 env_lines.append(f"ENV {k}={v}")
         env_block = "\n".join(env_lines)
 
-        if apt_packages.strip():
-            apt_block = (
-                "RUN apt-get update -qq && "
-                f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {apt_packages} && "
-                "rm -rf /var/lib/apt/lists/*"
-            )
+        if required_packages:
+            apt_lines = [
+                "RUN apt-get update -qq && \\",
+                "    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
+                f"{' '.join(required_packages)} && \\",
+            ]
+            for pkg in optional_packages:
+                apt_lines.append(
+                    "    (DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
+                    f"{pkg} || echo \"Optional package {pkg} unavailable; skipping\") && \\"
+                )
+            apt_lines.append("    rm -rf /var/lib/apt/lists/*")
+            apt_block = "\n".join(apt_lines)
         else:
             apt_block = "# (no apt packages)"
 

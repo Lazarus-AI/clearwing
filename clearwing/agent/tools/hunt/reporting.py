@@ -32,6 +32,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         poc: str = "",
         confidence: str = "medium",
         evidence_level: str = "suspicion",
+        crypto_protocol: str = "",
+        algorithm: str = "",
+        crypto_attack_class: str = "",
+        key_material_exposed: str = "",
         **_: object,
     ) -> str:
         """Record a finding into the hunter's state.
@@ -42,19 +46,23 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         Args:
             file: Repo-relative file path where the finding lives.
             line_number: 1-indexed line number.
-            finding_type: e.g. sql_injection, memory_safety, propagation_buffer_size.
+            finding_type: e.g. sql_injection, memory_safety, timing_side_channel.
             severity: critical / high / medium / low / info.
-            cwe: CWE identifier (e.g. CWE-89, CWE-787).
+            cwe: CWE identifier (e.g. CWE-89, CWE-787, CWE-208).
             description: One- or two-sentence description of the bug.
             code_snippet: Relevant code snippet (helpful for triage).
             crash_evidence: Sanitizer/PoC output if available.
             poc: Proof-of-concept input.
             confidence: high / medium / low.
             evidence_level: One of [suspicion, static_corroboration,
-                crash_reproduced, root_cause_explained, exploit_demonstrated,
-                patch_validated]. Defaults to suspicion; bump to crash_reproduced
-                if you have a sanitizer report, or root_cause_explained if you
-                wrote a coherent explanation.
+                parameter_anomaly, timing_confirmed, crash_reproduced,
+                root_cause_explained, assumption_broken, exploit_demonstrated,
+                key_material_recovered, patch_validated]. Defaults to suspicion.
+            crypto_protocol: Crypto protocol name (e.g. SRP-6a, TLS 1.3).
+            algorithm: Algorithm name (e.g. PBKDF2-HMAC-SHA256, AES-256-GCM).
+            crypto_attack_class: Attack class (e.g. timing_side_channel,
+                parameter_validation, nonce_reuse, padding_oracle).
+            key_material_exposed: Description of key material at risk.
         """
         finding = Finding(
             id=f"hunter-{uuid.uuid4().hex[:8]}",
@@ -72,6 +80,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             discovered_by=f"hunter:{ctx.specialist}",
             seeded_from_crash=ctx.seeded_crash is not None,
             hunter_session_id=ctx.session_id or "",
+            crypto_protocol=crypto_protocol or None,
+            algorithm=algorithm or None,
+            crypto_attack_class=crypto_attack_class or None,
+            key_material_exposed=key_material_exposed or None,
         )
         ctx.findings.append(finding)
         return (
@@ -97,6 +109,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "poc": {"type": "string", "default": ""},
                     "confidence": {"type": "string", "default": "medium"},
                     "evidence_level": {"type": "string", "default": "suspicion"},
+                    "crypto_protocol": {"type": "string", "default": ""},
+                    "algorithm": {"type": "string", "default": ""},
+                    "crypto_attack_class": {"type": "string", "default": ""},
+                    "key_material_exposed": {"type": "string", "default": ""},
                 },
                 "required": [
                     "file",

@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import struct
 import tempfile
 from dataclasses import dataclass, field
@@ -225,7 +226,7 @@ class RevengSandbox:
 
             logger.info("Building reveng sandbox image %s", tag)
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True)
+                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64")
             except Exception as e:
                 logger.warning("Reveng image build failed: %s", e)
                 raise RuntimeError(f"Failed to build reveng image: {e}") from e

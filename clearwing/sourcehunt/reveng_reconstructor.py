@@ -128,15 +128,7 @@ class RevengReconstructor:
             response = await self._llm.aask(
                 user_msg, system=RECONSTRUCTION_SYSTEM_PROMPT,
             )
-            from clearwing.llm.native import response_text
-
-            text = (
-                response_text(response)
-                if hasattr(response, "first_text") or hasattr(response, "texts")
-                else str(response)
-            )
-            if not text:
-                text = str(response)
+            text = response.first_text if hasattr(response, "first_text") else str(response)
             return self._parse_response(text, batch)
         except Exception:
             logger.warning("Reconstruction LLM call failed", exc_info=True)

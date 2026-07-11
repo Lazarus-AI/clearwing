@@ -22,13 +22,29 @@ Severity = Literal["critical", "high", "medium", "low", "info"]
 
 SEVERITY_VALUES: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
 
+CRYPTO_ATTACK_CLASSES: tuple[str, ...] = (
+    "timing_side_channel",
+    "parameter_validation",
+    "nonce_reuse",
+    "padding_oracle",
+    "downgrade",
+    "key_lifecycle",
+    "weak_prng",
+    "point_validation",
+    "mac_order",
+)
+
 
 EvidenceLevel = Literal[
     "suspicion",
     "static_corroboration",
+    "parameter_anomaly",
+    "timing_confirmed",
     "crash_reproduced",
     "root_cause_explained",
+    "assumption_broken",
     "exploit_demonstrated",
+    "key_material_recovered",
     "patch_validated",
 ]
 
@@ -38,9 +54,13 @@ EvidenceLevel = Literal[
 EVIDENCE_LEVELS: tuple[EvidenceLevel, ...] = (
     "suspicion",
     "static_corroboration",
+    "parameter_anomaly",
+    "timing_confirmed",
     "crash_reproduced",
     "root_cause_explained",
+    "assumption_broken",
     "exploit_demonstrated",
+    "key_material_recovered",
     "patch_validated",
 )
 
@@ -71,6 +91,8 @@ class Finding:
       - identification: id, finding_type, cwe
       - source location: file, line_number, end_line, code_snippet
       - network location: target, port, protocol, service
+      - crypto context (v0.4): crypto_protocol, algorithm, crypto_attack_class,
+        key_material_exposed, crypto_evidence
       - severity + confidence: severity, severity_verified, confidence
       - hunter output: description, crash_evidence, poc, discovered_by
       - evidence ladder: evidence_level
@@ -100,6 +122,13 @@ class Finding:
     port: int | None = None
     protocol: str | None = None
     service: str | None = None
+
+    # Crypto context (v0.4)
+    crypto_protocol: str | None = None
+    algorithm: str | None = None
+    crypto_attack_class: str | None = None
+    key_material_exposed: str | None = None
+    crypto_evidence: dict[str, Any] | None = None
 
     # Severity & confidence
     severity: Severity = "info"
@@ -195,18 +224,15 @@ class Finding:
     @property
     def is_strong_evidence(self) -> bool:
         """True if evidence_level is crash_reproduced or higher."""
-        order = (
-            "suspicion",
-            "static_corroboration",
-            "crash_reproduced",
-            "root_cause_explained",
-            "exploit_demonstrated",
-            "patch_validated",
-        )
         try:
-            return order.index(self.evidence_level) >= order.index("crash_reproduced")
+            return EVIDENCE_LEVELS.index(self.evidence_level) >= EVIDENCE_LEVELS.index("crash_reproduced")
         except ValueError:
             return False
+
+    @property
+    def is_crypto_finding(self) -> bool:
+        """True if this Finding has crypto-specific context."""
+        return bool(self.crypto_protocol or self.algorithm or self.crypto_attack_class)
 
     # --- Dict-style access shim --------------------------------------------
     # Phase-3 bridge for callers still using the legacy TypedDict access

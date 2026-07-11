@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from clearwing.llm import AsyncLLMClient
-from clearwing.llm.native import response_text
 
 from .state import EvidenceLevel, Finding, evidence_at_or_above
 
@@ -131,7 +130,7 @@ class AutoPatcher:
         user_msg = self._build_user_message(finding, file_content)
         try:
             response = await self.llm.aask_text(system=PATCHER_SYSTEM_PROMPT, user=user_msg)
-            content = response_text(response)
+            content = response.first_text or ""
         except Exception as e:
             logger.warning("Patcher LLM call failed", exc_info=True)
             return PatchAttempt(

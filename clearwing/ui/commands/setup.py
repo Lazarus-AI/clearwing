@@ -20,8 +20,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, IntPrompt, Prompt
-from rich.table import Table
+from rich.prompt import Confirm, Prompt
 
 from clearwing import __version__
 
@@ -174,29 +173,41 @@ def _print_welcome(console: Console, cli) -> None:
     console.print()
 
 
+def _flush_stdin_after_menu() -> None:
+    """Drain leftover escape bytes after simple_term_menu returns."""
+    import sys
+
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def _prompt_provider_choice(
     console: Console, presets: tuple[ProviderPreset, ...]
 ) -> ProviderPreset | None:
-    """Menu-driven provider selection."""
-    table = Table(title="Choose a provider", title_style="bold", show_lines=False)
-    table.add_column("#", justify="right", style="cyan", no_wrap=True)
-    table.add_column("Name", style="bold")
-    table.add_column("Description")
+    """Arrow-key navigable provider selection."""
+    from simple_term_menu import TerminalMenu
 
-    for i, preset in enumerate(presets, start=1):
-        table.add_row(str(i), preset.display_name, preset.description)
-    table.add_row("0", "[dim]Cancel[/dim]", "")
+    entries = [f"{p.display_name}  —  {p.description}" for p in presets]
+    entries.append("Cancel")
 
-    console.print(table)
-    choice = IntPrompt.ask(
-        "\nSelection",
-        default=1,
-        choices=[str(i) for i in range(0, len(presets) + 1)],
-        show_choices=False,
+    console.print("[bold]Choose a provider[/bold]  (↑↓ to move, Enter to select)\n")
+    menu = TerminalMenu(
+        entries,
+        cursor_index=0,
+        menu_highlight_style=("bg_cyan", "fg_black", "bold"),
     )
-    if choice == 0:
+    idx = menu.show()
+    _flush_stdin_after_menu()
+
+    if idx is None or idx == len(presets):
         return None
-    return presets[choice - 1]
+    return presets[idx]
 
 
 def _prompt_base_url(console: Console, preset: ProviderPreset) -> str:
@@ -206,7 +217,11 @@ def _prompt_base_url(console: Console, preset: ProviderPreset) -> str:
             "[dim]OpenAI OAuth uses the ChatGPT Codex backend "
             "(no Platform API key or /v1 base URL).[/dim]"
         )
-        return preset.default_base_url or "https://chatgpt.com/backend-api"
+        return ""
+
+    if preset.auth_flow == "anthropic_oauth":
+        console.print("[dim]Anthropic OAuth uses api.anthropic.com (no base URL to set).[/dim]")
+        return ""
 
     if preset.default_base_url is None:
         # Anthropic direct — no base_url to configure
@@ -250,25 +265,54 @@ def _prompt_api_key(
         if existing:
             try:
                 creds = ensure_fresh_openai_oauth_credentials()
-                console.print(
-                    f"[dim]Using stored OpenAI OAuth credentials for "
-                    f"account_id={creds.account_id}.[/dim]"
+                reuse = Confirm.ask(
+                    f"Found existing OpenAI OAuth credentials "
+                    f"(account [dim]{creds.account_id[:8]}...[/dim]). Use them?",
+                    default=True,
                 )
-                return ""
+                if reuse:
+                    console.print("[dim]Using stored credentials.[/dim]")
+                    return ""
             except Exception as exc:
-                console.print(
-                    f"[yellow]Stored OpenAI OAuth credentials need renewal: {exc}[/yellow]"
-                )
+                console.print(f"[yellow]Stored credentials expired: {exc}[/yellow]")
 
-        console.print(
-            "[dim]Starting OpenAI browser OAuth. Credentials are stored under ~/.clearwing/auth/.[/dim]"
-        )
+        console.print("")
         creds = login_openai_oauth(
             no_open=no_open,
             timeout_seconds=timeout_seconds,
             print_fn=console.print,
         )
-        console.print(f"[green]OpenAI OAuth login complete.[/green] account_id={creds.account_id}")
+        console.print(f"\n[green]Signed in.[/green] account_id={creds.account_id}")
+        return ""
+
+    if preset.auth_flow == "anthropic_oauth":
+        from clearwing.providers.openai_oauth import (
+            ensure_fresh_anthropic_oauth_credentials,
+            load_anthropic_oauth_credentials,
+            login_anthropic_oauth,
+        )
+
+        existing = load_anthropic_oauth_credentials()
+        if existing:
+            try:
+                creds = ensure_fresh_anthropic_oauth_credentials()
+                reuse = Confirm.ask(
+                    "Found existing Anthropic OAuth credentials. Use them?",
+                    default=True,
+                )
+                if reuse:
+                    console.print("[dim]Using stored credentials.[/dim]")
+                    return ""
+            except Exception as exc:
+                console.print(f"[yellow]Stored credentials expired: {exc}[/yellow]")
+
+        console.print("")
+        creds = login_anthropic_oauth(
+            no_open=no_open,
+            timeout_seconds=timeout_seconds,
+            print_fn=console.print,
+        )
+        console.print("\n[green]Signed in.[/green]")
         return ""
 
     if preset.is_local and preset.api_key_env_var is None:
@@ -304,17 +348,30 @@ def _prompt_api_key(
 
 
 def _prompt_model(console: Console, preset: ProviderPreset) -> str:
-    """Prompt for the default model identifier."""
-    if preset.alt_models:
-        console.print("\n[dim]Common models for this provider:[/dim]")
-        console.print(f"[dim]  {preset.default_model} (default)[/dim]")
-        for alt in preset.alt_models:
-            console.print(f"[dim]  {alt}[/dim]")
+    """Arrow-key model selection, with an option to type a custom name."""
+    if not preset.alt_models:
+        return Prompt.ask("\nModel", default=preset.default_model).strip()
 
-    return Prompt.ask(
-        "\nModel",
-        default=preset.default_model,
-    ).strip()
+    from simple_term_menu import TerminalMenu
+
+    models = [preset.default_model, *preset.alt_models]
+    entries = [f"{m}  (default)" if m == preset.default_model else m for m in models]
+    entries.append("Other (type manually)")
+
+    console.print("\n[bold]Select model[/bold]  (↑↓ to move, Enter to select)\n")
+    menu = TerminalMenu(
+        entries,
+        cursor_index=0,
+        menu_highlight_style=("bg_cyan", "fg_black", "bold"),
+    )
+    idx = menu.show()
+    _flush_stdin_after_menu()
+
+    if idx is None:
+        return preset.default_model
+    if idx == len(models):
+        return Prompt.ask("Model name", default=preset.default_model).strip()
+    return models[idx]
 
 
 def _print_config_preview(
@@ -424,19 +481,28 @@ def _run_test_invoke(
     """
     from clearwing.providers import LLMEndpoint, ProviderManager
 
-    if preset.auth_flow == "openai_codex":
-        endpoint = LLMEndpoint(
-            provider="openai_codex",
-            model=model,
-            base_url=base_url,
-            api_key=None,
-            source="cli",
-        )
+    if preset.auth_flow in ("openai_codex", "anthropic_oauth"):
+        import asyncio
+
+        from clearwing.llm.native import AsyncLLMClient, response_text
+
+        provider_name = "openai_codex" if preset.auth_flow == "openai_codex" else "anthropic_oauth"
         console.print("\n[dim]Testing endpoint...[/dim]", end=" ")
         try:
-            llm = ProviderManager.for_endpoint(endpoint).get_llm("default")
+            client = AsyncLLMClient(
+                model_name=model,
+                provider_name=provider_name,
+                api_key="",
+                base_url=None,
+            )
+            from genai_pyo3 import ChatMessage
+
             start = time.monotonic()
-            response = llm.invoke("Reply with exactly the word PONG.")
+            resp = asyncio.run(
+                client.achat(
+                    messages=[ChatMessage("user", "Reply with exactly the word PONG.")],
+                )
+            )
             elapsed_ms = int((time.monotonic() - start) * 1000)
         except Exception as exc:
             console.print(f"\n[red]Test failed: {exc}[/red]")
@@ -446,10 +512,7 @@ def _run_test_invoke(
             )
             return
 
-        content = getattr(response, "content", str(response))
-        if isinstance(content, list):
-            content = " ".join(str(p) for p in content)
-        snippet = str(content).strip()[:60]
+        snippet = response_text(resp).strip()[:60]
         console.print(f"[green]ok[/green] ({elapsed_ms}ms, reply: {snippet!r})")
         return
 

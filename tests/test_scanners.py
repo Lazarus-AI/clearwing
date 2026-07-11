@@ -47,7 +47,7 @@ class TestPortScanner:
 
         with caplog.at_level(logging.WARNING, logger="clearwing.scanning.port_scanner"):
             # Scan a single closed port on localhost so we exit fast
-            # regardless of whether scapy actually fires a packet.
+            # regardless of whether libpnet_pyo3 actually fires a packet.
             await scanner.scan("127.0.0.1", [1], scan_type="syn")
 
         warnings = [

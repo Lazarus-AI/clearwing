@@ -11,6 +11,7 @@ move to it incrementally.
 """
 
 from .types import (
+    CRYPTO_ATTACK_CLASSES,
     EVIDENCE_LEVELS,
     SEVERITY_VALUES,
     EvidenceLevel,
@@ -24,6 +25,7 @@ from .types import (
 )
 
 __all__ = [
+    "CRYPTO_ATTACK_CLASSES",
     "EVIDENCE_LEVELS",
     "EvidenceLevel",
     "Finding",

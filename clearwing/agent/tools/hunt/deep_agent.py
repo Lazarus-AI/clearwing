@@ -64,9 +64,31 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "duration_seconds": round(result.duration_seconds, 2),
         }
 
-    def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
+    def read_file(
+        path: str,
+        offset: int = 0,
+        limit: int = 2000,
+        line_start: int | None = None,
+        line_end: int | None = None,
+    ) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
+        # Compatibility shim: some providers emit line_start/line_end
+        # instead of offset/limit for range requests.
+        if line_start is not None:
+            try:
+                offset = max(0, int(line_start) - 1)
+            except (TypeError, ValueError):
+                pass
+        if line_end is not None:
+            try:
+                end_line = int(line_end)
+                if line_start is not None:
+                    limit = max(1, end_line - offset)
+                else:
+                    limit = max(1, end_line - offset)
+            except (TypeError, ValueError):
+                pass
         start = offset + 1
         end = offset + limit
         # Previously this was `sed ... | cat -n`, which numbers output
@@ -136,6 +158,14 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                         "type": "integer",
                         "description": "Max lines to return (default 2000).",
                         "default": 2000,
+                    },
+                    "line_start": {
+                        "type": "integer",
+                        "description": "1-based start line (alias for offset).",
+                    },
+                    "line_end": {
+                        "type": "integer",
+                        "description": "1-based inclusive end line (alias for limit).",
                     },
                 },
                 "required": ["path"],

@@ -14,10 +14,13 @@ Covers:
 from __future__ import annotations
 
 import argparse
+import io
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 import yaml
 
 from clearwing.providers import KNOWN_PROVIDERS, preset_by_key
@@ -47,10 +50,11 @@ class TestProviderCatalog:
             assert preset.description
             assert preset.docs_url.startswith("http")
 
-    def test_anthropic_is_first_and_default(self):
-        assert KNOWN_PROVIDERS[0].key == "anthropic"
-        assert KNOWN_PROVIDERS[0].default_base_url is None
-        assert not KNOWN_PROVIDERS[0].is_openai_compat
+    def test_oauth_providers_are_first(self):
+        assert KNOWN_PROVIDERS[0].key == "anthropic-oauth"
+        assert KNOWN_PROVIDERS[0].auth_flow == "anthropic_oauth"
+        assert KNOWN_PROVIDERS[1].key == "openai-oauth"
+        assert KNOWN_PROVIDERS[1].auth_flow == "openai_codex"
 
     def test_openai_compat_presets_all_have_base_url(self):
         for preset in KNOWN_PROVIDERS:
@@ -348,6 +352,29 @@ class TestOptionalExtrasCheck:
         genai_pyo3 = next((c for c in section.checks if c.name == "genai-pyo3"), None)
         assert genai_pyo3 is not None
         assert genai_pyo3.status == STATUS_OK
+
+
+class TestDoctorJsonOutput:
+    def test_print_json_is_valid_even_for_long_messages(self):
+        stream = io.StringIO()
+        console = Console(file=stream, force_terminal=False, width=20)
+        sections = [
+            DoctorSection(
+                "LLM provider",
+                checks=[
+                    DoctorCheck(
+                        "Endpoint",
+                        STATUS_OK,
+                        "UnCut @ https://jayleen-astrolabical-nontactically.ngrok-free.dev/v1",
+                    )
+                ],
+            )
+        ]
+
+        doctor._print_json(console, sections)
+
+        payload = json.loads(stream.getvalue())
+        assert payload["sections"][0]["checks"][0]["message"].startswith("UnCut @ https://")
 
 
 class TestLLMProviderCheck:

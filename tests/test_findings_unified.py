@@ -50,7 +50,11 @@ class TestFindingDataclass:
     def test_is_strong_evidence(self):
         assert not Finding(evidence_level="suspicion").is_strong_evidence
         assert not Finding(evidence_level="static_corroboration").is_strong_evidence
+        assert not Finding(evidence_level="parameter_anomaly").is_strong_evidence
+        assert not Finding(evidence_level="timing_confirmed").is_strong_evidence
         assert Finding(evidence_level="crash_reproduced").is_strong_evidence
+        assert Finding(evidence_level="assumption_broken").is_strong_evidence
+        assert Finding(evidence_level="key_material_recovered").is_strong_evidence
         assert Finding(evidence_level="patch_validated").is_strong_evidence
 
     def test_is_validated_patch(self):
@@ -234,3 +238,64 @@ class TestCrossShapeConversions:
         assert cicd_dict["severity"] == "critical"
         assert cicd_dict["file"] == "src/codec.c"
         assert cicd_dict["line_number"] == 47
+
+
+# --- Crypto fields -----------------------------------------------------------
+
+
+class TestCryptoFields:
+    def test_crypto_finding_construction(self):
+        f = Finding(
+            file="srp.py",
+            line_number=42,
+            crypto_protocol="SRP-6a",
+            algorithm="PBKDF2-HMAC-SHA256",
+            crypto_attack_class="parameter_validation",
+            key_material_exposed="session key S becomes H(0)",
+        )
+        assert f.crypto_protocol == "SRP-6a"
+        assert f.algorithm == "PBKDF2-HMAC-SHA256"
+        assert f.crypto_attack_class == "parameter_validation"
+        assert f.key_material_exposed == "session key S becomes H(0)"
+        assert f.is_crypto_finding
+
+    def test_non_crypto_finding(self):
+        f = Finding(file="app.py", line_number=1, description="sql injection")
+        assert not f.is_crypto_finding
+
+    def test_crypto_evidence_dict(self):
+        f = Finding(
+            crypto_evidence={"mean_ns": 1500, "std_ns": 50, "p_value": 0.001}
+        )
+        assert f.crypto_evidence["p_value"] == 0.001
+        assert f.crypto_evidence["mean_ns"] == 1500
+
+    def test_crypto_protocol_does_not_conflict_with_protocol(self):
+        f = Finding(protocol="tcp", crypto_protocol="TLS 1.3")
+        assert f.protocol == "tcp"
+        assert f.crypto_protocol == "TLS 1.3"
+
+    def test_partial_crypto_fields_are_crypto_finding(self):
+        assert Finding(algorithm="AES-256-GCM").is_crypto_finding
+        assert Finding(crypto_attack_class="nonce_reuse").is_crypto_finding
+        assert Finding(crypto_protocol="SRP-6a").is_crypto_finding
+
+    def test_crypto_evidence_level_parameter_anomaly(self):
+        f = Finding(evidence_level="parameter_anomaly")
+        assert f.evidence_level == "parameter_anomaly"
+        assert not f.is_strong_evidence
+
+    def test_crypto_evidence_level_key_material_recovered(self):
+        f = Finding(evidence_level="key_material_recovered")
+        assert f.evidence_level == "key_material_recovered"
+        assert f.is_strong_evidence
+
+    def test_bump_evidence_to_assumption_broken(self):
+        f = Finding(evidence_level="root_cause_explained")
+        f.bump_evidence("assumption_broken")
+        assert f.evidence_level == "assumption_broken"
+
+    def test_bump_evidence_to_key_material_recovered(self):
+        f = Finding(evidence_level="exploit_demonstrated")
+        f.bump_evidence("key_material_recovered")
+        assert f.evidence_level == "key_material_recovered"

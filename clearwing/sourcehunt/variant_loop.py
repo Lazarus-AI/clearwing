@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from clearwing.llm import AsyncLLMClient
-from clearwing.llm.native import response_text
 
 from .state import Finding
 
@@ -115,7 +114,7 @@ class VariantPatternGenerator:
                 system=PATTERN_GEN_SYSTEM_PROMPT,
                 user=user_msg,
             )
-            content = response_text(response)
+            content = response.first_text or ""
         except Exception:
             logger.debug("Variant pattern LLM call failed", exc_info=True)
             return None

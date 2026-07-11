@@ -17,16 +17,20 @@ from clearwing.sourcehunt.state import (
 class TestEvidenceLevelsOrdering:
     """The ladder is a strict total ordering."""
 
-    def test_ladder_is_six_levels(self):
-        assert len(EVIDENCE_LEVELS) == 6
+    def test_ladder_is_ten_levels(self):
+        assert len(EVIDENCE_LEVELS) == 10
 
     def test_ladder_order(self):
         assert EVIDENCE_LEVELS == (
             "suspicion",
             "static_corroboration",
+            "parameter_anomaly",
+            "timing_confirmed",
             "crash_reproduced",
             "root_cause_explained",
+            "assumption_broken",
             "exploit_demonstrated",
+            "key_material_recovered",
             "patch_validated",
         )
 
@@ -54,6 +58,22 @@ class TestEvidenceAtOrAbove:
     def test_below_threshold(self):
         assert not evidence_at_or_above("suspicion", "crash_reproduced")
         assert not evidence_at_or_above("static_corroboration", "exploit_demonstrated")
+
+    def test_parameter_anomaly_above_static_corroboration(self):
+        assert evidence_at_or_above("parameter_anomaly", "static_corroboration")
+        assert not evidence_at_or_above("static_corroboration", "parameter_anomaly")
+
+    def test_timing_confirmed_below_crash_reproduced(self):
+        assert not evidence_at_or_above("timing_confirmed", "crash_reproduced")
+        assert evidence_at_or_above("crash_reproduced", "timing_confirmed")
+
+    def test_assumption_broken_above_root_cause(self):
+        assert evidence_at_or_above("assumption_broken", "root_cause_explained")
+        assert not evidence_at_or_above("root_cause_explained", "assumption_broken")
+
+    def test_key_material_recovered_above_exploit_demonstrated(self):
+        assert evidence_at_or_above("key_material_recovered", "exploit_demonstrated")
+        assert not evidence_at_or_above("exploit_demonstrated", "key_material_recovered")
 
 
 class TestFilterByEvidence:
@@ -91,6 +111,8 @@ class TestFilterByEvidence:
         findings = [
             {"id": "ranker_only", "evidence_level": "suspicion"},
             {"id": "regex_hit", "evidence_level": "static_corroboration"},
+            {"id": "param_anom", "evidence_level": "parameter_anomaly"},
+            {"id": "timing", "evidence_level": "timing_confirmed"},
             {"id": "asan_crash", "evidence_level": "crash_reproduced"},
             {"id": "explained", "evidence_level": "root_cause_explained"},
         ]
@@ -102,10 +124,12 @@ class TestFilterByEvidence:
         findings = [
             {"id": "a", "evidence_level": "crash_reproduced"},
             {"id": "b", "evidence_level": "root_cause_explained"},
-            {"id": "c", "evidence_level": "exploit_demonstrated"},
+            {"id": "c", "evidence_level": "assumption_broken"},
+            {"id": "d", "evidence_level": "exploit_demonstrated"},
+            {"id": "e", "evidence_level": "key_material_recovered"},
         ]
         eligible = filter_by_evidence(findings, "root_cause_explained")
-        assert {f["id"] for f in eligible} == {"b", "c"}
+        assert {f["id"] for f in eligible} == {"b", "c", "d", "e"}
 
     def test_gold_standard(self):
         """patch_validated is the highest level — only itself qualifies."""

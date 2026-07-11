@@ -15,6 +15,7 @@ class SkillLoader:
     """Discovers, searches, and loads vulnerability skill files."""
 
     BUILTIN_DIR: Path = Path(__file__).parent / "vulnerabilities"
+    CRYPTO_DIR: Path = Path(__file__).parent / "crypto"
     CUSTOM_DIR: Path | None = None
 
     # ------------------------------------------------------------------
@@ -32,7 +33,7 @@ class SkillLoader:
             from clearwing.core.config import clearwing_home
 
             self.CUSTOM_DIR = clearwing_home() / "skills" / "custom"
-        for directory in (self.BUILTIN_DIR, self.CUSTOM_DIR):
+        for directory in (self.BUILTIN_DIR, self.CRYPTO_DIR, self.CUSTOM_DIR):
             if not directory.is_dir():
                 continue
             for md_file in sorted(directory.glob("*.md")):

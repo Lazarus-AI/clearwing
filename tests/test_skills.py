@@ -21,7 +21,7 @@ class TestSkillLoader:
 
     def test_list_skills_returns_builtin(self):
         skills = self.loader.list_skills()
-        assert len(skills) >= 10
+        assert len(skills) >= 17
         names = {s.name for s in skills}
         expected = {
             "sql_injection",
@@ -34,6 +34,13 @@ class TestSkillLoader:
             "privesc_windows",
             "command_injection",
             "file_upload",
+            "srp_attacks",
+            "kdf_analysis",
+            "padding_oracle",
+            "aead_misuse",
+            "key_hierarchy",
+            "tls_assessment",
+            "timing_attacks",
         }
         assert expected.issubset(names), f"Missing skills: {expected - names}"
 
@@ -118,7 +125,7 @@ class TestSkillContent:
 
     def test_each_skill_starts_with_heading(self):
         for skill in self.loader.list_skills():
-            if not skill.path.parent.name == "vulnerabilities":
+            if skill.path.parent.name not in ("vulnerabilities", "crypto"):
                 continue
             content = skill.path.read_text()
             first_line = content.strip().split("\n")[0]
@@ -126,7 +133,7 @@ class TestSkillContent:
 
     def test_each_skill_has_minimum_length(self):
         for skill in self.loader.list_skills():
-            if not skill.path.parent.name == "vulnerabilities":
+            if skill.path.parent.name not in ("vulnerabilities", "crypto"):
                 continue
             content = skill.path.read_text()
             lines = content.strip().split("\n")
@@ -147,3 +154,45 @@ class TestSkillContent:
         content = self.loader.load("privesc_linux")
         lower = content.lower()
         assert "suid" in lower or "sudo" in lower
+
+    def test_srp_attacks_has_key_content(self):
+        content = self.loader.load("srp_attacks")
+        lower = content.lower()
+        assert "zero-key" in lower or "zero key" in lower
+        assert "srp_fuzz_parameters" in lower
+
+    def test_kdf_analysis_has_key_content(self):
+        content = self.loader.load("kdf_analysis")
+        lower = content.lower()
+        assert "pbkdf2" in lower
+        assert "srp_extract_verifier_info" in lower or "extract_srp_values" in lower
+
+    def test_padding_oracle_has_key_content(self):
+        content = self.loader.load("padding_oracle")
+        lower = content.lower()
+        assert "cbc" in lower
+        assert "padding" in lower
+
+    def test_aead_misuse_has_key_content(self):
+        content = self.loader.load("aead_misuse")
+        lower = content.lower()
+        assert "nonce" in lower
+        assert "gcm" in lower
+
+    def test_key_hierarchy_has_key_content(self):
+        content = self.loader.load("key_hierarchy")
+        lower = content.lower()
+        assert "extract_key_hierarchy" in lower
+        assert "wrap" in lower
+
+    def test_tls_assessment_has_key_content(self):
+        content = self.loader.load("tls_assessment")
+        lower = content.lower()
+        assert "scan_tls_config" in lower
+        assert "downgrade" in lower
+
+    def test_timing_attacks_has_key_content(self):
+        content = self.loader.load("timing_attacks")
+        lower = content.lower()
+        assert "timing_probe" in lower or "timing_compare" in lower
+        assert "p-value" in lower or "welch" in lower

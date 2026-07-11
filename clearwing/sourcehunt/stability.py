@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from clearwing.llm import AsyncLLMClient
-from clearwing.llm.native import response_text
 
 from .poc_runner import PocRunner
 from .state import Finding, StabilityResult
@@ -260,7 +259,7 @@ class StabilityVerifier:
             response = await self._hardening_llm.aask_text(
                 system=HARDEN_SYSTEM_PROMPT, user=prompt,
             )
-            hardened_poc = response_text(response).strip()
+            hardened_poc = (response.first_text or "").strip()
         except Exception:
             logger.warning("Hardening LLM call failed", exc_info=True)
             return replace(result, hardened=True, hardening_improved=False)

@@ -11,13 +11,14 @@ ready for the Ranker.
 from __future__ import annotations
 
 import logging
-import os
+import os as _os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
+from clearwing.analysis.source_analyzer import _GitignoreMatcher
 
 from .callgraph import CallGraph, CallGraphBuilder
 from .semgrep_sidecar import SemgrepSidecar
@@ -105,7 +106,7 @@ def _tag_file(file_path: str, content_sample: str) -> list[FileTag]:
     Returns a list of FileTag values. v0.2 adds an LLM polish pass on top.
     """
     tags: list[FileTag] = []
-    name = os.path.basename(file_path).lower()
+    name = _os.path.basename(file_path).lower()
     parts = {p.lower() for p in Path(file_path).parts}
     ext = Path(file_path).suffix.lower()
 
@@ -155,13 +156,18 @@ def _file_defines_constants(content_sample: str, language: str) -> bool:
     return False
 
 
-def _count_imports_by(repo_path: str, file_path: str, language: str) -> int:
+def _count_imports_by(
+    repo_path: str,
+    file_path: str,
+    language: str,
+    gitignore: _GitignoreMatcher | None = None,
+) -> int:
     """Cheap heuristic for `imports_by`: grep the repo for references to this
     file's basename. Used as the v0.1 influence signal until v0.2's tree-sitter
     callgraph lands.
     """
-    basename = os.path.basename(file_path)
-    stem = os.path.splitext(basename)[0]
+    basename = _os.path.basename(file_path)
+    stem = _os.path.splitext(basename)[0]
     # Build a regex per language for include/import/require patterns
     if language in ("c", "cpp"):
         pattern = re.compile(rf'#\s*include\s*[<"][^>"]*{re.escape(basename)}[>"]')
@@ -179,14 +185,21 @@ def _count_imports_by(repo_path: str, file_path: str, language: str) -> int:
         return 0
 
     count = 0
-    for dirpath, dirnames, filenames in os.walk(repo_path):
-        dirnames[:] = [d for d in dirnames if d not in SourceAnalyzer.SKIP_DIRS]
+    for dirpath, dirnames, filenames in _os.walk(repo_path):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in SourceAnalyzer.SKIP_DIRS
+            and not (gitignore and gitignore.matches_dir(_os.path.join(dirpath, d)))
+        ]
         for fname in filenames:
-            other = os.path.join(dirpath, fname)
+            other = _os.path.join(dirpath, fname)
             if other == file_path:
                 continue
+            if gitignore and gitignore.matches_file(other):
+                continue
             try:
-                if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
+                if _os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
                     continue
                 with open(other, encoding="utf-8", errors="ignore") as f:
                     head = f.read(64 * 1024)  # only scan the first 64 KB
@@ -194,6 +207,7 @@ def _count_imports_by(repo_path: str, file_path: str, language: str) -> int:
                     count += 1
             except OSError:
                 continue
+                del OSError
     return count
 
 
@@ -226,6 +240,7 @@ class Preprocessor:
         ingest_fuzz_corpora: bool = False,  # v0.2 seam
         run_taint: bool = False,  # v0.4: tree-sitter taint analysis
         max_imports_by_files: int = 1000,  # cap the imports_by walk
+        respect_gitignore: bool = False,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -237,26 +252,24 @@ class Preprocessor:
         self.ingest_fuzz_corpora = ingest_fuzz_corpora
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
+        self.respect_gitignore = respect_gitignore
         self._analyzer: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
         repo_path = self._clone_or_use_local()
+        logger.info("Preprocessor: repo_path=%s local_path=%s", repo_path, self.local_path)
 
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")
-        # Preserve the analyzer instance returned from clone().
-        # Replacing it here drops the TemporaryDirectory owner, which
-        # immediately deletes the cloned repository and yields 0 files.
-        if self._analyzer is None:
-            self._analyzer = SourceAnalyzer(repo_path=repo_path)
-        else:
-            self._analyzer.repo_path = repo_path
-        analysis_result = self._analyzer.analyze(path=repo_path)
+        # Reuse the analyzer instance created in _clone_or_use_local
+        gitignore = _GitignoreMatcher.from_repo(repo_path) if self.respect_gitignore else None
+        analysis_result = self._analyzer.analyze()
         static_findings = analysis_result.findings
         logger.info(
-            "Preprocessor: static analyzer complete (%d findings)",
+            "Preprocessor: static analyzer complete (%d findings, %d files analyzed)",
             len(static_findings),
+            analysis_result.files_analyzed,
         )
 
         # Build per-file static_hint counts
@@ -267,6 +280,16 @@ class Preprocessor:
         logger.info("Preprocessor: enumerating source files")
         source_files = list(self._analyzer._iter_source_files(repo_path))
         logger.info("Preprocessor: found %d source files", len(source_files))
+        if len(source_files) == 0:
+            logger.warning("Preprocessor: ZERO source files found! repo_path=%s", repo_path)
+            # Debug: check if directory exists and has files
+            import os
+            if _os.path.isdir(repo_path):
+                all_files = []
+                for root, dirs, files in _os.walk(repo_path):
+                    all_files.extend(files)
+                logger.warning("Preprocessor: repo has %d total files (before filtering)", len(all_files))
+                logger.warning("Preprocessor: first 20 files: %s", all_files[:20])
         imports_by_budget = self.max_imports_by_files
         large_repo = len(source_files) > self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD
         if len(source_files) > self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD:
@@ -307,8 +330,9 @@ class Preprocessor:
                 loc = sum(1 for _ in content_sample.splitlines())
             except OSError:
                 continue
+                del OSError
 
-            rel_path = Path(os.path.relpath(abs_path, repo_path)).as_posix()
+            rel_path = Path(_os.path.relpath(abs_path, repo_path)).as_posix()
 
             tags: list[FileTag] = []
             if self.tag_files:
@@ -319,7 +343,7 @@ class Preprocessor:
             # v0.1 imports_by — capped to keep large repos snappy
             imports_by = 0
             if len(file_targets) < imports_by_budget:
-                imports_by = _count_imports_by(repo_path, abs_path, language)
+                imports_by = _count_imports_by(repo_path, abs_path, language, gitignore)
 
             target: FileTarget = {
                 "path": rel_path,
@@ -370,7 +394,7 @@ class Preprocessor:
 
         if self.run_semgrep:
             try:
-                sidecar = SemgrepSidecar()
+                sidecar = SemgrepSidecar(respect_gitignore=self.respect_gitignore)
                 if sidecar.available:
                     semgrep_findings_objs = sidecar.run_scan(repo_path)
                     semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]
@@ -536,18 +560,20 @@ class Preprocessor:
     def _clone_or_use_local(self) -> str:
         """Return the repo path. Clones if repo_url is a git URL."""
         if self.local_path:
-            if not os.path.isdir(self.local_path):
+            if not _os.path.isdir(self.local_path):
                 raise ValueError(f"local_path does not exist: {self.local_path}")
-            return os.path.abspath(self.local_path)
+            return _os.path.abspath(self.local_path)
 
         # Heuristic: looks like a git URL?
         if self._is_git_url(self.repo_url):
             self._analyzer = SourceAnalyzer()
+            self._analyzer.respect_gitignore = self.respect_gitignore
             return self._analyzer.clone(self.repo_url, branch=self.branch)
+        self._analyzer.respect_gitignore = self.respect_gitignore
 
         # Otherwise treat repo_url as a local path
-        if os.path.isdir(self.repo_url):
-            return os.path.abspath(self.repo_url)
+        if _os.path.isdir(self.repo_url):
+            return _os.path.abspath(self.repo_url)
 
         raise ValueError(
             f"repo_url is neither a git URL nor an existing local path: {self.repo_url}"

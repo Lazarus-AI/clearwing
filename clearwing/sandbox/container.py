@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import tarfile
+import tempfile
 import time
 from dataclasses import dataclass, field
 
@@ -138,7 +139,21 @@ class SandboxContainer:
         # auto_remove conflicts with detached non-restart containers in some
         # docker versions; we'll handle removal manually in stop()
 
-        self._container = client.containers.run(**kwargs)
+        try:
+            self._container = client.containers.run(**kwargs)
+        except Exception as exc:
+            if self.config.runtime and "runtime" in str(exc).lower():
+                rt = self.config.runtime
+                logger.warning(
+                    "Docker runtime %r unavailable — falling back to default runtime. "
+                    "Drop --gvisor or install %s to silence this.",
+                    rt, rt,
+                )
+                kwargs.pop("runtime", None)
+                self.config.runtime = None
+                self._container = client.containers.run(**kwargs)
+            else:
+                raise
         logger.debug("Sandbox container started: %s", self._container.short_id)
 
         from .registry import ContainerRegistry
@@ -290,54 +305,58 @@ class SandboxContainer:
     ) -> None:
         """Copy a host directory tree into the container.
 
-        Uses streaming tar via subprocess to avoid holding large repos in
-        memory. The container must already be started.
+        Uses a temporary tar archive + Docker SDK put_archive. This avoids
+        depending on the host/container `docker exec` CLI path and keeps the
+        transfer deterministic under constrained sidecar environments.
         """
         if self._container is None:
             raise RuntimeError("SandboxContainer.copy_tree_into called before start()")
 
         start_time = time.monotonic()
-        cid = self._container.id
-
         self.exec(["mkdir", "-p", container_path], timeout=10)
+        archive_path: str | None = None
 
-        tar_proc = subprocess.Popen(
-            ["tar", "cf", "-", "-C", host_path, "."],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        # `--no-same-owner` — the extract happens inside a container whose
-        # caps are dropped (cap_drop=["ALL"], no CAP_CHOWN), so any attempt
-        # to restore the host uid/gid from the archive fails with
-        # "Cannot change ownership ... Operation not permitted" and aborts
-        # the extract. Telling tar not to chown makes files owned by the
-        # (root) process running the extract, which is what we want anyway.
-        docker_proc = subprocess.Popen(
-            [
-                "docker",
-                "exec",
-                "-i",
-                cid,
-                "tar",
-                "xf",
-                "-",
-                "--no-same-owner",
-                "-C",
-                container_path,
-            ],
-            stdin=tar_proc.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        tar_proc.stdout.close()
-        _, docker_stderr = docker_proc.communicate(timeout=600)
-        tar_proc.wait(timeout=10)
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="clearwing-copy-tree-",
+                suffix=".tar",
+                delete=False,
+            ) as tf:
+                archive_path = tf.name
+
+            tar_result = subprocess.run(
+                ["tar", "cf", archive_path, "-C", host_path, "."],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if tar_result.returncode != 0:
+                err = (tar_result.stderr or "").strip()[:500]
+                logger.warning(
+                    "copy_tree_into tar creation failed (rc=%d): %s",
+                    tar_result.returncode,
+                    err,
+                )
+                raise RuntimeError(f"copy_tree_into tar creation failed: {err}")
+
+            with open(archive_path, "rb") as archive_f:
+                try:
+                    ok = bool(self._container.put_archive(container_path, archive_f))
+                except TypeError:
+                    archive_f.seek(0)
+                    ok = bool(
+                        self._container.put_archive(container_path, archive_f.read())
+                    )
+            if not ok:
+                raise RuntimeError("copy_tree_into failed: put_archive returned false")
+        finally:
+            if archive_path:
+                try:
+                    os.unlink(archive_path)
+                except OSError:
+                    logger.debug("copy_tree_into temp archive cleanup failed", exc_info=True)
 
         duration = time.monotonic() - start_time
-        if docker_proc.returncode != 0:
-            err = (docker_stderr or b"").decode("utf-8", errors="replace")
-            logger.warning("copy_tree_into failed (rc=%d): %s", docker_proc.returncode, err[:500])
-            raise RuntimeError(f"copy_tree_into failed: {err[:500]}")
         logger.debug(
             "copy_tree_into %s → %s completed in %.1fs",
             host_path,
@@ -380,6 +399,17 @@ class SandboxContainer:
             pass
 
         self._container = None
+
+        # Release the docker SDK's urllib3 connection pool. Without this,
+        # each SandboxContainer keeps its keep-alive unix-socket connections
+        # open for the rest of the process lifetime, leaking ~15 fd per
+        # Hunter session and eventually hitting `ulimit -n` on long scans.
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Sandbox docker client close failed", exc_info=True)
+            self._client = None
 
     # --- Context manager ----------------------------------------------------
 

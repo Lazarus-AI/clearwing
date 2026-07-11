@@ -10,7 +10,7 @@ Clearwing is a dual-mode offensive-security tool:
 - **Network-pentest agent** — a ReAct-loop agent that scans live
   targets, enumerates services, detects vulnerabilities, attempts
   exploits, and writes reports. Runs on top of a Docker-sandboxed
-  Kali toolbox when one is configured. 63 tools, gated through a
+  Kali toolbox when one is configured. 99 tools, gated through a
   guardrail/approval layer so destructive operations pause for a
   human.
 - **Source-code hunter** — a file-parallel agent-driven
@@ -32,6 +32,8 @@ Clearwing is a dual-mode offensive-security tool:
 | [**CLI reference**](cli.md) | Every `clearwing <subcommand>` flag, with examples |
 | [**API reference**](api.md) | `clearwing.findings.Finding`, the sourcehunt runner, auto-generated from docstrings |
 | [**Web API (WebSocket)**](web-api.md) | `/ws/agent` client/server message schema for the event-streaming web UI backend |
+| [**Crypto tools**](crypto-tools.md) | TLS, SRP, KDF, vault encryption, timing, WebCrypto, and credential attack tools — full reference |
+| [**1Password CTF**](1password_ctf.md) | CTF runbook: target analysis, toolchain mapping, step-by-step attack procedures, decision tree |
 
 ## Project status
 

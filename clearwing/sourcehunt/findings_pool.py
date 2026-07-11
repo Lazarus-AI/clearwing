@@ -44,6 +44,14 @@ PRIMITIVE_TYPES = [
     "command_injection",
     "path_traversal",
     "xss",
+    "timing_side_channel",
+    "nonce_reuse",
+    "key_lifecycle",
+    "weak_kdf",
+    "protocol_downgrade",
+    "parameter_validation",
+    "padding_oracle",
+    "crypto_bypass",
     "unknown",
 ]
 
@@ -74,6 +82,16 @@ _CWE_PRIMITIVE_MAP: dict[str, str] = {
     "CWE-120": "stack_overflow",
     "CWE-476": "use_after_free",
     "CWE-401": "info_leak",
+    "CWE-208": "timing_side_channel",
+    "CWE-323": "nonce_reuse",
+    "CWE-327": "crypto_bypass",
+    "CWE-328": "weak_kdf",
+    "CWE-330": "crypto_bypass",
+    "CWE-338": "crypto_bypass",
+    "CWE-347": "crypto_bypass",
+    "CWE-354": "padding_oracle",
+    "CWE-325": "key_lifecycle",
+    "CWE-326": "weak_kdf",
 }
 
 _FINDING_TYPE_PRIMITIVE_MAP: dict[str, str] = {
@@ -94,6 +112,14 @@ _FINDING_TYPE_PRIMITIVE_MAP: dict[str, str] = {
     "xss": "xss",
     "auth_bypass": "auth_bypass",
     "memory_safety": "heap_overflow",
+    "timing_side_channel": "timing_side_channel",
+    "nonce_reuse": "nonce_reuse",
+    "weak_kdf": "weak_kdf",
+    "key_lifecycle": "key_lifecycle",
+    "protocol_downgrade": "protocol_downgrade",
+    "parameter_validation": "parameter_validation",
+    "padding_oracle": "padding_oracle",
+    "crypto_primitive": "crypto_bypass",
 }
 
 MAX_DEDUP_CANDIDATES = 3
@@ -296,7 +322,7 @@ class FindingsPool:
         return "unknown"
 
     async def _llm_classify(self, finding: Finding) -> str:
-        from clearwing.llm.native import ChatMessage, response_text
+        from clearwing.llm.native import ChatMessage
 
         prompt = CLASSIFY_PROMPT.format(
             cwe=finding.get("cwe", ""),
@@ -309,7 +335,7 @@ class FindingsPool:
             system="You are a vulnerability classification expert. Return only JSON.",
             tools=[],
         )
-        text = response_text(response)
+        text = response.first_text or ""
         match = re.search(r'"primitive_type"\s*:\s*"([^"]+)"', text)
         if match and match.group(1) in PRIMITIVE_TYPES:
             return match.group(1)
@@ -361,7 +387,7 @@ class FindingsPool:
     async def _dedup_check(
         self, finding: Finding, candidates: list[FindingCluster],
     ) -> str | None:
-        from clearwing.llm.native import ChatMessage, response_text
+        from clearwing.llm.native import ChatMessage
 
         summaries = []
         for c in candidates:
@@ -384,7 +410,7 @@ class FindingsPool:
             system="You are a vulnerability deduplication expert. Return only JSON.",
             tools=[],
         )
-        text = response_text(response)
+        text = response.first_text or ""
         match = re.search(r'"duplicate_of"\s*:\s*"([^"]+)"', text)
         if match:
             candidate_id = match.group(1)
@@ -410,6 +436,9 @@ class FindingsPool:
                     "code_snippet": finding.get("code_snippet", ""),
                     "evidence_level": finding.get("evidence_level", "suspicion"),
                     "hunter_session_id": finding.get("hunter_session_id", ""),
+                    "crypto_protocol": finding.get("crypto_protocol"),
+                    "algorithm": finding.get("algorithm"),
+                    "crypto_attack_class": finding.get("crypto_attack_class"),
                     "ts": time.time(),
                 }.items() if v is not None
             }

@@ -320,9 +320,15 @@ class ClearwingApp(App):
                 if not got_response:
                     feed.add_message("(no response from agent)", "warning")
 
-                # Check for approval interrupts
-                state = self._agent_graph.get_state(self._agent_config)
-                if state.next and state.tasks:
+                # Drain pending approvals; the agent can chain them (each
+                # resume may surface another interrupt). Re-check state after
+                # every resume so subsequent interrupts are prompted instead
+                # of leaking a dangling tool_use when the outer loop consumes
+                # the next keystroke.
+                while True:
+                    state = self._agent_graph.get_state(self._agent_config)
+                    if not (state.next and state.tasks):
+                        break
                     for task in state.tasks:
                         if hasattr(task, "interrupts") and task.interrupts:
                             for intr in task.interrupts:
