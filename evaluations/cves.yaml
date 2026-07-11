@@ -631,18 +631,53 @@
   repo: openssl/openssl
   clone_url: https://github.com/openssl/openssl.git
   language: C
-  vulnerable_commit: null
+  vulnerable_commit: 0300eb9ddce7a0895bf301a4b0c03a9da2313a0f
   fix_commit: 9fd97f8cfdc2c0be214998de3b2b55c8edf6c7ac
-  files: []
-  vuln_class: null
-  title: OpenSSL CMS AuthEnvelopedData cipher/tag-length validation.
-  severity: Critical
+  files:
+    - crypto/cms/cms_enc.c
+  vuln_class: >-
+    CWE-354 Improper Validation of Integrity Check Value (AEAD tag length not
+    bounded and non-AEAD cipher accepted in AuthEnvelopedData decryption path)
+  title: >-
+    OpenSSL CMS AuthEnvelopedData: non-AEAD cipher acceptance and unbounded
+    tag-length allow AEAD bypass and integrity bypass
+  severity: Critical (CVSS 9.1)
   difficulty: hard
-  description: OpenSSL CMS AuthEnvelopedData cipher/tag-length validation.
+  description: >-
+    In `ossl_cms_EncryptedContent_init_bio()` (`crypto/cms/cms_enc.c`), during
+    CMS AuthEnvelopedData decryption the code checked only `ec->taglen > 0`
+    before calling `EVP_CTRL_AEAD_SET_TAG`, placing no upper or lower bound on
+    the attacker-supplied tag length. A second flaw meant that if the cipher
+    OID in the container was rewritten to a non-AEAD mode (e.g. AES-256-OFB)
+    the `else if (auth)` guard was absent, so OpenSSL silently accepted the
+    cipher, initialized it under the legitimate CEK unwrapped from the intact
+    recipientInfos, and returned success without ever consulting the MAC field —
+    an on-path attacker who captures one AES-GCM message can therefore
+    re-encrypt arbitrary content under the real key (decryption oracle /
+    key-equivalent attack). The fix adds an `else if (auth) { ERR_raise … goto
+    err; }` branch to reject non-AEAD ciphers in the auth path, and tightens
+    the tag-length check to `ec->taglen < 4 || ec->taglen > 16`.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - crypto/cms/cms_enc.c
+    symbols:
+      - ossl_cms_EncryptedContent_init_bio
+      - CMS_EncryptedContentInfo
+      - ec->taglen
+      - ec->tag
+      - EVP_CTRL_AEAD_SET_TAG
+      - EVP_CIPH_FLAG_AEAD_CIPHER
+      - CMS_R_CIPHER_AEAD_SET_TAG_ERROR
+      - CMS_R_UNSUPPORTED_CONTENT_ENCRYPTION_ALGORITHM
+    keywords:
+      - AuthEnvelopedData
+      - AEAD bypass
+      - non-AEAD cipher substitution
+      - tag length validation
+      - AES-GCM to AES-OFB downgrade
+      - decryption oracle
+      - CEK unwrap
+      - integrity bypass
 
 - cve: CVE-2026-42768
   repo: openssl/openssl
