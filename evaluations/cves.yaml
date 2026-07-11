@@ -927,3 +927,52 @@
       - CMP PKIMessage forgery
       - atLeastOneChecked guard
       - ASN.1 empty SEQUENCE
+
+- cve: CVE-2026-28386
+  repo: openssl/openssl
+  clone_url: https://github.com/openssl/openssl.git
+  language: C+asm
+  vulnerable_commit: 481743fb8aa2b72f0a82c4c112880c290339fa60
+  fix_commit: 61f428a2fc6671ede184a19f71e6e495f0689621
+  files:
+    - crypto/aes/asm/aes-cfb-avx512.pl
+  vuln_class: >-
+    CWE-125 Out-of-bounds Read (unmasked SIMD load reads past input buffer on partial blocks)
+  title: >-
+    OpenSSL AES-CFB128 OOB read on AVX-512+VAES partial blocks
+  severity: High (CVSS 7.5 NVD primary; Critical 9.1 secondary)
+  difficulty: hard
+  description: >-
+    The AVX-512+VAES optimized AES-CFB128 implementation in aes-cfb-avx512.pl
+    uses vmovdqu8 to load 16-byte XMM registers from the IV buffer and input
+    buffer when processing partial cipher blocks (fewer than 16 bytes remaining
+    from a prior incomplete block). Although a k1 opmask is computed to limit
+    the number of valid bytes (based on the $left variable), the load
+    instructions lack the {%k1}{z} masked-with-zeroing decorator, causing a
+    full 16-byte read regardless of how many bytes are actually valid. If the
+    input buffer is positioned near a page boundary with fewer than 16 bytes
+    remaining before an unmapped page, this triggers a segfault / OOB read of
+    up to 15 bytes. The fix adds the {%k1}{z} mask to both vmovdqu8 loads in
+    both the encrypt and decrypt partial-block paths, ensuring only $left bytes
+    are read and the remaining lanes are zeroed. This affects only x86-64
+    systems with AVX-512 and VAES support running OpenSSL 3.6.0-3.6.1.
+  judge_signal:
+    files:
+      - crypto/aes/asm/aes-cfb-avx512.pl
+    symbols:
+      - vmovdqu8
+      - aes_cfb128_encrypt_avx512
+      - aes_cfb128_decrypt_avx512
+      - kmovq
+      - k1
+      - xmm0
+      - xmm1
+    keywords:
+      - partial block
+      - opmask zeroing
+      - out-of-bounds read
+      - AVX-512 VAES
+      - page boundary segfault
+      - masked load
+      - CFB128 cipher feedback
+      - vmovdqu8 mask decorator
