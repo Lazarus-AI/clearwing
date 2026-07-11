@@ -172,7 +172,7 @@
   title: >-
     jq: integer overflow in jvp_string_append / jvp_string_copy_replace_bad
     leads to heap buffer overflow
-  severity: High (CVSS 3.1: 8.2 — AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H)
+  severity: "High (CVSS 3.1: 8.2 — AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H)"
   difficulty: easy
   description: >-
     In `src/jv.c`, both `jvp_string_append` and `jvp_string_copy_replace_bad`
@@ -455,7 +455,7 @@
   title: >-
     OpenSC do_key_value(): stack and heap buffer overrun via crafted profile
     configuration file
-  severity: Low (CVSS 3.1: 3.8 AV:P per CNA; NVD primary 7.8 HIGH AV:L)
+  severity: "Low (CVSS 3.1: 3.8 AV:P per CNA; NVD primary 7.8 HIGH AV:L)"
   difficulty: medium
   description: >-
     In OpenSC before 0.27.0, the `do_key_value()` function in
@@ -511,7 +511,7 @@
   title: >-
     wolfSSL: ECDSA sign/verify accepts undersized digests and mismatched hash
     OIDs via missing WC_MIN_DIGEST_SIZE / SigOidMatchesKeyOid checks
-  severity: Critical (CVSS 4.0: 9.3 / CVSS 3.1: 9.1)
+  severity: "Critical (CVSS 4.0: 9.3 / CVSS 3.1: 9.1)"
   difficulty: medium
   description: >-
     wolfSSL's ECDSA sign and verify entry points (`wc_ecc_sign_hash`,
@@ -794,7 +794,7 @@
   title: >-
     Firecracker virtio-pci: post-activation queue register write bypasses
     bounds validation, enabling guest-root OOB write and VMM crash
-  severity: High (CVSS 4.0: 8.7 / CVSS 3.1: 7.5 — AV:L/AC:H/PR:H/UI:N/S:C/C:H/I:H/A:H)
+  severity: "High (CVSS 4.0: 8.7 / CVSS 3.1: 7.5 — AV:L/AC:H/PR:H/UI:N/S:C/C:H/I:H/A:H)"
   difficulty: hard
   description: >-
     In Firecracker's virtio PCI transport (`common_config.rs`), the
@@ -856,7 +856,7 @@
   title: >-
     Bouncy Castle bcpkix: CompositeVerifier accepts empty signature sequence,
     bypassing all cryptographic verification
-  severity: Medium (CVSS 4.0: 6.3 — primary; CVSS 3.1: 7.5 High — Red Hat secondary)
+  severity: "Medium (CVSS 4.0: 6.3 — primary; CVSS 3.1: 7.5 High — Red Hat secondary)"
   difficulty: medium
   description: >-
     In Bouncy Castle's PKIX library, the inner CompositeVerifier class inside
