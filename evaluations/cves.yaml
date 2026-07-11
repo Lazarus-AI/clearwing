@@ -683,18 +683,64 @@
   repo: openssl/openssl
   clone_url: https://github.com/openssl/openssl.git
   language: C
-  vulnerable_commit: null
+  vulnerable_commit: 72fecdef656deca8119dda2d87e2618fcaf7b912
   fix_commit: f04b377be3d821741c86d1f4bf84dee09f3d5c3e
-  files: []
-  vuln_class: null
-  title: OpenSSL CMS/PKCS7 Bleichenbacher-style decrypt oracle.
-  severity: Low
+  files:
+    - crypto/cms/cms_env.c
+    - crypto/pkcs7/pk7_doit.c
+  vuln_class: >-
+    CWE-514 Covert Channel (RSA PKCS#1 v1.5 implicit rejection deliberately
+    disabled in CMS/PKCS7 decryption paths, creating a Bleichenbacher-style
+    adaptive chosen-ciphertext oracle)
+  title: >-
+    OpenSSL CMS/PKCS7: Bleichenbacher-style decrypt oracle via disabled RSA
+    implicit rejection
+  severity: Low (CVSS 3.7 — AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N)
   difficulty: hard
-  description: OpenSSL CMS/PKCS7 Bleichenbacher-style decrypt oracle.
+  description: >-
+    In OpenSSL's CMS and PKCS7 decryption paths, the functions
+    cms_RecipientInfo_ktri_decrypt() (crypto/cms/cms_env.c) and
+    pkcs7_decrypt_rinfo() (crypto/pkcs7/pk7_doit.c) explicitly disabled RSA
+    PKCS#1 v1.5 implicit rejection via EVP_PKEY_CTX_ctrl_str(...,
+    "rsa_pkcs1_implicit_rejection", "0") whenever an RSA key was in use. The
+    justification in the comments was that the upper-layer code "incorrectly
+    assumes a successful RSA decryption means the key matches the ciphertext,"
+    but disabling implicit rejection restores the classical padding oracle: the
+    operation either succeeds with valid PKCS#1 v1.5 padding or fails with a
+    distinct error path. Two attack variants exist: (1) when no recipient
+    certificate is supplied, CMS iterates all KeyTransRecipientInfo entries
+    without stopping at the first success, letting an attacker embed a probe
+    ciphertext in a second KTRI and observe whether its decryption produces
+    valid padding; (2) when a certificate is supplied but the recipient is not
+    found, a random key is substituted and the error/plaintext difference leaks
+    padding validity. Either path constitutes a Bleichenbacher oracle from which
+    the attacker can decrypt arbitrary RSA ciphertexts or forge PKCS#1 v1.5
+    signatures under the victim's key. The fix removes the explicit
+    rsa_pkcs1_implicit_rejection=0 override in both files, allowing the default
+    implicit rejection introduced in draft-irtf-cfrg-rsa-guidance to suppress
+    the oracle.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - crypto/cms/cms_env.c
+      - crypto/pkcs7/pk7_doit.c
+    symbols:
+      - cms_RecipientInfo_ktri_decrypt
+      - pkcs7_decrypt_rinfo
+      - EVP_PKEY_CTX_ctrl_str
+      - rsa_pkcs1_implicit_rejection
+      - evp_pkey_decrypt_alloc
+      - KeyTransRecipientInfo
+      - CMS_decrypt
+      - PKCS7_decrypt
+    keywords:
+      - Bleichenbacher oracle
+      - implicit rejection
+      - PKCS#1 v1.5 padding oracle
+      - adaptive chosen-ciphertext
+      - KeyTransRecipientInfo iteration
+      - RSA CEK unwrap
+      - padding validity side-channel
+      - draft-irtf-cfrg-rsa-guidance
 
 - cve: CVE-2026-6679
   repo: wolfSSL/wolfssl
