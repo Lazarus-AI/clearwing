@@ -778,23 +778,6 @@
       - undersized buffer allocation
       - linked list cap
 
-- cve: CVE-2026-28386
-  repo: openssl/openssl
-  clone_url: https://github.com/openssl/openssl.git
-  language: C+asm
-  vulnerable_commit: null
-  fix_commit: 61f428a2fc6671ede184a19f71e6e495f0689621
-  files: []
-  vuln_class: null
-  title: OpenSSL AES-CFB128 OOB read on AVX-512+VAES partial blocks.
-  severity: Critical
-  difficulty: hard
-  description: null
-  judge_signal:
-    files: []
-    symbols: []
-    keywords: []
-
 - cve: CVE-2026-5747
   repo: firecracker-microvm/firecracker
   clone_url: https://github.com/firecracker-microvm/firecracker.git
