@@ -816,19 +816,63 @@
   repo: firecracker-microvm/firecracker
   clone_url: https://github.com/firecracker-microvm/firecracker.git
   language: Rust
-  vulnerable_commit: null
-  fix_commit: null
+  vulnerable_commit: 7db02adc28eaeb5f54a0d4a8c312e7e9954070b6
+  fix_commit: ee7b464183a24196071e3fed5fb4cdb6b79825c5
   fix_release: https://github.com/firecracker-microvm/firecracker/releases/tag/v1.15.1
-  files: []
-  vuln_class: null
-  title: Firecracker virtio PCI OOB write, guest-root escape.
-  severity: High
+  files:
+    - src/vmm/src/devices/virtio/transport/pci/common_config.rs
+  vuln_class: >-
+    CWE-787 Out-of-bounds Write / CWE-369 Divide By Zero (virtio PCI common
+    config allows queue register writes after device activation, bypassing
+    initialization-time bounds validation)
+  title: >-
+    Firecracker virtio-pci: post-activation queue register write bypasses
+    bounds validation, enabling guest-root OOB write and VMM crash
+  severity: High (CVSS 4.0: 8.7 / CVSS 3.1: 7.5 — AV:L/AC:H/PR:H/UI:N/S:C/C:H/I:H/A:H)
   difficulty: hard
-  description: null
+  description: >-
+    In Firecracker's virtio PCI transport (`common_config.rs`), the
+    `write_common_config_word` and `write_common_config_dword` handlers passed
+    QUEUE_SIZE, QUEUE_ENABLE, QUEUE_DESC_LO/HI, QUEUE_AVAIL_LO/HI, and
+    QUEUE_USED_LO/HI writes directly to `with_queue_mut()` without checking
+    `driver_status`. The virtio 1.3 spec requires queue configuration to occur
+    only between the FEATURES_OK and DRIVER_OK status transitions; Firecracker
+    validated queue_size and ring addresses during device activation but nothing
+    prevented a guest-root user from modifying those registers afterwards via
+    MMIO writes to the PCI common-config BAR. Reducing queue_size post-activation
+    causes the VMM to process descriptors with the new (smaller) size while
+    guest memory still contains rings sized for the original value, producing
+    out-of-bounds writes up to 524,284 bytes beyond the virtio queue structures;
+    setting queue_size to zero triggers a divide-by-zero panic in the VMM process.
+    Reaching host memory (beyond guest RAM) additionally requires a custom guest
+    kernel or specific snapshot configurations. The fix introduces
+    `update_queue_field()`, which wraps `with_queue_mut()` behind a
+    `driver_status == (ACKNOWLEDGE | DRIVER | FEATURES_OK)` guard, making all
+    queue-config register writes a no-op once DRIVER_OK is set. A companion commit
+    (`3e385b8a`) also enforces the full device-status state machine in
+    `set_device_status()`, blocking arbitrary status register overwrites that could
+    be used to re-open the configuration window.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - src/vmm/src/devices/virtio/transport/pci/common_config.rs
+    symbols:
+      - write_common_config_word
+      - write_common_config_dword
+      - with_queue_mut
+      - update_queue_field
+      - set_device_status
+      - driver_status
+      - QUEUE_SIZE
+      - VirtioPciCommonConfig
+    keywords:
+      - post-activation queue register write
+      - virtio device status state machine
+      - DRIVER_OK guard
+      - FEATURES_OK to DRIVER_OK window
+      - queue_size OOB write
+      - divide-by-zero VMM crash
+      - guest-root hypervisor escape
+      - virtio PCI common config BAR
 
 - cve: CVE-2026-5588
   repo: bcgit/bc-java
