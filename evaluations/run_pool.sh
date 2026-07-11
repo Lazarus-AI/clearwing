@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # run_pool.sh — run all cve-*.sh scripts against multiple LLM providers in parallel.
 #
-# Each provider processes CVEs in independent waves of 2 concurrent jobs.
-# A provider advances to the next wave only after both current jobs finish.
+# Each provider processes CVEs sequentially, one job at a time.
+# A provider advances to the next CVE only after the current one finishes.
 # All providers run concurrently with no synchronisation between them.
 #
 # Usage:
@@ -57,7 +57,7 @@ mapfile -t SCRIPTS < <(ls -1 "$SCRIPT_DIR"/cve-*.sh 2>/dev/null | sort)
 RESULTS_DIR="$SCRIPT_DIR/results"
 N_CVE=${#SCRIPTS[@]}
 N_PROV=${#PROVIDERS[@]}
-WAVES=$(( (N_CVE + 1) / 2 ))
+WAVES=$N_CVE
 
 log "providers=$N_PROV  cves=$N_CVE  waves-per-provider=$WAVES  results=$RESULTS_DIR"
 
@@ -83,16 +83,13 @@ run_provider_worker() {
     local base_url="$1" api_key="$2" model="$3"
     local model_slug; model_slug="$(slugify "$model")"
     local n_scripts=${#SCRIPTS[@]}
-    local total_waves=$(( (n_scripts + 1) / 2 ))
+    local total_waves=$n_scripts
     local i=0 wave=1 ok_count=0 fail_count=0
 
     while [[ $i -lt $n_scripts ]]; do
-        # collect up to 2 scripts for this wave
+        # one script per wave
         local batch=()
         batch+=("${SCRIPTS[$i]}")
-        if [[ $(( i + 1 )) -lt $n_scripts ]]; then
-            batch+=("${SCRIPTS[$(( i + 1 ))]}")
-        fi
 
         # pretty-print CVE names for this wave
         local names=()
@@ -147,7 +144,7 @@ run_provider_worker() {
         # ── all jobs done — advance to next wave ──────────────────────────────
 
         printf '[%s] wave %d/%d done\n' "$model_slug" "$wave" "$total_waves"
-        i=$(( i + 2 ))
+        i=$(( i + 1 ))
         wave=$(( wave + 1 ))
     done
 
