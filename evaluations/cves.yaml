@@ -557,23 +557,6 @@
       - undersized digest
       - FIPS 186-5
 
-- cve: CVE-2026-5588
-  repo: bcgit/bc-java
-  clone_url: https://github.com/bcgit/bc-java.git
-  language: Java
-  vulnerable_commit: null
-  fix_commit: 656bae0dbd9b1521f840521ff786e78749fe3057
-  files: []
-  vuln_class: null
-  title: Bouncy Castle bcpkix broken/risky crypto algorithm.
-  severity: Medium
-  difficulty: medium
-  description: Bouncy Castle bcpkix broken/risky crypto algorithm.
-  judge_signal:
-    files: []
-    symbols: []
-    keywords: []
-
 - cve: CVE-2026-47391
   repo: MervinPraison/PraisonAI
   clone_url: https://github.com/MervinPraison/PraisonAI.git
