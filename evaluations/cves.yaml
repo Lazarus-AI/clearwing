@@ -161,7 +161,7 @@
   repo: jqlang/jq
   clone_url: https://github.com/jqlang/jq.git
   language: C
-  vulnerable_commit: 9f778b4a4f0f34f7bf15d00fcf9ff5d7f66534a4
+  vulnerable_commit: 9f778b4cb56aedc80592af994bdc5ef879bbbc17
   fix_commit: e47e56d226519635768e6aab2f38f0ab037c09e5
   files:
     - src/jv.c

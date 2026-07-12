@@ -11,17 +11,22 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import re
+import subprocess
+import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import yaml
 from inspect_ai import Task, task
 from inspect_ai.dataset import MemoryDataset, Sample
-from inspect_ai.model import GenerateConfig, get_model, ChatMessageUser
+from inspect_ai.model import ChatMessageUser, GenerateConfig, ModelOutput, get_model
 from inspect_ai.scorer import Score, Scorer, scorer, accuracy
 from inspect_ai.solver import Generate, TaskState, solver
-from inspect_ai.model import ModelOutput
 
 
 _YAML_PATH = Path(__file__).parent / "cves.yaml"
@@ -50,8 +55,18 @@ FAIL - no finding matches the CVE description
 # Dataset
 # ---------------------------------------------------------------------------
 
-def _cve_dataset(yaml_path: Path = _YAML_PATH) -> MemoryDataset:
+def cve_dataset(
+    yaml_path: Path = _YAML_PATH,
+    cve: str | list[str] | None = None,
+    difficulty: str | list[str] | None = None,
+) -> MemoryDataset:
     entries: list[dict[str, Any]] = yaml.safe_load(yaml_path.read_text())
+    if cve is not None:
+        ids = {cve.upper()} if isinstance(cve, str) else {c.upper() for c in cve}
+        entries = [e for e in entries if e["cve"].upper() in ids]
+    if difficulty is not None:
+        levels = {difficulty.lower()} if isinstance(difficulty, str) else {d.lower() for d in difficulty}
+        entries = [e for e in entries if e.get("difficulty", "").lower() in levels]
     return MemoryDataset(samples=[
         Sample(
             id=e["cve"],
@@ -62,6 +77,14 @@ def _cve_dataset(yaml_path: Path = _YAML_PATH) -> MemoryDataset:
                 "description": e.get("description", ""),
                 "title": e.get("title", ""),
                 "vuln_class": e.get("vuln_class", ""),
+                "difficulty": e.get("difficulty", ""),
+                "clone_url": e.get("clone_url", ""),
+                "vulnerable_commit": e.get("vulnerable_commit", ""),
+                "subsystem_paths": (
+                    [e["sourcehunt"]["subsystem"]]
+                    if e.get("sourcehunt", {}).get("subsystem")
+                    else e.get("files") or []
+                ),
             },
         )
         for e in entries
@@ -170,13 +193,335 @@ def llm_judge(model: str | None = None) -> Scorer:
 
 
 # ---------------------------------------------------------------------------
-# Task
+# Helpers
+# ---------------------------------------------------------------------------
+
+def git_clone_commit(clone_url: str, commit: str, dest: str) -> None:
+    """Clone repo and checkout a specific commit into dest."""
+    subprocess.run(
+        ["git", "clone", clone_url, dest],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", dest, "checkout", commit],
+        check=True, capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Script solver
+# ---------------------------------------------------------------------------
+
+def _load_findings(out_dir: Path) -> list:
+    findings: list = []
+    seen: set = set()
+    for fp in [out_dir / "findings_pool.jsonl", out_dir / "findings.json"]:
+        if not fp.exists():
+            continue
+        text = fp.read_text()
+        batch = (
+            [json.loads(l) for l in text.splitlines() if l.strip()]
+            if fp.suffix == ".jsonl"
+            else (lambda d: d.get("findings", d) if isinstance(d, dict) else d)(json.loads(text))
+        )
+        for item in batch:
+            key = json.dumps(item, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                findings.append(item)
+    return findings
+
+
+@solver
+def script_solver(
+    script: str | Path,
+    results_dir: str | Path = _RESULTS_DIR,
+    hunt_model: str | None = None,
+    hunt_base_url: str | None = None,
+    hunt_api_key: str | None = None,
+    no_verify: bool = True,
+    no_exploit: bool = True,
+    no_variant_loop: bool = True,
+    no_rank: bool = True,
+):
+    """Runs a CVE hunt shell script, captures workdir metadata, loads findings.
+
+    hunt_model / hunt_base_url / hunt_api_key are forwarded as CLEARWING_MODEL /
+    CLEARWING_BASE_URL / CLEARWING_API_KEY.  If None, the existing env/config is
+    used as-is (so ambient clearwing config still works).
+
+    no_verify / no_exploit / no_variant_loop / no_rank are forwarded as
+    HUNT_NO_VERIFY / HUNT_NO_EXPLOIT / HUNT_NO_VARIANT_LOOP / HUNT_NO_RANK
+    env vars (1=skip, 0=run).  Shell scripts should honour these.
+    """
+    script = Path(script)
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        cve: str = state.metadata["cve"]
+        out_dir = Path(results_dir) / cve.lower()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        env = {**os.environ, "OUT_DIR": str(out_dir)}
+        if hunt_model:
+            env["CLEARWING_MODEL"] = hunt_model
+        if hunt_base_url:
+            env["CLEARWING_BASE_URL"] = hunt_base_url
+        if hunt_api_key:
+            env["CLEARWING_API_KEY"] = hunt_api_key
+        env["HUNT_NO_VERIFY"] = "1" if no_verify else "0"
+        env["HUNT_NO_EXPLOIT"] = "1" if no_exploit else "0"
+        env["HUNT_NO_VARIANT_LOOP"] = "1" if no_variant_loop else "0"
+        env["HUNT_NO_RANK"] = "1" if no_rank else "0"
+
+        log_path = out_dir / "script.log"
+        lines: list[bytes] = []
+        proc = await asyncio.create_subprocess_exec(
+            "bash", str(script),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        with log_path.open("wb") as lf:
+            async for line in proc.stdout:
+                lf.write(line)
+                lf.flush()
+                lines.append(line)
+        await proc.wait()
+        stdout = b"".join(lines).decode()
+
+        workdirs = {}
+        for key, pattern in [
+            ("session", r"session\s+->\s+(\S+)"),
+            ("repo", r"repo\s+->\s+(\S+)"),
+            ("hunt_output", r"hunt output\s+->\s+(\S+)"),
+        ]:
+            m = re.search(pattern, stdout)
+            if m:
+                workdirs[key] = m.group(1)
+
+        state.metadata["workdirs"] = workdirs
+        state.metadata["script_exit"] = proc.returncode
+        state.metadata["script_log"] = stdout
+
+        findings = _load_findings(out_dir)
+        state.output = ModelOutput.from_content(
+            model="script_solver",
+            content=json.dumps({"findings": findings}),
+        )
+        return state
+
+    return solve
+
+
+# ---------------------------------------------------------------------------
+# Runner solver
+# ---------------------------------------------------------------------------
+
+@solver
+def runner_solver(
+    clone_url: str,
+    vulnerable_commit: str,
+    subsystem_paths: list[str] | None = None,
+    results_dir: str | Path = _RESULTS_DIR,
+    hunt_model: str | None = None,
+    hunt_base_url: str | None = None,
+    hunt_api_key: str | None = None,
+):
+    """Clones a repo at a vulnerable commit and runs SourceHuntRunner directly."""
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        if hunt_base_url:
+            os.environ["CLEARWING_BASE_URL"] = hunt_base_url
+        if hunt_api_key:
+            os.environ["CLEARWING_API_KEY"] = hunt_api_key
+        if hunt_model:
+            os.environ["CLEARWING_MODEL"] = hunt_model
+        # Note: model_override is intentionally not set on SourceHuntRunner —
+        # it bypasses env vars in resolve_llm_endpoint. The env vars above are
+        # sufficient and respect base_url + api_key together.
+
+        cve: str = state.metadata["cve"]
+        out_dir = Path(results_dir) / cve.lower()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        repo_dir = tempfile.mkdtemp(prefix=f"{cve.lower()}-repo-")
+        await asyncio.to_thread(git_clone_commit, clone_url, vulnerable_commit, repo_dir)
+
+        runner = SourceHuntRunner(
+            repo_url=clone_url,
+            local_path=repo_dir,
+            output_dir=str(out_dir),
+            enable_subsystem_hunt=True,
+            subsystem_paths=subsystem_paths,
+            no_per_file_hunt=True,
+            no_rank=True,
+            no_verify=True,
+            no_exploit=True,
+            enable_variant_loop=False,
+        )
+        result = await runner.arun()
+
+        findings = [asdict(f) if not isinstance(f, dict) else f for f in result.findings]
+        state.metadata["cost_usd"] = result.cost_usd
+        state.metadata["session_id"] = result.session_id
+        state.output = ModelOutput.from_content(
+            model="runner_solver",
+            content=json.dumps({"findings": findings}),
+        )
+        return state
+
+    return solve
+
+
+@solver
+def dynamic_runner_solver(
+    results_dir: str | Path = _RESULTS_DIR,
+    hunt_model: str | None = None,
+    hunt_base_url: str | None = None,
+    hunt_api_key: str | None = None,
+    agent_mode: str = "deep",
+):
+    """Runs SourceHuntRunner using clone_url/vulnerable_commit/subsystem_paths
+    from sample metadata (populated by cve_dataset)."""
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        if hunt_base_url:
+            os.environ["CLEARWING_BASE_URL"] = hunt_base_url
+        if hunt_api_key:
+            os.environ["CLEARWING_API_KEY"] = hunt_api_key
+        if hunt_model:
+            os.environ["CLEARWING_MODEL"] = hunt_model
+
+        cve: str = state.metadata["cve"]
+        clone_url: str = state.metadata["clone_url"]
+        vulnerable_commit: str = state.metadata["vulnerable_commit"]
+        subsystem_paths: list[str] = state.metadata.get("subsystem_paths") or []
+
+        if not clone_url or not vulnerable_commit:
+            state.output = ModelOutput.from_content(
+                model="dynamic_runner_solver",
+                content=json.dumps({"findings": [], "error": "missing clone_url or vulnerable_commit"}),
+            )
+            return state
+
+        out_dir = Path(results_dir) / cve.lower()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        repo_dir = tempfile.mkdtemp(prefix=f"{cve.lower()}-repo-")
+        await asyncio.to_thread(git_clone_commit, clone_url, vulnerable_commit, repo_dir)
+
+        runner = SourceHuntRunner(
+            repo_url=clone_url,
+            local_path=repo_dir,
+            output_dir=str(out_dir),
+            enable_subsystem_hunt=bool(subsystem_paths),
+            subsystem_paths=subsystem_paths or None,
+            no_per_file_hunt=bool(subsystem_paths),
+            no_rank=True,
+            no_verify=True,
+            no_exploit=True,
+            enable_variant_loop=False,
+            agent_mode=agent_mode,
+        )
+        result = await runner.arun()
+
+        findings = [asdict(f) if not isinstance(f, dict) else f for f in result.findings]
+        state.metadata["cost_usd"] = result.cost_usd
+        state.metadata["session_id"] = result.session_id
+        state.output = ModelOutput.from_content(
+            model="dynamic_runner_solver",
+            content=json.dumps({"findings": findings}),
+        )
+        return state
+
+    return solve
+
+
+# ---------------------------------------------------------------------------
+# Tasks
 # ---------------------------------------------------------------------------
 
 @task
 def clearwing_eval() -> Task:
     return Task(
-        dataset=_cve_dataset(),
+        dataset=cve_dataset(),
         solver=findings_loader(),
         scorer=llm_judge(),
     )
+
+
+@task
+def cve_2026_40034(
+    hunt_model: str = "glm-5.2",
+    hunt_base_url: str | None = None,
+    hunt_api_key: str | None = None,
+) -> Task:
+    return Task(
+        dataset=cve_dataset(cve="CVE-2026-40034"),
+        solver=runner_solver(
+            clone_url="https://github.com/GitoxideLabs/gitoxide.git",
+            vulnerable_commit="95b0399abca3e040686591388991b08c794050cd",
+            subsystem_paths=["gix-submodule/src/access.rs"],
+            hunt_model=hunt_model,
+            hunt_base_url=hunt_base_url,
+            hunt_api_key=hunt_api_key,
+        ),
+        scorer=llm_judge(),
+    )
+
+
+@task
+def clearwing_easy(
+    hunt_model: str | None = None,
+    hunt_base_url: str | None = None,
+    hunt_api_key: str | None = None,
+    agent_mode: str = "deep",
+) -> Task:
+    return Task(
+        dataset=cve_dataset(difficulty="easy"),
+        solver=dynamic_runner_solver(
+            hunt_model=hunt_model,
+            hunt_base_url=hunt_base_url,
+            hunt_api_key=hunt_api_key,
+            agent_mode=agent_mode,
+        ),
+        scorer=llm_judge(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-CVE tasks (generated from cves.yaml)
+# ---------------------------------------------------------------------------
+
+def _make_cve_task(entry: dict[str, Any]):
+    cve_id = entry["cve"]
+    task_name = cve_id.lower().replace("-", "_")
+
+    def _task_fn(
+        hunt_model: str | None = None,
+        hunt_base_url: str | None = None,
+        hunt_api_key: str | None = None,
+        agent_mode: str = "deep",
+    ) -> Task:
+        return Task(
+            dataset=cve_dataset(cve=cve_id),
+            solver=dynamic_runner_solver(
+                hunt_model=hunt_model,
+                hunt_base_url=hunt_base_url,
+                hunt_api_key=hunt_api_key,
+                agent_mode=agent_mode,
+            ),
+            scorer=llm_judge(),
+        )
+
+    _task_fn.__name__ = task_name
+    _task_fn.__qualname__ = task_name
+    return task(_task_fn)
+
+
+_cve_entries: list[dict[str, Any]] = yaml.safe_load(_YAML_PATH.read_text())
+for _entry in _cve_entries:
+    _task = _make_cve_task(_entry)
+    globals()[_task.__name__] = _task
