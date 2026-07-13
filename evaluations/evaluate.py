@@ -41,13 +41,12 @@ You are evaluating whether a vulnerability scanner correctly identified a known 
 ## Scanner Findings
 {findings}
 
-Does any finding above correctly identify the vulnerability described by the CVE? \
-A finding matches if it identifies the same root cause, affected code path, or \
-vulnerability class — even if the wording differs.
+Does any finding above correctly identify the vulnerability described by the CVE?
 
-Reply with PASS or FAIL on the first line, then optionally explain on subsequent lines.
-PASS - at least one finding correctly identifies the vulnerability
-FAIL - no finding matches the CVE description
+Reply with PASS, PARTIAL, or FAIL on the first line, then optionally explain on subsequent lines.
+PASS    - at least one finding correctly identifies the root cause and affected code path
+PARTIAL - a finding identifies the right file/area or vulnerability class but misses the specific mechanism
+FAIL    - no finding meaningfully matches the CVE description
 """
 
 
@@ -81,7 +80,7 @@ def cve_dataset(
                 "clone_url": e.get("clone_url", ""),
                 "vulnerable_commit": e.get("vulnerable_commit", ""),
                 "subsystem_paths": (
-                    [e["sourcehunt"]["subsystem"]]
+                    [e["sourcehunt"]["subsystem"]] + (e.get("files") or [])
                     if e.get("sourcehunt", {}).get("subsystem")
                     else e.get("files") or []
                 ),
@@ -178,14 +177,32 @@ def llm_judge(model: str | None = None) -> Scorer:
         prompt = _JUDGE_PROMPT.format(description=description, findings=descriptions)
 
         judge = get_model(model)
-        response = await judge.generate(
-            [ChatMessageUser(content=prompt)],
-            config=GenerateConfig(max_tokens=64),
-        )
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await asyncio.wait_for(
+                    judge.generate(
+                        [ChatMessageUser(content=prompt)],
+                        config=GenerateConfig(max_tokens=256),
+                    ),
+                    timeout=60,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(2 ** attempt)
+        else:
+            return Score(value=None, explanation=f"judge failed after 3 attempts: {last_exc}")
+
         first_line = response.completion.strip().splitlines()[0].upper()
-        passed = first_line.startswith("PASS")
+        if first_line.startswith("PASS"):
+            value = 1.0
+        elif first_line.startswith("PARTIAL"):
+            value = 0.5
+        else:
+            value = 0.0
         return Score(
-            value=1 if passed else 0,
+            value=value,
             explanation=response.completion.strip(),
         )
 
