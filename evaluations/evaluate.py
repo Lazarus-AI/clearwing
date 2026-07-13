@@ -381,6 +381,7 @@ def dynamic_runner_solver(
     hunt_base_url: str | None = None,
     hunt_api_key: str | None = None,
     agent_mode: str = "deep",
+    depth: str = "deep",
 ):
     """Runs SourceHuntRunner using clone_url/vulnerable_commit/subsystem_paths
     from sample metadata (populated by cve_dataset)."""
@@ -422,8 +423,9 @@ def dynamic_runner_solver(
             no_rank=True,
             no_verify=True,
             no_exploit=True,
-            enable_variant_loop=False,
+            enable_variant_loop=True,
             agent_mode=agent_mode,
+            depth=depth,
         )
         result = await runner.arun()
 
@@ -452,25 +454,6 @@ def clearwing_eval() -> Task:
     )
 
 
-@task
-def cve_2026_40034(
-    hunt_model: str = "glm-5.2",
-    hunt_base_url: str | None = None,
-    hunt_api_key: str | None = None,
-) -> Task:
-    return Task(
-        dataset=cve_dataset(cve="CVE-2026-40034"),
-        solver=runner_solver(
-            clone_url="https://github.com/GitoxideLabs/gitoxide.git",
-            vulnerable_commit="95b0399abca3e040686591388991b08c794050cd",
-            subsystem_paths=["gix-submodule/src/access.rs"],
-            hunt_model=hunt_model,
-            hunt_base_url=hunt_base_url,
-            hunt_api_key=hunt_api_key,
-        ),
-        scorer=llm_judge(),
-    )
-
 
 @task
 def clearwing_easy(
@@ -478,6 +461,7 @@ def clearwing_easy(
     hunt_base_url: str | None = None,
     hunt_api_key: str | None = None,
     agent_mode: str = "deep",
+    depth: str = "deep",
 ) -> Task:
     return Task(
         dataset=cve_dataset(difficulty="easy"),
@@ -486,6 +470,7 @@ def clearwing_easy(
             hunt_base_url=hunt_base_url,
             hunt_api_key=hunt_api_key,
             agent_mode=agent_mode,
+            depth=depth,
         ),
         scorer=llm_judge(),
     )
@@ -504,6 +489,7 @@ def _make_cve_task(entry: dict[str, Any]):
         hunt_base_url: str | None = None,
         hunt_api_key: str | None = None,
         agent_mode: str = "deep",
+        depth: str = "deep",
     ) -> Task:
         return Task(
             dataset=cve_dataset(cve=cve_id),
@@ -512,6 +498,7 @@ def _make_cve_task(entry: dict[str, Any]):
                 hunt_base_url=hunt_base_url,
                 hunt_api_key=hunt_api_key,
                 agent_mode=agent_mode,
+                depth=depth,
             ),
             scorer=llm_judge(),
         )

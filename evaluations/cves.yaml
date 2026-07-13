@@ -6,6 +6,8 @@
   fix_commit: 843c9b94ca9c2ed248bb30127bb4f3d7af0d607c
   files:
     - providers/implementations/ciphers/cipher_aes_ocb.c
+  sourcehunt:
+    subsystem: providers/implementations/ciphers
   vuln_class: >-
     CWE-325 Missing Required Cryptographic Step (application-supplied IV never
     applied to OCB context on the EVP_Cipher() one-shot path)
@@ -62,6 +64,8 @@
   fix_commit: 8b5d0be44ded457ca993ec9ca93d859941c63764
   files:
     - src/Serializer/Rules.php
+  sourcehunt:
+    subsystem: src
   vuln_class: >-
     CWE-79 Improper Neutralization of Input During Web Page Generation (namespace attribute
     values written unencoded during HTML serialization bypass XSS sanitizer)
@@ -110,6 +114,8 @@
   fix_commit: 947ff1d33f00f940aa68ae2593500291d799d954
   files:
     - src/main/java/com/github/junrar/LocalFolderExtractor.java
+  sourcehunt:
+    subsystem: src/main/java/com/github/junrar
   vuln_class: path-traversal
   title: Junrar LocalFolderExtractor backslash path traversal.
   severity: Medium
@@ -140,22 +146,56 @@
   repo: GitoxideLabs/gitoxide
   clone_url: https://github.com/GitoxideLabs/gitoxide.git
   language: Rust
-  vulnerable_commit: 95b0399abca3e040686591388991b08c794050cd
-  fix_commit: 6a2e6a436f76c8bbf2487f9967413a51356667a0
+  vulnerable_commit: 6a2e6a436f76c8bbf2487f9967413a51356667a0
+  fix_commit: e3ca1e64b0bcd627c7c5d3620f891cc22d1d03c7
   files:
     - gix-submodule/src/access.rs
   sourcehunt:
     subsystem: gix-submodule/src/access.rs
     flags: [--subsystem-hunt, --no-per-file-hunt, --auto-patch]
-  vuln_class: null
-  title: gix-submodule .gitmodules update-field validation bypass.
+  vuln_class: >-
+    CWE-863 Incorrect Authorization (CommandForbiddenInModulesConfiguration guard
+    bypassed by checking section presence rather than value origin, allowing
+    shell-command injection via .gitmodules update field)
+  title: >-
+    gix-submodule: .gitmodules update=!cmd shell injection via has_value_from_foreign_section bypass
   severity: High
   difficulty: easy
-  description: gix-submodule .gitmodules update-field validation bypass.
+  description: >-
+    gix-submodule before 0.29.0 incorrectly validates the update field in
+    .gitmodules. The update() method in gix-submodule/src/access.rs guarded
+    against arbitrary shell-command injection by checking whether any .git/config
+    section referenced the submodule name (has_value_from_foreign_section). Because
+    git submodule init writes a [submodule "<name>"] section to .git/config even
+    when the submodule is only partially configured, an attacker can craft a
+    repository whose .gitmodules sets update = !<shell command>; after a victim
+    runs git submodule init (which creates the foreign section), the guard's
+    has_value_from_foreign_section check returns true, allowing the Command value
+    sourced from the malicious .gitmodules to pass through. When
+    Submodule::update() is subsequently called the injected shell command executes,
+    achieving remote code execution. The fix replaces the section-presence check
+    with a string_filter() call that tracks the config metadata of the resolved
+    value itself, rejecting any Command that originated from the .gitmodules file
+    regardless of what other sections exist.
   judge_signal:
-    files: []
-    symbols: []
-    keywords: []
+    files:
+      - gix-submodule/src/access.rs
+    symbols:
+      - update
+      - has_value_from_foreign_section
+      - value_is_from_modules_file
+      - CommandForbiddenInModulesConfiguration
+      - string_filter
+      - Update::Command
+    keywords:
+      - update field
+      - shell command injection
+      - .gitmodules
+      - has_value_from_foreign_section
+      - value origin
+      - submodule init bypass
+      - remote code execution
+      - CommandForbiddenInModulesConfiguration bypass
 
 - cve: CVE-2026-32316
   repo: jqlang/jq
@@ -165,6 +205,8 @@
   fix_commit: e47e56d226519635768e6aab2f38f0ab037c09e5
   files:
     - src/jv.c
+  sourcehunt:
+    subsystem: src
   vuln_class: >-
     CWE-190 Integer Overflow leading to CWE-122 Heap-based Buffer Overflow
     (32-bit unsigned arithmetic wraps on combined string length ≥ 2^31,
