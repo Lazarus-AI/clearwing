@@ -90,6 +90,7 @@ class HuntTuning:
     subsystem_paths: list[str] | None = None
     campaign_hint: str | None = None
     gvisor_runtime: str | None = None
+    sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
 
 
 @dataclass(frozen=True)

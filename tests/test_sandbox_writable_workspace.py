@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from clearwing.sandbox.container import SandboxConfig, SandboxContainer
+from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 
 class TestSandboxConfigCpus:
@@ -51,6 +52,176 @@ class TestSandboxContainerCpus:
 
         kwargs = mock_client.containers.run.call_args.kwargs
         assert "nano_cpus" not in kwargs
+
+
+class TestHunterSandboxCpuPolicy:
+    @pytest.mark.parametrize(
+        ("available", "expected"),
+        [(1, 0.5), (2, 1.0), (3, 2.0), (4, 3.0), (64, 3.0)],
+    )
+    def test_auto_limit_uses_docker_cpu_count(self, tmp_path, available, expected):
+        manager = HunterSandbox(repo_path=str(tmp_path))
+        client = MagicMock()
+        client.info.return_value = {"NCPU": available}
+        manager._client = client
+
+        assert manager.available_cpus == float(available)
+        assert manager.default_cpu_limit == expected
+        # Both values are cached for every subsequent spawn in the hunt.
+        assert manager.default_cpu_limit == expected
+        client.info.assert_called_once_with()
+
+    def test_auto_limit_falls_back_to_process_affinity(self, tmp_path):
+        manager = HunterSandbox(repo_path=str(tmp_path))
+        client = MagicMock()
+        client.info.side_effect = RuntimeError("daemon info unavailable")
+        manager._client = client
+
+        with patch(
+            "clearwing.sandbox.hunter_sandbox.os.sched_getaffinity",
+            return_value={0, 1, 2},
+            create=True,
+        ):
+            assert manager.available_cpus == 3.0
+            assert manager.default_cpu_limit == 2.0
+
+    def test_auto_limit_falls_back_to_host_cpu_count(self, tmp_path):
+        manager = HunterSandbox(repo_path=str(tmp_path))
+        client = MagicMock()
+        client.info.return_value = {"NCPU": 0}
+        manager._client = client
+
+        with (
+            patch(
+                "clearwing.sandbox.hunter_sandbox.os.sched_getaffinity",
+                side_effect=OSError,
+                create=True,
+            ),
+            patch("clearwing.sandbox.hunter_sandbox.os.cpu_count", return_value=2),
+        ):
+            assert manager.available_cpus == 2.0
+            assert manager.default_cpu_limit == 1.0
+
+    def test_explicit_zero_disables_limit_without_cpu_detection(self, tmp_path):
+        manager = HunterSandbox(repo_path=str(tmp_path), default_cpus=0.0)
+        client = MagicMock()
+        manager._client = client
+
+        assert manager.default_cpu_limit == 0.0
+        client.info.assert_not_called()
+
+    @pytest.mark.parametrize("value", [-1.0, float("inf"), float("nan")])
+    def test_invalid_default_rejected(self, tmp_path, value):
+        with pytest.raises(ValueError, match="default_cpus"):
+            HunterSandbox(repo_path=str(tmp_path), default_cpus=value)
+
+    def test_spawn_inherits_manager_default(self, tmp_path):
+        manager = HunterSandbox(repo_path=str(tmp_path))
+        client = MagicMock()
+        client.info.return_value = {"NCPU": 2}
+        manager._client = client
+
+        with (
+            patch.object(HunterSandbox, "_build_variant_image", return_value="sandbox:test"),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+        ):
+            sandbox = manager.spawn(scratch_mount=False)
+
+        assert sandbox.config.cpus == 1.0
+
+    def test_spawn_override_wins_over_manager_default(self, tmp_path):
+        manager = HunterSandbox(repo_path=str(tmp_path), default_cpus=1.0)
+
+        with (
+            patch.object(HunterSandbox, "_build_variant_image", return_value="sandbox:test"),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+        ):
+            sandbox = manager.spawn(scratch_mount=False, cpus=2.5)
+
+        assert sandbox.config.cpus == 2.5
+
+
+class TestSourceHuntSandboxCpuWiring:
+    def test_runner_passes_override_to_manager_and_removes_hardcoded_limit(self):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        runner = SourceHuntRunner(
+            repo_url="test",
+            depth="standard",
+            max_parallel=1,
+            sandbox_cpus=1.5,
+        )
+        manager = MagicMock()
+        manager.build_image.return_value = "sandbox:test"
+        manager.default_cpu_limit = 1.5
+        manager.available_cpus = 4.0
+
+        with patch("clearwing.sourcehunt.runner.HunterSandbox", return_value=manager) as cls:
+            runner._ensure_sandbox_factory("/tmp/repo", [{"language": "c"}])
+
+        cls.assert_called_once_with(
+            repo_path="/tmp/repo",
+            languages=["c"],
+            deep_agent_mode=True,
+            default_cpus=1.5,
+        )
+        assert runner.sandbox_factory is not None
+        runner.sandbox_factory()
+        manager.spawn.assert_called_once_with(
+            writable_workspace=True,
+            memory_mb=16384,
+            timeout_seconds=600,
+            runtime=None,
+        )
+
+    def test_runner_warns_when_parallel_limits_exceed_daemon_capacity(self, caplog):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        runner = SourceHuntRunner(repo_url="test", max_parallel=2)
+        manager = MagicMock()
+        manager.build_image.return_value = "sandbox:test"
+        manager.default_cpu_limit = 3.0
+        manager.available_cpus = 4.0
+
+        with patch("clearwing.sourcehunt.runner.HunterSandbox", return_value=manager):
+            runner._ensure_sandbox_factory("/tmp/repo", [{"language": "c"}])
+
+        assert "CPU limits are per-container" in caplog.text
+
+    def test_structured_config_sets_sandbox_cpu_override(self):
+        from clearwing.sourcehunt import HuntTuning, SourceHuntConfig, TargetConfig
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        config = SourceHuntConfig(
+            target=TargetConfig(repo_url="test"),
+            tuning=HuntTuning(sandbox_cpus=1.25),
+        )
+
+        runner = SourceHuntRunner(config=config)
+
+        assert runner._sandbox_cpus == 1.25
+
+    @pytest.mark.parametrize("value", [-1.0, float("inf"), float("nan")])
+    def test_runner_rejects_invalid_override(self, value):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        with pytest.raises(ValueError, match="sandbox_cpus"):
+            SourceHuntRunner(repo_url="test", sandbox_cpus=value)
+
+    def test_cli_flag_and_default(self):
+        import argparse
+
+        from clearwing.ui.commands import sourcehunt
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        sourcehunt.add_parser(subparsers)
+
+        explicit = parser.parse_args(["sourcehunt", "test-repo", "--sandbox-cpus", "1.5"])
+        automatic = parser.parse_args(["sourcehunt", "test-repo"])
+
+        assert explicit.sandbox_cpus == 1.5
+        assert automatic.sandbox_cpus is None
 
 
 class TestCopyTreeInto:
@@ -183,11 +354,13 @@ class TestHunterSandboxWritableWorkspace:
             deep_agent_mode=True,
         )
 
-        with patch.object(SandboxContainer, "start", return_value="cid"):
-            with patch.object(SandboxContainer, "copy_tree_into") as mock_copy:
-                with patch.object(SandboxContainer, "exec") as mock_exec:
-                    mock_exec.return_value = MagicMock(exit_code=0)
-                    sb = manager.spawn(writable_workspace=True)
+        with (
+            patch.object(SandboxContainer, "start", return_value="cid"),
+            patch.object(SandboxContainer, "copy_tree_into") as mock_copy,
+            patch.object(SandboxContainer, "exec") as mock_exec,
+        ):
+            mock_exec.return_value = MagicMock(exit_code=0)
+            manager.spawn(writable_workspace=True)
 
         mock_copy.assert_called_once_with("/tmp/repo", "/workspace")
         # git init should have been called

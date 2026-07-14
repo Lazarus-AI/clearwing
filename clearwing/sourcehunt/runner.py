@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -217,6 +218,7 @@ class SourceHuntRunner:
         seed_harness_crashes: bool = False,
         respect_gitignore: bool = False,
         live: bool = False,
+        sandbox_cpus: float | None = None,
         *,
         config: SourceHuntConfig | None = None,
     ):
@@ -352,12 +354,15 @@ class SourceHuntRunner:
             gvisor_runtime = (
                 gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             )
+            sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
 
         if not repo_url:
             raise ValueError(
                 "repo_url is required — pass it directly or via "
                 "config=SourceHuntConfig(target=TargetConfig(repo_url=...))"
             )
+        if sandbox_cpus is not None and (not math.isfinite(sandbox_cpus) or sandbox_cpus < 0):
+            raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
 
         # Store the config for introspection (None if constructed the old way)
         self._config = config
@@ -435,6 +440,7 @@ class SourceHuntRunner:
         self._injected_historical_db = None
         self._enable_behavior_monitor = enable_behavior_monitor
         self._enable_artifact_store = enable_artifact_store
+        self._sandbox_cpus = None if sandbox_cpus is None else float(sandbox_cpus)
         self._gvisor_runtime = self._check_runtime_available(gvisor_runtime)
         self._preprocessing = preprocessing
         self._seed_harness_crashes = seed_harness_crashes
@@ -1690,6 +1696,7 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
+                default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()
         except Exception as exc:
@@ -1701,14 +1708,31 @@ class SourceHuntRunner:
             logger.debug("HunterSandbox initialization failed", exc_info=True)
             return
 
-        logger.info("HunterSandbox ready image=%s", image_tag)
+        cpu_limit = manager.default_cpu_limit
+        available_cpus = manager.available_cpus
+        logger.info(
+            "HunterSandbox ready image=%s cpu_limit=%.2f available_cpus=%.2f",
+            image_tag,
+            cpu_limit,
+            available_cpus,
+        )
+        aggregate_limit = cpu_limit * self.max_parallel
+        if cpu_limit > 0 and aggregate_limit > available_cpus:
+            logger.warning(
+                "Sandbox CPU limits are per-container: max_parallel=%d x %.2f CPUs "
+                "= %.2f, exceeding the detected %.2f CPUs. Lower --max-parallel or "
+                "--sandbox-cpus to preserve aggregate host headroom.",
+                self.max_parallel,
+                cpu_limit,
+                aggregate_limit,
+                available_cpus,
+            )
         self._sandbox_manager = manager
         gvisor_rt = self._gvisor_runtime
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(
                 writable_workspace=True,
                 memory_mb=kw.pop("memory_mb", 16384),
-                cpus=kw.pop("cpus", 8.0),
                 timeout_seconds=kw.pop("timeout_seconds", 600),
                 runtime=kw.pop("runtime", gvisor_rt),
                 **kw,
