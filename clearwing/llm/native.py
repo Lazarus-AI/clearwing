@@ -466,20 +466,14 @@ class AsyncLLMClient:
     ) -> None:
         if reservation is None or self._spend_ledger is None:
             return
-        usage = getattr(response, "usage", None)
-        details = getattr(usage, "prompt_tokens_details", None)
-        provider_cost = getattr(usage, "cost_usd", None)
-        if provider_cost is None:
-            provider_cost = getattr(response, "cost_usd", None)
+        usage = response.usage
+        details = usage.prompt_tokens_details
         self._spend_ledger.settle_call(
             reservation,
-            input_tokens=getattr(usage, "prompt_tokens", None),
-            output_tokens=getattr(usage, "completion_tokens", None),
+            input_tokens=usage.prompt_tokens,
+            output_tokens=usage.completion_tokens,
             cached_input_tokens=(
-                getattr(details, "cached_tokens", None) if details else None
-            ),
-            provider_cost_usd=(
-                float(provider_cost) if provider_cost is not None else None
+                details.cached_tokens if details is not None else None
             ),
         )
 
@@ -637,12 +631,12 @@ class AsyncLLMClient:
             raise
 
         self._settle_spend_call(reservation, response)
-        usage = getattr(response, "usage", None)
+        usage = response.usage
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        details = getattr(usage, "prompt_tokens_details", None)
-        cached_tokens = getattr(details, "cached_tokens", None) if details else None
+        prompt_tokens = usage.prompt_tokens
+        completion_tokens = usage.completion_tokens
+        details = usage.prompt_tokens_details
+        cached_tokens = details.cached_tokens if details is not None else None
         n_tool_calls = len(response.tool_calls or [])
         if _LOG_CALLS:
             # The live LLM-activity panel already surfaces this per-call; keep
@@ -666,7 +660,6 @@ class AsyncLLMClient:
             ok=True,
             cached_tokens=cached_tokens,
         )
-        self._log_request(response, elapsed_ms / 1000)
         return response
 
     async def achat_stream(
@@ -796,11 +789,11 @@ class AsyncLLMClient:
             raise
 
         self._settle_spend_call(reservation, response)
-        usage = getattr(response, "usage", None)
-        details = getattr(usage, "prompt_tokens_details", None)
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        cached_tokens = getattr(details, "cached_tokens", None) if details else None
+        usage = response.usage
+        details = usage.prompt_tokens_details
+        prompt_tokens = usage.prompt_tokens
+        completion_tokens = usage.completion_tokens
+        cached_tokens = details.cached_tokens if details is not None else None
         elapsed_ms = int((time.monotonic() - started) * 1000)
         _record_call(
             self.model_name,
@@ -811,7 +804,6 @@ class AsyncLLMClient:
             ok=True,
             cached_tokens=cached_tokens,
         )
-        self._log_request(response, elapsed_ms / 1000)
         return response
 
     def chat(self, **kwargs: Any) -> ChatResponse:
@@ -1462,28 +1454,6 @@ class AsyncLLMClient:
         if "reasoning_effort" not in text:
             return False
         return "400" in text or "unsupported" in text
-
-    def _log_request(self, response: ChatResponse, elapsed: float) -> None:
-        usage = response.usage
-        prompt = getattr(usage, "prompt_tokens", None)
-        completion = getattr(usage, "completion_tokens", None)
-        total = getattr(usage, "total_tokens", None)
-        raw_cost = getattr(usage, "cost_usd", None)
-        if raw_cost is None:
-            raw_cost = getattr(response, "cost_usd", None)
-        try:
-            cost = float(raw_cost) if raw_cost is not None else None
-        except (TypeError, ValueError):
-            cost = None
-        logger.info(
-            "llm request model=%s elapsed=%.3fs prompt_tokens=%s completion_tokens=%s total_tokens=%s cost=%s",
-            self.model_name,
-            elapsed,
-            prompt,
-            completion,
-            total,
-            f"${cost:.6f}" if cost is not None else "n/a",
-        )
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
