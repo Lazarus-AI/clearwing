@@ -504,6 +504,40 @@ class SourceHuntRunner:
             return "deep"
         return "standard"
 
+    def _global_spent_usd(self) -> float:
+        """Process-wide LLM spend so far — the figure the live panel shows.
+
+        native._record_call bumps a running total on every chat (independent
+        of --live), so this is always accurate. --budget only sizes the
+        per-file HunterPool; the subsystem hunt, variant loop, exploit and
+        elaboration phases each spend from their own budgets. Reading the
+        global total lets us treat --budget as a soft ceiling across ALL
+        phases instead of just the pool.
+        """
+        from clearwing.llm import native
+        from clearwing.observability.telemetry import CostTracker
+
+        stats = native.recent_call_stats()
+        totals = stats["totals"]
+        recent = stats["recent"]
+        model = recent[-1]["model"] if recent else None
+        if not model:
+            return 0.0
+        return CostTracker.estimate_cost(
+            totals.get("input_tokens") or 0,
+            totals.get("output_tokens") or 0,
+            model,
+            totals.get("cached_tokens") or 0,
+        )
+
+    def _over_budget(self) -> bool:
+        """True when --budget was set and process-wide spend has reached it.
+
+        Soft cap: phases already running can overshoot, but new discretionary
+        phases (and further per-finding iterations) are skipped once tripped.
+        """
+        return bool(self.budget_usd) and self._global_spent_usd() >= self.budget_usd
+
     @property
     def _shard_entry_points(self) -> bool:
         if self._shard_entry_points_override is not None:
@@ -833,7 +867,12 @@ class SourceHuntRunner:
             # 3.7. Subsystem hunt (spec 006)
             subsystems_hunted = 0
             subsystem_spent = 0.0
-            if self._enable_subsystem_hunt and hunter_llm is not None:
+            if self._enable_subsystem_hunt and hunter_llm is not None and self._over_budget():
+                logger.info(
+                    "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
+                    self.budget_usd, self._global_spent_usd(),
+                )
+            elif self._enable_subsystem_hunt and hunter_llm is not None:
                 from .subsystem import (
                     SubsystemHuntConfig,
                     SubsystemHuntRunner as SubsysRunner,
@@ -869,13 +908,27 @@ class SourceHuntRunner:
                             "  %s (%d files, priority=%.2f)",
                             st.name, len(st.files), st.priority,
                         )
+                    # Bound the whole subsystem phase to whatever --budget is
+                    # left, split evenly across targets, so 3 subsystems can't
+                    # each burn the internal $100 default ($300 total) past the
+                    # budget the user set. Falls back to the explicit override /
+                    # $100 default only when no --budget is in play.
+                    if self.budget_usd:
+                        remaining = max(0.0, self.budget_usd - self._global_spent_usd())
+                        per_subsystem_budget = remaining / len(subsystem_targets)
+                        if self._subsystem_budget_usd:
+                            per_subsystem_budget = min(
+                                per_subsystem_budget, self._subsystem_budget_usd,
+                            )
+                    else:
+                        per_subsystem_budget = self._subsystem_budget_usd or 100.0
                     subsys_runner = SubsysRunner(SubsystemHuntConfig(
                         subsystems=subsystem_targets,
                         repo_path=repo_path,
                         sandbox_factory=self.sandbox_factory,
                         llm=hunter_llm,
                         max_parallel=self._subsystem_max_parallel,
-                        budget_per_subsystem_usd=self._subsystem_budget_usd or 100.0,
+                        budget_per_subsystem_usd=per_subsystem_budget,
                         findings_pool=findings_pool,
                         session_id_prefix=f"{self._session_id}-subsys",
                         sandbox_manager=self._sandbox_manager,
@@ -969,7 +1022,7 @@ class SourceHuntRunner:
             #       match as a new suspicion-level finding linked back to the
             #       original. v0.3 scope: we surface the matches in the report;
             #       we don't re-spawn hunters on each match (that's a v1.0 pass).
-            if self.enable_variant_loop and verified:
+            if self.enable_variant_loop and verified and not self._over_budget():
                 variant_llm = self._get_native_client("verifier", self.verifier_llm)
                 if variant_llm is not None:
                     try:
@@ -1094,6 +1147,13 @@ class SourceHuntRunner:
                             ),
                         )
                         for finding in eligible:
+                            if self._over_budget():
+                                logger.info(
+                                    "Exploit phase halted: budget $%.2f "
+                                    "exhausted ($%.2f spent)",
+                                    self.budget_usd, self._global_spent_usd(),
+                                )
+                                break
                             try:
                                 exploit_result = await agentic.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
@@ -1126,7 +1186,7 @@ class SourceHuntRunner:
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
-            if self.enable_elaboration and exploited:
+            if self.enable_elaboration and exploited and not self._over_budget():
                 from .elaboration import (
                     ElaborationAgent,
                     prioritize_for_elaboration,
@@ -1153,6 +1213,13 @@ class SourceHuntRunner:
                             ),
                         )
                         for finding in targets:
+                            if self._over_budget():
+                                logger.info(
+                                    "Elaboration halted: budget $%.2f "
+                                    "exhausted ($%.2f spent)",
+                                    self.budget_usd, self._global_spent_usd(),
+                                )
+                                break
                             try:
                                 elab_result = await elab_agent.aattempt(finding)
                                 if elab_result.elaborated:
@@ -1170,7 +1237,7 @@ class SourceHuntRunner:
             # 5.5. v0.3: Auto-patch mode (opt-in).
             # The verify-by-recompile gate is MANDATORY — a patch is only marked
             # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
-            if self.enable_auto_patch and verified:
+            if self.enable_auto_patch and verified and not self._over_budget():
                 patcher_llm = self._get_native_client("sourcehunt_exploit", self.exploiter_llm)
                 if patcher_llm is not None:
                     try:

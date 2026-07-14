@@ -156,6 +156,7 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             rel = _normalize_path(ctx.repo_path, path)
         except ValueError as e:
             return f"Error: {e}"
+        ctx.files_read.add(rel)
         host_path = os.path.join(ctx.repo_path, rel)
         try:
             with open(host_path, encoding="utf-8", errors="replace") as f:
@@ -261,15 +262,30 @@ def build_discovery_tools(ctx: HunterContext) -> list:
     return [
         NativeToolSpec(
             name="read_source_file",
-            description="Read a repo-relative source file and return up to 500 lines.",
+            description=(
+                "Read a repo-relative source file. Returns up to 500 lines. "
+                "Use start_line/end_line to read a specific range."
+            ),
             schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "start_line": {"type": "integer", "default": 1},
-                    "end_line": {"type": "integer", "default": -1},
+                    "path": {
+                        "type": "string",
+                        "description": "Repo-relative file path, e.g. 'src/foo.c'",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "First line to read (1-indexed)",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "default": -1,
+                        "description": "Last line to read (-1 means start_line + 500)",
+                    },
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             },
             handler=read_source_file,
         ),
@@ -279,9 +295,18 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             schema={
                 "type": "object",
                 "properties": {
-                    "dir_path": {"type": "string", "default": "."},
-                    "max_depth": {"type": "integer", "default": 2},
+                    "dir_path": {
+                        "type": "string",
+                        "default": ".",
+                        "description": "Directory to list (repo-relative)",
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "default": 2,
+                        "description": "Maximum directory depth to recurse",
+                    },
                 },
+                "additionalProperties": False,
             },
             handler=list_source_tree,
         ),
@@ -291,11 +316,23 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             schema={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
-                    "path": {"type": "string", "default": "."},
-                    "file_glob": {"type": "string", "default": ""},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for",
+                    },
+                    "path": {
+                        "type": "string",
+                        "default": ".",
+                        "description": "Directory or file to search in (repo-relative)",
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Glob filter for filenames, e.g. '*.c'",
+                    },
                 },
                 "required": ["pattern"],
+                "additionalProperties": False,
             },
             handler=grep_source,
         ),
@@ -305,9 +342,13 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             schema={
                 "type": "object",
                 "properties": {
-                    "symbol": {"type": "string"},
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol name to search for references to",
+                    },
                 },
                 "required": ["symbol"],
+                "additionalProperties": False,
             },
             handler=find_callers,
         ),
