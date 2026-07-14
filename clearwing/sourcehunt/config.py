@@ -67,6 +67,7 @@ class FeatureFlags:
     enable_calibration: bool = True
     enable_artifact_store: bool = False
     no_per_file_hunt: bool = False
+    no_rank: bool = False
     seed_harness_crashes: bool = False
     preprocessing: bool = True
     adversarial_verifier: bool = True

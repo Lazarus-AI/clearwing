@@ -209,6 +209,7 @@ class SourceHuntRunner:
         enable_subsystem_hunt: bool = False,
         subsystem_paths: list[str] | None = None,
         no_per_file_hunt: bool = False,
+        no_rank: bool = False,
         subsystem_budget_usd: float = 0.0,
         subsystem_max_parallel: int = 4,
         enable_behavior_monitor: bool = True,
@@ -298,6 +299,7 @@ class SourceHuntRunner:
             enable_calibration = enable_calibration and f.enable_calibration
             enable_artifact_store = enable_artifact_store or f.enable_artifact_store
             no_per_file_hunt = no_per_file_hunt or f.no_per_file_hunt
+            no_rank = no_rank or f.no_rank
             seed_harness_crashes = seed_harness_crashes or f.seed_harness_crashes
             preprocessing = preprocessing and f.preprocessing
             adversarial_verifier = adversarial_verifier and f.adversarial_verifier
@@ -434,6 +436,7 @@ class SourceHuntRunner:
         self._enable_subsystem_hunt = enable_subsystem_hunt or bool(subsystem_paths)
         self._subsystem_paths = subsystem_paths
         self._no_per_file_hunt = no_per_file_hunt
+        self._no_rank = no_rank
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
         self._injected_findings_pool = None
@@ -582,10 +585,24 @@ class SourceHuntRunner:
             self._emit_stage("preprocess", "completed", detail=f"Enumerated {files_ranked} files")
             self._ensure_sandbox_factory(repo_path, files)
 
-            # 2. Rank — unless depth=quick AND no LLM available
+            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = self._get_native_client("ranker", self.ranker_llm)
             self._emit_stage("rank", "started", detail=f"{len(files)} files")
-            if ranker_llm is not None and files:
+            if self._no_rank:
+                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+                for ft in files:
+                    ft["surface"] = ft.get("surface") or 3
+                    ft["influence"] = ft.get("influence") or 2
+                    ft["reachability"] = ft.get("reachability") or 3
+                    ft["priority"] = (
+                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
+                    )
+                pipeline_status.record_degraded(
+                    "ranker",
+                    "All files assigned default priority scores (--no-rank)",
+                )
+                self._emit_stage("rank", "degraded", detail="Skipped (--no-rank)")
+            elif ranker_llm is not None and files:
                 logger.info("Ranker starting on %d files", len(files))
                 try:
                     ranker_config = RankerConfig()

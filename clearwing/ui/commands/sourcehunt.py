@@ -112,6 +112,13 @@ def add_parser(subparsers):
         help="Skip per-file hunting; only run subsystem hunts.",
     )
     parser.add_argument(
+        "--no-rank",
+        action="store_true",
+        default=False,
+        dest="no_rank",
+        help="Skip the ranker; assign default priority scores to all files.",
+    )
+    parser.add_argument(
         "--seed-corpus",
         default=None,
         dest="seed_corpus",
@@ -931,6 +938,7 @@ def handle(cli, args):
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
         no_per_file_hunt=args.no_per_file_hunt,
+        no_rank=args.no_rank,
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
