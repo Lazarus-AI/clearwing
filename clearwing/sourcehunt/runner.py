@@ -1056,15 +1056,22 @@ class SourceHuntRunner:
                             "Findings auto-verified without independent review",
                         )
             else:
-                verified = all_findings
+                for finding in all_findings:
+                    finding["verified"] = False
+                verified = []
                 pipeline_status.record(
                     "verifier", StageOutcome.SKIPPED,
                     fallback_description="Verification skipped (--no-verify)",
                 )
 
+            verify_detail = (
+                "Verification skipped (--no-verify)"
+                if self.no_verify
+                else f"{len(verified)} verified, {len(rejected)} rejected"
+            )
             self._emit_stage(
                 "verify", "completed", findings_so_far=len(all_findings),
-                detail=f"{len(verified)} verified, {len(rejected)} rejected",
+                detail=verify_detail,
             )
             if rejected:
                 self._write_rejected_findings(rejected)
@@ -1488,8 +1495,13 @@ class SourceHuntRunner:
             )
 
             duration = time.monotonic() - start_time
+            exit_findings = all_findings if self.no_verify else verified
             return SourceHuntResult(
-                exit_code=(3 if run_status == "budget_exhausted" else self._exit_code(verified)),
+                exit_code=(
+                    3
+                    if run_status == "budget_exhausted"
+                    else self._exit_code(exit_findings)
+                ),
                 repo_url=self.repo_url,
                 repo_path=repo_path,
                 findings=all_findings,
