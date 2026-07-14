@@ -11,6 +11,7 @@ from clearwing.agent.tools.recon.webcrypto_hooks import (
     CryptoLog,
     CryptoLogEntry,
     _crypto_logs,
+    _flush_js_log,
     _hooks_installed,
     clear_webcrypto_log,
     get_webcrypto_log,
@@ -145,6 +146,20 @@ class TestCryptoLogEntry:
         assert entry.id == 1
         assert entry.method == "encrypt"
         assert entry.key_material is None
+
+
+# --- Browser log flushing ---
+
+
+class TestFlushJsLog:
+    def test_missing_tab_does_not_start_browser(self, monkeypatch):
+        from clearwing.agent.tools.recon import browser_tools
+
+        def fail_if_called():
+            raise AssertionError("flushing an absent tab must not initialize Playwright")
+
+        monkeypatch.setattr(browser_tools, "_ensure_browser", fail_if_called)
+        assert _flush_js_log("missing-tab") == []
 
 
 # --- Tool metadata ---

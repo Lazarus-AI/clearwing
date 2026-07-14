@@ -8,6 +8,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from genai_pyo3 import ChatResponse
 
 from clearwing.llm.native import (
     _REASONING_EFFORT_OVERRIDE_ALLOW,
@@ -194,7 +195,7 @@ class TestAchatRetryOnUnsupportedReasoning:
             "Status: 400 Bad Request. "
             'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
         )
-        success_response = object()  # Sentinel — we don't assert its shape
+        success_response = ChatResponse(content=[{"text": "ok"}])
 
         # Replace the private call helper. _achat_with_provider_policy is the
         # narrowest seam: raises on first call, returns on second.
