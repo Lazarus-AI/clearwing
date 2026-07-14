@@ -1337,8 +1337,10 @@ class NativeHunter:
             )
             total_input_tokens += response.usage.prompt_tokens or 0
             total_output_tokens += response.usage.completion_tokens or 0
-            # prompt_tokens_details is None when nothing was cache-served.
-            details = response.usage.prompt_tokens_details
+            # Older genai-pyo3 responses and lightweight test doubles may not
+            # expose prompt_tokens_details at all. Treat that the same as a
+            # response where nothing was cache-served.
+            details = getattr(response.usage, "prompt_tokens_details", None)
             cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
             total_cost_usd += _estimate_cost_usd(
                 response.usage.prompt_tokens or 0,
