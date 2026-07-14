@@ -272,6 +272,47 @@ def test_streaming_calls_settle_against_the_same_ledger(tmp_path, monkeypatch):
     assert ledger.spent_usd == pytest.approx(1.0)
 
 
+def test_python_backend_streaming_uses_the_same_budget_ledger(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("CLEARWING_LLM_BACKEND", "python")
+    ledger = _ledger(tmp_path)
+    client = AsyncLLMClient(
+        model_name="private-priced-model",
+        provider_name="anthropic",
+        api_key="test",
+    ).with_spend_ledger(ledger, stage="verify")
+    observed_caps: list[int | None] = []
+
+    async def fake_python_stream(self, request, options, on_text_delta):
+        observed_caps.append(options.max_tokens)
+        on_text_delta("ok")
+        return ChatResponse(
+            content=[{"text": "ok"}],
+            usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1),
+        )
+
+    monkeypatch.setattr(
+        AsyncLLMClient,
+        "_achat_stream_python_backend",
+        fake_python_stream,
+    )
+    monkeypatch.setattr(AsyncLLMClient, "_log_request", lambda *args: None)
+    deltas: list[str] = []
+
+    result = asyncio.run(
+        client.achat_stream(
+            messages=[ChatMessage("user", "stream")],
+            on_text_delta=deltas.append,
+        )
+    )
+
+    assert result.text == "ok"
+    assert deltas == ["ok"]
+    assert observed_caps == [1]
+    assert ledger.spent_usd == pytest.approx(1.0)
+
+
 def test_ledger_persists_reservations_settlements_and_final_status(tmp_path):
     ledger = _ledger(tmp_path)
     reservation = ledger.reserve_call(
@@ -473,3 +514,44 @@ def test_runner_returns_clean_partial_result_when_budget_cannot_fit_call(
     assert result.cost_usd == 0.0
     assert manifest["status"] == "budget_exhausted"
     assert manifest["complete"] is False
+
+
+def test_no_rank_skips_ranker_pricing_preflight_and_dispatch(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+    client = AsyncLLMClient(
+        model_name="private-model-with-unknown-price",
+        provider_name="openai",
+        api_key="test",
+    )
+    dispatched = False
+
+    async def should_not_dispatch(self, client_obj, request, options):
+        nonlocal dispatched
+        dispatched = True
+        return ChatResponse()
+
+    monkeypatch.setattr(
+        AsyncLLMClient,
+        "_achat_with_provider_policy",
+        should_not_dispatch,
+    )
+
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        depth="quick",
+        budget_usd=1.0,
+        output_dir=str(tmp_path / "out"),
+        ranker_llm=client,
+        no_rank=True,
+        enable_knowledge_graph=False,
+        enable_mechanism_memory=False,
+    )
+
+    result = runner.run()
+
+    assert dispatched is False
+    assert result.status == "completed"
+    assert result.cost_usd == 0.0

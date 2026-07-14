@@ -112,6 +112,13 @@ def add_parser(subparsers):
         help="Skip per-file hunting; only run subsystem hunts.",
     )
     parser.add_argument(
+        "--no-rank",
+        action="store_true",
+        default=False,
+        dest="no_rank",
+        help="Skip the ranker; assign default priority scores to all files.",
+    )
+    parser.add_argument(
         "--seed-corpus",
         default=None,
         dest="seed_corpus",
@@ -946,6 +953,7 @@ def handle(cli, args):
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
         no_per_file_hunt=args.no_per_file_hunt,
+        no_rank=args.no_rank,
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
@@ -959,6 +967,31 @@ def handle(cli, args):
         f"budget={_format_budget(args.budget)}[/bold blue]"
     )
 
+    # Wire EventBus → console/logger for live feedback.
+    # When --live is active, Rich Live owns the terminal — use logging so
+    # messages scroll above the pinned panel. Otherwise print directly.
+    from ...core.events import EventBus, EventType
+
+    bus = EventBus()
+    _live_logger = logging.getLogger("clearwing.sourcehunt.live")
+    _live_logger.setLevel(logging.INFO)
+
+    def _on_finding(data):
+        if not isinstance(data, dict):
+            return
+        sev = (data.get("severity") or "info").upper()
+        file = data.get("file", "?")
+        line = data.get("line_number", "?")
+        desc = (data.get("description") or "")[:120]
+        msg = f"FINDING [{sev}] {file}:{line} — {desc}"
+        _live_logger.info(msg)
+
+    def _on_tool_start(data):
+        pass  # reads are shown in the LLM activity panel only
+
+    bus.subscribe(EventType.FINDING_RECORDED, _on_finding)
+    bus.subscribe(EventType.TOOL_START, _on_tool_start)
+
     try:
         result = runner.run()
     except KeyboardInterrupt:
@@ -967,6 +1000,9 @@ def handle(cli, args):
     except (ValueError, RuntimeError) as exc:
         cli.console.print(f"[red]Error: {exc}[/red]")
         sys.exit(1)
+    finally:
+        bus.unsubscribe(EventType.FINDING_RECORDED, _on_finding)
+        bus.unsubscribe(EventType.TOOL_START, _on_tool_start)
 
     # Summary
     if result.status == "budget_exhausted":

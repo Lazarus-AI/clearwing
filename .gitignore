@@ -116,3 +116,6 @@ results/
 
 # Casual place to put working files
 working-directory/
+
+# uv run inspect eval ...
+logs/

@@ -227,7 +227,7 @@ class HunterSandbox:
                 ",".join(sanitizers),
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64")
+                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64", network_mode="host")
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)

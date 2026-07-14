@@ -512,12 +512,28 @@ class HunterPool:
                     budget_remaining=max(0.0, budget - spent),
                 ))
 
-                if result.status == "completed" and self.config.findings_pool is not None:
+                if result.status == "completed" and result.findings:
                     for f in cast(list[Finding], result.findings):
-                        try:
-                            await self.config.findings_pool.add(f)
-                        except Exception:
-                            logger.debug("findings_pool.add failed", exc_info=True)
+                        trace = f.get("vulnerability_trace")
+                        trace_chain = ""
+                        if trace and trace.get("steps"):
+                            trace_chain = " | " + " -> ".join(
+                                f"{s.get('file', '?')}:{s.get('function') or '?'}"
+                                for s in trace["steps"]
+                            )
+                        logger.info(
+                            "Finding: %s:%s [%s] %.40s%s",
+                            f.get("file", "?"),
+                            f.get("line_number", "?"),
+                            f.get("severity", "?"),
+                            f.get("description", "") or "",
+                            trace_chain,
+                        )
+                        if self.config.findings_pool is not None:
+                            try:
+                                await self.config.findings_pool.add(f)
+                            except Exception:
+                                logger.debug("findings_pool.add failed", exc_info=True)
 
                 if result.status == "completed":
                     next_band = promotion_decision(

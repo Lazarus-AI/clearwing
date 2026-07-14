@@ -118,6 +118,7 @@ class ClearwingApp(App):
         bus.subscribe(EventType.DISCLOSURE_UPDATE, self._on_bus_disclosure_update)
         bus.subscribe(EventType.BENCHMARK_PROGRESS, self._on_bus_benchmark_progress)
         bus.subscribe(EventType.EVAL_PROGRESS, self._on_bus_eval_progress)
+        bus.subscribe(EventType.FINDING_RECORDED, self._on_bus_finding_recorded)
 
     def on_unmount(self) -> None:
         """Unsubscribe from EventBus before the app tears down."""
@@ -137,6 +138,7 @@ class ClearwingApp(App):
         bus.unsubscribe(EventType.DISCLOSURE_UPDATE, self._on_bus_disclosure_update)
         bus.unsubscribe(EventType.BENCHMARK_PROGRESS, self._on_bus_benchmark_progress)
         bus.unsubscribe(EventType.EVAL_PROGRESS, self._on_bus_eval_progress)
+        bus.unsubscribe(EventType.FINDING_RECORDED, self._on_bus_finding_recorded)
 
     # ------------------------------------------------------------------
     # Event handlers — bridge from background threads into the TUI
@@ -191,6 +193,9 @@ class ClearwingApp(App):
 
     def _on_bus_eval_progress(self, data):
         self._safe_call_from_thread(self._handle_eval_progress, data)
+
+    def _on_bus_finding_recorded(self, data):
+        self._safe_call_from_thread(self._handle_finding_recorded, data)
 
     # ------------------------------------------------------------------
     # Actual UI update methods (run on the Textual event loop thread)
@@ -270,6 +275,9 @@ class ClearwingApp(App):
 
     def _handle_eval_progress(self, data):
         self.query_one(ProgressPanel).update_eval(data)
+
+    def _handle_finding_recorded(self, data):
+        self.query_one(ActivityFeed).add_finding(data)
 
     # ------------------------------------------------------------------
     # Agent loop — runs as a Textual worker in the background

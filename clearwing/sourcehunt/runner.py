@@ -214,6 +214,7 @@ class SourceHuntRunner:
         enable_subsystem_hunt: bool = False,
         subsystem_paths: list[str] | None = None,
         no_per_file_hunt: bool = False,
+        no_rank: bool = False,
         subsystem_budget_usd: float = 0.0,
         subsystem_max_parallel: int = 4,
         enable_behavior_monitor: bool = True,
@@ -313,6 +314,7 @@ class SourceHuntRunner:
             enable_calibration = enable_calibration and f.enable_calibration
             enable_artifact_store = enable_artifact_store or f.enable_artifact_store
             no_per_file_hunt = no_per_file_hunt or f.no_per_file_hunt
+            no_rank = no_rank or f.no_rank
             seed_harness_crashes = seed_harness_crashes or f.seed_harness_crashes
             preprocessing = preprocessing and f.preprocessing
             adversarial_verifier = adversarial_verifier and f.adversarial_verifier
@@ -451,6 +453,7 @@ class SourceHuntRunner:
         self._enable_subsystem_hunt = enable_subsystem_hunt or bool(subsystem_paths)
         self._subsystem_paths = subsystem_paths
         self._no_per_file_hunt = no_per_file_hunt
+        self._no_rank = no_rank
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
         self._injected_findings_pool = None
@@ -523,6 +526,13 @@ class SourceHuntRunner:
             return "deep"
         return "standard"
 
+    def _run_spent_usd(self) -> float:
+        """Return spend recorded by this run's atomic ledger."""
+
+        if self._spend_ledger is None:
+            return 0.0
+        return self._spend_ledger.spent_usd
+
     @property
     def _shard_entry_points(self) -> bool:
         if self._shard_entry_points_override is not None:
@@ -565,9 +575,9 @@ class SourceHuntRunner:
 
         if self._spend_ledger is None or not self._spend_ledger.enforcing:
             return
-        roles: list[tuple[str, AsyncLLMClient | None, str]] = [
-            ("ranker", self.ranker_llm, "rank"),
-        ]
+        roles: list[tuple[str, AsyncLLMClient | None, str]] = []
+        if not self._no_rank:
+            roles.append(("ranker", self.ranker_llm, "rank"))
         if self.depth != "quick":
             roles.append(("hunter", self.hunter_llm, "hunt"))
             if not self.no_verify:
@@ -612,12 +622,32 @@ class SourceHuntRunner:
             self._emit_stage("preprocess", "completed", detail=f"Enumerated {files_ranked} files")
             self._ensure_sandbox_factory(repo_path, files)
 
-            # 2. Rank — unless depth=quick AND no LLM available
-            ranker_llm = self._get_native_client(
-                "ranker", self.ranker_llm, budget_stage="rank",
+            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
+            ranker_llm = (
+                None
+                if self._no_rank
+                else self._get_native_client(
+                    "ranker",
+                    self.ranker_llm,
+                    budget_stage="rank",
+                )
             )
             self._emit_stage("rank", "started", detail=f"{len(files)} files")
-            if ranker_llm is not None and files:
+            if self._no_rank:
+                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+                for ft in files:
+                    ft["surface"] = ft.get("surface") or 3
+                    ft["influence"] = ft.get("influence") or 2
+                    ft["reachability"] = ft.get("reachability") or 3
+                    ft["priority"] = (
+                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
+                    )
+                pipeline_status.record_degraded(
+                    "ranker",
+                    "All files assigned default priority scores (--no-rank)",
+                )
+                self._emit_stage("rank", "degraded", detail="Skipped (--no-rank)")
+            elif ranker_llm is not None and files:
                 logger.info("Ranker starting on %d files", len(files))
                 try:
                     ranker_config = RankerConfig()
@@ -949,8 +979,14 @@ class SourceHuntRunner:
             if (
                 self._enable_subsystem_hunt
                 and hunter_llm is not None
-                and not self._budget_exhausted()
+                and self._budget_exhausted()
             ):
+                logger.info(
+                    "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
+                    self.budget_usd,
+                    self._run_spent_usd(),
+                )
+            elif self._enable_subsystem_hunt and hunter_llm is not None:
                 from .subsystem import (
                     SubsystemHuntConfig,
                     identify_subsystems_auto,
@@ -991,13 +1027,28 @@ class SourceHuntRunner:
                             "  %s (%d files, priority=%.2f)",
                             st.name, len(st.files), st.priority,
                         )
+                    # Bound the whole subsystem phase to whatever --budget is
+                    # left, split evenly across targets, so 3 subsystems can't
+                    # each burn the internal $100 default ($300 total) past the
+                    # budget the user set. Falls back to the explicit override /
+                    # $100 default only when no --budget is in play.
+                    if self.budget_usd:
+                        assert self._spend_ledger is not None
+                        remaining = self._spend_ledger.remaining_usd or 0.0
+                        per_subsystem_budget = remaining / len(subsystem_targets)
+                        if self._subsystem_budget_usd:
+                            per_subsystem_budget = min(
+                                per_subsystem_budget, self._subsystem_budget_usd,
+                            )
+                    else:
+                        per_subsystem_budget = self._subsystem_budget_usd or 100.0
                     subsys_runner = SubsysRunner(SubsystemHuntConfig(
                         subsystems=subsystem_targets,
                         repo_path=repo_path,
                         sandbox_factory=self.sandbox_factory,
                         llm=subsystem_llm,
                         max_parallel=self._subsystem_max_parallel,
-                        budget_per_subsystem_usd=self._subsystem_budget_usd or 100.0,
+                        budget_per_subsystem_usd=per_subsystem_budget,
                         findings_pool=findings_pool,
                         session_id_prefix=f"{self._session_id}-subsys",
                         sandbox_manager=self._sandbox_manager,
@@ -1245,6 +1296,14 @@ class SourceHuntRunner:
                             ),
                         )
                         for finding in eligible:
+                            if self._budget_exhausted():
+                                logger.info(
+                                    "Exploit phase halted: budget $%.2f "
+                                    "exhausted ($%.2f spent)",
+                                    self.budget_usd,
+                                    self._run_spent_usd(),
+                                )
+                                break
                             try:
                                 exploit_result = await agentic.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
@@ -1315,6 +1374,14 @@ class SourceHuntRunner:
                             ),
                         )
                         for finding in targets:
+                            if self._budget_exhausted():
+                                logger.info(
+                                    "Elaboration halted: budget $%.2f "
+                                    "exhausted ($%.2f spent)",
+                                    self.budget_usd,
+                                    self._run_spent_usd(),
+                                )
+                                break
                             try:
                                 elab_result = await elab_agent.aattempt(finding)
                                 if elab_result.elaborated:
