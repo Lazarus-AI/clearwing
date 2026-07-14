@@ -142,6 +142,13 @@ def add_parser(subparsers):
         "--max-parallel", type=int, default=8, help="Max concurrent hunters (default: 8)"
     )
     parser.add_argument(
+        "--sandbox-cpus",
+        type=float,
+        default=None,
+        metavar="N",
+        help="CPU limit per sandbox (default: auto; 0 disables the limit)",
+    )
+    parser.add_argument(
         "--tier-split",
         default="70/25/5",
         help="Budget split A/B/C as percentages "
@@ -810,6 +817,7 @@ def handle(cli, args):
                 branch=args.branch,
                 depth=args.depth,
                 budget_usd=args.budget,
+                sandbox_cpus=args.sandbox_cpus,
                 output_dir=args.output_dir,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
@@ -854,6 +862,7 @@ def handle(cli, args):
                 output_dir=args.output_dir,
                 depth=args.depth,
                 budget_usd=args.budget,
+                sandbox_cpus=args.sandbox_cpus,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
             )
@@ -927,6 +936,7 @@ def handle(cli, args):
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
         respect_gitignore=args.respect_gitignore,
         live=args.live,
+        sandbox_cpus=args.sandbox_cpus,
     )
 
     cli.console.print(
