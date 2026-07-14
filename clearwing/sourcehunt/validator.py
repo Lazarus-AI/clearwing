@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import response_text
 
 from .state import (
@@ -297,6 +297,8 @@ class Validator:
             )
             schema = _VerdictSchema.model_validate_json(response_text(response))
             verdict = schema.to_verdict(finding.get("id", "unknown"))
+        except BudgetExceeded:
+            raise
         except Exception as e:
             logger.warning("Validator LLM call failed", exc_info=True)
             verdict = self._error_verdict(finding, f"validator error: {e}")

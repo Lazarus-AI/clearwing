@@ -14,6 +14,7 @@ import logging
 from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -71,13 +72,65 @@ def _cost_usd(counts: dict, model: str | None) -> float:
     )
 
 
-def _build_panel(budget_usd: float | None = None) -> Panel:
+def _append_trace_and_status(renderables: list[Any]) -> None:
+    """Append structured hunter trace and narration rows to the panel."""
+
+    if _recent_traces:
+        renderables.append(Rule(style="dim"))
+        for trace in _recent_traces:
+            hunter = trace.get("hunter_target", "?")
+            file = trace.get("file", "?")
+            line = trace.get("line", "?")
+            function = trace.get("function") or "?"
+            note = (trace.get("note") or "")[:80]
+            step_number = trace.get("step_number", "?")
+            renderables.append(
+                Text.assemble(
+                    (f"[{hunter}] ", "dim cyan"),
+                    (f"trace#{step_number} ", "bold magenta"),
+                    (f"{file}:{line} ", ""),
+                    (f"({function}) ", "dim"),
+                    (note, "italic"),
+                )
+            )
+
+    if _recent_status:
+        renderables.append(Rule(style="dim"))
+        for status in _recent_status:
+            hunter = status.get("hunter_target", "?")
+            text = status.get("text", "")
+            # Truncate to first newline or 120 chars.
+            first_line = text.split("\n", 1)[0][:120]
+            if first_line:
+                renderables.append(
+                    Text.assemble(
+                        (f"[{hunter}] ", "dim cyan"),
+                        (first_line, ""),
+                    )
+                )
+
+
+def _build_panel(
+    budget_usd: float | None = None,
+    spend_ledger: Any = None,
+) -> Panel:
     stats = native.recent_call_stats()
     totals = stats["totals"]
     recent = stats["recent"]
 
     model = recent[-1]["model"] if recent else None
-    spent = _cost_usd(totals, model)
+    if spend_ledger is not None:
+        ledger_snapshot = spend_ledger.snapshot()
+        totals = {
+            **totals,
+            "calls": ledger_snapshot["call_count"],
+            "input_tokens": ledger_snapshot["input_tokens"],
+            "cached_tokens": ledger_snapshot["cached_input_tokens"],
+            "output_tokens": ledger_snapshot["output_tokens"],
+        }
+        spent = float(ledger_snapshot["total_spent"])
+    else:
+        spent = _cost_usd(totals, model)
 
     cached = totals.get("cached_tokens") or 0
     total_in = totals["input_tokens"] or 0
@@ -185,39 +238,7 @@ def _build_panel(budget_usd: float | None = None) -> Panel:
                 )
             )
 
-    if _recent_traces:
-        renderables.append(Rule(style="dim"))
-        for tr in _recent_traces:
-            hunter = tr.get("hunter_target", "?")
-            file = tr.get("file", "?")
-            line = tr.get("line", "?")
-            func = tr.get("function") or "?"
-            note = (tr.get("note") or "")[:80]
-            n = tr.get("step_number", "?")
-            renderables.append(
-                Text.assemble(
-                    (f"[{hunter}] ", "dim cyan"),
-                    (f"trace#{n} ", "bold magenta"),
-                    (f"{file}:{line} ", ""),
-                    (f"({func}) ", "dim"),
-                    (note, "italic"),
-                )
-            )
-
-    if _recent_status:
-        renderables.append(Rule(style="dim"))
-        for st in _recent_status:
-            hunter = st.get("hunter_target", "?")
-            text = st.get("text", "")
-            # Truncate to first newline or 120 chars
-            first_line = text.split("\n", 1)[0][:120]
-            if first_line:
-                renderables.append(
-                    Text.assemble(
-                        (f"[{hunter}] ", "dim cyan"),
-                        (first_line, ""),
-                    )
-                )
+    _append_trace_and_status(renderables)
 
     return Panel(
         Group(*renderables),
@@ -230,11 +251,12 @@ def _build_panel(budget_usd: float | None = None) -> Panel:
 class _ActivityRenderable:
     """Re-renders on every Live refresh so the panel reflects live totals."""
 
-    def __init__(self, budget_usd: float | None = None) -> None:
+    def __init__(self, budget_usd: float | None = None, spend_ledger: Any = None) -> None:
         self.budget_usd = budget_usd
+        self.spend_ledger = spend_ledger
 
     def __rich__(self) -> Panel:
-        return _build_panel(self.budget_usd)
+        return _build_panel(self.budget_usd, self.spend_ledger)
 
 
 @contextmanager
@@ -243,6 +265,7 @@ def llm_activity_panel(
     refresh_hz: float = 4.0,
     live: bool = False,
     budget_usd: float | None = None,
+    spend_ledger: Any = None,
 ) -> Iterator[None]:
     """Pin a live LLM-activity panel while the wrapped block runs.
 
@@ -296,7 +319,7 @@ def llm_activity_panel(
     root.setLevel(logging.INFO)
 
     live_display = Live(
-        _ActivityRenderable(budget_usd),
+        _ActivityRenderable(budget_usd, spend_ledger),
         console=console,
         refresh_per_second=refresh_hz,
         transient=False,

@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
 
 from .state import FileTarget
@@ -191,15 +191,22 @@ class Ranker:
                 )
 
         tasks = [asyncio.create_task(run_one(index, chunk)) for index, chunk in enumerate(chunks)]
-        for future in asyncio.as_completed(tasks):
-            index, scores = await future
-            scores_by_chunk[index] = scores
-            completed += 1
-            logger.info(
-                "Ranker progress %d/%d chunks completed",
-                completed,
-                total_chunks,
-            )
+        try:
+            for future in asyncio.as_completed(tasks):
+                index, scores = await future
+                scores_by_chunk[index] = scores
+                completed += 1
+                logger.info(
+                    "Ranker progress %d/%d chunks completed",
+                    completed,
+                    total_chunks,
+                )
+        except BudgetExceeded:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         return scores_by_chunk
 
     def _apply_heuristic_baseline(self, files: list[FileTarget]) -> None:
@@ -312,6 +319,8 @@ class Ranker:
                     elapsed,
                 )
                 return self._parse_response(scores)
+            except BudgetExceeded:
+                raise
             except TimeoutError:
                 logger.warning(
                     "Ranker LLM call timed out after %ss for %d files; falling back to heuristics",

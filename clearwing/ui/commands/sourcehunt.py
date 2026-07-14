@@ -146,6 +146,20 @@ def add_parser(subparsers):
         help="Max dollars to spend (default: unlimited; 0 = unlimited)",
     )
     parser.add_argument(
+        "--input-price-per-million",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Explicit input-token price for models without built-in pricing",
+    )
+    parser.add_argument(
+        "--output-price-per-million",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Explicit output-token price for models without built-in pricing",
+    )
+    parser.add_argument(
         "--max-parallel", type=int, default=8, help="Max concurrent hunters (default: 8)"
     )
     parser.add_argument(
@@ -714,7 +728,6 @@ def handle(cli, args):
     # Elaborate mode: interactive HITL or autonomous agent
     if args.elaborate or args.elaborate_auto:
         from ...sourcehunt.elaboration import (
-            ElaborationAgent,
             find_latest_session,
             load_finding_from_session,
             load_session_findings,
@@ -787,7 +800,7 @@ def handle(cli, args):
                 cli.console.print("  Skipped")
 
         stats = store.stats()
-        cli.console.print(f"\n[bold]Calibration stats:[/bold]")
+        cli.console.print("\n[bold]Calibration stats:[/bold]")
         cli.console.print(f"  Total records: {stats['total_records']}")
         cli.console.print(f"  Human reviewed: {stats['human_reviewed']}")
         cli.console.print(f"  Exact match rate: {stats['exact_match_rate']:.1%}")
@@ -898,6 +911,8 @@ def handle(cli, args):
         local_path=args.local_path,
         depth=args.depth,
         budget_usd=args.budget,
+        input_price_per_million=getattr(args, "input_price_per_million", None),
+        output_price_per_million=getattr(args, "output_price_per_million", None),
         max_parallel=args.max_parallel,
         tier_budget=tier_budget,
         output_dir=args.output_dir,
@@ -990,7 +1005,11 @@ def handle(cli, args):
         bus.unsubscribe(EventType.TOOL_START, _on_tool_start)
 
     # Summary
-    cli.console.print("\n[bold]Sourcehunt complete[/bold]")
+    if result.status == "budget_exhausted":
+        cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
+        cli.console.print("  Status: partial (budget exhausted)")
+    else:
+        cli.console.print("\n[bold]Sourcehunt complete[/bold]")
     cli.console.print(f"  Session: {result.session_id}")
     cli.console.print(f"  Duration: {result.duration_seconds:.1f}s")
     cli.console.print(f"  Files ranked: {result.files_ranked}")
@@ -1034,7 +1053,6 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     from rich.prompt import Prompt
 
     from ...sourcehunt.elaboration import (
-        ElaborationAgent,
         _build_elaboration_prompt,
         build_elaboration_tools,
     )

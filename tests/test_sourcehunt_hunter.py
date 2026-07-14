@@ -360,6 +360,7 @@ class TestBuildHunterAgent:
             "run_with_sanitizer",
             "write_test_case",
             "fuzz_harness",
+            "record_trace_step",
             "record_finding",
         }
 
@@ -407,6 +408,7 @@ class TestBuildHunterAgent:
             "list_source_tree",
             "grep_source",
             "find_callers",
+            "record_trace_step",
             "record_finding",
         }
         assert "compile_file" not in tool_names
