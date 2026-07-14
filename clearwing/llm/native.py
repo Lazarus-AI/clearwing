@@ -107,10 +107,6 @@ def call_logging_enabled() -> bool:
     return _LOG_CALLS
 
 
-# Set to True once the litellm asyncio exception handler has been installed
-# on the running event loop, so _import_litellm never wraps it a second time.
-_litellm_loop_handler_installed: bool = False
-
 # ---------------------------------------------------------------------------
 # reasoning_effort auto-detection
 # ---------------------------------------------------------------------------
@@ -361,13 +357,6 @@ class AsyncLLMClient:
             rate_limit_max_backoff_seconds,
         )
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
-        # Python-native backend flag: set CLEARWING_LLM_BACKEND=python to route
-        # through litellm instead of genai-pyo3. OAuth providers are always
-        # handled by the genai path regardless (credential refresh lives there).
-        self._use_python_backend: bool = (
-            os.environ.get("CLEARWING_LLM_BACKEND", "").lower() == "python"
-            and self.provider_name not in ("openai_codex", "anthropic_oauth")
-        )
         self._spend_ledger: SpendLedger | None = None
         self._spend_stage = "llm"
 
@@ -477,20 +466,14 @@ class AsyncLLMClient:
     ) -> None:
         if reservation is None or self._spend_ledger is None:
             return
-        usage = getattr(response, "usage", None)
-        details = getattr(usage, "prompt_tokens_details", None)
-        provider_cost = getattr(usage, "cost_usd", None)
-        if provider_cost is None:
-            provider_cost = getattr(response, "cost_usd", None)
+        usage = response.usage
+        details = usage.prompt_tokens_details
         self._spend_ledger.settle_call(
             reservation,
-            input_tokens=getattr(usage, "prompt_tokens", None),
-            output_tokens=getattr(usage, "completion_tokens", None),
+            input_tokens=usage.prompt_tokens,
+            output_tokens=usage.completion_tokens,
             cached_input_tokens=(
-                getattr(details, "cached_tokens", None) if details else None
-            ),
-            provider_cost_usd=(
-                float(provider_cost) if provider_cost is not None else None
+                details.cached_tokens if details is not None else None
             ),
         )
 
@@ -648,12 +631,12 @@ class AsyncLLMClient:
             raise
 
         self._settle_spend_call(reservation, response)
-        usage = getattr(response, "usage", None)
+        usage = response.usage
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        details = getattr(usage, "prompt_tokens_details", None)
-        cached_tokens = getattr(details, "cached_tokens", None) if details else None
+        prompt_tokens = usage.prompt_tokens
+        completion_tokens = usage.completion_tokens
+        details = usage.prompt_tokens_details
+        cached_tokens = details.cached_tokens if details is not None else None
         n_tool_calls = len(response.tool_calls or [])
         if _LOG_CALLS:
             # The live LLM-activity panel already surfaces this per-call; keep
@@ -677,7 +660,6 @@ class AsyncLLMClient:
             ok=True,
             cached_tokens=cached_tokens,
         )
-        self._log_request(response, elapsed_ms / 1000)
         return response
 
     async def achat_stream(
@@ -740,63 +722,55 @@ class AsyncLLMClient:
                 reasoning_effort=self.reasoning_effort,
             )
             async with self._semaphore:
-                if self._use_python_backend:
+                client = self._build_client(Client)
+
+                async def _consume(opts: ChatOptions) -> ChatResponse | None:
+                    nonlocal dispatched
                     dispatched = True
-                    response = await self._achat_stream_python_backend(
-                        request,
-                        options,
-                        on_text_delta,
-                    )
-                else:
-                    client = self._build_client(Client)
+                    stream = await client.astream_chat(self.model_name, request, opts)
+                    async for event in stream:
+                        if event.content:
+                            on_text_delta(event.content)
+                        if event.end is not None:
+                            return self._chat_response_from_stream_end(event.end)
+                    return None
 
-                    async def _consume(opts: ChatOptions) -> ChatResponse | None:
-                        nonlocal dispatched
-                        dispatched = True
-                        stream = await client.astream_chat(self.model_name, request, opts)
-                        async for event in stream:
-                            if event.content:
-                                on_text_delta(event.content)
-                            if event.end is not None:
-                                return self._chat_response_from_stream_end(event.end)
-                        return None
-
-                    try:
-                        response = await _consume(options)
-                    except Exception as exc:
-                        if self._is_unsupported_reasoning_effort_error(exc):
-                            logger.warning(
-                                "Provider rejected reasoning_effort (streaming) for model "
-                                "%r; retrying with reasoning_effort=None and disabling it "
-                                "for this session.",
-                                self.model_name,
-                            )
-                            self.reasoning_effort = None
-                            options = self._rebuild_options_without_reasoning(options)
-                            response = await _consume(options)
-                        elif self._should_try_openai_http_fallback(exc) and not (
-                            self._spend_ledger is not None
-                            and self._spend_ledger.enforcing
-                        ):
-                            logger.debug(
-                                "Native OpenAI async stream failed for model=%s "
-                                "base_url=%s; falling back to aiohttp "
-                                "chat/completions: %s",
-                                self.model_name,
-                                self.base_url,
-                                exc,
-                            )
-                            response = await self._openai_chat_http_fallback(
-                                request,
-                                options,
-                                on_text_delta=on_text_delta,
-                            )
-                        else:
-                            raise
-                    if response is None:
-                        raise RuntimeError(
-                            "LLM stream ended without a terminal usage event"
+                try:
+                    response = await _consume(options)
+                except Exception as exc:
+                    if self._is_unsupported_reasoning_effort_error(exc):
+                        logger.warning(
+                            "Provider rejected reasoning_effort (streaming) for model "
+                            "%r; retrying with reasoning_effort=None and disabling it "
+                            "for this session.",
+                            self.model_name,
                         )
+                        self.reasoning_effort = None
+                        options = self._rebuild_options_without_reasoning(options)
+                        response = await _consume(options)
+                    elif self._should_try_openai_http_fallback(exc) and not (
+                        self._spend_ledger is not None
+                        and self._spend_ledger.enforcing
+                    ):
+                        logger.debug(
+                            "Native OpenAI async stream failed for model=%s "
+                            "base_url=%s; falling back to aiohttp "
+                            "chat/completions: %s",
+                            self.model_name,
+                            self.base_url,
+                            exc,
+                        )
+                        response = await self._openai_chat_http_fallback(
+                            request,
+                            options,
+                            on_text_delta=on_text_delta,
+                        )
+                    else:
+                        raise
+                if response is None:
+                    raise RuntimeError(
+                        "LLM stream ended without a terminal usage event"
+                    )
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
@@ -815,11 +789,11 @@ class AsyncLLMClient:
             raise
 
         self._settle_spend_call(reservation, response)
-        usage = getattr(response, "usage", None)
-        details = getattr(usage, "prompt_tokens_details", None)
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        cached_tokens = getattr(details, "cached_tokens", None) if details else None
+        usage = response.usage
+        details = usage.prompt_tokens_details
+        prompt_tokens = usage.prompt_tokens
+        completion_tokens = usage.completion_tokens
+        cached_tokens = details.cached_tokens if details is not None else None
         elapsed_ms = int((time.monotonic() - started) * 1000)
         _record_call(
             self.model_name,
@@ -830,7 +804,6 @@ class AsyncLLMClient:
             ok=True,
             cached_tokens=cached_tokens,
         )
-        self._log_request(response, elapsed_ms / 1000)
         return response
 
     def chat(self, **kwargs: Any) -> ChatResponse:
@@ -956,16 +929,14 @@ class AsyncLLMClient:
         request: ChatRequest,
         options: ChatOptions,
     ) -> ChatResponse:
-        if self._use_python_backend:
-            return await self._achat_python_backend(request, options)
         # openai_resp / openai_codex (the Responses API + ChatGPT gateway)
         # require `stream=true` on the wire, so they go through
         # `achat_via_stream`: it streams internally and returns a fully
         # collected ChatResponse, so callers never see chunk events.
         #
         # Plain `openai` chat-completions is the exception. genai's streaming
-        # path never sets stream_options.include_usage, so litellm/vLLM/OpenAI
-        # gateways drop the terminal usage chunk and ChatResponse.usage comes
+        # path never sets stream_options.include_usage, so compatible gateways
+        # drop the terminal usage chunk and ChatResponse.usage comes
         # back all-None (zeroing hunter totals, CostTracker, the activity
         # panel). A non-stream achat returns usage, so use it here. These
         # gateways can also be brittle on reqwest/HTTP2/SSE, so they keep the
@@ -990,200 +961,6 @@ class AsyncLLMClient:
                 exc,
             )
             return await self._openai_chat_http_fallback(request, options)
-
-    # ------------------------------------------------------------------
-    # Python-native backend (litellm)
-    # ------------------------------------------------------------------
-
-    def _litellm_model_string(self) -> str:
-        """Convert (provider_name, model_name) to litellm's routing format."""
-        model = self.model_name
-        if "/" in model:
-            return model
-        prefix_map = {
-            "anthropic": "anthropic",
-            "gemini": "gemini",
-            "google": "gemini",
-            "groq": "groq",
-            "openai": "openai",
-        }
-        prefix = prefix_map.get(self.provider_name, "openai")
-        return f"{prefix}/{model}"
-
-    def _litellm_messages(self, request: ChatRequest) -> list[dict[str, Any]]:
-        """Convert a ChatRequest's messages + system into litellm message dicts."""
-        out: list[dict[str, Any]] = []
-        if request.system:
-            out.append({"role": "system", "content": request.system})
-        for msg in request.messages():
-            d: dict[str, Any] = {"role": msg.role, "content": msg.content or ""}
-            if msg.tool_calls:
-                d["tool_calls"] = [
-                    {
-                        "id": tc.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.fn_name,
-                            "arguments": json.dumps(tc.fn_arguments),
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
-            if msg.tool_response_call_id:
-                d["tool_call_id"] = msg.tool_response_call_id
-            out.append(d)
-        return out
-
-    def _litellm_tool(self, tool: Tool) -> dict[str, Any]:
-        try:
-            parameters = json.loads(tool.schema_json or "{}")
-        except json.JSONDecodeError:
-            parameters = {"type": "object", "properties": {}}
-        return {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description or "",
-                "parameters": parameters,
-            },
-        }
-
-    def _litellm_base_kwargs(
-        self, request: ChatRequest, options: ChatOptions
-    ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {
-            "model": self._litellm_model_string(),
-            "messages": self._litellm_messages(request),
-            "api_key": self.api_key or None,
-            "api_base": self.base_url or None,
-        }
-        if options.temperature is not None:
-            kwargs["temperature"] = options.temperature
-        if options.max_tokens is not None:
-            kwargs["max_tokens"] = options.max_tokens
-        if self.reasoning_effort and self.provider_name == "anthropic":
-            # Claude uses thinking blocks, not reasoning_effort.
-            # temperature=1 is required by Anthropic when thinking is enabled.
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8000}
-            kwargs.setdefault("temperature", 1)
-        elif (
-            self.reasoning_effort
-            and self.reasoning_effort != "auto"
-            and self.provider_name in ("openai", "openai_resp")
-        ):
-            kwargs["reasoning_effort"] = self.reasoning_effort
-        if request.tools:
-            kwargs["tools"] = [self._litellm_tool(t) for t in request.tools]
-            kwargs["tool_choice"] = "auto"
-        if options.response_json_spec is not None:
-            kwargs["response_format"] = self._openai_response_format(options.response_json_spec)
-        return kwargs
-
-    @staticmethod
-    def _import_litellm():
-        try:
-            import litellm  # noqa: PLC0415
-        except ImportError as exc:
-            raise RuntimeError(
-                "CLEARWING_LLM_BACKEND=python requires 'litellm'. "
-                "Install with: pip install 'clearwing[python-llm]'"
-            ) from exc
-        # Suppress litellm's verbose per-call INFO logging.
-        litellm.suppress_debug_info = True
-        litellm.verbose = False
-        litellm.set_verbose = False
-        litellm.callbacks = []
-        litellm.success_callback = []
-        litellm.failure_callback = []
-        litellm._async_success_callback = []
-        litellm._async_failure_callback = []
-        # Enable cost tracking so completion_cost() has pricing data populated.
-        litellm.return_response_headers = True
-        logging.getLogger("LiteLLM").setLevel(logging.WARNING)
-        logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
-        logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
-        # litellm's LoggingWorker creates a background asyncio Task that it
-        # never cancels, causing two noisy-but-harmless messages on teardown:
-        #   RuntimeWarning: coroutine '...' was never awaited
-        #   ERROR: Task was destroyed but it is pending!
-        # Suppress both by installing a loop exception handler that drops
-        # context entries originating from litellm's LoggingWorker, and a
-        # warnings filter for the unawaited-coroutine variant.
-        import warnings  # noqa: PLC0415
-        warnings.filterwarnings(
-            "ignore",
-            message="coroutine '.*async_success_handler' was never awaited",
-            category=RuntimeWarning,
-        )
-        global _litellm_loop_handler_installed
-        if not _litellm_loop_handler_installed:
-            try:
-                loop = asyncio.get_event_loop()
-                _prev = loop.get_exception_handler()
-
-                def _handler(lp, ctx):
-                    task = ctx.get("task")
-                    if task is not None and "LoggingWorker" in repr(task):
-                        return
-                    if "LoggingWorker" in str(ctx.get("message", "")):
-                        return
-                    if _prev is not None:
-                        _prev(lp, ctx)
-                    else:
-                        lp.default_exception_handler(ctx)
-
-                loop.set_exception_handler(_handler)
-                _litellm_loop_handler_installed = True
-            except RuntimeError:
-                pass  # no running loop yet — will install on first actual call
-        return litellm
-
-    async def _achat_python_backend(
-        self, request: ChatRequest, options: ChatOptions
-    ) -> ChatResponse:
-        litellm = self._import_litellm()
-        kwargs = self._litellm_base_kwargs(request, options)
-        response = await litellm.acompletion(**kwargs)
-        return self._chat_response_from_openai_payload(response.model_dump())
-
-    async def _achat_stream_python_backend(
-        self,
-        request: ChatRequest,
-        options: ChatOptions,
-        on_text_delta: Callable[[str], None] | None,
-    ) -> ChatResponse:
-        litellm = self._import_litellm()
-        kwargs = self._litellm_base_kwargs(request, options)
-        kwargs["stream"] = True
-        content_parts: list[str] = []
-        tool_call_parts: dict[int, dict[str, Any]] = {}
-        usage: dict[str, Any] | None = None
-
-        response = await litellm.acompletion(**kwargs)
-        async for chunk in response:
-            chunk_dict = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
-            if chunk_dict.get("usage"):
-                usage = chunk_dict["usage"]
-            choices = chunk_dict.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or {}
-            text = delta.get("content")
-            if text:
-                content_parts.append(text)
-                if on_text_delta:
-                    on_text_delta(text)
-            raw_tool_calls = delta.get("tool_calls")
-            if raw_tool_calls:
-                self._merge_openai_tool_call_deltas(tool_call_parts, raw_tool_calls)
-
-        return self._chat_response_from_parts(
-            text="".join(content_parts),
-            reasoning_content=None,
-            tool_calls=self._finalize_openai_tool_calls(tool_call_parts),
-            usage=usage,
-            provider_model=self._litellm_model_string(),
-        )
 
     def _should_try_openai_http_fallback(self, exc: Exception) -> bool:
         if self.provider_name != "openai" or not self.base_url:
@@ -1677,32 +1454,6 @@ class AsyncLLMClient:
         if "reasoning_effort" not in text:
             return False
         return "400" in text or "unsupported" in text
-
-    def _log_request(self, response: ChatResponse, elapsed: float) -> None:
-        usage = response.usage
-        prompt = getattr(usage, "prompt_tokens", None)
-        completion = getattr(usage, "completion_tokens", None)
-        total = getattr(usage, "total_tokens", None)
-        cost: float | None = None
-        if prompt is not None and completion is not None:
-            try:
-                import litellm as _ll  # noqa: PLC0415
-                cost = _ll.completion_cost(
-                    model=self.model_name,
-                    prompt_tokens=prompt,
-                    completion_tokens=completion,
-                )
-            except Exception:
-                pass
-        logger.info(
-            "llm request model=%s elapsed=%.3fs prompt_tokens=%s completion_tokens=%s total_tokens=%s cost=%s",
-            self.model_name,
-            elapsed,
-            prompt,
-            completion,
-            total,
-            f"${cost:.6f}" if cost is not None else "n/a",
-        )
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         text = str(exc).lower()

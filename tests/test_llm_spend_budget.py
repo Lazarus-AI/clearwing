@@ -52,7 +52,18 @@ def test_strict_budget_rejects_unknown_pricing_before_dispatch(tmp_path):
     assert ledger.spent_usd == 0.0
 
 
-def test_budget_rejects_provider_without_output_ceiling(tmp_path):
+def test_budget_rejects_provider_without_output_ceiling(tmp_path, monkeypatch):
+    from clearwing.providers import openai_oauth
+
+    def fail_refresh():
+        raise RuntimeError("no stored test credentials")
+
+    monkeypatch.setattr(
+        openai_oauth,
+        "ensure_fresh_openai_oauth_credentials",
+        fail_refresh,
+    )
+    monkeypatch.setattr(openai_oauth, "extract_account_id", lambda _token: "test-account")
     ledger = _ledger(tmp_path)
     client = AsyncLLMClient(
         model_name="private-priced-model",
@@ -267,47 +278,6 @@ def test_streaming_calls_settle_against_the_same_ledger(tmp_path, monkeypatch):
     )
 
     assert result is response
-    assert deltas == ["ok"]
-    assert observed_caps == [1]
-    assert ledger.spent_usd == pytest.approx(1.0)
-
-
-def test_python_backend_streaming_uses_the_same_budget_ledger(
-    tmp_path, monkeypatch,
-):
-    monkeypatch.setenv("CLEARWING_LLM_BACKEND", "python")
-    ledger = _ledger(tmp_path)
-    client = AsyncLLMClient(
-        model_name="private-priced-model",
-        provider_name="anthropic",
-        api_key="test",
-    ).with_spend_ledger(ledger, stage="verify")
-    observed_caps: list[int | None] = []
-
-    async def fake_python_stream(self, request, options, on_text_delta):
-        observed_caps.append(options.max_tokens)
-        on_text_delta("ok")
-        return ChatResponse(
-            content=[{"text": "ok"}],
-            usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1),
-        )
-
-    monkeypatch.setattr(
-        AsyncLLMClient,
-        "_achat_stream_python_backend",
-        fake_python_stream,
-    )
-    monkeypatch.setattr(AsyncLLMClient, "_log_request", lambda *args: None)
-    deltas: list[str] = []
-
-    result = asyncio.run(
-        client.achat_stream(
-            messages=[ChatMessage("user", "stream")],
-            on_text_delta=deltas.append,
-        )
-    )
-
-    assert result.text == "ok"
     assert deltas == ["ok"]
     assert observed_caps == [1]
     assert ledger.spent_usd == pytest.approx(1.0)
