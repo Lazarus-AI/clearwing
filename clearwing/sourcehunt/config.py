@@ -27,6 +27,8 @@ class BudgetConfig:
     """Cost and parallelism knobs."""
 
     budget_usd: float = 0.0
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
     max_parallel: int = 8
     tier_budget: Any = None  # TierBudget | None
     exploit_budget: str | None = None  # "standard" | "deep" | "campaign" | None (auto)

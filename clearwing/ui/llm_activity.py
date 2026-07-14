@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -61,13 +62,27 @@ def _cost_usd(counts: dict, model: str | None) -> float:
     )
 
 
-def _build_panel(budget_usd: float | None = None) -> Panel:
+def _build_panel(
+    budget_usd: float | None = None,
+    spend_ledger: Any = None,
+) -> Panel:
     stats = native.recent_call_stats()
     totals = stats["totals"]
     recent = stats["recent"]
 
     model = recent[-1]["model"] if recent else None
-    spent = _cost_usd(totals, model)
+    if spend_ledger is not None:
+        ledger_snapshot = spend_ledger.snapshot()
+        totals = {
+            **totals,
+            "calls": ledger_snapshot["call_count"],
+            "input_tokens": ledger_snapshot["input_tokens"],
+            "cached_tokens": ledger_snapshot["cached_input_tokens"],
+            "output_tokens": ledger_snapshot["output_tokens"],
+        }
+        spent = float(ledger_snapshot["total_spent"])
+    else:
+        spent = _cost_usd(totals, model)
 
     header = Text.assemble(
         ("calls ", "dim"),
@@ -134,11 +149,12 @@ def _build_panel(budget_usd: float | None = None) -> Panel:
 class _ActivityRenderable:
     """Re-renders on every Live refresh so the panel reflects live totals."""
 
-    def __init__(self, budget_usd: float | None = None) -> None:
+    def __init__(self, budget_usd: float | None = None, spend_ledger: Any = None) -> None:
         self.budget_usd = budget_usd
+        self.spend_ledger = spend_ledger
 
     def __rich__(self) -> Panel:
-        return _build_panel(self.budget_usd)
+        return _build_panel(self.budget_usd, self.spend_ledger)
 
 
 @contextmanager
@@ -147,6 +163,7 @@ def llm_activity_panel(
     refresh_hz: float = 4.0,
     live: bool = False,
     budget_usd: float | None = None,
+    spend_ledger: Any = None,
 ) -> Iterator[None]:
     """Pin a live LLM-activity panel while the wrapped block runs.
 
@@ -170,7 +187,7 @@ def llm_activity_panel(
     root.setLevel(logging.INFO)
 
     live_display = Live(
-        _ActivityRenderable(budget_usd),
+        _ActivityRenderable(budget_usd, spend_ledger),
         console=console,
         refresh_per_second=refresh_hz,
         transient=False,

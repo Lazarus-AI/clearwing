@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -8,10 +9,10 @@ import random
 import re
 import threading
 import time
-from datetime import datetime
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urljoin
 
@@ -28,6 +29,12 @@ from genai_pyo3 import (
     Usage,
 )
 from pydantic import BaseModel, RootModel
+
+from .budget import (
+    BudgetReservation,
+    SpendLedger,
+    current_spend_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +356,176 @@ class AsyncLLMClient:
             rate_limit_max_backoff_seconds,
         )
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        self._spend_ledger: SpendLedger | None = None
+        self._spend_stage = "llm"
+
+    def with_spend_ledger(self, ledger: SpendLedger, *, stage: str) -> AsyncLLMClient:
+        """Return a run-bound view that shares this client's transport limits.
+
+        ProviderManager caches native clients process-wide.  A shallow view
+        avoids mutating that shared client while retaining its semaphore and
+        provider configuration for this Sourcehunt run.
+        """
+
+        ledger.validate_model(
+            model=self.model_name,
+            provider=self.provider_name,
+            supports_output_limit=self.provider_name != "openai_codex",
+        )
+        bound = copy.copy(self)
+        bound._spend_ledger = ledger
+        bound._spend_stage = stage
+        return bound
+
+    @property
+    def spend_ledger(self) -> SpendLedger | None:
+        """The run-scoped ledger attached to this client view, if any."""
+
+        return self._spend_ledger
+
+    def _reserve_spend_call(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system: str,
+        tools: list[NativeToolSpec] | None,
+        max_tokens: int | None,
+    ) -> BudgetReservation | None:
+        if self._spend_ledger is None:
+            return None
+        return self._spend_ledger.reserve_call(
+            model=self.model_name,
+            provider=self.provider_name,
+            stage=self._spend_stage,
+            input_token_upper_bound=self._request_input_token_upper_bound(
+                messages=messages,
+                system=system,
+                tools=tools,
+            ),
+            requested_max_output_tokens=max_tokens,
+            supports_output_limit=self.provider_name != "openai_codex",
+            metadata=current_spend_metadata(),
+        )
+
+    @staticmethod
+    def _request_input_token_upper_bound(
+        *,
+        messages: list[ChatMessage],
+        system: str,
+        tools: list[NativeToolSpec] | None,
+    ) -> int:
+        """Return a conservative provider-independent prompt token bound.
+
+        Modern provider tokenizers encode text as one or more UTF-8 bytes per
+        token.  Counting every serialized byte as a token, plus framing
+        overhead, intentionally over-reserves without needing a model-specific
+        tokenizer or a billable provider preflight request.
+        """
+
+        payload_messages: list[dict[str, Any]] = []
+        for message in messages:
+            item: dict[str, Any] = {
+                "role": message.role,
+                "content": message.content,
+            }
+            if message.tool_response_call_id:
+                item["tool_call_id"] = message.tool_response_call_id
+            if message.tool_calls:
+                item["tool_calls"] = [
+                    {
+                        "id": call.call_id,
+                        "name": call.fn_name,
+                        "arguments": call.fn_arguments,
+                    }
+                    for call in message.tool_calls
+                ]
+            payload_messages.append(item)
+        payload = {
+            "system": system,
+            "messages": payload_messages,
+            "tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "schema": tool.schema,
+                }
+                for tool in tools or []
+            ],
+        }
+        serialized_bytes = len(
+            json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+        )
+        framing_overhead = 256 + 32 * len(messages) + 64 * len(tools or [])
+        return serialized_bytes + framing_overhead
+
+    def _settle_spend_call(
+        self,
+        reservation: BudgetReservation | None,
+        response: ChatResponse,
+    ) -> None:
+        if reservation is None or self._spend_ledger is None:
+            return
+        usage = getattr(response, "usage", None)
+        details = getattr(usage, "prompt_tokens_details", None)
+        provider_cost = getattr(usage, "cost_usd", None)
+        if provider_cost is None:
+            provider_cost = getattr(response, "cost_usd", None)
+        self._spend_ledger.settle_call(
+            reservation,
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+            cached_input_tokens=(
+                getattr(details, "cached_tokens", None) if details else None
+            ),
+            provider_cost_usd=(
+                float(provider_cost) if provider_cost is not None else None
+            ),
+        )
+
+    def _fail_spend_call(
+        self,
+        reservation: BudgetReservation | None,
+        exc: BaseException,
+        *,
+        dispatched: bool,
+    ) -> None:
+        if reservation is None or self._spend_ledger is None:
+            return
+        if not dispatched:
+            self._spend_ledger.release_call(
+                reservation,
+                reason=type(exc).__name__,
+            )
+            return
+        self._spend_ledger.fail_call(
+            reservation,
+            error=type(exc).__name__,
+            definitely_unbilled=self._is_definitely_unbilled_error(exc),
+        )
+
+    def _is_definitely_unbilled_error(self, exc: BaseException) -> bool:
+        """Return true only for provider rejections that precede generation."""
+
+        if isinstance(exc, Exception) and self._is_rate_limit_error(exc):
+            return True
+        if self._is_unsupported_reasoning_effort_error(exc):
+            return True
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "status code 400",
+                "http 400",
+                "status code 401",
+                "http 401",
+                "status code 403",
+                "http 403",
+                "status code 404",
+                "http 404",
+                "status code 422",
+                "http 422",
+            )
+        )
 
     async def achat(
         self,
@@ -373,73 +550,92 @@ class AsyncLLMClient:
                 for tool in tools
             ]
 
+        system_prompt = system or self.default_system
         request = ChatRequest(
             messages=list(messages),
-            system=system or self.default_system,
+            system=system_prompt,
             tools=request_tools,
         )
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
-        options = ChatOptions(
-            temperature=temperature,
+        reservation = self._reserve_spend_call(
+            messages=messages,
+            system=system_prompt,
+            tools=tools,
             max_tokens=max_tokens,
-            capture_content=True,
-            capture_usage=True,
-            capture_tool_calls=True,
-            # Ask genai-pyo3 to surface the provider's reasoning output
-            # (OpenAI Responses `reasoning.summary`, Anthropic thinking
-            # blocks, etc.). `normalize_reasoning_content` unifies the
-            # varied provider shapes into ChatResponse.reasoning_content,
-            # so hunter transcripts see a single string regardless of
-            # backend.
-            capture_reasoning_content=self.capture_reasoning_content,
-            normalize_reasoning_content=self.capture_reasoning_content,
-            reasoning_effort=self.reasoning_effort,
-            response_json_spec=(
-                _json_spec_from_model(
-                    response_schema,
-                    name=response_schema_name,
-                    description=response_schema_description,
-                )
-                if response_schema is not None
-                else None
-            ),
-            # Opt into genai-pyo3's per-adapter strict-schema sanitizer so the
-            # pydantic schema is rewritten to satisfy the provider's constrained
-            # decoding (e.g. OpenAI strict: inject required + additional
-            # Properties:false, collapse $ref siblings). No-op when there is no
-            # response_json_spec. Requires genai-pyo3 >= 0.7.0b10.dev2.
-            sanitize_schema=True,
         )
+        if reservation is not None and self._spend_ledger is not None:
+            if self._spend_ledger.enforcing:
+                max_tokens = reservation.max_output_tokens
 
         started = time.monotonic()
-        async with self._semaphore:
-            client = self._build_client(Client)
-            try:
-                response = await self._with_rate_limit_retries(
-                    lambda: self._achat_with_provider_policy(client, request, options)
-                )
-            except Exception as exc:
-                if not self._is_unsupported_reasoning_effort_error(exc):
-                    elapsed_ms = int((time.monotonic() - started) * 1000)
-                    if _LOG_CALLS:
-                        logger.info(
-                            "LLM %s failed in %dms: %s",
-                            self.model_name,
-                            elapsed_ms,
-                            exc,
-                        )
-                    _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
-                    raise
-                logger.warning(
-                    "Provider rejected reasoning_effort for model %r; retrying "
-                    "with reasoning_effort=None and disabling it for this session.",
+        dispatched = False
+        try:
+            options = ChatOptions(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                capture_content=True,
+                capture_usage=True,
+                capture_tool_calls=True,
+                # Ask genai-pyo3 to surface the provider's reasoning output
+                # (OpenAI Responses `reasoning.summary`, Anthropic thinking
+                # blocks, etc.). `normalize_reasoning_content` unifies the
+                # varied provider shapes into ChatResponse.reasoning_content,
+                # so hunter transcripts see a single string regardless of
+                # backend.
+                capture_reasoning_content=self.capture_reasoning_content,
+                normalize_reasoning_content=self.capture_reasoning_content,
+                reasoning_effort=self.reasoning_effort,
+                response_json_spec=(
+                    _json_spec_from_model(
+                        response_schema,
+                        name=response_schema_name,
+                        description=response_schema_description,
+                    )
+                    if response_schema is not None
+                    else None
+                ),
+                # Opt into genai-pyo3's per-adapter strict-schema sanitizer so the
+                # pydantic schema is rewritten to satisfy the provider's constrained
+                # decoding (e.g. OpenAI strict: inject required + additional
+                # Properties:false, collapse $ref siblings). No-op when there is no
+                # response_json_spec. Requires genai-pyo3 >= 0.7.0b10.dev2.
+                sanitize_schema=True,
+            )
+
+            async with self._semaphore:
+                client = self._build_client(Client)
+                dispatched = True
+                try:
+                    response = await self._with_rate_limit_retries(
+                        lambda: self._achat_with_provider_policy(client, request, options)
+                    )
+                except Exception as exc:
+                    if not self._is_unsupported_reasoning_effort_error(exc):
+                        raise
+                    logger.warning(
+                        "Provider rejected reasoning_effort for model %r; retrying "
+                        "with reasoning_effort=None and disabling it for this session.",
+                        self.model_name,
+                    )
+                    self.reasoning_effort = None
+                    options = self._rebuild_options_without_reasoning(options)
+                    response = await self._with_rate_limit_retries(
+                        lambda: self._achat_with_provider_policy(client, request, options)
+                    )
+        except BaseException as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._fail_spend_call(reservation, exc, dispatched=dispatched)
+            if _LOG_CALLS:
+                logger.info(
+                    "LLM %s failed in %dms: %s",
                     self.model_name,
+                    elapsed_ms,
+                    exc,
                 )
-                self.reasoning_effort = None
-                options = self._rebuild_options_without_reasoning(options)
-                response = await self._with_rate_limit_retries(
-                    lambda: self._achat_with_provider_policy(client, request, options)
-                )
+            _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
+            raise
+
+        self._settle_spend_call(reservation, response)
         usage = getattr(response, "usage", None)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         prompt_tokens = getattr(usage, "prompt_tokens", None)
@@ -500,71 +696,114 @@ class AsyncLLMClient:
             request_tools = [
                 Tool(tool.name, tool.description, json.dumps(tool.schema)) for tool in tools
             ]
+        system_prompt = system or self.default_system
         request = ChatRequest(
             messages=list(messages),
-            system=system or self.default_system,
+            system=system_prompt,
             tools=request_tools,
         )
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
-        options = ChatOptions(
-            temperature=temperature,
-            max_tokens=max_tokens,
-            capture_content=True,
-            capture_usage=True,
-            capture_tool_calls=True,
-            capture_reasoning_content=self.capture_reasoning_content,
-            normalize_reasoning_content=self.capture_reasoning_content,
-            reasoning_effort=self.reasoning_effort,
-        )
-
-        async with self._semaphore:
-            client = self._build_client(Client)
-
-            async def _consume(opts: ChatOptions) -> ChatResponse | None:
-                stream = await client.astream_chat(self.model_name, request, opts)
-                async for event in stream:
-                    if event.content:
-                        on_text_delta(event.content)
-                    if event.end is not None:
-                        return self._chat_response_from_stream_end(event.end)
-                return None
-
-            try:
-                end_event = await _consume(options)
-            except Exception as exc:
-                if self._is_unsupported_reasoning_effort_error(exc):
-                    logger.warning(
-                        "Provider rejected reasoning_effort (streaming) for model "
-                        "%r; retrying with reasoning_effort=None and disabling it "
-                        "for this session.",
-                        self.model_name,
-                    )
-                    self.reasoning_effort = None
-                    options = self._rebuild_options_without_reasoning(options)
-                    end_event = await _consume(options)
-                elif self._should_try_openai_http_fallback(exc):
-                    logger.debug(
-                        "Native OpenAI async stream failed for model=%s base_url=%s; "
-                        "falling back to aiohttp chat/completions: %s",
-                        self.model_name,
-                        self.base_url,
-                        exc,
-                    )
-                    return await self._openai_chat_http_fallback(
-                        request, options, on_text_delta=on_text_delta
-                    )
-                else:
-                    raise
-            if end_event is not None:
-                return end_event
-        # Fallback if stream ends without an end event
-        return await self.achat(
+        reservation = self._reserve_spend_call(
             messages=messages,
-            system=system,
+            system=system_prompt,
             tools=tools,
-            temperature=temperature,
             max_tokens=max_tokens,
         )
+        if reservation is not None and self._spend_ledger is not None:
+            if self._spend_ledger.enforcing:
+                max_tokens = reservation.max_output_tokens
+
+        started = time.monotonic()
+        dispatched = False
+        try:
+            options = ChatOptions(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                capture_content=True,
+                capture_usage=True,
+                capture_tool_calls=True,
+                capture_reasoning_content=self.capture_reasoning_content,
+                normalize_reasoning_content=self.capture_reasoning_content,
+                reasoning_effort=self.reasoning_effort,
+            )
+            async with self._semaphore:
+                client = self._build_client(Client)
+
+                async def _consume(opts: ChatOptions) -> ChatResponse | None:
+                    nonlocal dispatched
+                    dispatched = True
+                    stream = await client.astream_chat(self.model_name, request, opts)
+                    async for event in stream:
+                        if event.content:
+                            on_text_delta(event.content)
+                        if event.end is not None:
+                            return self._chat_response_from_stream_end(event.end)
+                    return None
+
+                try:
+                    response = await _consume(options)
+                except Exception as exc:
+                    if self._is_unsupported_reasoning_effort_error(exc):
+                        logger.warning(
+                            "Provider rejected reasoning_effort (streaming) for model "
+                            "%r; retrying with reasoning_effort=None and disabling it "
+                            "for this session.",
+                            self.model_name,
+                        )
+                        self.reasoning_effort = None
+                        options = self._rebuild_options_without_reasoning(options)
+                        response = await _consume(options)
+                    elif self._should_try_openai_http_fallback(exc) and not (
+                        self._spend_ledger is not None and self._spend_ledger.enforcing
+                    ):
+                        logger.debug(
+                            "Native OpenAI async stream failed for model=%s base_url=%s; "
+                            "falling back to aiohttp chat/completions: %s",
+                            self.model_name,
+                            self.base_url,
+                            exc,
+                        )
+                        response = await self._openai_chat_http_fallback(
+                            request, options, on_text_delta=on_text_delta
+                        )
+                    else:
+                        raise
+                if response is None:
+                    raise RuntimeError("LLM stream ended without a terminal usage event")
+        except BaseException as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._fail_spend_call(reservation, exc, dispatched=dispatched)
+            _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
+            if (
+                "without a terminal usage event" in str(exc)
+                and not (self._spend_ledger is not None and self._spend_ledger.enforcing)
+            ):
+                return await self.achat(
+                    messages=messages,
+                    system=system,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            raise
+
+        self._settle_spend_call(reservation, response)
+        usage = getattr(response, "usage", None)
+        details = getattr(usage, "prompt_tokens_details", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        cached_tokens = getattr(details, "cached_tokens", None) if details else None
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        _record_call(
+            self.model_name,
+            elapsed_ms,
+            prompt_tokens,
+            completion_tokens,
+            len(response.tool_calls or []),
+            ok=True,
+            cached_tokens=cached_tokens,
+        )
+        return response
 
     def chat(self, **kwargs: Any) -> ChatResponse:
         return _run_coro_sync(self.achat(**kwargs))
@@ -707,6 +946,11 @@ class AsyncLLMClient:
             return await client.achat_via_stream(self.model_name, request, options)
         except Exception as exc:
             if not self._should_try_openai_http_fallback(exc):
+                raise
+            if self._spend_ledger is not None and self._spend_ledger.enforcing:
+                # The failed transport may already have reached the provider.
+                # Retrying through another transport could incur a second bill;
+                # let the ledger conservatively charge this reservation instead.
                 raise
             logger.debug(
                 "Native OpenAI streaming transport failed for model=%s base_url=%s; "

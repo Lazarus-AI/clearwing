@@ -15,15 +15,13 @@ import json
 import logging
 import math
 import re
-import time
 from pathlib import Path
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient, NativeToolSpec
+from clearwing.llm import AsyncLLMClient, BudgetExceeded, NativeToolSpec
 
 from .exploiter import EXPLOIT_BUDGET_BANDS
 from .state import (
-    EVIDENCE_LEVELS,
     ElaborationResult,
     EvidenceLevel,
     Finding,
@@ -403,7 +401,7 @@ class ElaborationAgent:
             return ElaborationResult(
                 original_finding_id=finding_id,
                 elaborated=False,
-                upgrade_path=f"Skipped — not eligible for elaboration.",
+                upgrade_path="Skipped — not eligible for elaboration.",
             )
 
         if self.sandbox_manager is None and self.sandbox_factory is None:
@@ -417,7 +415,6 @@ class ElaborationAgent:
         from clearwing.sourcehunt.hunter import NativeHunter
 
         sandbox = None
-        start_time = time.monotonic()
         transcript_dir = None
         if self.output_dir:
             transcript_dir = (
@@ -482,7 +479,6 @@ class ElaborationAgent:
             except asyncio.TimeoutError:
                 run_result = None
 
-            duration = time.monotonic() - start_time
             transcript_path = ""
             if transcript_dir is not None:
                 tp = transcript_dir / "transcript.jsonl"
@@ -507,6 +503,8 @@ class ElaborationAgent:
                 transcript_path=transcript_path,
             )
 
+        except BudgetExceeded:
+            raise
         except Exception as e:
             logger.warning(
                 "Elaboration agent error for %s", finding_id, exc_info=True,
