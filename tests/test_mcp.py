@@ -20,8 +20,9 @@ def _make_fake_tool(name: str, description: str, schema: dict | None = None):
             "type": "object",
             "properties": {"ip_or_cidr": {"type": "string"}},
         }
-    # Simulate args_schema with a .schema() method
+    # Simulate a Pydantic v2 args_schema while retaining its compatibility API.
     args_schema = MagicMock()
+    args_schema.model_json_schema.return_value = schema
     args_schema.schema.return_value = schema
     tool.args_schema = args_schema
     return tool
@@ -239,6 +240,24 @@ class TestToolToMCP:
         fake = _make_fake_tool("my_tool", "Does things")
         name, desc, schema = server._tool_to_mcp(fake)
         assert desc == "Does things"
+
+    def test_prefers_pydantic_v2_schema_api(self):
+        server = _build_server([])
+        fake = _make_fake_tool("my_tool", "Does things")
+        fake.input_schema = None
+        fake.args_schema.model_json_schema.return_value = {
+            "type": "object",
+            "properties": {"modern": {"type": "boolean"}},
+        }
+        fake.args_schema.schema.return_value = {
+            "type": "object",
+            "properties": {"legacy": {"type": "boolean"}},
+        }
+
+        _, _, schema = server._tool_to_mcp(fake)
+
+        assert "modern" in schema["properties"]
+        fake.args_schema.schema.assert_not_called()
 
     def test_extracts_schema(self):
         server = _build_server([])

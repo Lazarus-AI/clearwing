@@ -17,6 +17,7 @@ from .messages import (
 from .native import (
     AsyncLLMClient,
     NativeToolSpec,
+    ToolInputModel,
     extract_json_array,
     extract_json_object,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "ChatResponse",
     "ToolCall",
     "NativeToolSpec",
+    "ToolInputModel",
     "SpendLedger",
     "Usage",
     "extract_json_array",

@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import shlex
 
-from clearwing.llm import NativeToolSpec
+from pydantic import Field
+
+from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
@@ -30,6 +32,22 @@ from .sandbox import HunterContext
 logger = logging.getLogger(__name__)
 
 _OUTPUT_CAP = 100_000  # 100 KB cap on stdout/stderr per execute call
+
+
+class ExecuteInput(ToolInputModel):
+    command: str = Field(description="Shell command to execute.")
+    timeout: int = Field(default=300, description="Timeout in seconds (default 300).")
+
+
+class ReadFileInput(ToolInputModel):
+    path: str = Field(description="Absolute path in the container.")
+    offset: int = Field(default=0, description="Line offset (0-based, default 0).")
+    limit: int = Field(default=2000, description="Max lines to return (default 2000).")
+
+
+class WriteFileInput(ToolInputModel):
+    path: str = Field(description="Absolute path in the container.")
+    contents: str = Field(description="File contents to write.")
 
 
 def _cap_output(text: str, label: str = "output") -> str:
@@ -96,22 +114,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "Run a shell command inside the sandbox container. "
                 "Use for compilation, debugging, running tests, etc."
             ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute.",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (default 300).",
-                        "default": 300,
-                    },
-                },
-                "required": ["command"],
-                "additionalProperties": False,
-            },
+            schema=ExecuteInput.model_json_schema(),
             handler=execute,
         ),
         NativeToolSpec(
@@ -121,47 +124,13 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "Parameters: path (required), offset (line offset, default 0), "
                 "limit (max lines, default 2000). No other parameters exist."
             ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path in the container.",
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Line offset (0-based, default 0).",
-                        "default": 0,
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max lines to return (default 2000).",
-                        "default": 2000,
-                    },
-                },
-                "required": ["path"],
-                "additionalProperties": False,
-            },
+            schema=ReadFileInput.model_json_schema(),
             handler=read_file,
         ),
         NativeToolSpec(
             name="write_file",
             description="Write contents to a file in the container. Creates parent directories.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path in the container.",
-                    },
-                    "contents": {
-                        "type": "string",
-                        "description": "File contents to write.",
-                    },
-                },
-                "required": ["path", "contents"],
-                "additionalProperties": False,
-            },
+            schema=WriteFileInput.model_json_schema(),
             handler=write_file,
         ),
         *reporting_tools,

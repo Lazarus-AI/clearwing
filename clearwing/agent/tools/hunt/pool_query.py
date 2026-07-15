@@ -6,9 +6,20 @@ complementary primitives for exploit chaining.
 
 from __future__ import annotations
 
-from clearwing.llm import NativeToolSpec
+from pydantic import Field
+
+from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .sandbox import HunterContext
+
+
+class QueryFindingsPoolInput(ToolInputModel):
+    primitive_type: str = Field(
+        default="",
+        description="Filter by primitive type (e.g. 'info_leak', 'arbitrary_write', 'use_after_free').",
+    )
+    cwe: str = Field(default="", description="Filter by CWE identifier (e.g. 'CWE-787').")
+    file_path: str = Field(default="", description="Filter by repo-relative file path.")
 
 
 def build_pool_query_tools(ctx: HunterContext) -> list[NativeToolSpec]:
@@ -52,27 +63,7 @@ def build_pool_query_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "CWE, or file path. Use to find complementary primitives "
                 "for exploit chaining."
             ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "primitive_type": {
-                        "type": "string",
-                        "description": "Filter by primitive type (e.g. 'info_leak', 'arbitrary_write', 'use_after_free').",
-                        "default": "",
-                    },
-                    "cwe": {
-                        "type": "string",
-                        "description": "Filter by CWE identifier (e.g. 'CWE-787').",
-                        "default": "",
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "Filter by repo-relative file path.",
-                        "default": "",
-                    },
-                },
-                "required": [],
-            },
+            schema=QueryFindingsPoolInput.model_json_schema(),
             handler=query_findings_pool,
         )
     ]
