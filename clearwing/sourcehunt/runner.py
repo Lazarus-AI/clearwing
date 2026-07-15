@@ -1687,6 +1687,10 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
+                extra_packages=["python3-pip"],
+                post_install_commands=[
+                    "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true",
+                ],
             )
             image_tag = manager.build_image()
         except Exception as exc:
