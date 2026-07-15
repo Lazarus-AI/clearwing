@@ -39,6 +39,7 @@ nav:
   - Quickstart: quickstart.md
   - LLM providers: providers.md
   - FFmpeg case study: FFmpeg.md
+  - Sourcehunt evaluation and rollout: eval_rollout.md
   - Architecture: architecture.md
   - CLI reference: cli.md
   - API reference: api.md
