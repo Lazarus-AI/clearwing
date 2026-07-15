@@ -208,7 +208,10 @@ class TestHuntEndToEnd:
             "CVE-2024-TEST",
             {"rule_id": "retro-hunt-memcpy", "description": "unchecked memcpy length"},
         )
-        assert repeated.id == f.id
+        assert repeated.id != f.id
+        assert len(f.id) == len("retro-") + 8
+        assert repeated.extra["stable_finding_id"] == f.extra["stable_finding_id"]
+        assert len(f.extra["stable_finding_id"]) == len("retro-") + 16
 
     def test_hunt_with_semgrep_unavailable(self, tmp_path: Path):
         patch_file = tmp_path / "cve.patch"

@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -277,7 +278,7 @@ class RetroHunter:
         severity_map = {"error": "high", "warning": "medium", "info": "low"}
         mapped_severity = severity_map.get(severity, "medium")
 
-        finding_id = stable_run_id(
+        stable_finding_id = stable_run_id(
             "retro",
             {
                 "cve_id": cve_id,
@@ -289,7 +290,7 @@ class RetroHunter:
             },
         )
         return Finding(
-            id=finding_id,
+            id=f"retro-{uuid.uuid4().hex[:8]}",
             file=hit.get("file", ""),
             line_number=int(hit.get("line", 0)),
             finding_type="cve_variant",
@@ -305,4 +306,5 @@ class RetroHunter:
             evidence_level="static_corroboration",
             discovered_by="retro_hunt",
             related_cve=cve_id,
+            extra={"stable_finding_id": stable_finding_id},
         )

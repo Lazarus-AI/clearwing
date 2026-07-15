@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -776,10 +777,7 @@ class HunterPool:
                     ),
                 },
             )
-        session_id = stable_run_id(
-            "hunter",
-            {"run_id": self.config.session_id_prefix, "work_item_id": work_item_id},
-        )
+        session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
 
         if self.config.hunter_factory is not None:
             result = self.config.hunter_factory(file_target, sandbox, session_id)

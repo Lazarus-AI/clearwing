@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -278,13 +279,7 @@ class SubsystemHuntRunner:
                     e,
                 )
 
-        session_id = stable_run_id(
-            "hunter",
-            {
-                "run_id": self.config.session_id_prefix,
-                "work_item_id": work_item_id,
-            },
-        )
+        session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
         files = [str(item.get("path") or "") for item in subsystem.files]
         symbols = sorted(
             {

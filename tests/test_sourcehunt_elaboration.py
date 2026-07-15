@@ -424,7 +424,10 @@ class TestRunnerElaboration:
         new_finding = _apply_elaboration(finding, elab_result)
         repeated = _apply_elaboration(finding, elab_result)
         assert new_finding["id"].startswith("elab-")
-        assert repeated["id"] == new_finding["id"]
+        assert len(new_finding["id"]) == len("elab-") + 8
+        assert repeated["id"] != new_finding["id"]
+        assert repeated["stable_finding_id"] == new_finding["stable_finding_id"]
+        assert len(new_finding["stable_finding_id"]) == len("elab-") + 16
         assert new_finding["related_finding_id"] == "original-123"
         assert new_finding["severity"] == "critical"
         assert new_finding["severity_verified"] == "critical"

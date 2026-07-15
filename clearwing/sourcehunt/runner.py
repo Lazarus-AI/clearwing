@@ -129,7 +129,7 @@ def _apply_elaboration(finding: Finding, elab_result) -> Finding:
         elab_result.upgraded_impact or "",
         "high",
     )
-    elaboration_id = stable_run_id(
+    stable_finding_id = stable_run_id(
         "elab",
         {
             "finding_id": finding.get("id", "unknown"),
@@ -140,7 +140,8 @@ def _apply_elaboration(finding: Finding, elab_result) -> Finding:
         },
     )
     return {
-        "id": elaboration_id,
+        "id": f"elab-{uuid.uuid4().hex[:8]}",
+        "stable_finding_id": stable_finding_id,
         "related_finding_id": finding.get("id", "unknown"),
         "file": finding.get("file", ""),
         "line_number": finding.get("line_number"),
@@ -1716,7 +1717,7 @@ class SourceHuntRunner:
                         )
                         for seed in variant_result.seeds:
                             parent = seed.original_finding
-                            variant_id = stable_run_id(
+                            stable_finding_id = stable_run_id(
                                 "variant",
                                 {
                                     "run_id": self._session_id,
@@ -1728,7 +1729,7 @@ class SourceHuntRunner:
                                 },
                             )
                             variant_finding = Finding(
-                                id=variant_id,
+                                id=f"variant-{uuid.uuid4().hex[:8]}",
                                 file=seed.match.file,
                                 line_number=seed.match.line_number,
                                 finding_type=parent.finding_type or "variant",
@@ -1744,6 +1745,7 @@ class SourceHuntRunner:
                                 related_finding_id=parent.id or None,
                                 related_cve=parent.related_cve,
                                 hunter_session_id=self._session_id,
+                                extra={"stable_finding_id": stable_finding_id},
                             )
                             all_findings.append(variant_finding)
                         logger.info(
@@ -2750,19 +2752,20 @@ class SourceHuntRunner:
             relative_file = Path(
                 os.path.relpath(sf.file_path, preprocess_result.repo_path)
             ).as_posix()
+            stable_finding_id = stable_run_id(
+                "static",
+                {
+                    "run_id": getattr(self, "_session_id", "unscoped"),
+                    "file": relative_file,
+                    "line": sf.line_number,
+                    "type": sf.finding_type,
+                    "cwe": sf.cwe,
+                    "description": sf.description,
+                },
+            )
             out.append(
                 Finding(
-                    id=stable_run_id(
-                        "static",
-                        {
-                            "run_id": getattr(self, "_session_id", "unscoped"),
-                            "file": relative_file,
-                            "line": sf.line_number,
-                            "type": sf.finding_type,
-                            "cwe": sf.cwe,
-                            "description": sf.description,
-                        },
-                    ),
+                    id=f"static-{uuid.uuid4().hex[:8]}",
                     file=relative_file,
                     line_number=sf.line_number,
                     finding_type=sf.finding_type,
@@ -2773,6 +2776,7 @@ class SourceHuntRunner:
                     code_snippet=sf.code_snippet,
                     evidence_level="static_corroboration",
                     discovered_by="source_analyzer",
+                    extra={"stable_finding_id": stable_finding_id},
                 )
             )
         return out

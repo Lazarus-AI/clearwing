@@ -13,6 +13,8 @@ verifier, exploiter, patcher, and reporter stages downstream.
 
 from __future__ import annotations
 
+import uuid
+
 from clearwing.core.events import EventBus, EventType
 from clearwing.findings.types import TraceStep, VulnerabilityTrace
 from clearwing.llm import NativeToolSpec
@@ -161,20 +163,27 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # Reset only after the authoritative steps are stored on the finding.
         ctx.trace_steps.clear()
 
+        stable_finding_id = stable_run_id(
+            "hunter",
+            {
+                "run_id": ctx.session_id or "",
+                "work_item_id": ctx.work_item_id or "",
+                "file": file,
+                "line": line_number,
+                "type": finding_type,
+                "cwe": cwe,
+                "description": description,
+                "trace": trace_dict,
+            },
+        )
+        finding_metadata = {"stable_finding_id": stable_finding_id}
+        if ctx.work_item_id:
+            finding_metadata["work_item_id"] = ctx.work_item_id
+
         finding = Finding(
-            id=stable_run_id(
-                "hunter",
-                {
-                    "run_id": ctx.session_id or "",
-                    "work_item_id": ctx.work_item_id or "",
-                    "file": file,
-                    "line": line_number,
-                    "type": finding_type,
-                    "cwe": cwe,
-                    "description": description,
-                    "trace": trace_dict,
-                },
-            ),
+            # Keep the public legacy identifier shape stable. Evaluation and
+            # instrumentation use the deterministic identifier in ``extra``.
+            id=f"hunter-{uuid.uuid4().hex[:8]}",
             file=file,
             line_number=line_number,
             finding_type=finding_type,
@@ -194,13 +203,14 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             crypto_attack_class=crypto_attack_class or None,
             key_material_exposed=key_material_exposed or None,
             vulnerability_trace=trace_dict,
-            extra={"work_item_id": ctx.work_item_id} if ctx.work_item_id else {},
+            extra=finding_metadata,
         )
         ctx.findings.append(finding)
         EventBus().emit(
             EventType.FINDING_RECORDED,
             {
                 "finding_id": finding.id,
+                "stable_finding_id": stable_finding_id,
                 "file": file,
                 "line_number": line_number,
                 "finding_type": finding_type,

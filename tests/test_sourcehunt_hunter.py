@@ -696,6 +696,9 @@ class TestRecordFinding:
         assert f["seeded_from_crash"] is False
         assert f["hunter_session_id"] == "sess-123"
         assert f["id"].startswith("hunter-")
+        assert len(f["id"]) == len("hunter-") + 8
+        assert f["extra"]["stable_finding_id"].startswith("hunter-")
+        assert len(f["extra"]["stable_finding_id"]) == len("hunter-") + 16
         assert f["vulnerability_trace"]["summary"] == "input flows to memcpy unchecked"
         assert len(f["vulnerability_trace"]["steps"]) == 2
 
