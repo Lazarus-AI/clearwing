@@ -721,9 +721,8 @@ class TestRecordFinding:
         assert ctx.findings[0]["seeded_from_crash"] is True
         assert ctx.findings[0]["discovered_by"] == "hunter:memory_safety"
 
-    def test_trace_required_and_authoritative(self):
-        """record_finding rejects a missing trace and persists the explicit
-        one; steps streamed via record_trace_step are NOT harvested."""
+    def test_streamed_trace_is_required_and_authoritative(self):
+        """record_finding persists streamed steps without model reassembly."""
         ctx = HunterContext(
             repo_path=str(FIXTURE_C_PROPAGATION),
             specialist="general",
@@ -746,13 +745,13 @@ class TestRecordFinding:
         assert msg.startswith("ERROR")
         assert ctx.findings == []
 
-        # A streamed step fills the live accumulator but is not persisted.
+        # A streamed step becomes authoritative investigation state.
         # (constrained mode gates record_trace_step on files_read.)
         ctx.files_read.add("x.c")
         step.invoke({"file": "x.c", "line": 1, "note": "ENTRY: streamed"})
         assert len(ctx.trace_steps) == 1
 
-        # Explicit trace is authoritative; streamed steps are discarded.
+        # The compatibility trace cannot overwrite already-streamed evidence.
         record.invoke(
             {
                 **base,
@@ -764,7 +763,8 @@ class TestRecordFinding:
         )
         vt = ctx.findings[0]["vulnerability_trace"]
         assert len(vt["steps"]) == 1
-        assert vt["steps"][0]["line"] == 42
+        assert vt["steps"][0]["line"] == 1
+        assert vt["steps"][0]["note"] == "ENTRY: streamed"
         assert ctx.trace_steps == []  # accumulator reset
 
 
