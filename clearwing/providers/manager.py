@@ -196,7 +196,12 @@ class ProviderManager:
     # --- Constructors -----------------------------------------------------
 
     @classmethod
-    def for_endpoint(cls, endpoint: LLMEndpoint) -> ProviderManager:
+    def for_endpoint(
+        cls,
+        endpoint: LLMEndpoint,
+        *,
+        task_model_overrides: dict[str, str] | None = None,
+    ) -> ProviderManager:
         """Build a ProviderManager that routes every task to one endpoint.
 
         The common case: operator sets `--base-url https://openrouter.ai/api/v1
@@ -208,7 +213,10 @@ class ProviderManager:
         """
         return cls(
             endpoint=endpoint,
-            task_model_overrides=_default_task_model_overrides(endpoint),
+            task_model_overrides={
+                **_default_task_model_overrides(endpoint),
+                **(task_model_overrides or {}),
+            },
         )
 
     @classmethod

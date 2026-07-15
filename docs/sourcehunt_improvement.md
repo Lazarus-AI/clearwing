@@ -2117,6 +2117,15 @@ scenario and migration contract for final replacement of the legacy default.
 
 The migration implementation is now present behind `--flow proof`:
 
+**Phase 0 implementation: 100%. Phase 1 implementation: 100%. Phase 2
+implementation: 100%. Phase 3 implementation: 100%. Phase 4 implementation:
+100%. Phase 5 implementation: 100%.** These percentages describe repository
+implementation and fixture-level acceptance coverage, not a claim that an
+unrun paid-model or FFmpeg campaign produced measurements. Empirical campaign
+reports remain separately versioned artifacts, and the baseline,
+counterfactual, and learning-coverage compilers keep those measurements
+separate from implementation status.
+
 - Strict snapshot, fact, evidence, claim, assumption, threat-model,
   candidate, obligation, action, derivation, context-packet, and certificate
   schemas.
@@ -2144,6 +2153,39 @@ The migration implementation is now present behind `--flow proof`:
 - Action-attributed model-call telemetry, calibration-ready run metrics,
   finalized falsification views, and a combined proof/spend manifest that
   cannot be overwritten by ledger checkpointing.
+- Session-local legacy instrumentation with stable run, work-item, model-call,
+  tool-action, trajectory-event, and finding joins; per-stage file/symbol
+  inventories; and separately retained reporting failures.
+- A strict five-case intermediate-ground-truth manifest, seven-level ablation
+  planner, resumable local/frontier campaign executor, session scorer, and
+  completeness-gated precision/recall/cost/failure-stage baseline compiler.
+- Live assumption records in candidate graphs, bounded packets, falsifier
+  packets, certificates, and reports. Assumption revisions now stale dependent
+  claims and obligations and persist stale certificate successor revisions.
+- Versioned canonical allocation, access, length, cast, guard, and call facts;
+  allocation-versus-access spatial candidates; explicit attacker-reachability
+  and bounds obligations; and deterministic safe-containment and dominating-
+  guard rejection paths.
+- Reusable manifest-declared libFuzzer/ASan/UBSan harness templates that are
+  materialized and compiled inside the sandbox, with build and runtime
+  artifacts retained separately.
+- Manifest-driven vulnerable, fixed, renamed, moved, guarded, unreachable,
+  decoy, and widened-domain counterfactual scoring with exact-matrix
+  validation.
+- Portable scheduler-calibration artifacts compiled from observed action yield
+  and spend, enforced structured/exploratory allocation, candidate starvation
+  prevention, explicit local/frontier model identities, and escalation audit
+  telemetry.
+- Bug-class-specific Phase 4 resolvers, completeness dimensions, falsification
+  checklists, and decisive dynamic evidence gates for parser, authorization,
+  temporal, state-machine, cryptographic, injection, concurrency, and resource
+  investigations. An incidental guard, encoder, lock, or limit marker cannot
+  prove safety without effectiveness or complete supporting analysis.
+- Typed exploratory retrospectives, explicit reviewed promotion into a
+  content-addressed learning registry, mechanical promoted-mechanism candidate
+  generation, reviewed bindings to installed proof plans, mandatory rejection
+  and counterfactual regression specifications, and before/after local-model
+  coverage reports.
 
 This is a migration release, not an evidence-free default flip. `legacy`
 remains the default until measured frontier recall is no worse than legacy,
@@ -2158,75 +2200,202 @@ an accepted finding.
 
 ### Phase 0: Instrument the current funnel
 
-- Assign stable IDs to runs, work items, model calls, tool actions, and
+- [x] Assign stable IDs to runs, work items, model calls, tool actions, and
   findings.
-- Record which files and symbols enter each stage.
-- Preserve hunter trajectories and reporting failures.
-- Add intermediate ground truth to representative CVE evaluations.
-- Run staged ablations across frontier and local models.
-- Establish baseline precision, recall, cost, and failure-stage metrics.
+- [x] Record which files and symbols enter each stage.
+- [x] Preserve hunter trajectories and reporting failures.
+- [x] Add intermediate ground truth to representative CVE evaluations.
+- [x] Provide and test a resumable staged-ablation runner that executes
+  identical hint packets across frontier and local models.
+- [x] Establish a completeness-gated baseline compiler for precision, recall,
+  cost, unsupported claims, report failures, and first-failure-stage metrics.
 
 This phase determines where mechanization will yield the largest return.
 
+The ground truth lives in
+`evaluations/sourcehunt_ground_truth.yaml`. A reproducible campaign uses:
+
+~~~bash
+clearwing eval sourcehunt-plan \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --local-model LOCAL_MODEL \
+  --frontier-model FRONTIER_MODEL \
+  --output results/sourcehunt-eval/plan.json
+
+clearwing eval sourcehunt-run \
+  --plan results/sourcehunt-eval/plan.json \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --checkout CASE_ID=/path/to/vulnerable/checkout \
+  --budget-per-run 10 \
+  --output-dir results/sourcehunt-eval/sessions \
+  --checkpoint results/sourcehunt-eval/observations.json
+
+clearwing eval sourcehunt-baseline \
+  --plan results/sourcehunt-eval/plan.json \
+  --observations results/sourcehunt-eval/observations.json \
+  --output results/sourcehunt-eval/baseline.json
+
+clearwing eval sourcehunt-calibrate \
+  --observations results/sourcehunt-eval/observations.json \
+  --output results/sourcehunt-eval/scheduler-calibration.json
+~~~
+
+`sourcehunt-run` verifies that each supplied checkout is at the manifest's
+vulnerable commit before dispatch. It requires a positive per-run budget,
+rejects tracked checkout changes, checkpoints atomically after every arm, and
+automatically resumes the checkpoint by stable run ID. C/C++ cases also
+require a per-case `--compile-commands CASE_ID=PATH`; runtime evidence can be
+provided with `--validation-manifest CASE_ID=PATH`. Level 1 supplies no oracle
+hint. Levels 2–7 reveal only their declared cumulative information. Each
+local/frontier pair receives the exact same serialized hint packet. Assisted
+hints are recorded in the proof manifest and packets but are never accepted as
+evidence. `sourcehunt-baseline` validates every observation against its plan
+and fails closed when any planned arm is missing unless `--allow-incomplete`
+is explicitly requested, in which case the report is visibly marked
+incomplete.
+
+The calibration command derives per-action information yield, cost, and time
+from completed proof sessions. A later proof run consumes the artifact with
+`--scheduler-calibration`; it never treats a model's self-reported confidence
+as calibration data. Counterfactual sessions are scored as one complete,
+causally related matrix:
+
+~~~bash
+clearwing eval sourcehunt-counterfactual \
+  --manifest evaluations/ffmpeg_proof.yaml \
+  --session vulnerable=/path/to/vulnerable/session \
+  --session fixed=/path/to/fixed/session \
+  --session renamed=/path/to/renamed/session \
+  --session moved=/path/to/moved/session \
+  --session guarded=/path/to/guarded/session \
+  --session unreachable=/path/to/unreachable/session \
+  --session decoy=/path/to/decoy/session \
+  --session widened-domain=/path/to/widened/session \
+  --output results/sourcehunt-eval/ffmpeg-counterfactual.json
+~~~
+
 ### Phase 1: Proof substrate
 
-- Implement snapshot, fact, evidence, claim, assumption, obligation,
+- [x] Implement snapshot, fact, evidence, claim, assumption, obligation,
   action, derivation, and certificate schemas.
-- Add immutable artifact storage and provenance.
-- Make trace steps authoritative rather than conversation-only.
-- Allow findings to reference evidence IDs.
-- Implement dependency invalidation and stale-state propagation.
-- Emit incomplete certificates when a run exhausts its budget.
+- [x] Add immutable artifact storage and provenance.
+- [x] Make trace steps authoritative rather than conversation-only.
+- [x] Allow findings to reference evidence IDs.
+- [x] Implement dependency invalidation and stale-state propagation, including
+  durable stale certificate revisions for file, symbol, evidence, and
+  assumption changes.
+- [x] Emit incomplete certificates when a run exhausts its budget.
 
 This phase should initially coexist with the current hunter.
 
 ### Phase 2: Spatial-memory-safety vertical slice
 
-- Normalize allocation, access, length, cast, guard, and callgraph facts.
-- Implement allocation-versus-access candidate generators.
-- Add the memory-write proof plan.
-- Build completeness-aware context packets.
-- Add bounded guard, reachability, and attacker-control resolvers.
-- Reuse or template sanitizer harnesses.
-- Implement the memory-safety falsifier.
-- Emit finding and rejection certificates.
-- Add patched, renamed, moved, unreachable, and decoy counterfactuals.
+- [x] Normalize allocation, access, length, cast, guard, and callgraph facts.
+- [x] Implement allocation-versus-access candidate generators.
+- [x] Add the memory-write proof plan.
+- [x] Build completeness-aware context packets.
+- [x] Add bounded guard, reachability, and attacker-control resolvers.
+- [x] Reuse or template sanitizer harnesses.
+- [x] Implement the memory-safety falsifier.
+- [x] Emit finding and rejection certificates.
+- [x] Add patched, renamed, moved, unreachable, and decoy counterfactuals.
 
 This vertical slice exercises nearly every architectural concept while
 remaining narrow enough for rigorous evaluation.
 
+Phase 2 completion means each mechanism exists as a typed, provenance-carrying
+repository feature with positive, rejection, incomplete-context, and
+counterfactual fixtures. It does not mean the full FFmpeg counterfactual
+checkout matrix or retained real-world trigger corpus has already been run.
+
 ### Phase 3: Scheduling and model routing
 
-- Replace file-level hunter assignments with candidate/action scheduling.
-- Add value-of-information estimates and action budgets.
-- Route deterministic actions before model calls.
-- Route small typed judgments to local models.
-- Escalate explicit unresolved obligations to stronger models.
-- Calibrate action utility using evaluation results.
-- Add starvation prevention and exploration allocation.
+- [x] Replace file-level hunter assignments with candidate/action scheduling.
+- [x] Add value-of-information estimates and action budgets.
+- [x] Route deterministic actions before model calls.
+- [x] Route small typed judgments to local models.
+- [x] Escalate explicit unresolved obligations to stronger models.
+- [x] Calibrate action utility using evaluation results.
+- [x] Add starvation prevention and exploration allocation.
+
+Phase 3 completion means those policies are enforced and audited in the proof
+engine. Their production thresholds remain empirical: rollout still depends
+on the complete local/frontier campaign meeting the cutover gates above.
 
 ### Phase 4: Additional proof plans
 
-Add proof plans and validation backends in measured order:
+Proof plans and validation backends are implemented in measured order:
 
-1. Parser and integer-domain safety.
-2. Authorization and tenancy isolation.
-3. Temporal memory safety.
-4. State-machine and protocol safety.
-5. Cryptographic property violations.
-6. Injection, path, command, and deserialization boundaries.
-7. Concurrency and resource-exhaustion classes.
+- [x] Parser and integer-domain safety.
+- [x] Authorization and tenancy isolation.
+- [x] Temporal memory safety.
+- [x] State-machine and protocol safety.
+- [x] Cryptographic property violations.
+- [x] Injection, path, command, and deserialization boundaries.
+- [x] Concurrency and resource-exhaustion classes.
 
-Each plan must ship with positive, negative, and counterfactual tests.
+Each plan has typed obligations, at least one decisive rejection path, hard
+runtime-evidence gates where appropriate, a finite falsification checklist,
+and positive, negative, rename, and move counterfactual fixtures. Validation
+manifests can route sanitizer, fuzzing, symbolic, model-checking, differential,
+protocol, race, schedule, load, fault-injection, configuration-matrix, and
+patch-differential actions through the same sandboxed evidence boundary.
+
+Phase 4 completion is repository and fixture completion. Production recall,
+precision, and backend yield for each bug class remain empirical campaign
+results and must not be inferred from the implementation percentage.
 
 ### Phase 5: Exploration and learning flywheel
 
-- Add bounded exploratory tasks and budget accounting.
-- Add structured retrospectives for novel discoveries.
-- Promote validated mechanisms into candidate generators and proof plans.
-- Generate rejection and counterfactual regression cases.
-- Measure whether exploratory discoveries improve future local-model
+- [x] Add bounded exploratory tasks and budget accounting.
+- [x] Add structured retrospectives for novel discoveries.
+- [x] Promote validated mechanisms into candidate generators and proof-plan
+  profiles.
+- [x] Generate rejection and counterfactual regression specifications.
+- [x] Measure whether exploratory discoveries improve future local-model
   coverage.
+
+Exploratory output never becomes policy directly. Only an exploratory
+candidate with a finding certificate, audited evidence, evidence-linked report
+claims, a reusable structural fact signature, and completed falsification is
+eligible. Promotion is an explicit operator action:
+
+~~~bash
+clearwing eval sourcehunt-promote \
+  --retrospectives results/proof-session/learning/retrospectives.json \
+  --output results/sourcehunt-learning/registry.json
+~~~
+
+The registry stores content-addressed generator seeds, reviewed bindings to
+installed typed proof plans, and the required original, guarded/policy,
+renamed, moved, unreachable, and decoy regression matrix. Unknown plan IDs
+fail preflight. A later run applies the structural seed mechanically:
+
+~~~bash
+clearwing sourcehunt /path/to/repository \
+  --flow proof \
+  --proof-learning-registry results/sourcehunt-learning/registry.json \
+  --output-dir results/proof-learned
+~~~
+
+Supplying a learning registry makes a run assisted and unseals the strict
+blind-evaluation boundary. The registry and digest are retained as immutable
+run artifacts. Compare actual before/after sessions with:
+
+~~~bash
+clearwing eval sourcehunt-learning-coverage \
+  --registry results/sourcehunt-learning/registry.json \
+  --before-session results/before/session-id \
+  --after-session results/after/session-id \
+  --output results/sourcehunt-learning/coverage.json
+~~~
+
+The report measures structured rediscovery, terminal local-only obligation
+completion, and frontier actions for promoted mechanisms only. It reports
+improvement only when structured rediscovery and the count of local-only
+resolved obligations both increase without a regression in the local-only
+completion rate. These are observed session measurements, not model
+self-assessment.
 
 ## Initial vertical-slice acceptance criteria
 

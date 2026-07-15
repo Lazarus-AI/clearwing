@@ -15,7 +15,8 @@ from clearwing.llm.budget import spend_metadata
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 from ..preprocessor import Preprocessor
-from .candidates import CandidatePipeline, ThreatModelBuilder
+from .calibration import SchedulerCalibration
+from .candidates import AssumptionBuilder, CandidatePipeline, ThreatModelBuilder
 from .certificates import CertificateCompiler
 from .context import ContextPacketBuilder
 from .exploration import ExploratoryLane
@@ -30,6 +31,7 @@ from .extractors import (
 )
 from .falsifier import BoundedFalsifier, FalsificationPlanner
 from .graph import ProofGraph, revise
+from .learning import LearnedMechanismGenerator, LearningRegistry, RetrospectiveCompiler
 from .models import (
     Action,
     ActionStatus,
@@ -38,6 +40,8 @@ from .models import (
     CertificateKind,
     Claim,
     Derivation,
+    Evidence,
+    Obligation,
     ObligationStatus,
     RepositorySnapshot,
 )
@@ -56,6 +60,7 @@ from .telemetry import ProofTelemetryCompiler
 from .validation import (
     CommandValidationBackend,
     SanitizerValidationBackend,
+    TemplateHarnessBackend,
     ValidationManifest,
     ValidationRequest,
 )
@@ -69,6 +74,8 @@ class ProofRunConfig:
     session_id: str = ""
     compile_commands: str | None = None
     validation_manifest: str | None = None
+    scheduler_calibration: str | None = None
+    learning_registry: str | None = None
     build_configuration: str = "default"
     clang_binary: str = "clang"
     max_actions: int = 200
@@ -81,6 +88,7 @@ class ProofRunConfig:
     falsify: bool = True
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None
+    evaluation_hints: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -144,8 +152,13 @@ class ProofFlowRunner:
             "session_id": session_id,
             "status": "starting",
             "blind_boundary": {
-                "sealed": False,
+                "sealed": not bool(self.config.evaluation_hints or self.config.learning_registry),
                 "oracle_evidence_permitted": False,
+                "learning_registry_supplied": bool(self.config.learning_registry),
+            },
+            "evaluation_ablation": {
+                "assisted": bool(self.config.evaluation_hints or self.config.learning_registry),
+                "hints": self.config.evaluation_hints,
             },
             "budget": {
                 "max_actions": self.config.max_actions,
@@ -165,6 +178,36 @@ class ProofFlowRunner:
                 if self.config.validation_manifest
                 else None
             )
+            scheduler_calibration = (
+                SchedulerCalibration.load(self.config.scheduler_calibration)
+                if self.config.scheduler_calibration
+                else None
+            )
+            try:
+                learning_registry = (
+                    LearningRegistry.load(self.config.learning_registry)
+                    if self.config.learning_registry
+                    else None
+                )
+            except (OSError, ValueError) as exc:
+                raise ProofPreflightError(
+                    f"Invalid learning registry: {exc}",
+                    missing=("valid_learning_registry",),
+                ) from exc
+            plan_registry = ProofPlanRegistry()
+            if learning_registry is not None:
+                referenced_plan_ids = {
+                    plan_id
+                    for mechanism in learning_registry.mechanisms
+                    for plan_id in mechanism.generator_seed.proof_plan_ids
+                }
+                unknown_plan_ids = sorted(referenced_plan_ids - set(plan_registry.plans))
+                if unknown_plan_ids:
+                    raise ProofPreflightError(
+                        "Learning registry references unknown proof plans: "
+                        + ", ".join(unknown_plan_ids),
+                        missing=tuple(unknown_plan_ids),
+                    )
             command_runner = self.command_runner
             if {"c", "cpp"} & set(languages):
                 compile_commands = self._compile_commands_path(Path(repo_path))
@@ -199,6 +242,7 @@ class ProofFlowRunner:
                     "falsification": self.config.falsify,
                     "exploration_fraction": self.config.exploration_fraction,
                     "validation_manifest": bool(validation_manifest),
+                    "learning_registry": bool(learning_registry),
                 },
                 tool_versions={
                     "command_runner": (
@@ -220,6 +264,33 @@ class ProofFlowRunner:
                     "digest": validation_digest,
                     "command_count": len(validation_manifest.commands),
                 }
+            if self.config.scheduler_calibration:
+                calibration_source = Path(self.config.scheduler_calibration).expanduser().resolve()
+                calibration_uri, calibration_digest = store.store_artifact(
+                    calibration_source.read_bytes(),
+                    media_type="application/json",
+                    name="scheduler-calibration.json",
+                )
+                manifest["scheduler_calibration"] = {
+                    "artifact_uri": calibration_uri,
+                    "digest": calibration_digest,
+                    "profile_count": len(scheduler_calibration.profiles),
+                    "source_sessions": scheduler_calibration.source_sessions,
+                }
+            if self.config.learning_registry:
+                assert learning_registry is not None
+                learning_source = Path(self.config.learning_registry).expanduser().resolve()
+                learning_uri, learning_digest = store.store_artifact(
+                    learning_source.read_bytes(),
+                    media_type="application/json",
+                    name="proof-learning-registry.json",
+                )
+                manifest["learning_registry"] = {
+                    "artifact_uri": learning_uri,
+                    "digest": learning_digest,
+                    "mechanism_count": len(learning_registry.mechanisms),
+                    "strict_blind_baseline": False,
+                }
             manifest.update(
                 {
                     "snapshot_id": snapshot.id,
@@ -231,8 +302,11 @@ class ProofFlowRunner:
                     },
                     "languages": languages,
                     "blind_boundary": {
-                        "sealed": True,
+                        "sealed": not bool(
+                            self.config.evaluation_hints or self.config.learning_registry
+                        ),
                         "oracle_evidence_permitted": False,
+                        "learning_registry_supplied": bool(self.config.learning_registry),
                         "snapshot_id": snapshot.id,
                     },
                     "status": "extracting",
@@ -253,7 +327,10 @@ class ProofFlowRunner:
             files_analyzed = extraction.files_analyzed
             errors.extend(extraction.errors)
 
-            generation = CandidatePipeline().generate(
+            candidate_pipeline = CandidatePipeline()
+            if learning_registry is not None:
+                candidate_pipeline.generators.append(LearnedMechanismGenerator(learning_registry))
+            generation = candidate_pipeline.generate(
                 snapshot.id,
                 extraction.facts,
             )
@@ -352,10 +429,11 @@ class ProofFlowRunner:
                 },
             )
             graph = ProofGraph(store, snapshot.id)
-            plan_registry = ProofPlanRegistry()
             threat_builder = ThreatModelBuilder()
+            assumption_builder = AssumptionBuilder()
             for draft in generated_candidates:
                 candidate_threat = threat_builder.build(draft, extraction.facts)
+                assumptions = assumption_builder.build(draft, candidate_threat)
                 plans = plan_registry.select(draft)
                 obligations = plan_registry.instantiate(draft, plans)
                 payload = draft.model_dump(mode="python")
@@ -363,6 +441,7 @@ class ProofFlowRunner:
                     {
                         "id": "",
                         "threat_model_id": candidate_threat.logical_id,
+                        "assumption_ids": [assumption.logical_id for assumption in assumptions],
                         "proof_plan_ids": [plan.id for plan in plans],
                         "obligation_ids": [obligation.logical_id for obligation in obligations],
                     }
@@ -370,6 +449,8 @@ class ProofFlowRunner:
                 candidate = Candidate.model_validate(payload)
                 store.append(candidate_threat)
                 graph.add_candidate(candidate)
+                for assumption in assumptions:
+                    graph.add_assumption(assumption)
                 for obligation in obligations:
                     graph.add_obligation(obligation)
                 candidates.append(candidate)
@@ -384,6 +465,7 @@ class ProofFlowRunner:
                     structured_fraction=self.config.structured_fraction,
                     exploration_fraction=self.config.exploration_fraction,
                 ),
+                calibration=scheduler_calibration,
             )
             threats = store.latest_threats(snapshot.id)
             await self._investigate_candidates(
@@ -462,6 +544,7 @@ class ProofFlowRunner:
                                     extraction.facts,
                                     extraction.completeness,
                                     threat_model=threat,
+                                    assumptions=list(graph.assumptions.values()),
                                 )
                             if not execution.completed:
                                 scheduler.complete(
@@ -551,33 +634,19 @@ class ProofFlowRunner:
                 if certificate.kind == CertificateKind.FINDING
             ]
             findings = finding_payloads
-            retrospectives = [
-                {
-                    "candidate_id": candidate.logical_id,
-                    "mechanism": candidate.suspected_mechanism,
-                    "invariant_families": candidate.invariant_families,
-                    "fact_ids": candidate.fact_ids,
-                    "recommended_generator_seed": {
-                        "mechanism": candidate.suspected_mechanism,
-                        "required_invariants": candidate.suspected_invariants,
-                    },
-                }
-                for candidate in candidates
-                if candidate.experimental
-                and any(
-                    certificate.candidate_id == candidate.logical_id
-                    and certificate.kind == CertificateKind.FINDING
-                    for certificate in certificates
-                )
-            ]
-            if retrospectives:
-                store.write_json(
-                    "learning/retrospectives.json",
-                    {
-                        "snapshot_id": snapshot.id,
-                        "retrospectives": retrospectives,
-                    },
-                )
+            retrospective_bundle = RetrospectiveCompiler().compile_bundle(
+                snapshot.id,
+                candidates,
+                certificates,
+                extraction.facts,
+                list(store.latest(Obligation).values()),
+                list(store.latest(Action).values()),
+                list(store.latest(Evidence).values()),
+            )
+            retrospective_path = retrospective_bundle.write(
+                store.root / "learning" / "retrospectives.json"
+            )
+            paths["retrospectives"] = retrospective_path
             status = (
                 "incomplete"
                 if any(
@@ -590,6 +659,18 @@ class ProofFlowRunner:
                 {
                     "status": status,
                     "candidate_count": len(candidates),
+                    "learning": {
+                        "retrospective_count": len(retrospective_bundle.retrospectives),
+                        "promotion_eligible_count": sum(
+                            item.eligible_for_promotion
+                            for item in retrospective_bundle.retrospectives
+                        ),
+                        "registry_mechanism_count": (
+                            len(learning_registry.mechanisms)
+                            if learning_registry is not None
+                            else 0
+                        ),
+                    },
                     "certificate_counts": {
                         kind.value: sum(
                             1 for certificate in certificates if certificate.kind == kind
@@ -727,6 +808,8 @@ class ProofFlowRunner:
                         list(graph.claims.values()),
                         completeness,
                         threat_model=threat_model,
+                        assumptions=list(graph.assumptions.values()),
+                        evaluation_hints=self.config.evaluation_hints,
                     )
                     store.append(packet)
                     try:
@@ -798,10 +881,31 @@ class ProofFlowRunner:
             cwd.relative_to(repo_path.resolve())
         except ValueError as exc:
             raise ProofPreflightError(f"Validation cwd escapes the repository: {spec.cwd}") from exc
+        evidence_ids: list[str] = []
+        command = tuple(spec.command)
+        if spec.harness_template is not None:
+            preparation = TemplateHarnessBackend(command_runner, store).prepare(
+                snapshot_id=candidate.snapshot_id,
+                candidate_id=candidate.logical_id,
+                spec=spec.harness_template,
+                repo_root=repo_path,
+                timeout_seconds=spec.timeout_seconds,
+            )
+            graph.reload()
+            evidence_ids.append(preparation.evidence.logical_id)
+            if not preparation.succeeded:
+                return (
+                    Resolution(
+                        status=ObligationStatus.BLOCKED,
+                        blocked_reason=preparation.error,
+                    ),
+                    evidence_ids,
+                )
+            command = preparation.command
         request = ValidationRequest(
             snapshot_id=candidate.snapshot_id,
             candidate_id=candidate.logical_id,
-            command=tuple(spec.command),
+            command=command,
             cwd=cwd,
             repeats=spec.repeats,
             timeout_seconds=spec.timeout_seconds,
@@ -823,7 +927,7 @@ class ProofFlowRunner:
         )
         result = backend.validate(request)
         graph.reload()
-        evidence_ids = [result.evidence.logical_id]
+        evidence_ids.append(result.evidence.logical_id)
         if result.reproductions < spec.required_reproductions:
             return (
                 Resolution(

@@ -18,11 +18,14 @@ blind:
     - live_domain_overlaps_reserved_value
     - no_effective_upper_bound_guard
     - collision_changes_security_relevant_state
+    - attacker_reaches_memory_operation
     - runtime_confirms_unsafe_memory_access
 fixed:
   expected_decision: disproven
   expected_counterevidence: dominating_rejecting_guard
 counterfactuals:
+  - name: fixed
+    relation: finding_removed
   - name: renamed
     relation: mechanism_preserved
   - name: moved

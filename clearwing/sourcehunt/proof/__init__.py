@@ -6,8 +6,14 @@ derivations, and terminal certificates. Models may help resolve bounded
 obligations, but this package remains the authoritative source of truth.
 """
 
+from .calibration import (
+    ActionUtilityProfile,
+    SchedulerCalibration,
+    SchedulerCalibrationCompiler,
+)
 from .candidates import (
     AllocationAccessGenerator,
+    AssumptionBuilder,
     AuthorizationBoundaryGenerator,
     CandidateGenerationResult,
     CandidatePipeline,
@@ -44,7 +50,21 @@ from .falsifier import (
     FalsificationTask,
 )
 from .graph import ProofGraph
-from .incremental import invalidated_certificates
+from .incremental import invalidate_certificates, invalidated_certificates
+from .learning import (
+    DiscoveryRetrospective,
+    GeneratorSeed,
+    LearnedMechanismGenerator,
+    LearningCoverageCompiler,
+    LearningCoverageReport,
+    LearningCoverageSnapshot,
+    LearningRegistry,
+    PromotedMechanism,
+    ProofPlanProfile,
+    RegressionSpecification,
+    RetrospectiveBundle,
+    RetrospectiveCompiler,
+)
 from .models import (
     Action,
     ActionStatus,
@@ -67,6 +87,7 @@ from .models import (
     SourceLocation,
     ThreatModel,
 )
+from .normalization import NORMALIZATION_SCHEMA_VERSION, FactNormalizer
 from .plans import (
     DEFAULT_PLANS,
     ObligationTemplate,
@@ -93,7 +114,10 @@ from .store import ProofStore
 from .telemetry import ProofTelemetryCompiler
 from .validation import (
     CommandValidationBackend,
+    HarnessPreparationResult,
+    HarnessTemplateSpec,
     SanitizerValidationBackend,
+    TemplateHarnessBackend,
     ValidationCommandSpec,
     ValidationManifest,
     ValidationRequest,
@@ -104,9 +128,11 @@ __all__ = [
     "Action",
     "ActionScheduler",
     "ActionStatus",
+    "ActionUtilityProfile",
     "AllocationAccessGenerator",
     "AuthorizationBoundaryGenerator",
     "Assumption",
+    "AssumptionBuilder",
     "BoundedJudgment",
     "BoundedFalsifier",
     "BoundedModelResolver",
@@ -126,6 +152,7 @@ __all__ = [
     "ContextPacketBuilder",
     "CryptographicPropertyGenerator",
     "Derivation",
+    "DiscoveryRetrospective",
     "Evidence",
     "EvidencePolicy",
     "ExplorationOutput",
@@ -133,16 +160,26 @@ __all__ = [
     "ExtractionResult",
     "Fact",
     "FactExtractor",
+    "FactNormalizer",
     "ExploratoryLane",
     "ExploratoryProposal",
     "FalsificationPlanner",
     "FalsificationExecution",
     "FalsificationJudgment",
     "FalsificationTask",
+    "GeneratorSeed",
     "InvestigationBudget",
+    "HarnessPreparationResult",
+    "HarnessTemplateSpec",
     "InjectionBoundaryGenerator",
+    "LearnedMechanismGenerator",
+    "LearningCoverageCompiler",
+    "LearningCoverageReport",
+    "LearningCoverageSnapshot",
+    "LearningRegistry",
     "MechanicalResolver",
     "ModelRoutePolicy",
+    "NORMALIZATION_SCHEMA_VERSION",
     "Obligation",
     "ObligationStatus",
     "ObligationTemplate",
@@ -151,6 +188,7 @@ __all__ = [
     "ProofFlowResult",
     "ProofFlowRunner",
     "ProofPlan",
+    "ProofPlanProfile",
     "ProofPlanRegistry",
     "ProofPreflightError",
     "ProofStore",
@@ -158,17 +196,24 @@ __all__ = [
     "ProofReporter",
     "ProofRunConfig",
     "Provenance",
+    "PromotedMechanism",
     "RepositorySnapshot",
     "Resolution",
     "ReservedSentinelGenerator",
+    "RegressionSpecification",
+    "RetrospectiveBundle",
+    "RetrospectiveCompiler",
     "SUPPORTED_LANGUAGES",
     "SandboxCommandRunner",
     "SnapshotError",
     "SchedulerState",
+    "SchedulerCalibration",
+    "SchedulerCalibrationCompiler",
     "SanitizerValidationBackend",
     "SourceLocation",
     "StateMachineGenerator",
     "TemporalSafetyGenerator",
+    "TemplateHarnessBackend",
     "ThreatModel",
     "ThreatModelBuilder",
     "ValidationRequest",
@@ -179,5 +224,6 @@ __all__ = [
     "capture_snapshot",
     "apply_resolution",
     "invalidated_certificates",
+    "invalidate_certificates",
     "is_dynamic_action",
 ]

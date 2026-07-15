@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any, TypeVar, cast
 
 from .models import (
+    Assumption,
     Candidate,
     Claim,
     Evidence,
@@ -44,6 +45,7 @@ class ProofGraph:
         self.store = store
         self.snapshot_id = snapshot_id
         self.candidates: dict[str, Candidate] = {}
+        self.assumptions: dict[str, Assumption] = {}
         self.claims: dict[str, Claim] = {}
         self.evidence: dict[str, Evidence] = {}
         self.obligations: dict[str, Obligation] = {}
@@ -52,6 +54,7 @@ class ProofGraph:
 
     def reload(self) -> None:
         self.candidates = self._latest_for_snapshot(Candidate)
+        self.assumptions = self._latest_for_snapshot(Assumption)
         self.claims = self._latest_for_snapshot(Claim)
         self.evidence = self._latest_for_snapshot(Evidence)
         self.obligations = self._latest_for_snapshot(Obligation)
@@ -66,10 +69,7 @@ class ProofGraph:
 
     def _reindex(self) -> None:
         self._dependents = defaultdict(set)
-        aliases = {
-            obligation.id: logical_id
-            for logical_id, obligation in self.obligations.items()
-        }
+        aliases = {obligation.id: logical_id for logical_id, obligation in self.obligations.items()}
         for logical_id, obligation in self.obligations.items():
             for dependency in obligation.dependencies:
                 dependency_id = aliases.get(dependency, dependency)
@@ -79,6 +79,10 @@ class ProofGraph:
     def add_candidate(self, candidate: Candidate) -> Candidate:
         self._check_snapshot(candidate)
         return self._add(candidate, self.candidates)
+
+    def add_assumption(self, assumption: Assumption) -> Assumption:
+        self._check_snapshot(assumption)
+        return self._add(assumption, self.assumptions)
 
     def add_claim(self, claim: Claim) -> Claim:
         self._check_snapshot(claim)
@@ -91,9 +95,7 @@ class ProofGraph:
     def add_obligation(self, obligation: Obligation) -> Obligation:
         self._check_snapshot(obligation)
         if self._resolve_candidate(obligation.candidate_id) is None:
-            raise ValueError(
-                f"Obligation references unknown candidate {obligation.candidate_id}"
-            )
+            raise ValueError(f"Obligation references unknown candidate {obligation.candidate_id}")
         if obligation.logical_id in self.obligations:
             raise ValueError(
                 f"Obligation {obligation.logical_id} already exists; "
@@ -172,6 +174,35 @@ class ProofGraph:
         self.claims[logical_id] = successor
         return successor
 
+    def update_assumption(
+        self,
+        assumption_id: str,
+        *,
+        status: ObligationStatus,
+        evidence_ids: Iterable[str] = (),
+    ) -> Assumption:
+        """Append an assumption revision and stale every conclusion using it."""
+
+        logical_id = self._resolve_record_id(self.assumptions, assumption_id)
+        current = self.assumptions[logical_id]
+        successor = revise(
+            current,
+            status=status,
+            evidence_ids=list(evidence_ids),
+        )
+        self.store.append(successor)
+        self.assumptions[logical_id] = successor
+        self._invalidate_assumption_users(current)
+        from .incremental import invalidate_certificates
+
+        invalidate_certificates(
+            self.store,
+            changed_assumptions=[current.id, current.logical_id],
+            reason=f"Assumption {current.logical_id} was revised",
+        )
+        self._reindex()
+        return successor
+
     def ready_obligations(self, candidate_id: str | None = None) -> list[Obligation]:
         ready: list[Obligation] = []
         candidate_aliases: set[str] | None = None
@@ -181,10 +212,7 @@ class ProofGraph:
                 raise KeyError(candidate_id)
             candidate_aliases = {candidate.id, candidate.logical_id}
         for obligation in self.obligations.values():
-            if (
-                candidate_aliases is not None
-                and obligation.candidate_id not in candidate_aliases
-            ):
+            if candidate_aliases is not None and obligation.candidate_id not in candidate_aliases:
                 continue
             if obligation.status not in {
                 ObligationStatus.UNKNOWN,
@@ -216,17 +244,13 @@ class ProofGraph:
     def validate(self) -> None:
         """Reject dangling dependencies and obligation cycles."""
 
-        aliases = {
-            obligation.id: logical_id
-            for logical_id, obligation in self.obligations.items()
-        }
+        aliases = {obligation.id: logical_id for logical_id, obligation in self.obligations.items()}
         for obligation in self.obligations.values():
             for dependency in obligation.dependencies:
                 resolved = aliases.get(dependency, dependency)
                 if resolved not in self.obligations:
                     raise ValueError(
-                        f"Obligation {obligation.logical_id} has missing dependency "
-                        f"{dependency}"
+                        f"Obligation {obligation.logical_id} has missing dependency {dependency}"
                     )
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -255,9 +279,11 @@ class ProofGraph:
             "schema_version": 1,
             "snapshot_id": self.snapshot_id,
             "candidate": candidate.model_dump(mode="json"),
-            "obligations": [
-                obligation.model_dump(mode="json") for obligation in obligations
+            "assumptions": [
+                assumption.model_dump(mode="json")
+                for assumption in self._candidate_assumptions(candidate)
             ],
+            "obligations": [obligation.model_dump(mode="json") for obligation in obligations],
             "edges": [
                 {
                     "from": dependency,
@@ -266,6 +292,14 @@ class ProofGraph:
                 }
                 for obligation in obligations
                 for dependency in obligation.dependencies
+            ]
+            + [
+                {
+                    "from": assumption.logical_id,
+                    "to": candidate.logical_id,
+                    "kind": "assumed_by",
+                }
+                for assumption in self._candidate_assumptions(candidate)
             ],
         }
         self.store.write_graph(candidate.logical_id, payload)
@@ -291,6 +325,59 @@ class ProofGraph:
                 self.store.append(successor)
                 self.obligations[dependent_id] = successor
             queue.extend(self._dependents.get(dependent_id, ()))
+
+    def _invalidate_assumption_users(self, assumption: Assumption) -> None:
+        assumption_aliases = {assumption.id, assumption.logical_id}
+        stale_claim_aliases: set[str] = set()
+        for logical_id, claim in list(self.claims.items()):
+            if not assumption_aliases.intersection(claim.assumption_ids):
+                continue
+            stale_claim = revise(
+                claim,
+                status=ObligationStatus.STALE,
+                supporting_evidence_ids=[],
+                contradicting_evidence_ids=[],
+            )
+            self.store.append(stale_claim)
+            self.claims[logical_id] = stale_claim
+            stale_claim_aliases.update({claim.id, claim.logical_id})
+
+        directly_stale: list[str] = []
+        for logical_id, obligation in list(self.obligations.items()):
+            claim_ids = {
+                *obligation.supporting_claim_ids,
+                *obligation.contradicting_claim_ids,
+            }
+            if not claim_ids.intersection(stale_claim_aliases):
+                continue
+            stale_obligation = revise(
+                obligation,
+                status=ObligationStatus.STALE,
+                supporting_claim_ids=[],
+                contradicting_claim_ids=[],
+                blocked_reason=(
+                    f"Assumption {assumption.logical_id} changed after this obligation was resolved"
+                ),
+            )
+            self.store.append(stale_obligation)
+            self.obligations[logical_id] = stale_obligation
+            directly_stale.append(logical_id)
+        for logical_id in directly_stale:
+            self._invalidate_dependents(logical_id)
+
+    def _candidate_assumptions(self, candidate: Candidate) -> list[Assumption]:
+        aliases = set(candidate.assumption_ids)
+        candidate_aliases = {candidate.id, candidate.logical_id}
+        return sorted(
+            (
+                assumption
+                for assumption in self.assumptions.values()
+                if assumption.id in aliases
+                or assumption.logical_id in aliases
+                or candidate_aliases.intersection(assumption.required_by)
+            ),
+            key=lambda assumption: assumption.logical_id,
+        )
 
     def _check_snapshot(self, record: VersionedRecord) -> None:
         if record.snapshot_id != self.snapshot_id:

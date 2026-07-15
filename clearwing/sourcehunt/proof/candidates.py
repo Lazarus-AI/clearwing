@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from .models import Candidate, Fact, ThreatModel
+from .models import Assumption, Candidate, Fact, ObligationStatus, ThreatModel
 
 
 @dataclass(frozen=True)
@@ -20,8 +20,7 @@ class CandidateGenerator(Protocol):
     name: str
     version: str
 
-    def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
-        ...
+    def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]: ...
 
 
 class ReservedSentinelGenerator:
@@ -35,9 +34,7 @@ class ReservedSentinelGenerator:
         assignments = [fact for fact in facts if fact.kind == "assignment"]
         variables = [fact for fact in facts if fact.kind in {"variable", "field"}]
         guards = [fact for fact in facts if fact.kind == "guard"]
-        accesses = [
-            fact for fact in facts if fact.kind in {"memory_access", "memory_write"}
-        ]
+        accesses = [fact for fact in facts if fact.kind in {"memory_access", "memory_write"}]
         calls = [fact for fact in facts if fact.kind == "call"]
 
         by_storage: dict[str, list[Fact]] = defaultdict(list)
@@ -59,11 +56,8 @@ class ReservedSentinelGenerator:
                 {
                     identifier
                     for fact in writes
-                    for identifier in _identifiers(
-                        str(fact.properties.get("rhs", ""))
-                    )
-                    if identifier != storage_symbol
-                    and identifier not in _NOISE_IDENTIFIERS
+                    for identifier in _identifiers(str(fact.properties.get("rhs", "")))
+                    if identifier != storage_symbol and identifier not in _NOISE_IDENTIFIERS
                 }
             )
             source = _best_source(sources)
@@ -78,26 +72,15 @@ class ReservedSentinelGenerator:
                 for fact in facts
                 if source
                 and (
-                    (
-                        fact.kind in {"variable", "field", "parameter"}
-                        and source in fact.subject
-                    )
-                    or (
-                        fact.kind == "counter_update"
-                        and source in _expression(fact)
-                    )
+                    (fact.kind in {"variable", "field", "parameter"} and source in fact.subject)
+                    or (fact.kind == "counter_update" and source in _expression(fact))
                 )
             ]
-            relevant_guards = [
-                fact
-                for fact in guards
-                if source and source in _expression(fact)
-            ]
+            relevant_guards = [fact for fact in guards if source and source in _expression(fact)]
             relevant_accesses = [
                 fact
                 for fact in accesses
-                if storage_symbol in _expression(fact)
-                or _shares_function(fact, writes)
+                if storage_symbol in _expression(fact) or _shares_function(fact, writes)
             ]
             downstream_calls = [
                 fact
@@ -128,10 +111,7 @@ class ReservedSentinelGenerator:
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
-                    title=(
-                        f"Live identifier may alias reserved sentinel in "
-                        f"{storage_symbol}"
-                    ),
+                    title=(f"Live identifier may alias reserved sentinel in {storage_symbol}"),
                     invariant_families=invariant_families,
                     suspected_mechanism="live_identifier_aliases_reserved_sentinel",
                     source_symbols=[source] if source else [],
@@ -162,42 +142,71 @@ class AllocationAccessGenerator:
     """Find allocation/access extent contrasts in the same bounded scope."""
 
     name = "allocation-access-contrast"
-    version = "1"
+    version = "2"
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
         allocations = [fact for fact in facts if fact.kind == "allocation"]
         writes = [fact for fact in facts if fact.kind == "memory_write"]
         casts = [fact for fact in facts if fact.kind == "cast"]
         assignments = [fact for fact in facts if fact.kind == "assignment"]
+        lengths = [fact for fact in facts if fact.kind == "length"]
+        guards = [fact for fact in facts if fact.kind == "guard"]
+        calls = [
+            fact
+            for fact in facts
+            if fact.kind in {"call", "call_edge", "reachability", "taint_path"}
+        ]
         candidates: list[Candidate] = []
         for allocation in allocations:
             related_writes = [
                 write
                 for write in writes
-                if _same_scope(allocation, write)
+                if _same_scope(allocation, write) and _allocation_may_feed_access(allocation, write)
             ]
             for write in related_writes:
                 allocation_expression = _expression(allocation)
                 write_expression = _expression(write)
-                allocation_ids = set(_identifiers(allocation_expression))
-                write_ids = set(_identifiers(write_expression))
-                if not allocation_ids or not write_ids:
-                    continue
-                local_casts = [fact for fact in casts if _same_scope(fact, allocation)]
-                local_assignments = [
-                    fact for fact in assignments if _same_scope(fact, allocation)
-                ]
-                if allocation_expression == write_expression:
-                    continue
-                source_symbols = sorted(
-                    identifier
-                    for identifier in allocation_ids | write_ids
-                    if any(token in identifier.lower() for token in ("len", "size", "count"))
+                allocation_extent = str(
+                    allocation.properties.get("extent") or allocation_expression
                 )
+                write_extent = str(write.properties.get("extent") or write_expression)
+                allocation_target = str(allocation.properties.get("target") or "")
+                write_target = str(write.properties.get("target") or "")
+                allocation_ids = set(
+                    allocation.properties.get("extent_symbols") or _identifiers(allocation_extent)
+                )
+                write_ids = set(
+                    write.properties.get("extent_symbols")
+                    or write.properties.get("offset_symbols")
+                    or _identifiers(write_extent)
+                )
+                local_casts = [fact for fact in casts if _same_scope(fact, allocation)]
+                local_assignments = [fact for fact in assignments if _same_scope(fact, allocation)]
+                local_lengths = [
+                    fact
+                    for fact in lengths
+                    if _same_file_function(fact, allocation)
+                    and fact.subject in allocation_ids | write_ids
+                ]
+                relevant_symbols = allocation_ids | write_ids
+                local_guards = [
+                    fact
+                    for fact in guards
+                    if _same_scope(fact, allocation)
+                    and relevant_symbols.intersection(
+                        set(
+                            fact.properties.get("guarded_symbols")
+                            or _identifiers(_expression(fact))
+                        )
+                    )
+                ]
+                local_calls = [fact for fact in calls if _same_file_function(fact, allocation)]
+                source_symbols = sorted(relevant_symbols)
+                target = write_target or allocation_target or "memory object"
                 candidates.append(
                     Candidate(
                         snapshot_id=snapshot_id,
-                        title="Allocation and write extents require a bounds proof",
+                        title=f"Allocation and write extents for {target} require a bounds proof",
                         invariant_families=[
                             "spatial_safety",
                             "representation_domain_safety",
@@ -207,20 +216,31 @@ class AllocationAccessGenerator:
                         transformations=[
                             _expression(fact) for fact in local_casts + local_assignments
                         ],
-                        state_sinks=[allocation_expression],
-                        impact_sinks=[write_expression],
-                        suspected_invariants=[
-                            "accessed region is a subset of allocated region"
-                        ],
+                        state_sinks=[allocation_target or allocation_expression],
+                        impact_sinks=[write_target or write_expression],
+                        suspected_invariants=["accessed region is a subset of allocated region"],
                         fact_ids=[
                             fact.id
                             for fact in _unique_facts(
-                                [allocation, write, *local_casts, *local_assignments]
+                                [
+                                    allocation,
+                                    write,
+                                    *local_casts,
+                                    *local_assignments,
+                                    *local_lengths,
+                                    *local_guards,
+                                    *local_calls,
+                                ]
                             )
                         ],
                         generator=self.name,
                         generator_version=self.version,
-                        experimental=True,
+                        experimental=not bool(
+                            allocation.properties.get("extent")
+                            and write.properties.get("extent")
+                            and allocation_target
+                            and write_target
+                        ),
                     )
                 )
         return candidates
@@ -228,7 +248,7 @@ class AllocationAccessGenerator:
 
 class InjectionBoundaryGenerator:
     name = "interpreter-boundary"
-    version = "1"
+    version = "2"
     _SINKS = {
         "eval",
         "exec",
@@ -240,6 +260,13 @@ class InjectionBoundaryGenerator:
         "loads",
         "render_template_string",
         "yaml_load",
+    }
+    _ENCODERS = {
+        "escape",
+        "parameterize",
+        "quote",
+        "sanitize",
+        "shellescape",
     }
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
@@ -257,6 +284,23 @@ class InjectionBoundaryGenerator:
                     for token in ("input", "request", "user", "arg", "data", "query")
                 )
             ]
+            local_counterfacts = [
+                item
+                for item in facts
+                if item.id != fact.id
+                and _same_scope(item, fact)
+                and (
+                    item.kind == "encoding"
+                    or (
+                        item.kind == "call"
+                        and any(
+                            marker in str(item.properties.get("callee", "")).lower()
+                            for marker in self._ENCODERS
+                        )
+                    )
+                    or item.kind == "guard"
+                )
+            ]
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
@@ -265,10 +309,8 @@ class InjectionBoundaryGenerator:
                     suspected_mechanism="untrusted_data_reaches_interpreter_boundary",
                     source_symbols=sorted(set(sources)),
                     impact_sinks=[callee],
-                    suspected_invariants=[
-                        "untrusted data cannot alter interpreted structure"
-                    ],
-                    fact_ids=[fact.id],
+                    suspected_invariants=["untrusted data cannot alter interpreted structure"],
+                    fact_ids=[fact.id, *[item.id for item in local_counterfacts]],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=not bool(sources),
@@ -279,7 +321,7 @@ class InjectionBoundaryGenerator:
 
 class TemporalSafetyGenerator:
     name = "release-use-contrast"
-    version = "1"
+    version = "2"
     _RELEASES = {"free", "delete", "drop", "close", "release", "unref"}
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
@@ -290,9 +332,7 @@ class TemporalSafetyGenerator:
             and str(fact.properties.get("callee", "")).lower() in self._RELEASES
         ]
         accesses = [
-            fact
-            for fact in facts
-            if fact.kind in {"memory_access", "memory_write", "call"}
+            fact for fact in facts if fact.kind in {"memory_access", "memory_write", "call"}
         ]
         candidates: list[Candidate] = []
         for release in releases:
@@ -314,6 +354,17 @@ class TemporalSafetyGenerator:
             ]
             if not later:
                 continue
+            first_use = later[0]
+            intervening = [
+                fact
+                for fact in facts
+                if fact.location
+                and release.location
+                and first_use.location
+                and _same_file_function(fact, release)
+                and release.location.line < fact.location.line < first_use.location.line
+                and fact.id != release.id
+            ]
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
@@ -323,10 +374,12 @@ class TemporalSafetyGenerator:
                     source_symbols=[released[0]],
                     transformations=[_expression(release)],
                     impact_sinks=[_expression(later[0])],
-                    suspected_invariants=[
-                        "object is live at every dereference"
+                    suspected_invariants=["object is live at every dereference"],
+                    fact_ids=[
+                        release.id,
+                        *[fact.id for fact in intervening],
+                        *[fact.id for fact in later],
                     ],
-                    fact_ids=[release.id, *[fact.id for fact in later]],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=True,
@@ -337,7 +390,7 @@ class TemporalSafetyGenerator:
 
 class AuthorizationBoundaryGenerator:
     name = "authorization-contrast"
-    version = "1"
+    version = "2"
     _PROTECTED = {
         "delete",
         "update",
@@ -350,13 +403,11 @@ class AuthorizationBoundaryGenerator:
     }
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
-        guards = [fact for fact in facts if fact.kind == "guard"]
+        guards = [fact for fact in facts if fact.kind in {"guard", "authorization_policy"}]
         candidates: list[Candidate] = []
         for fact in facts:
             callee = str(fact.properties.get("callee", "")).lower()
-            if fact.kind != "call" or not any(
-                protected in callee for protected in self._PROTECTED
-            ):
+            if fact.kind != "call" or not any(protected in callee for protected in self._PROTECTED):
                 continue
             local_guards = [
                 guard
@@ -374,9 +425,7 @@ class AuthorizationBoundaryGenerator:
                     invariant_families=["authority_safety"],
                     suspected_mechanism="protected_operation_authorization_contrast",
                     state_sinks=[callee],
-                    suspected_invariants=[
-                        "requested operation is permitted for the principal"
-                    ],
+                    suspected_invariants=["requested operation is permitted for the principal"],
                     fact_ids=[fact.id, *[guard.id for guard in local_guards]],
                     generator=self.name,
                     generator_version=self.version,
@@ -388,7 +437,7 @@ class AuthorizationBoundaryGenerator:
 
 class CryptographicPropertyGenerator:
     name = "cryptographic-precondition"
-    version = "1"
+    version = "2"
     _MARKERS = {
         "md5": "collision_resistant_hash_required",
         "sha1": "collision_resistant_hash_required",
@@ -409,6 +458,13 @@ class CryptographicPropertyGenerator:
             )
             if marker is None:
                 continue
+            local_contracts = [
+                item
+                for item in facts
+                if item.id != fact.id
+                and _same_scope(item, fact)
+                and item.kind in {"crypto_contract", "crypto_precondition", "guard"}
+            ]
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
@@ -417,7 +473,7 @@ class CryptographicPropertyGenerator:
                     suspected_mechanism=f"cryptographic_precondition:{marker}",
                     impact_sinks=[expression],
                     suspected_invariants=[self._MARKERS[marker]],
-                    fact_ids=[fact.id],
+                    fact_ids=[fact.id, *[item.id for item in local_contracts]],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=True,
@@ -428,16 +484,20 @@ class CryptographicPropertyGenerator:
 
 class ParserBoundaryGenerator:
     name = "parser-boundary-contrast"
-    version = "1"
+    version = "2"
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
         guards = [fact for fact in facts if fact.kind == "guard"]
         candidates: list[Candidate] = []
         for fact in facts:
-            if fact.kind != "memory_access":
+            if fact.kind not in {"memory_access", "memory_write"}:
                 continue
             expression = _expression(fact)
-            identifiers = _identifiers(expression)
+            identifiers = sorted(
+                set(fact.properties.get("offset_symbols", []))
+                | set(fact.properties.get("extent_symbols", []))
+                | set(_identifiers(expression))
+            )
             extents = [
                 identifier
                 for identifier in identifiers
@@ -454,6 +514,11 @@ class ParserBoundaryGenerator:
                 if _same_scope(fact, guard)
                 and any(extent in _expression(guard) for extent in extents)
             ]
+            local_boundaries = [
+                item
+                for item in facts
+                if item.kind in {"parser_boundary", "range_violation"} and _same_scope(fact, item)
+            ]
             if not local_guards and len(set(extents)) < 2:
                 continue
             candidates.append(
@@ -467,7 +532,11 @@ class ParserBoundaryGenerator:
                     suspected_invariants=[
                         "cursor plus requested length is within the validated boundary"
                     ],
-                    fact_ids=[fact.id, *[guard.id for guard in local_guards]],
+                    fact_ids=[
+                        fact.id,
+                        *[guard.id for guard in local_guards],
+                        *[item.id for item in local_boundaries],
+                    ],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=True,
@@ -478,7 +547,7 @@ class ParserBoundaryGenerator:
 
 class StateMachineGenerator:
     name = "state-transition"
-    version = "1"
+    version = "2"
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
         candidates: list[Candidate] = []
@@ -487,15 +556,18 @@ class StateMachineGenerator:
                 continue
             lhs = str(fact.properties.get("lhs", "")).lower()
             if not any(
-                token in lhs
-                for token in ("state", "status", "phase", "authenticated", "session")
+                token in lhs for token in ("state", "status", "phase", "authenticated", "session")
             ):
                 continue
-            if "[" in lhs or any(
-                storage in lhs
-                for storage in ("table", "map", "buffer", "cache")
-            ):
+            if "[" in lhs or any(storage in lhs for storage in ("table", "map", "buffer", "cache")):
                 continue
+            local_state_facts = [
+                item
+                for item in facts
+                if item.id != fact.id
+                and _same_scope(item, fact)
+                and item.kind in {"guard", "state_model", "state_transition"}
+            ]
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
@@ -507,7 +579,7 @@ class StateMachineGenerator:
                     suspected_invariants=[
                         "transition is permitted from the current authenticated state"
                     ],
-                    fact_ids=[fact.id],
+                    fact_ids=[fact.id, *[item.id for item in local_state_facts]],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=True,
@@ -518,7 +590,7 @@ class StateMachineGenerator:
 
 class ConcurrencyResourceGenerator:
     name = "concurrency-resource"
-    version = "1"
+    version = "2"
     _THREAD_MARKERS = {"pthread_create", "thread", "spawn", "go"}
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
@@ -526,11 +598,14 @@ class ConcurrencyResourceGenerator:
         loops = [fact for fact in facts if fact.kind == "loop"]
         allocations = [fact for fact in facts if fact.kind == "allocation"]
         for allocation in allocations:
-            local_loops = [
-                loop for loop in loops if _same_scope(loop, allocation)
-            ]
+            local_loops = [loop for loop in loops if _same_scope(loop, allocation)]
             if not local_loops:
                 continue
+            local_limits = [
+                fact
+                for fact in facts
+                if _same_scope(fact, allocation) and fact.kind in {"guard", "resource_limit"}
+            ]
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
@@ -542,7 +617,11 @@ class ConcurrencyResourceGenerator:
                     suspected_invariants=[
                         "attacker-influenced work remains within a bounded resource limit"
                     ],
-                    fact_ids=[allocation.id, *[loop.id for loop in local_loops]],
+                    fact_ids=[
+                        allocation.id,
+                        *[loop.id for loop in local_loops],
+                        *[fact.id for fact in local_limits],
+                    ],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=True,
@@ -559,11 +638,24 @@ class ConcurrencyResourceGenerator:
         ]
         writes = [fact for fact in facts if fact.kind == "memory_write"]
         for thread in thread_calls:
-            local_writes = [
-                write for write in writes if _same_scope(thread, write)
-            ]
+            local_writes = [write for write in writes if _same_scope(thread, write)]
             if not local_writes:
                 continue
+            synchronization = [
+                fact
+                for fact in facts
+                if _same_scope(fact, thread)
+                and (
+                    fact.kind == "synchronization"
+                    or (
+                        fact.kind == "call"
+                        and any(
+                            token in str(fact.properties.get("callee", "")).lower()
+                            for token in ("lock", "mutex", "atomic", "semaphore")
+                        )
+                    )
+                )
+            ]
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
@@ -574,7 +666,11 @@ class ConcurrencyResourceGenerator:
                     suspected_invariants=[
                         "shared-state invariants hold for every permitted schedule"
                     ],
-                    fact_ids=[thread.id, *[write.id for write in local_writes]],
+                    fact_ids=[
+                        thread.id,
+                        *[write.id for write in local_writes],
+                        *[fact.id for fact in synchronization],
+                    ],
                     generator=self.name,
                     generator_version=self.version,
                     experimental=True,
@@ -624,15 +720,12 @@ class CandidatePipeline:
                 payload.update(
                     {
                         "id": "",
-                        "fact_ids": sorted(
-                            set(existing.fact_ids) | set(candidate.fact_ids)
-                        ),
+                        "fact_ids": sorted(set(existing.fact_ids) | set(candidate.fact_ids)),
                         "evidence_ids": sorted(
                             set(existing.evidence_ids) | set(candidate.evidence_ids)
                         ),
                         "invariant_families": sorted(
-                            set(existing.invariant_families)
-                            | set(candidate.invariant_families)
+                            set(existing.invariant_families) | set(candidate.invariant_families)
                         ),
                         "impact_sinks": sorted(
                             set(existing.impact_sinks) | set(candidate.impact_sinks)
@@ -652,9 +745,7 @@ class ThreatModelBuilder:
 
     def build(self, candidate: Candidate, facts: list[Fact]) -> ThreatModel:
         relevant = {fact.id: fact for fact in facts if fact.id in candidate.fact_ids}
-        text = " ".join(
-            _expression(fact).lower() for fact in relevant.values()
-        )
+        text = " ".join(_expression(fact).lower() for fact in relevant.values())
         parser_like = any(
             token in text
             for token in (
@@ -670,17 +761,13 @@ class ThreatModelBuilder:
         memory_like = "spatial_safety" in candidate.invariant_families
         return ThreatModel(
             snapshot_id=candidate.snapshot_id,
-            attacker_principal=(
-                "untrusted_input_supplier" if parser_like else "unknown"
-            ),
+            attacker_principal=("untrusted_input_supplier" if parser_like else "unknown"),
             attacker_capabilities=(
                 ["provide data to the affected parser or decoder"]
                 if parser_like
                 else ["unknown; attacker control remains an obligation"]
             ),
-            trust_boundaries=[
-                "untrusted input to application processing boundary"
-            ],
+            trust_boundaries=["untrusted input to application processing boundary"],
             protected_assets=(
                 ["process memory integrity", "application availability"]
                 if memory_like
@@ -696,6 +783,32 @@ class ThreatModelBuilder:
                 ["memory safety"] if memory_like else ["state integrity"]
             ),
         )
+
+
+class AssumptionBuilder:
+    """Turn implicit threat-model premises into first-class graph records."""
+
+    def build(
+        self,
+        candidate: Candidate,
+        threat_model: ThreatModel,
+    ) -> list[Assumption]:
+        assumptions: list[Assumption] = []
+        for statement in threat_model.deployment_assumptions:
+            assumptions.append(
+                Assumption(
+                    snapshot_id=candidate.snapshot_id,
+                    kind="deployment",
+                    statement=statement,
+                    status=ObligationStatus.UNKNOWN,
+                    scope={
+                        "candidate_id": candidate.logical_id,
+                        "threat_model_id": threat_model.logical_id,
+                    },
+                    required_by=[candidate.logical_id],
+                )
+            )
+        return assumptions
 
 
 def _expression(fact: Fact) -> str:
@@ -748,11 +861,7 @@ def _storage_symbols(expression: str) -> list[str]:
     if preferred:
         return sorted(set(preferred))
     return sorted(
-        {
-            identifier
-            for identifier in identifiers
-            if identifier not in _NOISE_IDENTIFIERS
-        }
+        {identifier for identifier in identifiers if identifier not in _NOISE_IDENTIFIERS}
     )[:2]
 
 
@@ -774,6 +883,36 @@ def _same_scope(left: Fact, right: Fact) -> bool:
     if left.location.function and right.location.function:
         return left.location.function == right.location.function
     return abs(left.location.line - right.location.line) <= 80
+
+
+def _same_file_function(left: Fact, right: Fact) -> bool:
+    if left.location is None or right.location is None:
+        return False
+    return (
+        left.location.file == right.location.file
+        and bool(left.location.function)
+        and left.location.function == right.location.function
+    )
+
+
+def _allocation_may_feed_access(allocation: Fact, access: Fact) -> bool:
+    allocation_target = str(allocation.properties.get("target") or "")
+    access_target = str(access.properties.get("target") or "")
+    if allocation_target and access_target:
+        return _canonical_target(allocation_target) == _canonical_target(access_target)
+    allocation_symbols = set(
+        allocation.properties.get("extent_symbols") or _identifiers(_expression(allocation))
+    )
+    access_symbols = set(
+        access.properties.get("extent_symbols")
+        or access.properties.get("offset_symbols")
+        or _identifiers(_expression(access))
+    )
+    return bool(allocation_symbols & access_symbols)
+
+
+def _canonical_target(value: str) -> str:
+    return re.sub(r"\s+", "", value).removeprefix("&")
 
 
 def _shares_function(fact: Fact, others: list[Fact]) -> bool:
@@ -808,9 +947,7 @@ def _attach_related_taint(candidate: Candidate, facts: list[Fact]) -> Candidate:
             if fact.properties.get(key)
         }
         if any(
-            endpoint == path_endpoint
-            or endpoint in path_endpoint
-            or path_endpoint in endpoint
+            endpoint == path_endpoint or endpoint in path_endpoint or path_endpoint in endpoint
             for endpoint in endpoints
             for path_endpoint in path_endpoints
         ):

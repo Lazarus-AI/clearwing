@@ -21,13 +21,13 @@ import os
 import re
 import subprocess
 import tempfile
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from clearwing.llm import AsyncLLMClient, ChatMessage
 from clearwing.llm.native import response_text
 
+from .instrumentation import stable_run_id
 from .semgrep_sidecar import SemgrepSidecar
 from .state import Finding
 
@@ -206,7 +206,7 @@ class RetroHunter:
 
     def _format_semgrep_rule(self, rule_info: dict) -> str:
         """Build a minimal Semgrep rule YAML from the parsed rule_info dict."""
-        rule_id = rule_info.get("rule_id", f"retro-hunt-{uuid.uuid4().hex[:6]}")
+        rule_id = rule_info.get("rule_id") or stable_run_id("retro-hunt", rule_info)
         description = rule_info.get("description", "")
         pattern = rule_info.get("pattern", "")
         severity = rule_info.get("severity", "WARNING")
@@ -277,8 +277,19 @@ class RetroHunter:
         severity_map = {"error": "high", "warning": "medium", "info": "low"}
         mapped_severity = severity_map.get(severity, "medium")
 
+        finding_id = stable_run_id(
+            "retro",
+            {
+                "cve_id": cve_id,
+                "rule_id": rule_info.get("rule_id"),
+                "file": hit.get("file", ""),
+                "line": int(hit.get("line", 0)),
+                "check_id": hit.get("check_id", ""),
+                "code_snippet": hit.get("code_snippet", ""),
+            },
+        )
         return Finding(
-            id=f"retro-{uuid.uuid4().hex[:8]}",
+            id=finding_id,
             file=hit.get("file", ""),
             line_number=int(hit.get("line", 0)),
             finding_type="cve_variant",

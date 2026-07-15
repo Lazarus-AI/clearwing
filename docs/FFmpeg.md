@@ -31,6 +31,9 @@ Follow these rules if you want a meaningful recreation:
    runs cannot inject remembered mechanisms.
 5. For formal benchmarking, use a Clearwing checkout that has not been
    modified with FFmpeg-specific or H.264-specific local hints.
+6. Do not pass `--proof-learning-registry` to the strict blind pass. A registry
+   built from this FFmpeg case, its fix, or a related oracle makes the run an
+   assisted rescan and the manifest will record the blind boundary as unsealed.
 
 ## Prerequisites
 
@@ -123,6 +126,8 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --compile-commands compile_commands.json \
   --build-configuration asan-debug \
   --model-routing local-first \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
   --structured-budget 90% \
   --exploration-budget 10% \
   --proof-plan auto \
@@ -146,6 +151,11 @@ Why these flags:
 - `--model-routing local-first` sends bounded judgments to the small-model
   route, escalating the same atomic question to the frontier route only
   after a local attempt remains unresolved.
+- `--proof-local-model` and `--proof-frontier-model` give those two routes
+  distinct, auditable model identities. With a single OpenAI-compatible
+  endpoint, that endpoint must serve both names. With multi-provider config,
+  configure `proof_local` and `proof_frontier` routes; the flags override the
+  model on those existing routes.
 - `--structured-budget` and `--exploration-budget` make the exploratory lane
   a bounded minority rather than an unbounded whole-repository agent.
 - The three `--proof-max-*` limits are run-wide caps. Mechanical, dynamic,
@@ -204,6 +214,37 @@ The example repeats the production FFmpeg command three times. A sanitizer
 observation can establish only the scoped runtime obligation; it cannot by
 itself establish attacker reachability, a realistic deployment, remote code
 execution, or security impact.
+
+For a smaller target function that can be linked in isolation, the same
+manifest can use a reusable harness template instead of a handwritten
+command. Clearwing writes the generated source only to sandbox scratch,
+compiles it with libFuzzer, ASan, and UBSan, and retains the build artifact and
+runtime observation as separate evidence:
+
+```json
+{
+  "schema_version": 1,
+  "commands": [
+    {
+      "name": "fuzz isolated parser",
+      "action_template": "fuzz",
+      "obligation_predicate": "runtime_confirms_unsafe_memory_access",
+      "candidate_mechanism": "allocation_access_extent_contrast",
+      "harness_template": {
+        "target_function": "parse_packet",
+        "signature": "int parse_packet(const uint8_t *, size_t)",
+        "source_files": ["lib/parser.c"],
+        "include_dirs": ["include"],
+        "duration_seconds": 30
+      },
+      "success_condition": "sanitizer"
+    }
+  ]
+}
+```
+
+FFmpeg's full decoder is not a good isolated-template target, so the retained
+production trigger manifest remains the appropriate backend for this case.
 
 ## Optional Legacy Agentic Control
 
@@ -312,6 +353,7 @@ spend-ledger.jsonl
 spend-summary.json
 certificates/{findings,rejections,incomplete}/
 artifacts/sha256/
+learning/retrospectives.json
 report.md
 findings.json
 findings.sarif
@@ -450,9 +492,100 @@ notice the type mismatch with declarations in `libavcodec/h264dec.h`.
 
 Do not count a candidate or an incomplete certificate as a successful
 finding. They are stage-level signals. The evaluation harness in
-`evaluations/ffmpeg_proof.yaml` records the expected mechanism, proof plans,
-predicates, fixed-commit decision, counterfactual relations, and cutover
-gates.
+`evaluations/sourcehunt_ground_truth.yaml` records the target files,
+functions, expected extracted fact symbols, entry point, source, sinks,
+transformation, invariant, guard,
+trigger constraints, expected runtime behavior, threat model, mechanism,
+proof plans, predicates, evidence kinds, and decision.
+`evaluations/ffmpeg_proof.yaml` is the executable compact counterfactual
+contract used to score the vulnerable, fixed, renamed, moved, guarded,
+unreachable, decoy, and widened-domain sessions as one matrix.
+
+To include FFmpeg in the identical local/frontier seven-level ablation matrix,
+first build the plan:
+
+```bash
+clearwing eval sourcehunt-plan \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --cases ffmpeg-h264-slice-sentinel \
+  --local-model Qwen3.5-35B \
+  --frontier-model YOUR_FRONTIER_MODEL \
+  --output "$CASE_DIR/eval-plan.json"
+```
+
+The plan's Level 1 arms receive no hint. Later levels cumulatively reveal the
+target file, target function, source/sink pair, invariant/path, full trace, and
+trigger. Every local/frontier pair has the same `context_id`. Run the plan
+only after preparing the vulnerable checkout and compilation database:
+
+```bash
+clearwing eval sourcehunt-run \
+  --plan "$CASE_DIR/eval-plan.json" \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --checkout ffmpeg-h264-slice-sentinel="$FFMPEG_DIR" \
+  --compile-commands ffmpeg-h264-slice-sentinel="$FFMPEG_DIR/compile_commands.json" \
+  --budget-per-run 10 \
+  --output-dir "$CASE_DIR/eval-sessions" \
+  --checkpoint "$CASE_DIR/eval-observations.json"
+```
+
+When using the full five-case plan, repeat `--checkout` (and the C/C++
+`--compile-commands`) for every case. The runner verifies each checkout's HEAD
+and tracked-file cleanliness against the ground-truth manifest, then
+automatically reloads its atomic checkpoint and resumes by stable run ID.
+Compile the baseline only after every planned arm completes:
+
+```bash
+clearwing eval sourcehunt-baseline \
+  --plan "$CASE_DIR/eval-plan.json" \
+  --observations "$CASE_DIR/eval-observations.json" \
+  --output "$CASE_DIR/eval-baseline.json"
+
+clearwing eval sourcehunt-calibrate \
+  --observations "$CASE_DIR/eval-observations.json" \
+  --output "$CASE_DIR/scheduler-calibration.json"
+```
+
+The compiler fails on a partial matrix instead of silently inflating recall.
+Use `--allow-incomplete` only for a visibly marked progress report.
+`sourcehunt-calibrate` learns action yield, cost, and elapsed-time profiles
+from observed proof actions; it does not consume model self-confidence. Apply
+the resulting artifact to a later direct run with:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --flow proof \
+  --compile-commands compile_commands.json \
+  --scheduler-calibration "$CASE_DIR/scheduler-calibration.json" \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
+  --falsify \
+  --gvisor \
+  --output-dir "$CASE_DIR/results-proof-calibrated"
+```
+
+For another ablation campaign, pass the same artifact to
+`clearwing eval sourcehunt-run --scheduler-calibration ...` with a new plan or
+checkpoint. The run manifest records its digest and the scheduler records the
+profile used in each action's inputs.
+
+After producing every checkout variant declared by the compact manifest,
+evaluate causal consistency. The command fails if a session is missing or an
+unexpected session is supplied:
+
+```bash
+clearwing eval sourcehunt-counterfactual \
+  --manifest evaluations/ffmpeg_proof.yaml \
+  --session vulnerable="$CASE_DIR/results-proof-blind" \
+  --session fixed="$CASE_DIR/results-proof-fixed" \
+  --session renamed="$CASE_DIR/results-proof-renamed" \
+  --session moved="$CASE_DIR/results-proof-moved" \
+  --session guarded="$CASE_DIR/results-proof-guarded" \
+  --session unreachable="$CASE_DIR/results-proof-unreachable" \
+  --session decoy="$CASE_DIR/results-proof-decoy" \
+  --session widened-domain="$CASE_DIR/results-proof-widened" \
+  --output "$CASE_DIR/ffmpeg-counterfactual.json"
+```
 
 ### Legacy PoC Stability Control
 
@@ -525,6 +658,8 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --compile-commands compile_commands.json \
   --build-configuration asan-debug \
   --model-routing local-first \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
   --structured-budget 90% \
   --exploration-budget 10% \
   --emit-rejection-certificates \
@@ -544,6 +679,64 @@ The repository also includes `evaluations/ffmpeg_proof.sh`, which automates
 the build and vulnerable run. It stops after sealing the vulnerable snapshot
 by default. After inspection, set `RUN_FIXED_CONTROL=1` to add the fixed
 control. Set `VALIDATION_MANIFEST` only when a retained trigger is available.
+
+## Post-Discovery Learning Flywheel
+
+This is an optional assisted experiment, never part of the blind FFmpeg score.
+After a genuinely exploratory candidate has earned a finding certificate and
+completed falsification, inspect its typed retrospective before promotion:
+
+```bash
+jq . "$SESSION_DIR/learning/retrospectives.json"
+
+clearwing eval sourcehunt-promote \
+  --retrospectives "$SESSION_DIR/learning/retrospectives.json" \
+  --output "$CASE_DIR/ffmpeg-learning-registry.json"
+```
+
+The promotion command ignores ineligible retrospectives. It does not turn raw
+model prose into executable policy: the registry contains a content-addressed
+structural generator seed, its reviewed binding to installed proof plans, and
+vulnerable, guarded/policy, renamed, moved, unreachable, and decoy regression
+specifications. Promotion fails if there is no eligible proof-carrying
+discovery.
+
+Apply the registry only to a later, explicitly labeled assisted control, such
+as a moved/renamed counterfactual or a different repository snapshot:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --flow proof \
+  --compile-commands compile_commands.json \
+  --proof-learning-registry "$CASE_DIR/ffmpeg-learning-registry.json" \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
+  --falsify \
+  --gvisor \
+  --output-dir "$CASE_DIR/results-proof-learned"
+```
+
+The run stores the registry and digest as immutable provenance and sets
+`blind_boundary.sealed` to `false`. Find the concrete session directory and
+compare it with a comparable pre-promotion session:
+
+```bash
+LEARNED_SESSION_DIR="$(dirname "$(find "$CASE_DIR/results-proof-learned" \
+  -mindepth 2 -maxdepth 2 -name manifest.json -print -quit)")"
+
+clearwing eval sourcehunt-learning-coverage \
+  --registry "$CASE_DIR/ffmpeg-learning-registry.json" \
+  --before-session "$SESSION_DIR" \
+  --after-session "$LEARNED_SESSION_DIR" \
+  --output "$CASE_DIR/ffmpeg-learning-coverage.json"
+```
+
+The coverage report distinguishes structured rediscovery from the original
+exploratory candidate and measures terminal local-only obligation completion
+and frontier use for promoted mechanisms only. It reports improvement only
+when rediscovery and the count of local-only resolved obligations increase
+without a completion-rate regression. Never compare a registry-assisted
+result to the strict blind run as if both had the same information boundary.
 
 ## Post-Discovery: Elaborate and Disclose
 
