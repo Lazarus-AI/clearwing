@@ -791,16 +791,33 @@ Web frameworks have many legitimate idioms that look dangerous. When in doubt, c
 TRACE_BUILDING_INSTRUCTIONS = """
 ## Building a Vulnerability Trace
 
-Call `record_trace_step` after each relevant `read_source_file` result.
-Each accepted step immediately becomes authoritative investigation state
-and is automatically attached to the next `record_finding` call. Do not
-reconstruct the trace from memory when reporting.
+As you investigate, call `record_trace_step` at each key location in the
+dataflow AFTER reading the code with `read_source_file`. These streamed
+steps are echoed back and shown live for visibility — they are NOT stored
+on the finding.
 
-Record, in order:
-1. The attacker-controlled entry.
-2. Each relevant propagation, transformation, and path condition.
-3. The security-relevant sink.
-4. The finding, after the trace is coherent.
+When you submit the finding you MUST pass the complete, authoritative trace
+as the `trace` argument to `record_finding`. That is what gets stored and
+independently re-verified. record_finding does NOT harvest your streamed
+steps — assemble the full trace explicitly.
+
+Workflow:
+1. read_source_file → find attacker-controlled entry point
+2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")   # live only
+3. read_source_file → follow the tainted data through calls/assignments
+4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")      # live only
+5. record_trace_step(..., note="SINK: vulnerable operation on tainted data")   # live only
+6. record_finding(
+     ...,
+     trace={
+       "steps": [
+         {"file": "...", "line": 12, "function": "...", "code_snippet": "...", "note": "ENTRY: ..."},
+         {"file": "...", "line": 40, "function": "...", "code_snippet": "...", "note": "PROPAGATION: ..."},
+         {"file": "...", "line": 88, "function": "...", "code_snippet": "...", "note": "SINK: ..."}
+       ],
+       "summary": "attacker-controlled X flows to Y unchecked"
+     }
+   )
 
 Rules:
 - code_snippet in each step MUST come from a read_source_file result. Do
@@ -810,18 +827,42 @@ Rules:
 - Assumptions must be consistent with your PoC inputs. If your trace says
   "field==2" but your PoC sets "field=1", you have a contradiction —
   resolve it before calling record_finding.
-- The streamed trace must contain at least one ENTRY step and one SINK step.
+- The `trace` passed to record_finding must contain at least one ENTRY step
+  and one SINK step.
 """
 
 
 DEEP_TRACE_INSTRUCTIONS = """
 ## Building a Vulnerability Trace
 
-Call `record_trace_step` after each relevant `read_file` result. Each
-accepted step immediately becomes authoritative investigation state and is
-automatically attached to the next `record_finding` call. Record the entry,
-propagation and conditions, then the sink. Do not reconstruct the path from
-memory at reporting time.
+As you investigate, call `record_trace_step` at each key location in the
+dataflow AFTER reading the code with `read_file`. Each step is echoed back
+into this conversation and shown live, so the growing trace stays part of
+the message sequence you reason over. These streamed steps are for
+visibility only — they are NOT stored on the finding.
+
+When you submit the finding you MUST pass the complete, authoritative trace
+as the `trace` argument to `record_finding`. That is what gets stored and
+independently re-verified. record_finding does NOT harvest your streamed
+steps — assemble the full trace explicitly.
+
+Workflow:
+1. read_file → find attacker-controlled entry point
+2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")   # live only
+3. read_file → follow the tainted data through calls/assignments
+4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")      # live only
+5. record_trace_step(..., note="SINK: vulnerable operation on tainted data")   # live only
+6. record_finding(
+     ...,
+     trace={
+       "steps": [
+         {"file": "...", "line": 12, "function": "...", "code_snippet": "...", "note": "ENTRY: ..."},
+         {"file": "...", "line": 40, "function": "...", "code_snippet": "...", "note": "PROPAGATION: ..."},
+         {"file": "...", "line": 88, "function": "...", "code_snippet": "...", "note": "SINK: ..."}
+       ],
+       "summary": "attacker-controlled X flows to Y unchecked"
+     }
+   )
 
 Rules:
 - code_snippet in each step MUST come from a read_file result. Do not
@@ -831,7 +872,8 @@ Rules:
 - Assumptions must be consistent with your PoC inputs. If your trace says
   "field==2" but your PoC sets "field=1", resolve the contradiction before
   calling record_finding.
-- The streamed trace must contain at least one ENTRY step and one SINK step.
+- The `trace` passed to record_finding must contain at least one ENTRY step
+  and one SINK step.
 """
 
 

@@ -1,6 +1,5 @@
 """Sourcehunt CLI subcommand — runs the Clearwing source-code vulnerability pipeline."""
 
-import argparse
 import logging
 import os
 import sys
@@ -12,38 +11,12 @@ def _format_budget(budget: float) -> str:
     return f"${budget:.2f}"
 
 
-def _parse_fraction(value: str) -> float:
-    text_value = value.strip()
-    percent = text_value.endswith("%")
-    if percent:
-        text_value = text_value[:-1]
-    try:
-        parsed = float(text_value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"expected a percentage or fraction, got {value!r}"
-        ) from exc
-    if percent or parsed > 1:
-        parsed /= 100.0
-    if not 0 <= parsed <= 1:
-        raise argparse.ArgumentTypeError(
-            "budget fraction must be between 0% and 100%"
-        )
-    return parsed
-
-
 def add_parser(subparsers):
     parser = subparsers.add_parser(
         "sourcehunt",
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", help="Git URL or local path to a repository")
-    parser.add_argument(
-        "--flow",
-        choices=["legacy", "proof"],
-        default="legacy",
-        help="Investigation engine: legacy file agents or proof obligations (default: legacy)",
-    )
     parser.add_argument("--branch", default="main", help="Git branch to clone (default: main)")
     parser.add_argument(
         "--local-path", metavar="PATH", help="Use this local path instead of cloning"
@@ -53,97 +26,6 @@ def add_parser(subparsers):
         choices=["quick", "standard", "deep"],
         default="standard",
         help="Hunt depth (default: standard)",
-    )
-    parser.add_argument(
-        "--compile-commands",
-        default=None,
-        metavar="PATH",
-        help="C/C++ compilation database required by --flow proof",
-    )
-    parser.add_argument(
-        "--validation-manifest",
-        default=None,
-        metavar="PATH",
-        help=(
-            "JSON manifest of sandboxed commands tied to proof obligations"
-        ),
-    )
-    parser.add_argument(
-        "--build-configuration",
-        default="default",
-        metavar="NAME",
-        help="Name recorded for the proof snapshot's selected build configuration",
-    )
-    parser.add_argument(
-        "--clang-binary",
-        default="clang",
-        metavar="NAME",
-        help="Clang executable inside the proof analysis sandbox",
-    )
-    parser.add_argument(
-        "--model-routing",
-        choices=["local-first"],
-        default="local-first",
-        help="Proof obligation model-routing policy (default: local-first)",
-    )
-    parser.add_argument(
-        "--structured-budget",
-        type=_parse_fraction,
-        default=0.90,
-        metavar="PERCENT",
-        help="Proof action budget reserved for structured work (default: 90%)",
-    )
-    parser.add_argument(
-        "--exploration-budget",
-        type=_parse_fraction,
-        default=0.10,
-        metavar="PERCENT",
-        help="Proof action budget reserved for exploration (default: 10%)",
-    )
-    parser.add_argument(
-        "--proof-plan",
-        choices=["auto"],
-        default="auto",
-        help="Proof-plan selection policy (currently: auto)",
-    )
-    parser.add_argument(
-        "--proof-max-actions",
-        type=int,
-        default=200,
-        metavar="N",
-        help="Maximum proof actions across the run (default: 200)",
-    )
-    parser.add_argument(
-        "--proof-max-model-calls",
-        type=int,
-        default=40,
-        metavar="N",
-        help="Maximum bounded model judgments (default: 40)",
-    )
-    parser.add_argument(
-        "--proof-max-dynamic-actions",
-        type=int,
-        default=20,
-        metavar="N",
-        help="Maximum harness, fuzz, and runtime actions (default: 20)",
-    )
-    parser.add_argument(
-        "--retain-incomplete-certificates",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Retain residual incomplete investigations (default: enabled)",
-    )
-    parser.add_argument(
-        "--emit-rejection-certificates",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Emit evidence-backed rejected candidate certificates (default: enabled)",
-    )
-    parser.add_argument(
-        "--falsify",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run the finite independent falsification plan (default: enabled)",
     )
     parser.add_argument(
         "--agent-mode",
@@ -1078,23 +960,10 @@ def handle(cli, args):
         respect_gitignore=args.respect_gitignore,
         live=args.live,
         sandbox_cpus=args.sandbox_cpus,
-        flow=args.flow,
-        proof_compile_commands=args.compile_commands,
-        proof_validation_manifest=args.validation_manifest,
-        proof_build_configuration=args.build_configuration,
-        proof_clang_binary=args.clang_binary,
-        proof_max_actions=args.proof_max_actions,
-        proof_max_model_calls=args.proof_max_model_calls,
-        proof_max_dynamic_actions=args.proof_max_dynamic_actions,
-        proof_structured_fraction=args.structured_budget,
-        proof_exploration_fraction=args.exploration_budget,
-        retain_incomplete_certificates=args.retain_incomplete_certificates,
-        emit_rejection_certificates=args.emit_rejection_certificates,
-        falsify=args.falsify,
     )
 
     cli.console.print(
-        f"[bold blue]Sourcehunt: {args.repo} flow={args.flow} depth={args.depth} "
+        f"[bold blue]Sourcehunt: {args.repo} depth={args.depth} "
         f"budget={_format_budget(args.budget)}[/bold blue]"
     )
 

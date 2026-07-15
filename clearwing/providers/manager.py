@@ -120,30 +120,6 @@ DEFAULT_ROUTES = [
         model="claude-opus-4-6",
         reason="Exploit generation is hardest reasoning",
     ),
-    ModelRoute(
-        task="proof_local",
-        provider="anthropic",
-        model="claude-haiku-4-5-20251001",
-        reason="Small-model tier for bounded atomic proof obligations",
-    ),
-    ModelRoute(
-        task="proof_frontier",
-        provider="anthropic",
-        model="claude-opus-4-6",
-        reason="Escalation tier for ambiguities that survive bounded local review",
-    ),
-    ModelRoute(
-        task="proof_falsifier",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
-        reason="Independent tier for finite counterexample searches",
-    ),
-    ModelRoute(
-        task="proof_exploration",
-        provider="anthropic",
-        model="claude-sonnet-4-6",
-        reason="Bounded exploratory lane for unmodeled vulnerability hypotheses",
-    ),
 ]
 
 

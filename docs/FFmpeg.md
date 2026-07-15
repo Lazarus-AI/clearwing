@@ -34,13 +34,7 @@ Follow these rules if you want a meaningful recreation:
 
 ## Prerequisites
 
-Install Clearwing per README.md. The proof flow for C/C++ also requires:
-
-- Docker, because Clang extraction and all target execution fail closed
-  unless they run in a sandbox.
-- Clang and a build toolchain for FFmpeg.
-- `bear`, used below to capture `compile_commands.json`.
-- `jq` and `rg` for the artifact queries in this walkthrough.
+Install Clearwing per README.md
 
 ## Prepare The Vulnerable Checkout
 
@@ -68,37 +62,6 @@ Confirm that `HEAD` is:
 Do not fetch or inspect the fix diff yet if you are trying to preserve a
 strict blind run.
 
-## Build And Capture The Compilation Database
-
-The proof flow does not guess C/C++ compiler flags. Build the pinned tree
-and capture its real commands before starting discovery:
-
-```bash
-cd ~/clearwing-cases/ffmpeg-h264/ffmpeg-vuln
-
-./configure \
-  --cc=clang \
-  --cxx=clang++ \
-  --disable-doc \
-  --enable-decoder=h264 \
-  --enable-parser=h264 \
-  --disable-stripping \
-  --disable-optimizations \
-  --enable-debug=3 \
-  --extra-cflags='-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1' \
-  --extra-ldflags='-fsanitize=address,undefined'
-
-NPROC="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)"
-bear -- make -j"$NPROC"
-test -s compile_commands.json
-```
-
-The resulting database is an extraction input, not vulnerability evidence.
-Clearwing records its build configuration and runs Clang inside the analysis
-sandbox. If the database or sandbox is unavailable, the C/C++ proof run is
-reported as incomplete; it never silently falls back to lexical analysis or
-the legacy hunter.
-
 ## Run The Blind Discovery Pass
 
 Create an isolated Clearwing home for this case. This keeps the mechanism
@@ -113,103 +76,63 @@ export FFMPEG_DIR="$CASE_DIR/ffmpeg-vuln"
 export CLEARWING_HOME="$CASE_DIR/.clearwing-blind-home"
 export CLEARWING_SOURCEHUNT_TRACE_DIR="$CASE_DIR/trajectories"
 
-rm -rf "$CLEARWING_HOME" "$CLEARWING_SOURCEHUNT_TRACE_DIR" \
-  "$CASE_DIR/results-proof-blind"
-mkdir -p "$CLEARWING_HOME" "$CLEARWING_SOURCEHUNT_TRACE_DIR" \
-  "$CASE_DIR/results-proof-blind"
+rm -rf "$CLEARWING_HOME" "$CLEARWING_SOURCEHUNT_TRACE_DIR" "$CASE_DIR/results"
+mkdir -p "$CLEARWING_HOME" "$CLEARWING_SOURCEHUNT_TRACE_DIR" "$CASE_DIR/results"
 
 clearwing sourcehunt "$FFMPEG_DIR" \
-  --flow proof \
-  --compile-commands compile_commands.json \
-  --build-configuration asan-debug \
-  --model-routing local-first \
-  --structured-budget 90% \
-  --exploration-budget 10% \
-  --proof-plan auto \
-  --proof-max-actions 200 \
-  --proof-max-model-calls 40 \
-  --proof-max-dynamic-actions 20 \
-  --retain-incomplete-certificates \
-  --emit-rejection-certificates \
-  --falsify \
+  --depth deep \
+  --agent-mode deep \
+  --max-parallel 8 \
+  --shard-entry-points \
+  --seed-cves \
+  --elaborate-pipeline \
+  --exploit \
+  --campaign-hint "integer overflows and type mismatches in media codec parsers" \
   --no-mechanism-memory \
   --gvisor \
-  --output-dir "$CASE_DIR/results-proof-blind" \
+  --encrypt-artifacts \
+  --output-dir "$CASE_DIR/results" \
   --format all
 ```
 
 Why these flags:
 
-- `--flow proof` selects the candidate/evidence/obligation engine. During
-  migration, `legacy` remains the default for backward compatibility.
-- `--compile-commands` supplies the required C/C++ build truth.
-- `--model-routing local-first` sends bounded judgments to the small-model
-  route, escalating the same atomic question to the frontier route only
-  after a local attempt remains unresolved.
-- `--structured-budget` and `--exploration-budget` make the exploratory lane
-  a bounded minority rather than an unbounded whole-repository agent.
-- The three `--proof-max-*` limits are run-wide caps. Mechanical, dynamic,
-  exploratory, frontier, and falsification actions share the same ledger.
-- Incomplete and rejection certificates preserve negative results and
-  unresolved state instead of converting either into a finding.
-- `--falsify` runs a finite independent search for concrete counterexamples
-  before a finding certificate can be issued.
-- `--no-mechanism-memory` plus the fresh home prevents prior runs from
-  influencing the strict baseline. The proof engine does not consume legacy
-  mechanism memory, but keeping the flag makes the benchmark boundary clear.
+- `--depth deep` enables the full sourcehunt pipeline: callgraph,
+  reachability, Semgrep sidecar if available, taint analysis, sandboxed
+  hunters, crash-first harness generation (libFuzzer, 30s per file),
+  verifier, patch oracle, and report generation. At `--depth deep`,
+  `--agent-mode deep` and `--shard-entry-points` are auto-derived, so
+  passing them explicitly is optional but makes intent clear.
+- `--agent-mode deep` forces the full-shell agent (execute/read_file/
+  write_file/think tools) regardless of the depth-derived default. This
+  gives hunters maximum flexibility to compile test harnesses and inspect
+  memory layouts. The `auto` default (new in v1.0) derives this from
+  `--depth`, so `--depth deep` already implies `--agent-mode deep`.
+- `--shard-entry-points` splits high-ranked files into per-function shards
+  instead of whole-file analysis. FFmpeg's codec files have many entry
+  points; sharding lets each agent focus on one parser, decoder, or fuzz
+  target. Auto-enabled at `--depth deep`. Use `--min-shard-rank N` to
+  control the minimum file rank for sharding (default: 4).
+- `--seed-cves` extracts CVE history from FFmpeg's git log and injects it
+  as seed context for hunters. Past CVE patterns (integer overflows in
+  codec parsers, etc.) help hunters recognize similar shapes.
+- `--elaborate-pipeline` enables Stage 1.5 autonomous elaboration, which
+  upgrades the top 10% of verified findings to higher-impact primitives
+  (e.g. promoting a heap overflow to arbitrary write or code execution).
+- `--exploit` instructs hunters to write working exploits for discovered
+  vulnerabilities. Combine with `--exploit-budget deep` (default: auto
+  from `--depth`) for more resources per exploit attempt.
+- `--campaign-hint` provides a natural-language objective that steers
+  hunters toward a specific class of bugs. For FFmpeg, focusing on codec
+  parser integer overflows and type mismatches improves signal-to-noise.
+- `--no-mechanism-memory` prevents prior runs from influencing the hunter.
+  The fresh `CLEARWING_HOME` is a second isolation layer.
 - `--gvisor` uses the gVisor runtime for container isolation, adding an
   extra security layer when running untrusted PoC code inside sandboxes.
+- `--encrypt-artifacts` enables encrypted storage for findings and PoC
+  artifacts.
 - Budget is unlimited by default. Add `--budget 50` to cap spend for a local
   recreation, or pass `--budget 0` explicitly to keep the unlimited default.
-
-Do not add `--seed-cves` or a vulnerability-class `--campaign-hint` to this
-strict baseline. Those are useful assisted controls, but they contaminate a
-blind-discovery measurement.
-
-The vulnerable run may legitimately end with an incomplete certificate if
-it establishes the representation collision but lacks a retained trigger or
-runtime evidence. That is a useful partial result, not a finding. A finding
-requires every mandatory class obligation, hard memory-safety evidence, a
-security boundary, and a completed falsification plan.
-
-## Optional Manifest-Driven Runtime Validation
-
-Dynamic checks are never invented as arbitrary shell commands. They are
-declared in a strict JSON manifest, matched to one candidate mechanism and
-one obligation predicate, and executed without a shell inside the same
-sandbox boundary.
-
-After a blind run produces and retains a trigger, place it at
-`$FFMPEG_DIR/proof-input.h264`, copy the example manifest, and rerun:
-
-```bash
-export CLEARWING_REPO=/path/to/your/clearwing-checkout
-cp "$CLEARWING_REPO/evaluations/ffmpeg_validation_manifest.example.json" \
-  "$CASE_DIR/ffmpeg-validation.json"
-
-clearwing sourcehunt "$FFMPEG_DIR" \
-  --flow proof \
-  --compile-commands compile_commands.json \
-  --build-configuration asan-debug \
-  --validation-manifest "$CASE_DIR/ffmpeg-validation.json" \
-  --model-routing local-first \
-  --structured-budget 90% \
-  --exploration-budget 10% \
-  --falsify \
-  --gvisor \
-  --output-dir "$CASE_DIR/results-proof-validation"
-```
-
-The example repeats the production FFmpeg command three times. A sanitizer
-observation can establish only the scoped runtime obligation; it cannot by
-itself establish attacker reachability, a realistic deployment, remote code
-execution, or security impact.
-
-## Optional Legacy Agentic Control
-
-The controls below describe the older file-agent engine. Use them only for a
-separately labeled `--flow legacy` comparison; do not pool those findings or
-trajectories with proof-flow certificates.
 
 ### Prompt Mode
 
@@ -262,7 +185,7 @@ This runs additional agents that see all findings from the per-file phase
 and can discover cross-file interaction bugs (e.g., a type mismatch between
 `h264dec.h` declarations and `h264_slice.c` usage).
 
-The legacy command writes a session directory under:
+The command writes a session directory under:
 
 ```text
 ~/clearwing-cases/ffmpeg-h264/results/<session_id>/
@@ -276,122 +199,10 @@ The important files are:
 - `findings.sarif` - IDE/code-scanning import.
 - `manifest.json` - run metadata, spend by tier, and pipeline status.
 
-## Inspect Proof Artifacts
+## Run Multiple Independent Passes
 
-Locate the sealed proof session:
-
-```bash
-SESSION_DIR="$(dirname "$(find "$CASE_DIR/results-proof-blind" \
-  -mindepth 2 -maxdepth 2 -name manifest.json -print -quit)")"
-test -n "$SESSION_DIR"
-jq '{engine, status, proof_status, snapshot_id, blind_boundary, budget,
-     spend, candidate_count, certificate_counts, action_counts, metrics}' \
-  "$SESSION_DIR/manifest.json"
-```
-
-The authoritative state is append-only JSONL plus content-addressed
-artifacts:
-
-```text
-manifest.json
-snapshots/snapshots.jsonl
-facts/facts.jsonl
-facts/extraction-coverage.json
-candidates/candidates.jsonl
-threats/threat-models.jsonl
-obligations/obligations.jsonl
-actions/action-log.jsonl
-claims/claims.jsonl
-evidence/evidence.jsonl
-derivations/derivations.jsonl
-context-packets/packets.jsonl
-proof-graphs/<candidate-id>.json
-falsification/<candidate-id>.json
-metrics/run-metrics.json
-spend-ledger.jsonl
-spend-summary.json
-certificates/{findings,rejections,incomplete}/
-artifacts/sha256/
-report.md
-findings.json
-findings.sarif
-```
-
-Inspect whether the local-first routing is resolving atomic work efficiently
-and whether every physical provider call is linked to a proof action:
-
-```bash
-jq '{totals, efficiency, by_model_route, by_action_template,
-     model_call_linkage}' "$SESSION_DIR/metrics/run-metrics.json"
-```
-
-Any non-zero `unlinked_model_calls` is an instrumentation failure for a proof
-run. `model_actions_without_ledger_call` can be non-zero when a model route is
-unavailable or fails before provider dispatch; inspect the corresponding
-action status and error rather than treating it as model evidence.
-
-Query the expected mechanism and its selected plans:
-
-```bash
-jq -c 'select(.suspected_mechanism ==
-  "live_identifier_aliases_reserved_sentinel") |
-  {logical_id, title, invariant_families, proof_plan_ids, fact_ids}' \
-  "$SESSION_DIR/candidates/candidates.jsonl"
-```
-
-Inspect the latest revision of every obligation. This preserves `unknown`,
-`blocked`, `conflicting_evidence`, and `stale` instead of silently treating
-them as false or absent:
-
-```bash
-jq -s '
-  sort_by(.logical_id, .revision)
-  | group_by(.logical_id)
-  | map(last)
-  | map({predicate, status, blocked_reason,
-         supporting_claim_ids, contradicting_claim_ids})
-' "$SESSION_DIR/obligations/obligations.jsonl"
-```
-
-Inspect extraction completeness and unknown edges:
-
-```bash
-jq '.items | to_entries[] |
-  {name: .key, status: .value.status,
-   limitations: .value.limitations, unresolved: .value.unresolved}' \
-  "$SESSION_DIR/facts/extraction-coverage.json"
-```
-
-Inspect run-wide action routing and bounded falsification:
-
-```bash
-jq -s '
-  sort_by(.logical_id, .revision)
-  | group_by(.logical_id)
-  | map(last)
-  | map({template, model_route, status, obligation_ids, error})
-' "$SESSION_DIR/actions/action-log.jsonl"
-
-jq . "$SESSION_DIR"/falsification/*.json
-```
-
-Finally, inspect certificates rather than grepping report prose:
-
-```bash
-jq '{kind, decision, reason, proof_plan_ids, evidence_ids,
-     unresolved_obligation_ids, blocked_obligation_ids}' \
-  "$SESSION_DIR"/certificates/{findings,rejections,incomplete}/*.json
-```
-
-`findings.json` and SARIF contain only accepted finding certificates.
-Rejections and incomplete investigations remain in their own certificate
-directories and in `report.md`.
-
-## Legacy Whole-Run Redundancy Control
-
-The legacy scenario was not a guaranteed single-shot discovery. For a
-separately labeled old-engine control, run several isolated passes and compare
-their reports:
+The original scenario was not a guaranteed single-shot discovery. For a closer
+recreation, run several isolated passes and compare their reports:
 
 ```bash
 cd ~/clearwing-cases/ffmpeg-h264
@@ -408,7 +219,6 @@ for i in 1 2 3 4 5; do
   CLEARWING_HOME="$RUN_HOME" \
   CLEARWING_SOURCEHUNT_TRACE_DIR="$RUN_TRACE" \
   clearwing sourcehunt "$FFMPEG_DIR" \
-    --flow legacy \
     --depth deep \
     --agent-mode deep \
     --max-parallel 8 \
@@ -429,11 +239,20 @@ If shell automation treats high-severity findings as a failing command, check
 the output directories before discarding the run. `sourcehunt` may return a
 non-zero exit code when it finds high or critical issues.
 
-## Evaluate The Expected Proof
+## Identify A Successful Finding
 
-Use the structured queries above to find a candidate whose mechanism is
-`live_identifier_aliases_reserved_sentinel`. A finding certificate should
-explain substantially this root cause:
+Search the generated reports for the H.264 slice-counter mechanism:
+
+```bash
+cd ~/clearwing-cases/ffmpeg-h264
+
+rg -n \
+  "h264_slice|h264dec|slice_table|current_slice|slice_num|0xFFFF|65535|65536|deblock|sentinel" \
+  results*/*/report.md \
+  results*/*/findings.json
+```
+
+A matching finding should explain substantially this root cause:
 
 - FFmpeg tracks macroblock ownership in a `slice_table`.
 - The table entries are 16-bit values and are initialized to all `0xFF`
@@ -448,13 +267,7 @@ explain substantially this root cause:
 The best report will point at `libavcodec/h264_slice.c` and should also
 notice the type mismatch with declarations in `libavcodec/h264dec.h`.
 
-Do not count a candidate or an incomplete certificate as a successful
-finding. They are stage-level signals. The evaluation harness in
-`evaluations/ffmpeg_proof.yaml` records the expected mechanism, proof plans,
-predicates, fixed-commit decision, counterfactual relations, and cutover
-gates.
-
-### Legacy PoC Stability Control
+### Checking PoC Stability
 
 If a finding includes a concrete PoC, check its stability classification
 in `findings.json`:
@@ -470,7 +283,7 @@ containers) are the strongest. `flaky` findings (50–90%) may indicate
 ASLR sensitivity or timing dependence. The stability verifier automatically
 attempts one hardening round for unreliable PoCs before archival.
 
-### Legacy Four-Axis Validator Control
+### Checking Validation Axes
 
 With the default v2 validator, each finding is evaluated on four
 independent axes: REAL, TRIGGERABLE, IMPACTFUL, and GENERAL. Inspect
@@ -507,43 +320,28 @@ You can also run a fixed-commit control:
 ```bash
 cd ~/clearwing-cases/ffmpeg-h264/ffmpeg-vuln
 git switch --detach 39e1969303a0b9ec5fb5f5eb643bf7a5b69c0a89
-git clean -fdx
-
-# Repeat the configure + `bear -- make` commands from
-# "Build And Capture The Compilation Database" above.
 
 cd ~/clearwing-cases/ffmpeg-h264
 export CASE_DIR="$PWD"
 export FFMPEG_DIR="$CASE_DIR/ffmpeg-vuln"
 export CLEARWING_HOME="$CASE_DIR/.clearwing-fixed-home"
 
-rm -rf "$CLEARWING_HOME" "$CASE_DIR/results-proof-fixed"
-mkdir -p "$CLEARWING_HOME" "$CASE_DIR/results-proof-fixed"
+rm -rf "$CLEARWING_HOME" "$CASE_DIR/results-fixed"
+mkdir -p "$CLEARWING_HOME" "$CASE_DIR/results-fixed"
 
 clearwing sourcehunt "$FFMPEG_DIR" \
-  --flow proof \
-  --compile-commands compile_commands.json \
-  --build-configuration asan-debug \
-  --model-routing local-first \
-  --structured-budget 90% \
-  --exploration-budget 10% \
-  --emit-rejection-certificates \
-  --falsify \
+  --depth standard \
+  --agent-mode deep \
+  --max-parallel 8 \
+  --shard-entry-points \
+  --seed-cves \
   --no-mechanism-memory \
-  --gvisor \
-  --output-dir "$CASE_DIR/results-proof-fixed"
+  --output-dir "$CASE_DIR/results-fixed" \
+  --format all
 ```
 
-The fixed control should emit a rejection certificate whose decisive
-counterevidence is the earlier upper-bound guard. It must not emit the same
-finding certificate. Compare the latest obligation revisions and certificate
-directories across snapshots; do not add the fix diff to the vulnerable
-session after the fact.
-
-The repository also includes `evaluations/ffmpeg_proof.sh`, which automates
-the build and vulnerable run. It stops after sealing the vulnerable snapshot
-by default. After inspection, set `RUN_FIXED_CONTROL=1` to add the fixed
-control. Set `VALIDATION_MANIFEST` only when a retained trigger is available.
+The fixed control should either omit the slice-counter finding or mark the
+dangerous counter/sentinel collision as mitigated.
 
 ## Post-Discovery: Elaborate and Disclose
 
@@ -761,38 +559,11 @@ clearwing sourcehunt "$FFMPEG_DIR" \
 LM Studio, vLLM, Together, Groq, etc.). Also settable via the
 `CLEARWING_BASE_URL` and `CLEARWING_API_KEY` environment variables.
 
-Passing one `--model` binds every proof role to that override. To measure the
-intended local-first policy, configure distinct task routes in
-`~/.clearwing/config.yaml`:
+## Optional Local ASan Build
 
-```yaml
-providers:
-  local_qwen:
-    base_url: http://localhost:8000/v1
-    api_key: unused
-    model: Qwen3.5-35B
-  frontier:
-    base_url: https://your-frontier-endpoint.example/v1
-    api_key: ${FRONTIER_API_KEY}
-    model: your-frontier-model
-
-routes:
-  proof_local: local_qwen
-  proof_frontier: frontier
-  proof_falsifier: frontier
-  proof_exploration: local_qwen
-```
-
-`proof_local` receives the first bounded judgment. Only unresolved atomic
-questions advance to `proof_frontier`. `proof_falsifier` is a distinct role
-with a finite counterexample objective; its failure to find a counterexample
-does not count as positive evidence.
-
-## Manual ASan Reproduction
-
-The proof-flow setup already builds FFmpeg with ASan and UBSan. The commands
-below are useful when reproducing an emitted trigger manually outside the
-Clearwing validation sandbox.
+Clearwing's sourcehunt run does not require you to build FFmpeg manually, but
+a local ASan build is useful if a run produces a concrete H.264 proof of
+concept.
 
 ```bash
 cd ~/clearwing-cases/ffmpeg-h264/ffmpeg-vuln
@@ -821,28 +592,28 @@ confirm the same input no longer reaches the out-of-bounds path.
 - `fatal: invalid reference: main`: FFmpeg uses `master`; use the local
   checkout flow above or pass `--branch master` for unpinned scans.
 - Docker errors: run `clearwing doctor` and confirm Docker is reachable.
-  C/C++ proof extraction fails closed without a sandbox. Add `--gvisor` for
-  stronger isolation when the runtime is installed; the Docker default
-  runtime remains sandboxed.
-- No accepted finding: inspect candidates, completeness, obligations, and
-  actions in that order. An incomplete certificate identifies the exact
-  missing proof edge. Increase a budget only when the action log shows that
-  its cap caused the unresolved state. Use CVE seeds or a campaign hint only
-  in a labeled assisted control.
-- Too much report noise: query `candidates.jsonl` and the latest obligation
-  revisions before reading prose. Rejection certificates are durable negative
-  results; incomplete certificates are queued work, not false positives.
+  Without Docker, Clearwing can still reason over source, but sanitizer-backed
+  evidence is weaker. Add `--gvisor` for stronger container isolation.
+- No matching finding: increase budget, run more independent passes, enable
+  `--shard-entry-points` and `--seed-cves`, and keep `CLEARWING_HOME`
+  isolated. Large mature C projects are intentionally hard targets. Try
+  adding `--campaign-hint` to steer hunters toward the right bug class.
+- Too much report noise: search `findings.json` first, then inspect the
+  matching hunter trajectory under `trajectories*/`. Check
+  `stability_classification` to filter out unreliable PoCs. Add
+  `--no-adversarial` to use the simpler verifier, or tighten with
+  `--adversarial-threshold crash_reproduced` to require stronger evidence.
 - Need a non-blind control: after the blind experiment, use the fix diff and
   `sourcehunt --retro-hunt` to test whether patch-derived variant hunting can
   rediscover the same pattern. Do not mix that result with blind-discovery
   claims.
-- Dynamic validation does not run: confirm the manifest command and working
-  directory are repository-relative, the trigger is inside the mounted tree,
-  the manifest predicate exactly matches an obligation, and its dependencies
-  are proven. Non-reproduction leaves the obligation blocked; it does not
-  disprove the candidate.
-- Slow proof runs: inspect the action log's value-of-information ordering and
-  reduce `--proof-max-actions`, `--proof-max-model-calls`, or
-  `--proof-max-dynamic-actions`. The residual graph remains reusable.
+- PoC instability: if a finding has `stability_classification: "flaky"`,
+  consider running with `--redundancy 5` to increase the number of
+  independent agents per file, or manually trigger hardening through
+  elaboration. Pass `--no-stability-check` to skip stability verification
+  entirely (not recommended for formal benchmarks).
+- Slow runs: `--skip-tier-c` and `--no-variant-loop` reduce scope.
+  `--no-verify` skips the independent verifier (faster, but findings are
+  unverified). `--no-findings-pool` disables cross-agent dedup queries.
 - Using a different model: pass `--model <name>` to override the default
   provider. For local models, add `--base-url` and `--api-key`.
