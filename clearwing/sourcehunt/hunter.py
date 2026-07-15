@@ -1268,7 +1268,6 @@ class NativeHunter:
         total_cost_usd = 0.0
         repeated_tool_calls: dict[tuple[str, str], int] = {}
         tools_by_name = {tool.name: tool for tool in self.tools}
-        throttle_repeats = self.agent_mode == "constrained"
         last_assistant_text = ""
 
         step = 0
@@ -1358,12 +1357,14 @@ class NativeHunter:
                     if not isinstance(tool_arguments, dict):
                         tool_arguments = {}
 
-                    skipped = False
-                    if throttle_repeats:
-                        key = (tool_call.fn_name, tool_call.fn_arguments_json)
-                        repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
-                        if repeated_tool_calls[key] > 3:
-                            skipped = True
+                    # Keyed on a prefix rather than the full argument string:
+                    # models stuck in a degenerate loop often reissue the same
+                    # call with a growing/mutating tail (e.g. appending another
+                    # redundant clause each turn), which would otherwise dodge
+                    # an exact-match dedup key while making no real progress.
+                    key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
+                    repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
+                    skipped = repeated_tool_calls[key] > 3
 
                     if skipped:
                         tool_output = {
