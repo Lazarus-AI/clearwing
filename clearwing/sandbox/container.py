@@ -138,7 +138,21 @@ class SandboxContainer:
         # auto_remove conflicts with detached non-restart containers in some
         # docker versions; we'll handle removal manually in stop()
 
-        self._container = client.containers.run(**kwargs)
+        try:
+            self._container = client.containers.run(**kwargs)
+        except Exception as exc:
+            if self.config.runtime and "runtime" in str(exc).lower():
+                rt = self.config.runtime
+                logger.warning(
+                    "Docker runtime %r unavailable — falling back to default runtime. "
+                    "Drop --gvisor or install %s to silence this.",
+                    rt, rt,
+                )
+                kwargs.pop("runtime", None)
+                self.config.runtime = None
+                self._container = client.containers.run(**kwargs)
+            else:
+                raise
         logger.debug("Sandbox container started: %s", self._container.short_id)
 
         from .registry import ContainerRegistry
@@ -380,6 +394,17 @@ class SandboxContainer:
             pass
 
         self._container = None
+
+        # Release the docker SDK's urllib3 connection pool. Without this,
+        # each SandboxContainer keeps its keep-alive unix-socket connections
+        # open for the rest of the process lifetime, leaking ~15 fd per
+        # Hunter session and eventually hitting `ulimit -n` on long scans.
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Sandbox docker client close failed", exc_info=True)
+            self._client = None
 
     # --- Context manager ----------------------------------------------------
 

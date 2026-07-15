@@ -259,7 +259,7 @@ class StabilityVerifier:
             response = await self._hardening_llm.aask_text(
                 system=HARDEN_SYSTEM_PROMPT, user=prompt,
             )
-            hardened_poc = (response.first_text() or "").strip()
+            hardened_poc = (response.first_text or "").strip()
         except Exception:
             logger.warning("Hardening LLM call failed", exc_info=True)
             return replace(result, hardened=True, hardening_improved=False)

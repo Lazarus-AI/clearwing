@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,12 +29,23 @@ from .state import FileTarget
 logger = logging.getLogger(__name__)
 
 
+# A 1..5 score. Expressed as a Literal (not Field(ge=1, le=5)) so the generated
+# JSON schema is `{"type": "integer", "enum": [1,2,3,4,5]}` rather than
+# minimum/maximum bounds — Anthropic's structured-output validator uses
+# constrained decoding and rejects numeric-range keywords, but supports (and
+# enforces) enums. Pydantic still validates the range on parse.
+Score = Annotated[
+    Literal[1, 2, 3, 4, 5],
+    Field(description="Integer score from 1 (lowest) to 5 (highest)."),
+]
+
+
 class RankedFileScore(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str
-    surface: int = Field(ge=1, le=5)
-    influence: int = Field(ge=1, le=5)
+    surface: Score
+    influence: Score
     surface_rationale: str
     influence_rationale: str
 

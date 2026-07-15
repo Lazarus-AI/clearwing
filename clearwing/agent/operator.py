@@ -345,28 +345,22 @@ class OperatorAgent:
             progress=progress_text,
         )
 
-        messages = [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
-                    f"What should I tell the agent to do next? "
-                    f"Reply with GOALS_COMPLETE if all goals are done, "
-                    f"ESCALATE: <question> if you need to ask the real user, "
-                    f"or give the next instruction."
-                ),
-            },
-        ]
+        user = (
+            f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
+            f"What should I tell the agent to do next? "
+            f"Reply with GOALS_COMPLETE if all goals are done, "
+            f"ESCALATE: <question> if you need to ask the real user, "
+            f"or give the next instruction."
+        )
 
         try:
-            response = await operator_llm.ainvoke(messages)
-            content = response.content
-            if isinstance(content, list):
-                content = "\n".join(
-                    c["text"] for c in content if isinstance(c, dict) and c.get("type") == "text"
-                )
-            return content.strip()
+            # Native LLM surface: `aask_text` returns a genai ``ChatResponse``.
+            # Works against both today's ``ChatModel`` (delegates to its client)
+            # and a bare ``AsyncLLMClient`` once operator wiring is repointed.
+            from clearwing.llm.native import response_text
+
+            response = await operator_llm.aask_text(system=system, user=user)
+            return response_text(response).strip()
         except Exception as e:
             logger.error("Operator LLM error: %s", e)
             return "Continue with the next goal."

@@ -320,7 +320,7 @@ class HarnessGenerator:
                     user=user_msg,
                 )
             )
-            response_text = response.first_text() or ""
+            response_text = response.first_text or ""
         except Exception:
             logger.debug("Harness-gen LLM call failed", exc_info=True)
             return None

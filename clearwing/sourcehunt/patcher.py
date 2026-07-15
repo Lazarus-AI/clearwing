@@ -130,7 +130,7 @@ class AutoPatcher:
         user_msg = self._build_user_message(finding, file_content)
         try:
             response = await self.llm.aask_text(system=PATCHER_SYSTEM_PROMPT, user=user_msg)
-            content = response.first_text() or ""
+            content = response.first_text or ""
         except Exception as e:
             logger.warning("Patcher LLM call failed", exc_info=True)
             return PatchAttempt(

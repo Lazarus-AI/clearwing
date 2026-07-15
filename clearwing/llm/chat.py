@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from genai_pyo3 import ChatMessage
+from genai_pyo3 import ChatMessage, ChatResponse
 
 from clearwing.llm.native import AsyncLLMClient
 
@@ -215,7 +215,7 @@ class ChatModel:
             tools=self.bound_tools or None,
         )
         return AIMessage(
-            content=response.first_text() or "",
+            content=response.first_text or "",
             tool_calls=[
                 {
                     "id": tool_call.call_id,
@@ -223,7 +223,7 @@ class ChatModel:
                     "args": tool_call.fn_arguments,
                     "type": "tool_call",
                 }
-                for tool_call in response.tool_calls()
+                for tool_call in response.tool_calls
             ],
             response_metadata={
                 "usage": {
@@ -234,6 +234,19 @@ class ChatModel:
                 "model": response.provider_model_name or self.model_name,
             },
         )
+
+    async def aask_text(self, **kwargs: Any) -> ChatResponse:
+        """Delegate to the underlying native client's ``aask_text``.
+
+        Gives ChatModel the same text-ask surface as AsyncLLMClient, so callers
+        holding either type share one API (and returns a ``ChatResponse``, not
+        an ``AIMessage`` like ``ainvoke``).
+        """
+        return await self._client.aask_text(**kwargs)
+
+    async def aask_json(self, **kwargs: Any) -> tuple[Any, ChatResponse]:
+        """Delegate to the underlying native client's ``aask_json``."""
+        return await self._client.aask_json(**kwargs)
 
     async def ainvoke(self, messages: Any, on_text_delta: Callable[[str], None] | None = None) -> AIMessage:
         system, chat_messages = _coerce_chat_messages(messages)
@@ -251,7 +264,7 @@ class ChatModel:
                 tools=self.bound_tools or None,
             )
         return AIMessage(
-            content=response.first_text() or "",
+            content=response.first_text or "",
             tool_calls=[
                 {
                     "id": tool_call.call_id,
@@ -259,7 +272,7 @@ class ChatModel:
                     "args": tool_call.fn_arguments,
                     "type": "tool_call",
                 }
-                for tool_call in response.tool_calls()
+                for tool_call in response.tool_calls
             ],
             response_metadata={
                 "usage": {
