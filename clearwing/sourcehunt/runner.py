@@ -10,6 +10,7 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -227,6 +228,19 @@ class SourceHuntRunner:
         sandbox_cpus: float | None = None,
         *,
         config: SourceHuntConfig | None = None,
+        flow: str = "legacy",
+        proof_compile_commands: str | None = None,
+        proof_validation_manifest: str | None = None,
+        proof_build_configuration: str = "default",
+        proof_clang_binary: str = "clang",
+        proof_max_actions: int = 200,
+        proof_max_model_calls: int = 40,
+        proof_max_dynamic_actions: int = 20,
+        proof_structured_fraction: float = 0.90,
+        proof_exploration_fraction: float = 0.10,
+        retain_incomplete_certificates: bool = True,
+        emit_rejection_certificates: bool = True,
+        falsify: bool = True,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -372,6 +386,59 @@ class SourceHuntRunner:
                 gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             )
             sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
+            p = config.proof
+            flow = flow if flow != "legacy" else p.flow
+            proof_compile_commands = (
+                proof_compile_commands
+                if proof_compile_commands is not None
+                else p.compile_commands
+            )
+            proof_validation_manifest = (
+                proof_validation_manifest
+                if proof_validation_manifest is not None
+                else p.validation_manifest
+            )
+            proof_build_configuration = (
+                proof_build_configuration
+                if proof_build_configuration != "default"
+                else p.build_configuration
+            )
+            proof_clang_binary = (
+                proof_clang_binary
+                if proof_clang_binary != "clang"
+                else p.clang_binary
+            )
+            proof_max_actions = (
+                proof_max_actions if proof_max_actions != 200 else p.max_actions
+            )
+            proof_max_model_calls = (
+                proof_max_model_calls
+                if proof_max_model_calls != 40
+                else p.max_model_calls
+            )
+            proof_max_dynamic_actions = (
+                proof_max_dynamic_actions
+                if proof_max_dynamic_actions != 20
+                else p.max_dynamic_actions
+            )
+            proof_structured_fraction = (
+                proof_structured_fraction
+                if proof_structured_fraction != 0.90
+                else p.structured_fraction
+            )
+            proof_exploration_fraction = (
+                proof_exploration_fraction
+                if proof_exploration_fraction != 0.10
+                else p.exploration_fraction
+            )
+            retain_incomplete_certificates = (
+                retain_incomplete_certificates
+                and p.retain_incomplete_certificates
+            )
+            emit_rejection_certificates = (
+                emit_rejection_certificates and p.emit_rejection_certificates
+            )
+            falsify = falsify and p.falsify
 
         if not repo_url:
             raise ValueError(
@@ -380,6 +447,18 @@ class SourceHuntRunner:
             )
         if sandbox_cpus is not None and (not math.isfinite(sandbox_cpus) or sandbox_cpus < 0):
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
+        if flow not in {"legacy", "proof"}:
+            raise ValueError("flow must be 'legacy' or 'proof'")
+        if proof_max_actions < 1:
+            raise ValueError("proof_max_actions must be positive")
+        if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
+            raise ValueError("proof action sub-budgets cannot be negative")
+        if not 0 <= proof_structured_fraction <= 1:
+            raise ValueError("proof_structured_fraction must be between 0 and 1")
+        if not 0 <= proof_exploration_fraction <= 1:
+            raise ValueError("proof_exploration_fraction must be between 0 and 1")
+        if proof_structured_fraction + proof_exploration_fraction > 1.000001:
+            raise ValueError("proof structured and exploration budgets exceed 100%")
 
         # Store the config for introspection (None if constructed the old way)
         self._config = config
@@ -468,6 +547,19 @@ class SourceHuntRunner:
         self._live = live
         self._spend_ledger: SpendLedger | None = None
         self._metered_clients: dict[tuple[int, str], AsyncLLMClient] = {}
+        self._flow = flow
+        self._proof_compile_commands = proof_compile_commands
+        self._proof_validation_manifest = proof_validation_manifest
+        self._proof_build_configuration = proof_build_configuration
+        self._proof_clang_binary = proof_clang_binary
+        self._proof_max_actions = proof_max_actions
+        self._proof_max_model_calls = proof_max_model_calls
+        self._proof_max_dynamic_actions = proof_max_dynamic_actions
+        self._proof_structured_fraction = proof_structured_fraction
+        self._proof_exploration_fraction = proof_exploration_fraction
+        self._retain_incomplete_certificates = retain_incomplete_certificates
+        self._emit_rejection_certificates = emit_rejection_certificates
+        self._falsify = falsify
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -564,6 +656,11 @@ class SourceHuntRunner:
                 output_dir=self.output_dir,
                 input_price_per_million=self.input_price_per_million,
                 output_price_per_million=self.output_price_per_million,
+                manifest_filename=(
+                    "spend-summary.json"
+                    if self._flow == "proof"
+                    else "manifest.json"
+                ),
             )
         return self._spend_ledger
 
@@ -604,7 +701,218 @@ class SourceHuntRunner:
         ):
             return asyncio.run(self.arun())
 
+    async def _arun_proof_flow(self) -> SourceHuntResult:
+        """Run the proof-carrying engine and adapt its typed output."""
+
+        from .proof.engine import ProofFlowRunner, ProofRunConfig
+
+        ledger = self._ensure_spend_ledger()
+
+        def model_client(route: str) -> AsyncLLMClient | None:
+            override = (
+                self.verifier_llm
+                if route == "proof_falsifier"
+                else self.hunter_llm
+            )
+            return self._get_native_client(
+                route,
+                override,
+                budget_stage=route,
+            )
+
+        if ledger.enforcing and self._proof_max_model_calls > 0:
+            routes = ["proof_local", "proof_frontier"]
+            if self._proof_exploration_fraction > 0:
+                routes.append("proof_exploration")
+            if self._falsify:
+                routes.append("proof_falsifier")
+            for route in routes:
+                model_client(route)
+
+        proof_runner = ProofFlowRunner(
+            repo_url=self.repo_url,
+            branch=self.branch,
+            local_path=self.local_path,
+            config=ProofRunConfig(
+                output_dir=self.output_dir,
+                session_id=self._session_id,
+                compile_commands=self._proof_compile_commands,
+                validation_manifest=self._proof_validation_manifest,
+                build_configuration=self._proof_build_configuration,
+                clang_binary=self._proof_clang_binary,
+                max_actions=self._proof_max_actions,
+                max_model_calls=self._proof_max_model_calls,
+                max_dynamic_actions=self._proof_max_dynamic_actions,
+                structured_fraction=self._proof_structured_fraction,
+                exploration_fraction=self._proof_exploration_fraction,
+                retain_incomplete_certificates=(
+                    self._retain_incomplete_certificates
+                ),
+                emit_rejection_certificates=(
+                    self._emit_rejection_certificates
+                ),
+                falsify=self._falsify,
+                gvisor_runtime=self._gvisor_runtime,
+                sandbox_cpus=self._sandbox_cpus,
+            ),
+            model_client_factory=model_client,
+        )
+        self._emit_stage("proof", "started")
+        try:
+            proof_result = await proof_runner.arun()
+            run_status = (
+                "budget_exhausted"
+                if ledger.exhausted
+                else proof_result.status
+            )
+            proof_manifest = self._read_proof_manifest(proof_result.session_id)
+            budget_summary = self._finalize_spend_ledger(run_status)
+            self._finalize_proof_manifest(
+                proof_result,
+                proof_manifest=proof_manifest,
+                budget_summary=budget_summary,
+                status=run_status,
+            )
+        except Exception:
+            if not ledger.finalized:
+                ledger.finalize("failed")
+            self._emit_stage("proof", "failed")
+            raise
+
+        findings: list[Finding] = []
+        known_fields = set(Finding.__dataclass_fields__)
+        for payload in proof_result.findings:
+            base = {
+                key: value
+                for key, value in payload.items()
+                if key in known_fields and key != "extra"
+            }
+            base["cwe"] = base.get("cwe") or ""
+            base["severity_verified"] = base.get("severity")
+            base["hunter_session_id"] = proof_result.session_id
+            extra = {
+                key: value
+                for key, value in payload.items()
+                if key not in known_fields
+            }
+            findings.append(Finding(**base, extra=extra))
+
+        pipeline_status = PipelineStatus()
+        if proof_result.incomplete:
+            pipeline_status.record_degraded(
+                "proof",
+                "Residual obligation graph and incomplete certificates were retained",
+            )
+            self._emit_stage(
+                "proof",
+                "incomplete",
+                findings_so_far=len(findings),
+            )
+        else:
+            pipeline_status.record_succeeded("proof")
+            self._emit_stage(
+                "proof",
+                "completed",
+                findings_so_far=len(findings),
+            )
+
+        has_high = any(
+            finding.severity in {"critical", "high"} for finding in findings
+        )
+        has_medium = any(finding.severity == "medium" for finding in findings)
+        exit_code = (
+            3
+            if proof_result.incomplete or ledger.exhausted
+            else 2
+            if has_high
+            else 1
+            if has_medium
+            else 0
+        )
+        total_spent = float(budget_summary.get("total_spent", 0.0))
+        return SourceHuntResult(
+            exit_code=exit_code,
+            repo_url=self.repo_url,
+            repo_path=proof_result.repo_path,
+            findings=findings,
+            verified_findings=list(findings),
+            exploited_findings=[],
+            files_ranked=proof_result.files_analyzed,
+            files_hunted=len(proof_result.candidates),
+            duration_seconds=proof_result.duration_seconds,
+            cost_usd=total_spent,
+            spent_per_tier={"A": total_spent, "B": 0.0, "C": 0.0},
+            tokens_used=int(budget_summary.get("total_tokens", 0)),
+            output_paths=proof_result.output_paths,
+            session_id=proof_result.session_id,
+            pipeline_status=pipeline_status,
+            status=run_status,
+            budget_usd=self.budget_usd,
+        )
+
+    def _read_proof_manifest(self, session_id: str) -> dict[str, Any]:
+        """Capture the proof manifest before final spend-ledger checkpointing."""
+
+        path = Path(self.output_dir) / session_id / "manifest.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _finalize_proof_manifest(
+        self,
+        proof_result: Any,
+        *,
+        proof_manifest: dict[str, Any],
+        budget_summary: dict[str, Any],
+        status: str,
+    ) -> None:
+        """Atomically publish one combined proof, spend, and output index."""
+
+        session_dir = Path(self.output_dir) / proof_result.session_id
+        manifest_path = session_dir / "manifest.json"
+        outputs = dict(proof_result.output_paths)
+        ledger_path = budget_summary.get("ledger_path")
+        if ledger_path:
+            outputs["ledger"] = str(ledger_path)
+        spend_summary_path = budget_summary.get("spend_summary_path")
+        if spend_summary_path:
+            outputs["spend_summary"] = str(spend_summary_path)
+        outputs["manifest"] = str(manifest_path)
+
+        combined = dict(proof_manifest)
+        combined.update(
+            {
+                "engine": "proof",
+                "session_id": proof_result.session_id,
+                "status": status,
+                "proof_status": proof_result.status,
+                "complete": status == "completed" and not proof_result.incomplete,
+                "spend": budget_summary,
+                "total_spent": float(budget_summary.get("total_spent", 0.0)),
+                "input_tokens": int(budget_summary.get("input_tokens", 0)),
+                "cached_input_tokens": int(
+                    budget_summary.get("cached_input_tokens", 0)
+                ),
+                "output_tokens": int(budget_summary.get("output_tokens", 0)),
+                "total_tokens": int(budget_summary.get("total_tokens", 0)),
+                "model_call_count": int(budget_summary.get("call_count", 0)),
+                "outputs": outputs,
+            }
+        )
+        temporary = manifest_path.with_suffix(".json.tmp")
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump(combined, stream, indent=2, sort_keys=True, default=str)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, manifest_path)
+        proof_result.output_paths.update(outputs)
+
     async def arun(self) -> SourceHuntResult:
+        if self._flow == "proof":
+            return await self._arun_proof_flow()
         start_time = time.monotonic()
         self._ensure_output_dir_layout()
         self._ensure_spend_ledger()
