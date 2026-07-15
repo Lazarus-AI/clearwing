@@ -25,8 +25,8 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         line_number: int,
         finding_type: str,
         severity: str,
-        cwe: str,
         description: str,
+        cwe: str = "",
         code_snippet: str = "",
         crash_evidence: str = "",
         poc: str = "",
@@ -48,8 +48,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             line_number: 1-indexed line number.
             finding_type: e.g. sql_injection, memory_safety, timing_side_channel.
             severity: critical / high / medium / low / info.
-            cwe: CWE identifier (e.g. CWE-89, CWE-787, CWE-208).
             description: One- or two-sentence description of the bug.
+            cwe: CWE identifier (e.g. CWE-89, CWE-787, CWE-208). Leave blank
+                if unclassified — don't block on picking one.
             code_snippet: Relevant code snippet (helpful for triage).
             crash_evidence: Sanitizer/PoC output if available.
             poc: Proof-of-concept input.
@@ -102,7 +103,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "line_number": {"type": "integer"},
                     "finding_type": {"type": "string"},
                     "severity": {"type": "string"},
-                    "cwe": {"type": "string"},
+                    "cwe": {"type": "string", "default": ""},
                     "description": {"type": "string"},
                     "code_snippet": {"type": "string", "default": ""},
                     "crash_evidence": {"type": "string", "default": ""},
@@ -119,7 +120,6 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "line_number",
                     "finding_type",
                     "severity",
-                    "cwe",
                     "description",
                 ],
             },

@@ -709,6 +709,26 @@ class TestRecordFinding:
         assert ctx.findings[0]["seeded_from_crash"] is True
         assert ctx.findings[0]["discovered_by"] == "hunter:memory_safety"
 
+    def test_missing_cwe_does_not_crash(self):
+        """Local models don't always populate every schema field; a hunter
+        that reports a finding without a CWE classification yet should still
+        get it recorded instead of losing the finding to a TypeError."""
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
+        tools = build_hunter_tools(ctx)
+        record = next(t for t in tools if t.name == "record_finding")
+        msg = record.invoke(
+            {
+                "file": "src/codec_a.c",
+                "line_number": 9,
+                "finding_type": "memory_safety",
+                "severity": "critical",
+                "description": "memcpy with unchecked length",
+            }
+        )
+        assert "Finding recorded" in msg
+        assert len(ctx.findings) == 1
+        assert ctx.findings[0]["cwe"] == ""
+
 
 # --- Sanitizer / rg parsing helpers -----------------------------------------
 
