@@ -8,6 +8,7 @@ obligations, but this package remains the authoritative source of truth.
 
 from .candidates import (
     AllocationAccessGenerator,
+    AssumptionBuilder,
     AuthorizationBoundaryGenerator,
     CandidateGenerationResult,
     CandidatePipeline,
@@ -44,7 +45,7 @@ from .falsifier import (
     FalsificationTask,
 )
 from .graph import ProofGraph
-from .incremental import invalidated_certificates
+from .incremental import invalidate_certificates, invalidated_certificates
 from .models import (
     Action,
     ActionStatus,
@@ -107,6 +108,7 @@ __all__ = [
     "AllocationAccessGenerator",
     "AuthorizationBoundaryGenerator",
     "Assumption",
+    "AssumptionBuilder",
     "BoundedJudgment",
     "BoundedFalsifier",
     "BoundedModelResolver",
@@ -179,5 +181,6 @@ __all__ = [
     "capture_snapshot",
     "apply_resolution",
     "invalidated_certificates",
+    "invalidate_certificates",
     "is_dynamic_action",
 ]

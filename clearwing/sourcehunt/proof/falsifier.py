@@ -14,6 +14,7 @@ from clearwing.llm.native import response_text
 from .models import (
     Action,
     ActionStatus,
+    Assumption,
     Candidate,
     Claim,
     CompletenessManifest,
@@ -42,6 +43,7 @@ class FalsificationJudgment(StrictModel):
     conclusion: str
     contradicted_obligation_id: str | None = None
     cited_fact_ids: list[str] = Field(default_factory=list)
+    cited_assumption_ids: list[str] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
 
 
@@ -209,9 +211,11 @@ class BoundedFalsifier:
 
     SYSTEM_PROMPT = """You are an independent falsifier. Try only the finite
 objective supplied. A counterexample must name one supplied obligation and
-cite concrete supplied facts. `no_counterexample` means only that this bounded
-attempt found none; it does not add support to the vulnerability. Return
-`blocked` when required context is absent."""
+cite concrete supplied facts and any assumptions it relies on by ID.
+Assumptions remain labeled assumptions and cannot prove themselves.
+`no_counterexample` means only that this bounded attempt found none; it does
+not add support to the vulnerability. Return `blocked` when required context
+is absent."""
 
     def __init__(self, llm: Any):
         self.llm = llm
@@ -224,9 +228,16 @@ attempt found none; it does not add support to the vulnerability. Return
         facts: list[Fact],
         completeness: CompletenessManifest,
         threat_model: ThreatModel | None = None,
+        assumptions: list[Assumption] | None = None,
     ) -> FalsificationExecution:
         candidate_fact_ids = set(candidate.fact_ids)
         included_facts = [fact for fact in facts if fact.id in candidate_fact_ids]
+        assumption_aliases = set(candidate.assumption_ids)
+        included_assumptions = [
+            assumption
+            for assumption in assumptions or []
+            if assumption.id in assumption_aliases or assumption.logical_id in assumption_aliases
+        ]
         packet = {
             "objective": action.inputs.get("objective"),
             "atomic_claims": action.inputs.get("atomic_claims", []),
@@ -252,6 +263,9 @@ attempt found none; it does not add support to the vulnerability. Return
             "threat_model": (
                 threat_model.model_dump(mode="json") if threat_model is not None else None
             ),
+            "assumptions": [
+                assumption.model_dump(mode="json") for assumption in included_assumptions
+            ],
         }
         response = await self.llm.aask_text(
             system=self.SYSTEM_PROMPT,
@@ -261,11 +275,18 @@ attempt found none; it does not add support to the vulnerability. Return
         )
         judgment = FalsificationJudgment.model_validate_json(response_text(response))
         allowed_facts = {fact.id for fact in included_facts}
+        allowed_assumptions = {assumption.id for assumption in included_assumptions}
         if not set(judgment.cited_fact_ids) <= allowed_facts:
             return FalsificationExecution(
                 completed=False,
                 evidence=[],
                 error="falsifier cited facts outside its packet",
+            )
+        if not set(judgment.cited_assumption_ids) <= allowed_assumptions:
+            return FalsificationExecution(
+                completed=False,
+                evidence=[],
+                error="falsifier cited assumptions outside its packet",
             )
         if judgment.status == "blocked":
             return FalsificationExecution(
@@ -285,6 +306,7 @@ attempt found none; it does not add support to the vulnerability. Return
                     "objective": action.inputs.get("objective"),
                     "conclusion": judgment.conclusion,
                     "cited_fact_ids": judgment.cited_fact_ids,
+                    "cited_assumption_ids": judgment.cited_assumption_ids,
                     "scope": "finite bounded falsification attempt",
                 }
             ],
@@ -324,12 +346,16 @@ attempt found none; it does not add support to the vulnerability. Return
             object=judgment.conclusion,
             status=ObligationStatus.PROVEN,
             scope={"obligation_id": contradicted.logical_id},
+            assumption_ids=judgment.cited_assumption_ids,
             supporting_evidence_ids=[evidence.id],
         )
         derivation = Derivation(
             snapshot_id=candidate.snapshot_id,
             rule="independent-bounded-falsification",
-            premise_ids=judgment.cited_fact_ids,
+            premise_ids=[
+                *judgment.cited_fact_ids,
+                *judgment.cited_assumption_ids,
+            ],
             conclusion_claim_ids=[claim.logical_id],
             validator="model",
         )

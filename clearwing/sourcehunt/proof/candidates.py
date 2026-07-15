@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from .models import Candidate, Fact, ThreatModel
+from .models import Assumption, Candidate, Fact, ObligationStatus, ThreatModel
 
 
 @dataclass(frozen=True)
@@ -20,8 +20,7 @@ class CandidateGenerator(Protocol):
     name: str
     version: str
 
-    def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
-        ...
+    def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]: ...
 
 
 class ReservedSentinelGenerator:
@@ -35,9 +34,7 @@ class ReservedSentinelGenerator:
         assignments = [fact for fact in facts if fact.kind == "assignment"]
         variables = [fact for fact in facts if fact.kind in {"variable", "field"}]
         guards = [fact for fact in facts if fact.kind == "guard"]
-        accesses = [
-            fact for fact in facts if fact.kind in {"memory_access", "memory_write"}
-        ]
+        accesses = [fact for fact in facts if fact.kind in {"memory_access", "memory_write"}]
         calls = [fact for fact in facts if fact.kind == "call"]
 
         by_storage: dict[str, list[Fact]] = defaultdict(list)
@@ -59,11 +56,8 @@ class ReservedSentinelGenerator:
                 {
                     identifier
                     for fact in writes
-                    for identifier in _identifiers(
-                        str(fact.properties.get("rhs", ""))
-                    )
-                    if identifier != storage_symbol
-                    and identifier not in _NOISE_IDENTIFIERS
+                    for identifier in _identifiers(str(fact.properties.get("rhs", "")))
+                    if identifier != storage_symbol and identifier not in _NOISE_IDENTIFIERS
                 }
             )
             source = _best_source(sources)
@@ -78,26 +72,15 @@ class ReservedSentinelGenerator:
                 for fact in facts
                 if source
                 and (
-                    (
-                        fact.kind in {"variable", "field", "parameter"}
-                        and source in fact.subject
-                    )
-                    or (
-                        fact.kind == "counter_update"
-                        and source in _expression(fact)
-                    )
+                    (fact.kind in {"variable", "field", "parameter"} and source in fact.subject)
+                    or (fact.kind == "counter_update" and source in _expression(fact))
                 )
             ]
-            relevant_guards = [
-                fact
-                for fact in guards
-                if source and source in _expression(fact)
-            ]
+            relevant_guards = [fact for fact in guards if source and source in _expression(fact)]
             relevant_accesses = [
                 fact
                 for fact in accesses
-                if storage_symbol in _expression(fact)
-                or _shares_function(fact, writes)
+                if storage_symbol in _expression(fact) or _shares_function(fact, writes)
             ]
             downstream_calls = [
                 fact
@@ -128,10 +111,7 @@ class ReservedSentinelGenerator:
             candidates.append(
                 Candidate(
                     snapshot_id=snapshot_id,
-                    title=(
-                        f"Live identifier may alias reserved sentinel in "
-                        f"{storage_symbol}"
-                    ),
+                    title=(f"Live identifier may alias reserved sentinel in {storage_symbol}"),
                     invariant_families=invariant_families,
                     suspected_mechanism="live_identifier_aliases_reserved_sentinel",
                     source_symbols=[source] if source else [],
@@ -171,11 +151,7 @@ class AllocationAccessGenerator:
         assignments = [fact for fact in facts if fact.kind == "assignment"]
         candidates: list[Candidate] = []
         for allocation in allocations:
-            related_writes = [
-                write
-                for write in writes
-                if _same_scope(allocation, write)
-            ]
+            related_writes = [write for write in writes if _same_scope(allocation, write)]
             for write in related_writes:
                 allocation_expression = _expression(allocation)
                 write_expression = _expression(write)
@@ -184,9 +160,7 @@ class AllocationAccessGenerator:
                 if not allocation_ids or not write_ids:
                     continue
                 local_casts = [fact for fact in casts if _same_scope(fact, allocation)]
-                local_assignments = [
-                    fact for fact in assignments if _same_scope(fact, allocation)
-                ]
+                local_assignments = [fact for fact in assignments if _same_scope(fact, allocation)]
                 if allocation_expression == write_expression:
                     continue
                 source_symbols = sorted(
@@ -209,9 +183,7 @@ class AllocationAccessGenerator:
                         ],
                         state_sinks=[allocation_expression],
                         impact_sinks=[write_expression],
-                        suspected_invariants=[
-                            "accessed region is a subset of allocated region"
-                        ],
+                        suspected_invariants=["accessed region is a subset of allocated region"],
                         fact_ids=[
                             fact.id
                             for fact in _unique_facts(
@@ -265,9 +237,7 @@ class InjectionBoundaryGenerator:
                     suspected_mechanism="untrusted_data_reaches_interpreter_boundary",
                     source_symbols=sorted(set(sources)),
                     impact_sinks=[callee],
-                    suspected_invariants=[
-                        "untrusted data cannot alter interpreted structure"
-                    ],
+                    suspected_invariants=["untrusted data cannot alter interpreted structure"],
                     fact_ids=[fact.id],
                     generator=self.name,
                     generator_version=self.version,
@@ -290,9 +260,7 @@ class TemporalSafetyGenerator:
             and str(fact.properties.get("callee", "")).lower() in self._RELEASES
         ]
         accesses = [
-            fact
-            for fact in facts
-            if fact.kind in {"memory_access", "memory_write", "call"}
+            fact for fact in facts if fact.kind in {"memory_access", "memory_write", "call"}
         ]
         candidates: list[Candidate] = []
         for release in releases:
@@ -323,9 +291,7 @@ class TemporalSafetyGenerator:
                     source_symbols=[released[0]],
                     transformations=[_expression(release)],
                     impact_sinks=[_expression(later[0])],
-                    suspected_invariants=[
-                        "object is live at every dereference"
-                    ],
+                    suspected_invariants=["object is live at every dereference"],
                     fact_ids=[release.id, *[fact.id for fact in later]],
                     generator=self.name,
                     generator_version=self.version,
@@ -354,9 +320,7 @@ class AuthorizationBoundaryGenerator:
         candidates: list[Candidate] = []
         for fact in facts:
             callee = str(fact.properties.get("callee", "")).lower()
-            if fact.kind != "call" or not any(
-                protected in callee for protected in self._PROTECTED
-            ):
+            if fact.kind != "call" or not any(protected in callee for protected in self._PROTECTED):
                 continue
             local_guards = [
                 guard
@@ -374,9 +338,7 @@ class AuthorizationBoundaryGenerator:
                     invariant_families=["authority_safety"],
                     suspected_mechanism="protected_operation_authorization_contrast",
                     state_sinks=[callee],
-                    suspected_invariants=[
-                        "requested operation is permitted for the principal"
-                    ],
+                    suspected_invariants=["requested operation is permitted for the principal"],
                     fact_ids=[fact.id, *[guard.id for guard in local_guards]],
                     generator=self.name,
                     generator_version=self.version,
@@ -487,14 +449,10 @@ class StateMachineGenerator:
                 continue
             lhs = str(fact.properties.get("lhs", "")).lower()
             if not any(
-                token in lhs
-                for token in ("state", "status", "phase", "authenticated", "session")
+                token in lhs for token in ("state", "status", "phase", "authenticated", "session")
             ):
                 continue
-            if "[" in lhs or any(
-                storage in lhs
-                for storage in ("table", "map", "buffer", "cache")
-            ):
+            if "[" in lhs or any(storage in lhs for storage in ("table", "map", "buffer", "cache")):
                 continue
             candidates.append(
                 Candidate(
@@ -526,9 +484,7 @@ class ConcurrencyResourceGenerator:
         loops = [fact for fact in facts if fact.kind == "loop"]
         allocations = [fact for fact in facts if fact.kind == "allocation"]
         for allocation in allocations:
-            local_loops = [
-                loop for loop in loops if _same_scope(loop, allocation)
-            ]
+            local_loops = [loop for loop in loops if _same_scope(loop, allocation)]
             if not local_loops:
                 continue
             candidates.append(
@@ -559,9 +515,7 @@ class ConcurrencyResourceGenerator:
         ]
         writes = [fact for fact in facts if fact.kind == "memory_write"]
         for thread in thread_calls:
-            local_writes = [
-                write for write in writes if _same_scope(thread, write)
-            ]
+            local_writes = [write for write in writes if _same_scope(thread, write)]
             if not local_writes:
                 continue
             candidates.append(
@@ -624,15 +578,12 @@ class CandidatePipeline:
                 payload.update(
                     {
                         "id": "",
-                        "fact_ids": sorted(
-                            set(existing.fact_ids) | set(candidate.fact_ids)
-                        ),
+                        "fact_ids": sorted(set(existing.fact_ids) | set(candidate.fact_ids)),
                         "evidence_ids": sorted(
                             set(existing.evidence_ids) | set(candidate.evidence_ids)
                         ),
                         "invariant_families": sorted(
-                            set(existing.invariant_families)
-                            | set(candidate.invariant_families)
+                            set(existing.invariant_families) | set(candidate.invariant_families)
                         ),
                         "impact_sinks": sorted(
                             set(existing.impact_sinks) | set(candidate.impact_sinks)
@@ -652,9 +603,7 @@ class ThreatModelBuilder:
 
     def build(self, candidate: Candidate, facts: list[Fact]) -> ThreatModel:
         relevant = {fact.id: fact for fact in facts if fact.id in candidate.fact_ids}
-        text = " ".join(
-            _expression(fact).lower() for fact in relevant.values()
-        )
+        text = " ".join(_expression(fact).lower() for fact in relevant.values())
         parser_like = any(
             token in text
             for token in (
@@ -670,17 +619,13 @@ class ThreatModelBuilder:
         memory_like = "spatial_safety" in candidate.invariant_families
         return ThreatModel(
             snapshot_id=candidate.snapshot_id,
-            attacker_principal=(
-                "untrusted_input_supplier" if parser_like else "unknown"
-            ),
+            attacker_principal=("untrusted_input_supplier" if parser_like else "unknown"),
             attacker_capabilities=(
                 ["provide data to the affected parser or decoder"]
                 if parser_like
                 else ["unknown; attacker control remains an obligation"]
             ),
-            trust_boundaries=[
-                "untrusted input to application processing boundary"
-            ],
+            trust_boundaries=["untrusted input to application processing boundary"],
             protected_assets=(
                 ["process memory integrity", "application availability"]
                 if memory_like
@@ -696,6 +641,32 @@ class ThreatModelBuilder:
                 ["memory safety"] if memory_like else ["state integrity"]
             ),
         )
+
+
+class AssumptionBuilder:
+    """Turn implicit threat-model premises into first-class graph records."""
+
+    def build(
+        self,
+        candidate: Candidate,
+        threat_model: ThreatModel,
+    ) -> list[Assumption]:
+        assumptions: list[Assumption] = []
+        for statement in threat_model.deployment_assumptions:
+            assumptions.append(
+                Assumption(
+                    snapshot_id=candidate.snapshot_id,
+                    kind="deployment",
+                    statement=statement,
+                    status=ObligationStatus.UNKNOWN,
+                    scope={
+                        "candidate_id": candidate.logical_id,
+                        "threat_model_id": threat_model.logical_id,
+                    },
+                    required_by=[candidate.logical_id],
+                )
+            )
+        return assumptions
 
 
 def _expression(fact: Fact) -> str:
@@ -748,11 +719,7 @@ def _storage_symbols(expression: str) -> list[str]:
     if preferred:
         return sorted(set(preferred))
     return sorted(
-        {
-            identifier
-            for identifier in identifiers
-            if identifier not in _NOISE_IDENTIFIERS
-        }
+        {identifier for identifier in identifiers if identifier not in _NOISE_IDENTIFIERS}
     )[:2]
 
 
@@ -808,9 +775,7 @@ def _attach_related_taint(candidate: Candidate, facts: list[Fact]) -> Candidate:
             if fact.properties.get(key)
         }
         if any(
-            endpoint == path_endpoint
-            or endpoint in path_endpoint
-            or path_endpoint in endpoint
+            endpoint == path_endpoint or endpoint in path_endpoint or path_endpoint in endpoint
             for endpoint in endpoints
             for path_endpoint in path_endpoints
         ):

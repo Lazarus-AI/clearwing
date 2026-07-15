@@ -41,6 +41,7 @@ from .disclosure import (
 )
 from .exploiter import AgenticExploiter, Exploiter, apply_exploiter_result
 from .harness_generator import HarnessGenerator, HarnessGeneratorConfig, SeededCrash
+from .instrumentation import SourceHuntInstrumentation, stable_run_id
 from .mechanism_memory import (
     MechanismExtractor,
     MechanismStore,
@@ -124,13 +125,22 @@ _IMPACT_TO_SEVERITY = {
 
 def _apply_elaboration(finding: Finding, elab_result) -> Finding:
     """Create a new finding from a successful elaboration."""
-    import uuid
-
     sev = _IMPACT_TO_SEVERITY.get(
-        elab_result.upgraded_impact or "", "high",
+        elab_result.upgraded_impact or "",
+        "high",
+    )
+    elaboration_id = stable_run_id(
+        "elab",
+        {
+            "finding_id": finding.get("id", "unknown"),
+            "upgrade_path": elab_result.upgrade_path,
+            "upgraded_impact": elab_result.upgraded_impact,
+            "upgraded_exploit_code": elab_result.upgraded_exploit_code,
+            "chained_findings": sorted(elab_result.chained_findings or []),
+        },
     )
     return {
-        "id": f"elab-{uuid.uuid4().hex[:8]}",
+        "id": elaboration_id,
         "related_finding_id": finding.get("id", "unknown"),
         "file": finding.get("file", ""),
         "line_number": finding.get("line_number"),
@@ -141,10 +151,7 @@ def _apply_elaboration(finding: Finding, elab_result) -> Finding:
         "severity_verified": sev,
         "evidence_level": "exploit_demonstrated",
         "verified": True,
-        "description": (
-            f"Elaborated from {finding.get('id', '?')}: "
-            f"{elab_result.upgrade_path}"
-        ),
+        "description": (f"Elaborated from {finding.get('id', '?')}: {elab_result.upgrade_path}"),
         "exploit": elab_result.upgraded_exploit_code or "",
         "exploit_success": True,
         "exploit_impact": elab_result.upgraded_impact or "",
@@ -268,21 +275,13 @@ class SourceHuntRunner:
             )
             max_parallel = max_parallel if max_parallel != 8 else b.max_parallel
             tier_budget = tier_budget if tier_budget is not None else b.tier_budget
-            exploit_budget = (
-                exploit_budget if exploit_budget is not None else b.exploit_budget
-            )
-            elaboration_cap = (
-                elaboration_cap if elaboration_cap != "10%" else b.elaboration_cap
-            )
+            exploit_budget = exploit_budget if exploit_budget is not None else b.exploit_budget
+            elaboration_cap = elaboration_cap if elaboration_cap != "10%" else b.elaboration_cap
             subsystem_budget_usd = (
-                subsystem_budget_usd
-                if subsystem_budget_usd != 0.0
-                else b.subsystem_budget_usd
+                subsystem_budget_usd if subsystem_budget_usd != 0.0 else b.subsystem_budget_usd
             )
             subsystem_max_parallel = (
-                subsystem_max_parallel
-                if subsystem_max_parallel != 4
-                else b.subsystem_max_parallel
+                subsystem_max_parallel if subsystem_max_parallel != 4 else b.subsystem_max_parallel
             )
             # Output params
             output_dir = output_dir if output_dir is not None else (o.output_dir or None)
@@ -311,20 +310,14 @@ class SourceHuntRunner:
             enable_stability_verification = (
                 enable_stability_verification and f.enable_stability_verification
             )
-            enable_mechanism_memory = (
-                enable_mechanism_memory and f.enable_mechanism_memory
-            )
-            enable_behavior_monitor = (
-                enable_behavior_monitor and f.enable_behavior_monitor
-            )
+            enable_mechanism_memory = enable_mechanism_memory and f.enable_mechanism_memory
+            enable_behavior_monitor = enable_behavior_monitor and f.enable_behavior_monitor
             enable_patch_oracle = enable_patch_oracle and f.enable_patch_oracle
             enable_findings_pool = enable_findings_pool and f.enable_findings_pool
             enable_subsystem_hunt = enable_subsystem_hunt or f.enable_subsystem_hunt
             enable_auto_patch = enable_auto_patch or f.enable_auto_patch
             auto_pr = auto_pr or f.auto_pr
-            enable_knowledge_graph = (
-                enable_knowledge_graph and f.enable_knowledge_graph
-            )
+            enable_knowledge_graph = enable_knowledge_graph and f.enable_knowledge_graph
             enable_calibration = enable_calibration and f.enable_calibration
             enable_artifact_store = enable_artifact_store or f.enable_artifact_store
             no_per_file_hunt = no_per_file_hunt or f.no_per_file_hunt
@@ -337,61 +330,31 @@ class SourceHuntRunner:
                 if adversarial_threshold != "static_corroboration"
                 else f.adversarial_threshold
             )
-            validator_mode = (
-                validator_mode if validator_mode != "v2" else f.validator_mode
-            )
+            validator_mode = validator_mode if validator_mode != "v2" else f.validator_mode
             exploit_mode = exploit_mode or f.exploit_mode
             agent_mode = agent_mode if agent_mode != "auto" else f.agent_mode
-            prompt_mode = (
-                prompt_mode
-                if prompt_mode != "unconstrained"
-                else f.prompt_mode
-            )
+            prompt_mode = prompt_mode if prompt_mode != "unconstrained" else f.prompt_mode
             # Hunt tuning
-            starting_band = (
-                starting_band if starting_band is not None else h.starting_band
-            )
+            starting_band = starting_band if starting_band is not None else h.starting_band
             redundancy_override = (
-                redundancy_override
-                if redundancy_override is not None
-                else h.redundancy_override
+                redundancy_override if redundancy_override is not None else h.redundancy_override
             )
             shard_entry_points = (
-                shard_entry_points
-                if shard_entry_points is not None
-                else h.shard_entry_points
+                shard_entry_points if shard_entry_points is not None else h.shard_entry_points
             )
-            min_shard_rank = (
-                min_shard_rank if min_shard_rank != 4 else h.min_shard_rank
-            )
-            min_project_loc = (
-                min_project_loc
-                if min_project_loc != 50_000
-                else h.min_project_loc
-            )
+            min_shard_rank = min_shard_rank if min_shard_rank != 4 else h.min_shard_rank
+            min_project_loc = min_project_loc if min_project_loc != 50_000 else h.min_project_loc
             seed_corpus_sources = (
-                seed_corpus_sources
-                if seed_corpus_sources is not None
-                else h.seed_corpus_sources
+                seed_corpus_sources if seed_corpus_sources is not None else h.seed_corpus_sources
             )
-            subsystem_paths = (
-                subsystem_paths
-                if subsystem_paths is not None
-                else h.subsystem_paths
-            )
-            campaign_hint = (
-                campaign_hint if campaign_hint is not None else h.campaign_hint
-            )
-            gvisor_runtime = (
-                gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
-            )
+            subsystem_paths = subsystem_paths if subsystem_paths is not None else h.subsystem_paths
+            campaign_hint = campaign_hint if campaign_hint is not None else h.campaign_hint
+            gvisor_runtime = gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
             p = config.proof
             flow = flow if flow != "legacy" else p.flow
             proof_compile_commands = (
-                proof_compile_commands
-                if proof_compile_commands is not None
-                else p.compile_commands
+                proof_compile_commands if proof_compile_commands is not None else p.compile_commands
             )
             proof_validation_manifest = (
                 proof_validation_manifest
@@ -404,17 +367,11 @@ class SourceHuntRunner:
                 else p.build_configuration
             )
             proof_clang_binary = (
-                proof_clang_binary
-                if proof_clang_binary != "clang"
-                else p.clang_binary
+                proof_clang_binary if proof_clang_binary != "clang" else p.clang_binary
             )
-            proof_max_actions = (
-                proof_max_actions if proof_max_actions != 200 else p.max_actions
-            )
+            proof_max_actions = proof_max_actions if proof_max_actions != 200 else p.max_actions
             proof_max_model_calls = (
-                proof_max_model_calls
-                if proof_max_model_calls != 40
-                else p.max_model_calls
+                proof_max_model_calls if proof_max_model_calls != 40 else p.max_model_calls
             )
             proof_max_dynamic_actions = (
                 proof_max_dynamic_actions
@@ -432,8 +389,7 @@ class SourceHuntRunner:
                 else p.exploration_fraction
             )
             retain_incomplete_certificates = (
-                retain_incomplete_certificates
-                and p.retain_incomplete_certificates
+                retain_incomplete_certificates and p.retain_incomplete_certificates
             )
             emit_rejection_certificates = (
                 emit_rejection_certificates and p.emit_rejection_certificates
@@ -490,6 +446,7 @@ class SourceHuntRunner:
         if enable_calibration:
             try:
                 from .calibration import CalibrationStore
+
                 self._calibration_store = CalibrationStore()
             except Exception:
                 logger.debug("CalibrationStore init failed", exc_info=True)
@@ -546,6 +503,7 @@ class SourceHuntRunner:
         self._respect_gitignore = respect_gitignore
         self._live = live
         self._spend_ledger: SpendLedger | None = None
+        self._spend_instrumented = False
         self._metered_clients: dict[tuple[int, str], AsyncLLMClient] = {}
         self._flow = flow
         self._proof_compile_commands = proof_compile_commands
@@ -560,6 +518,12 @@ class SourceHuntRunner:
         self._retain_incomplete_certificates = retain_incomplete_certificates
         self._emit_rejection_certificates = emit_rejection_certificates
         self._falsify = falsify
+        self._instrumentation = SourceHuntInstrumentation(
+            Path(self.output_dir) / self._session_id,
+            self._session_id,
+        )
+        self._instrumentation_finalized = False
+        self._last_reporting_error: dict[str, str] | None = None
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -567,6 +531,7 @@ class SourceHuntRunner:
             return None
         try:
             import docker
+
             info = docker.from_env().info()
             runtimes = info.get("Runtimes") or {}
             if runtime in runtimes:
@@ -634,18 +599,55 @@ class SourceHuntRunner:
     # --- Public API ---------------------------------------------------------
 
     def _emit_stage(
-        self, stage: str, status: str, findings_so_far: int = 0,
-        cost_usd: float = 0.0, detail: str = "",
+        self,
+        stage: str,
+        status: str,
+        findings_so_far: int = 0,
+        cost_usd: float = 0.0,
+        detail: str = "",
+        *,
+        files: list[str] | tuple[str, ...] = (),
+        symbols: list[str] | tuple[str, ...] = (),
+        finding_ids: list[str] | tuple[str, ...] = (),
+        error: dict[str, Any] | None = None,
     ) -> None:
-        EventBus().emit_sourcehunt_stage(SourcehuntStagePayload(
-            session_id=self._session_id,
-            repo=self.repo_url,
-            stage=stage,
-            status=status,
-            findings_so_far=findings_so_far,
-            cost_usd=cost_usd,
-            detail=detail,
-        ))
+        EventBus().emit_sourcehunt_stage(
+            SourcehuntStagePayload(
+                session_id=self._session_id,
+                repo=self.repo_url,
+                stage=stage,
+                status=status,
+                findings_so_far=findings_so_far,
+                cost_usd=cost_usd,
+                detail=detail,
+            )
+        )
+        try:
+            self._instrumentation.stage(
+                stage,
+                status,
+                files=files,
+                symbols=symbols,
+                finding_ids=finding_ids,
+                detail=detail,
+                error=error,
+                metadata={
+                    "findings_so_far": findings_so_far,
+                    "cost_usd": cost_usd,
+                    "flow": self._flow,
+                },
+            )
+        except Exception:
+            logger.debug("Sourcehunt instrumentation write failed", exc_info=True)
+
+    def _finalize_instrumentation(self, status: str) -> None:
+        if self._instrumentation_finalized:
+            return
+        try:
+            self._instrumentation.finalize(status)
+            self._instrumentation_finalized = True
+        except Exception:
+            logger.debug("Sourcehunt instrumentation finalization failed", exc_info=True)
 
     def _ensure_spend_ledger(self) -> SpendLedger:
         if self._spend_ledger is None:
@@ -657,9 +659,7 @@ class SourceHuntRunner:
                 input_price_per_million=self.input_price_per_million,
                 output_price_per_million=self.output_price_per_million,
                 manifest_filename=(
-                    "spend-summary.json"
-                    if self._flow == "proof"
-                    else "manifest.json"
+                    "spend-summary.json" if self._flow == "proof" else "manifest.json"
                 ),
             )
         return self._spend_ledger
@@ -686,9 +686,16 @@ class SourceHuntRunner:
 
     def _finalize_spend_ledger(self, status: str | None = None) -> dict[str, Any]:
         ledger = self._ensure_spend_ledger()
-        if ledger.finalized:
-            return ledger.snapshot()
-        return ledger.finalize(status)
+        summary = ledger.snapshot() if ledger.finalized else ledger.finalize(status)
+        if not self._spend_instrumented:
+            try:
+                ledger_path = summary.get("ledger_path")
+                if ledger_path:
+                    self._instrumentation.ingest_spend_ledger(ledger_path)
+                self._spend_instrumented = True
+            except Exception:
+                logger.debug("Could not join sourcehunt spend instrumentation", exc_info=True)
+        return summary
 
     def run(self) -> SourceHuntResult:
         from clearwing.ui.llm_activity import llm_activity_panel
@@ -709,11 +716,7 @@ class SourceHuntRunner:
         ledger = self._ensure_spend_ledger()
 
         def model_client(route: str) -> AsyncLLMClient | None:
-            override = (
-                self.verifier_llm
-                if route == "proof_falsifier"
-                else self.hunter_llm
-            )
+            override = self.verifier_llm if route == "proof_falsifier" else self.hunter_llm
             return self._get_native_client(
                 route,
                 override,
@@ -728,6 +731,16 @@ class SourceHuntRunner:
                 routes.append("proof_falsifier")
             for route in routes:
                 model_client(route)
+
+        evaluation_hints: dict[str, Any] = {}
+        if self._campaign_hint:
+            try:
+                parsed_hint = json.loads(self._campaign_hint)
+            except json.JSONDecodeError:
+                parsed_hint = {"objective": self._campaign_hint}
+            evaluation_hints = (
+                parsed_hint if isinstance(parsed_hint, dict) else {"objective": self._campaign_hint}
+            )
 
         proof_runner = ProofFlowRunner(
             repo_url=self.repo_url,
@@ -745,26 +758,25 @@ class SourceHuntRunner:
                 max_dynamic_actions=self._proof_max_dynamic_actions,
                 structured_fraction=self._proof_structured_fraction,
                 exploration_fraction=self._proof_exploration_fraction,
-                retain_incomplete_certificates=(
-                    self._retain_incomplete_certificates
-                ),
-                emit_rejection_certificates=(
-                    self._emit_rejection_certificates
-                ),
+                retain_incomplete_certificates=(self._retain_incomplete_certificates),
+                emit_rejection_certificates=(self._emit_rejection_certificates),
                 falsify=self._falsify,
                 gvisor_runtime=self._gvisor_runtime,
                 sandbox_cpus=self._sandbox_cpus,
+                evaluation_hints=evaluation_hints,
             ),
             model_client_factory=model_client,
+        )
+        self._instrumentation.record(
+            "run",
+            stage="run",
+            status="started",
+            metadata={"flow": self._flow, "repository": self.repo_url},
         )
         self._emit_stage("proof", "started")
         try:
             proof_result = await proof_runner.arun()
-            run_status = (
-                "budget_exhausted"
-                if ledger.exhausted
-                else proof_result.status
-            )
+            run_status = "budget_exhausted" if ledger.exhausted else proof_result.status
             proof_manifest = self._read_proof_manifest(proof_result.session_id)
             budget_summary = self._finalize_spend_ledger(run_status)
             self._finalize_proof_manifest(
@@ -773,10 +785,14 @@ class SourceHuntRunner:
                 budget_summary=budget_summary,
                 status=run_status,
             )
-        except Exception:
-            if not ledger.finalized:
-                ledger.finalize("failed")
-            self._emit_stage("proof", "failed")
+        except Exception as exc:
+            self._finalize_spend_ledger("failed")
+            self._emit_stage(
+                "proof",
+                "failed",
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            self._finalize_instrumentation("failed")
             raise
 
         findings: list[Finding] = []
@@ -790,11 +806,7 @@ class SourceHuntRunner:
             base["cwe"] = base.get("cwe") or ""
             base["severity_verified"] = base.get("severity")
             base["hunter_session_id"] = proof_result.session_id
-            extra = {
-                key: value
-                for key, value in payload.items()
-                if key not in known_fields
-            }
+            extra = {key: value for key, value in payload.items() if key not in known_fields}
             findings.append(Finding(**base, extra=extra))
 
         pipeline_status = PipelineStatus()
@@ -807,6 +819,8 @@ class SourceHuntRunner:
                 "proof",
                 "incomplete",
                 findings_so_far=len(findings),
+                files=[str(finding.file or "") for finding in findings],
+                finding_ids=[finding.id for finding in findings],
             )
         else:
             pipeline_status.record_succeeded("proof")
@@ -814,11 +828,11 @@ class SourceHuntRunner:
                 "proof",
                 "completed",
                 findings_so_far=len(findings),
+                files=[str(finding.file or "") for finding in findings],
+                finding_ids=[finding.id for finding in findings],
             )
 
-        has_high = any(
-            finding.severity in {"critical", "high"} for finding in findings
-        )
+        has_high = any(finding.severity in {"critical", "high"} for finding in findings)
         has_medium = any(finding.severity == "medium" for finding in findings)
         exit_code = (
             3
@@ -830,6 +844,13 @@ class SourceHuntRunner:
             else 0
         )
         total_spent = float(budget_summary.get("total_spent", 0.0))
+        self._finalize_instrumentation(run_status)
+        proof_result.output_paths.update(
+            {
+                "instrumentation": str(self._instrumentation.summary_path),
+                "instrumentation_events": str(self._instrumentation.events_path),
+            }
+        )
         return SourceHuntResult(
             exit_code=exit_code,
             repo_url=self.repo_url,
@@ -879,6 +900,8 @@ class SourceHuntRunner:
         spend_summary_path = budget_summary.get("spend_summary_path")
         if spend_summary_path:
             outputs["spend_summary"] = str(spend_summary_path)
+        outputs["instrumentation"] = str(self._instrumentation.summary_path)
+        outputs["instrumentation_events"] = str(self._instrumentation.events_path)
         outputs["manifest"] = str(manifest_path)
 
         combined = dict(proof_manifest)
@@ -892,9 +915,7 @@ class SourceHuntRunner:
                 "spend": budget_summary,
                 "total_spent": float(budget_summary.get("total_spent", 0.0)),
                 "input_tokens": int(budget_summary.get("input_tokens", 0)),
-                "cached_input_tokens": int(
-                    budget_summary.get("cached_input_tokens", 0)
-                ),
+                "cached_input_tokens": int(budget_summary.get("cached_input_tokens", 0)),
                 "output_tokens": int(budget_summary.get("output_tokens", 0)),
                 "total_tokens": int(budget_summary.get("total_tokens", 0)),
                 "model_call_count": int(budget_summary.get("call_count", 0)),
@@ -912,12 +933,21 @@ class SourceHuntRunner:
 
     async def arun(self) -> SourceHuntResult:
         if self._flow == "proof":
-            return await self._arun_proof_flow()
+            try:
+                return await self._arun_proof_flow()
+            finally:
+                self._finalize_instrumentation("failed")
         start_time = time.monotonic()
         self._ensure_output_dir_layout()
         self._ensure_spend_ledger()
         pipeline_status = PipelineStatus()
         logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
+        self._instrumentation.record(
+            "run",
+            stage="run",
+            status="started",
+            metadata={"flow": self._flow, "repository": self.repo_url},
+        )
         try:
             self._preflight_budget_clients()
             # 1. Preprocess
@@ -927,7 +957,13 @@ class SourceHuntRunner:
             files = preprocess_result.file_targets
             files_ranked = len(files)
             logger.info("Preprocessor enumerated %d files", files_ranked)
-            self._emit_stage("preprocess", "completed", detail=f"Enumerated {files_ranked} files")
+            stage_files = [str(file_target.get("path") or "") for file_target in files]
+            self._emit_stage(
+                "preprocess",
+                "completed",
+                detail=f"Enumerated {files_ranked} files",
+                files=stage_files,
+            )
             self._ensure_sandbox_factory(repo_path, files)
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
@@ -940,7 +976,12 @@ class SourceHuntRunner:
                     budget_stage="rank",
                 )
             )
-            self._emit_stage("rank", "started", detail=f"{len(files)} files")
+            self._emit_stage(
+                "rank",
+                "started",
+                detail=f"{len(files)} files",
+                files=stage_files,
+            )
             if self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
                 for ft in files:
@@ -954,7 +995,12 @@ class SourceHuntRunner:
                     "ranker",
                     "All files assigned default priority scores (--no-rank)",
                 )
-                self._emit_stage("rank", "degraded", detail="Skipped (--no-rank)")
+                self._emit_stage(
+                    "rank",
+                    "degraded",
+                    detail="Skipped (--no-rank)",
+                    files=stage_files,
+                )
             elif ranker_llm is not None and files:
                 logger.info("Ranker starting on %d files", len(files))
                 try:
@@ -974,7 +1020,12 @@ class SourceHuntRunner:
                     await Ranker(ranker_llm, ranker_config).arank(files)
                     logger.info("Ranker completed")
                     pipeline_status.record_succeeded("ranker")
-                    self._emit_stage("rank", "completed", detail=f"Ranked {len(files)} files")
+                    self._emit_stage(
+                        "rank",
+                        "completed",
+                        detail=f"Ranked {len(files)} files",
+                        files=stage_files,
+                    )
                 except BudgetExceeded:
                     logger.info("Ranker stopped because the run budget is exhausted")
                     pipeline_status.record(
@@ -982,14 +1033,24 @@ class SourceHuntRunner:
                         StageOutcome.SKIPPED,
                         fallback_description="Budget exhausted; remaining files use heuristic ranks",
                     )
-                    self._emit_stage("rank", "budget_exhausted", detail="Using heuristic ranks")
+                    self._emit_stage(
+                        "rank",
+                        "budget_exhausted",
+                        detail="Using heuristic ranks",
+                        files=stage_files,
+                    )
                 except Exception:
                     logger.warning("Ranker failed", exc_info=True)
                     pipeline_status.record_degraded(
                         "ranker",
                         "All files assigned default priority scores (surface=3, influence=2)",
                     )
-                    self._emit_stage("rank", "degraded", detail="Default priority scores used")
+                    self._emit_stage(
+                        "rank",
+                        "degraded",
+                        detail="Default priority scores used",
+                        files=stage_files,
+                    )
             else:
                 logger.info("Ranker skipped; no LLM available")
                 pipeline_status.record_degraded(
@@ -1004,6 +1065,12 @@ class SourceHuntRunner:
                     ft["priority"] = (
                         ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                     )
+                self._emit_stage(
+                    "rank",
+                    "degraded",
+                    detail="No ranker model available; default priority scores used",
+                    files=stage_files,
+                )
 
             # Ensure a partial/failed rank pass still leaves every file
             # schedulable by the deterministic fallback.
@@ -1012,9 +1079,7 @@ class SourceHuntRunner:
                 ft["influence"] = ft.get("influence") or 2
                 ft["reachability"] = ft.get("reachability") or 3
                 ft["priority"] = ft.get("priority") or (
-                    ft["surface"] * 0.5
-                    + ft["influence"] * 0.2
-                    + ft["reachability"] * 0.3
+                    ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                 )
 
             # depth=quick exits here with the static_findings as-is
@@ -1031,11 +1096,12 @@ class SourceHuntRunner:
             #      when seed_harness_crashes is explicitly enabled (spec 018).
             seeded_crashes: list[SeededCrash] = []
             if (
-                (self.depth == "deep" or self._seed_harness_crashes)
-                and not self._budget_exhausted()
-            ):
+                self.depth == "deep" or self._seed_harness_crashes
+            ) and not self._budget_exhausted():
                 harness_llm = self._get_native_client(
-                    "hunter", self.hunter_llm, budget_stage="harness",
+                    "hunter",
+                    self.hunter_llm,
+                    budget_stage="harness",
                 )
                 harness_sandbox = self._sandbox_manager or self.sandbox_factory
                 if harness_llm is not None and harness_sandbox is not None:
@@ -1119,7 +1185,9 @@ class SourceHuntRunner:
                     from .seed_corpus import ingest_seed_corpus
 
                     sc_result = ingest_seed_corpus(
-                        repo_path, files, self._seed_corpus_sources,
+                        repo_path,
+                        files,
+                        self._seed_corpus_sources,
                     )
                     for entry in sc_result.entries:
                         seed_corpus_by_file.setdefault(entry.file_path, []).append(entry)
@@ -1144,9 +1212,7 @@ class SourceHuntRunner:
                 from .findings_pool import FindingsPool
                 from .historical_findings_db import HistoricalFindingsDB
 
-                checkpoint_path = (
-                    Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
-                )
+                checkpoint_path = Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
                 findings_pool = FindingsPool(checkpoint_path=checkpoint_path)
                 try:
                     historical_db = HistoricalFindingsDB(path=self._historical_db_path)
@@ -1159,17 +1225,40 @@ class SourceHuntRunner:
 
             # 3. Tiered hunt
             hunter_llm = self._get_native_client(
-                "hunter", self.hunter_llm, budget_stage="hunt",
+                "hunter",
+                self.hunter_llm,
+                budget_stage="hunt",
             )
             all_findings: list[Finding] = []
             files_hunted = 0
             spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
             band_stats: dict | None = None
+            hunt_symbols = sorted(
+                {
+                    str(getattr(entry_point, "function_name", "") or "")
+                    for entry_points in entry_points_by_file.values()
+                    for entry_point in entry_points
+                    if getattr(entry_point, "function_name", "")
+                }
+            )
 
             if self._no_per_file_hunt:
                 logger.info("Per-file hunt skipped (--no-per-file-hunt)")
+                self._emit_stage(
+                    "hunt",
+                    "skipped",
+                    detail="Per-file hunt disabled",
+                    files=stage_files,
+                    symbols=hunt_symbols,
+                )
             elif hunter_llm is not None and files and not self._budget_exhausted():
-                self._emit_stage("hunt", "started", detail=f"{len(files)} files")
+                self._emit_stage(
+                    "hunt",
+                    "started",
+                    detail=f"{len(files)} files",
+                    files=stage_files,
+                    symbols=hunt_symbols,
+                )
                 logger.info("HunterPool starting on %d files", len(files))
                 pool = HunterPool(
                     HuntPoolConfig(
@@ -1196,6 +1285,8 @@ class SourceHuntRunner:
                         seed_corpus_by_file=seed_corpus_by_file,
                         shard_entry_points=self._shard_entry_points,
                         findings_pool=findings_pool,
+                        trajectory_root=(Path(self.output_dir) / self._session_id / "trajectories"),
+                        instrumentation=self._instrumentation,
                     )
                 )
                 try:
@@ -1208,15 +1299,26 @@ class SourceHuntRunner:
                             fallback_description="Budget exhausted; partial hunter results retained",
                         )
                         self._emit_stage(
-                            "hunt", "budget_exhausted", findings_so_far=len(all_findings),
+                            "hunt",
+                            "budget_exhausted",
+                            findings_so_far=len(all_findings),
                             cost_usd=pool.total_spent,
                             detail=f"{len(all_findings)} partial findings",
+                            files=[str(finding.file or "") for finding in all_findings],
+                            symbols=self._finding_symbols(all_findings),
+                            finding_ids=[finding.id for finding in all_findings],
                         )
                     else:
                         pipeline_status.record_succeeded("hunter_pool")
                         self._emit_stage(
-                            "hunt", "completed", findings_so_far=len(all_findings),
-                            cost_usd=pool.total_spent, detail=f"{len(all_findings)} findings",
+                            "hunt",
+                            "completed",
+                            findings_so_far=len(all_findings),
+                            cost_usd=pool.total_spent,
+                            detail=f"{len(all_findings)} findings",
+                            files=[str(finding.file or "") for finding in all_findings],
+                            symbols=self._finding_symbols(all_findings),
+                            finding_ids=[finding.id for finding in all_findings],
                         )
                 except BudgetExceeded:
                     logger.info("HunterPool stopped because the run budget is exhausted")
@@ -1225,11 +1327,28 @@ class SourceHuntRunner:
                         StageOutcome.SKIPPED,
                         fallback_description="Budget exhausted; partial hunter results retained",
                     )
-                except Exception:
+                    self._emit_stage(
+                        "hunt",
+                        "budget_exhausted",
+                        findings_so_far=len(all_findings),
+                        files=stage_files,
+                        symbols=hunt_symbols,
+                        finding_ids=[finding.id for finding in all_findings],
+                    )
+                except Exception as exc:
                     logger.warning("HunterPool run failed", exc_info=True)
                     pipeline_status.record_degraded(
                         "hunter_pool",
                         "Hunter phase produced no findings due to error",
+                    )
+                    self._emit_stage(
+                        "hunt",
+                        "degraded",
+                        findings_so_far=len(all_findings),
+                        files=stage_files,
+                        symbols=hunt_symbols,
+                        finding_ids=[finding.id for finding in all_findings],
+                        error={"type": type(exc).__name__, "message": str(exc)},
                     )
                 spent_per_tier = pool.spent_per_tier
                 band_stats = {
@@ -1244,11 +1363,28 @@ class SourceHuntRunner:
                 files_hunted = pool.completed_target_count
             else:
                 logger.info("HunterPool skipped; no LLM available")
+                if not files:
+                    hunt_status = "skipped"
+                    hunt_detail = "No source files were available"
+                elif self._budget_exhausted():
+                    hunt_status = "budget_exhausted"
+                    hunt_detail = "Run budget was exhausted before hunting"
+                else:
+                    hunt_status = "degraded"
+                    hunt_detail = "No hunter model was available"
+                self._emit_stage(
+                    "hunt",
+                    hunt_status,
+                    detail=hunt_detail,
+                    files=stage_files,
+                    symbols=hunt_symbols,
+                )
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
             if self._enable_behavior_monitor and all_findings:
                 try:
                     from .behavior_monitor import BehaviorMonitor
+
                     bmon = BehaviorMonitor(session_id=self._session_id)
                     for f in all_findings:
                         for field in ("description", "poc", "exploit", "evidence"):
@@ -1259,7 +1395,8 @@ class SourceHuntRunner:
                     if alerts:
                         logger.warning(
                             "Behavior monitor: %d alerts — %s",
-                            len(alerts), bmon.summary(),
+                            len(alerts),
+                            bmon.summary(),
                         )
                 except Exception:
                     logger.debug("Behavior monitor failed", exc_info=True)
@@ -1273,7 +1410,9 @@ class SourceHuntRunner:
             if historical_db is not None and all_findings and self._injected_findings_pool is None:
                 try:
                     count = historical_db.ingest_campaign(
-                        all_findings, repo_url=self.repo_url, session_id=self._session_id,
+                        all_findings,
+                        repo_url=self.repo_url,
+                        session_id=self._session_id,
                     )
                     logger.info("Persisted %d findings to historical DB", count)
                 except Exception:
@@ -1284,11 +1423,7 @@ class SourceHuntRunner:
             # 3.7. Subsystem hunt (spec 006)
             subsystems_hunted = 0
             subsystem_spent = 0.0
-            if (
-                self._enable_subsystem_hunt
-                and hunter_llm is not None
-                and self._budget_exhausted()
-            ):
+            if self._enable_subsystem_hunt and hunter_llm is not None and self._budget_exhausted():
                 logger.info(
                     "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
                     self.budget_usd,
@@ -1303,8 +1438,11 @@ class SourceHuntRunner:
                 from .subsystem import (
                     SubsystemHuntRunner as SubsysRunner,
                 )
+
                 subsystem_llm = self._get_native_client(
-                    "hunter", self.hunter_llm, budget_stage="subsystem_hunt",
+                    "hunter",
+                    self.hunter_llm,
+                    budget_stage="subsystem_hunt",
                 )
 
                 subsystem_targets: list = []
@@ -1312,7 +1450,8 @@ class SourceHuntRunner:
                     for sp in self._subsystem_paths:
                         try:
                             st = subsystem_from_path(
-                                sp, files,
+                                sp,
+                                files,
                                 callgraph=preprocess_result.callgraph,
                                 entry_points_by_file=entry_points_by_file,
                             )
@@ -1327,13 +1466,38 @@ class SourceHuntRunner:
                     )
 
                 if subsystem_targets:
+                    subsystem_files = sorted(
+                        {
+                            str(file_target.get("path") or "")
+                            for subsystem in subsystem_targets
+                            for file_target in subsystem.files
+                        }
+                    )
+                    subsystem_symbols = sorted(
+                        {
+                            str(getattr(entry_point, "function_name", "") or "")
+                            for subsystem in subsystem_targets
+                            for entry_point in subsystem.entry_points
+                            if getattr(entry_point, "function_name", "")
+                        }
+                    )
+                    self._emit_stage(
+                        "subsystem_hunt",
+                        "started",
+                        detail=f"{len(subsystem_targets)} subsystems",
+                        files=subsystem_files,
+                        symbols=subsystem_symbols,
+                    )
                     logger.info(
-                        "Subsystem hunt: %d targets identified", len(subsystem_targets),
+                        "Subsystem hunt: %d targets identified",
+                        len(subsystem_targets),
                     )
                     for st in subsystem_targets:
                         logger.info(
                             "  %s (%d files, priority=%.2f)",
-                            st.name, len(st.files), st.priority,
+                            st.name,
+                            len(st.files),
+                            st.priority,
                         )
                     # Bound the whole subsystem phase to whatever --budget is
                     # left, split evenly across targets, so 3 subsystems can't
@@ -1346,23 +1510,30 @@ class SourceHuntRunner:
                         per_subsystem_budget = remaining / len(subsystem_targets)
                         if self._subsystem_budget_usd:
                             per_subsystem_budget = min(
-                                per_subsystem_budget, self._subsystem_budget_usd,
+                                per_subsystem_budget,
+                                self._subsystem_budget_usd,
                             )
                     else:
                         per_subsystem_budget = self._subsystem_budget_usd or 100.0
-                    subsys_runner = SubsysRunner(SubsystemHuntConfig(
-                        subsystems=subsystem_targets,
-                        repo_path=repo_path,
-                        sandbox_factory=self.sandbox_factory,
-                        llm=subsystem_llm,
-                        max_parallel=self._subsystem_max_parallel,
-                        budget_per_subsystem_usd=per_subsystem_budget,
-                        findings_pool=findings_pool,
-                        session_id_prefix=f"{self._session_id}-subsys",
-                        sandbox_manager=self._sandbox_manager,
-                        campaign_hint=self._campaign_hint,
-                        callgraph=preprocess_result.callgraph,
-                    ))
+                    subsys_runner = SubsysRunner(
+                        SubsystemHuntConfig(
+                            subsystems=subsystem_targets,
+                            repo_path=repo_path,
+                            sandbox_factory=self.sandbox_factory,
+                            llm=subsystem_llm,
+                            max_parallel=self._subsystem_max_parallel,
+                            budget_per_subsystem_usd=per_subsystem_budget,
+                            findings_pool=findings_pool,
+                            session_id_prefix=f"{self._session_id}-subsys",
+                            sandbox_manager=self._sandbox_manager,
+                            campaign_hint=self._campaign_hint,
+                            callgraph=preprocess_result.callgraph,
+                            trajectory_root=(
+                                Path(self.output_dir) / self._session_id / "trajectories"
+                            ),
+                            instrumentation=self._instrumentation,
+                        )
+                    )
                     try:
                         subsys_findings = await subsys_runner.arun()
                         all_findings.extend(subsys_findings)
@@ -1370,24 +1541,48 @@ class SourceHuntRunner:
                         subsystem_spent = subsys_runner.total_spent
                         logger.info(
                             "Subsystem hunt completed: %d findings, $%.4f spent",
-                            len(subsys_findings), subsystem_spent,
+                            len(subsys_findings),
+                            subsystem_spent,
                         )
-                    except Exception:
+                        self._emit_stage(
+                            "subsystem_hunt",
+                            "completed",
+                            findings_so_far=len(subsys_findings),
+                            cost_usd=subsystem_spent,
+                            files=subsystem_files,
+                            symbols=subsystem_symbols,
+                            finding_ids=[finding.id for finding in subsys_findings],
+                        )
+                    except Exception as exc:
                         logger.warning("Subsystem hunt failed", exc_info=True)
                         pipeline_status.record_degraded(
                             "subsystem_hunt",
                             "Subsystem hunt failed; only per-file findings available",
                         )
+                        self._emit_stage(
+                            "subsystem_hunt",
+                            "degraded",
+                            files=subsystem_files,
+                            symbols=subsystem_symbols,
+                            error={"type": type(exc).__name__, "message": str(exc)},
+                        )
 
             # 4. Verify (unless --no-verify)
             verified: list[Finding] = []
             rejected: list[Finding] = []
+            verify_status = "completed"
             self._emit_stage(
-                "verify", "started", findings_so_far=len(all_findings),
+                "verify",
+                "started",
+                findings_so_far=len(all_findings),
                 detail=f"{len(all_findings)} findings to verify",
+                files=[str(finding.file or "") for finding in all_findings],
+                symbols=self._finding_symbols(all_findings),
+                finding_ids=[finding.id for finding in all_findings],
             )
             if not self.no_verify:
                 if self._budget_exhausted():
+                    verify_status = "budget_exhausted"
                     pipeline_status.record(
                         "verifier",
                         StageOutcome.SKIPPED,
@@ -1395,18 +1590,25 @@ class SourceHuntRunner:
                     )
                 else:
                     verifier_llm = self._get_native_client(
-                        "verifier", self.verifier_llm, budget_stage="verify",
+                        "verifier",
+                        self.verifier_llm,
+                        budget_stage="verify",
                     )
                     if verifier_llm is not None:
                         if self.validator_mode == "v2":
                             verified, rejected = await self._verify_v2(
-                                verifier_llm, all_findings, repo_path,
+                                verifier_llm,
+                                all_findings,
+                                repo_path,
                             )
                         else:
                             verified = await self._verify_v1(
-                                verifier_llm, all_findings, repo_path,
+                                verifier_llm,
+                                all_findings,
+                                repo_path,
                             )
                     else:
+                        verify_status = "degraded"
                         for f in all_findings:
                             f["verified"] = True
                         verified = all_findings
@@ -1419,7 +1621,8 @@ class SourceHuntRunner:
                     finding["verified"] = False
                 verified = []
                 pipeline_status.record(
-                    "verifier", StageOutcome.SKIPPED,
+                    "verifier",
+                    StageOutcome.SKIPPED,
                     fallback_description="Verification skipped (--no-verify)",
                 )
 
@@ -1429,21 +1632,24 @@ class SourceHuntRunner:
                 else f"{len(verified)} verified, {len(rejected)} rejected"
             )
             self._emit_stage(
-                "verify", "completed", findings_so_far=len(all_findings),
+                "verify",
+                verify_status,
+                findings_so_far=len(all_findings),
                 detail=verify_detail,
+                files=[str(finding.file or "") for finding in all_findings],
+                symbols=self._finding_symbols(all_findings),
+                finding_ids=[finding.id for finding in all_findings],
             )
             if rejected:
                 self._write_rejected_findings(rejected)
 
             # 4.5. v0.3: Extract mechanisms from verified findings and persist them
             #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
-            if (
-                self._mechanism_store is not None
-                and verified
-                and not self._budget_exhausted()
-            ):
+            if self._mechanism_store is not None and verified and not self._budget_exhausted():
                 verifier_llm_for_extract = self._get_native_client(
-                    "verifier", self.verifier_llm, budget_stage="mechanism_extraction",
+                    "verifier",
+                    self.verifier_llm,
+                    budget_stage="mechanism_extraction",
                 )
                 if verifier_llm_for_extract is not None:
                     try:
@@ -1469,7 +1675,9 @@ class SourceHuntRunner:
             #       we don't re-spawn hunters on each match (that's a v1.0 pass).
             if self.enable_variant_loop and verified and not self._budget_exhausted():
                 variant_llm = self._get_native_client(
-                    "verifier", self.verifier_llm, budget_stage="variant_loop",
+                    "verifier",
+                    self.verifier_llm,
+                    budget_stage="variant_loop",
                 )
                 if variant_llm is not None:
                     try:
@@ -1492,8 +1700,19 @@ class SourceHuntRunner:
                         )
                         for seed in variant_result.seeds:
                             parent = seed.original_finding
+                            variant_id = stable_run_id(
+                                "variant",
+                                {
+                                    "run_id": self._session_id,
+                                    "parent_id": parent.id,
+                                    "file": seed.match.file,
+                                    "line": seed.match.line_number,
+                                    "matched_text": seed.match.matched_text,
+                                    "pattern": seed.match.pattern.semantic_description,
+                                },
+                            )
                             variant_finding = Finding(
-                                id=f"variant-{uuid.uuid4().hex[:8]}",
+                                id=variant_id,
                                 file=seed.match.file,
                                 line_number=seed.match.line_number,
                                 finding_type=parent.finding_type or "variant",
@@ -1536,17 +1755,22 @@ class SourceHuntRunner:
                 from .stability import StabilityVerifier, apply_stability_result
 
                 stability_llm = self._get_native_client(
-                    "verifier", self.verifier_llm, budget_stage="stability",
+                    "verifier",
+                    self.verifier_llm,
+                    budget_stage="stability",
                 )
                 sv = StabilityVerifier(
                     sandbox_manager=self._sandbox_manager,
                     hardening_llm=stability_llm,
                 )
                 stability_eligible = [
-                    f for f in verified
-                    if f.get("poc") and f.get("crash_evidence")
+                    f
+                    for f in verified
+                    if f.get("poc")
+                    and f.get("crash_evidence")
                     and evidence_at_or_above(
-                        f.get("evidence_level", "suspicion"), "crash_reproduced",
+                        f.get("evidence_level", "suspicion"),
+                        "crash_reproduced",
                     )
                 ]
                 stable_verified: list[Finding] = []
@@ -1568,27 +1792,36 @@ class SourceHuntRunner:
                     except Exception:
                         logger.warning(
                             "Stability check failed for %s",
-                            finding.get("id"), exc_info=True,
+                            finding.get("id"),
+                            exc_info=True,
                         )
                         stable_verified.append(finding)
                 non_poc = [f for f in verified if f not in stability_eligible]
                 verified = stable_verified + non_poc
 
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
-            self._emit_stage("exploit", "started", findings_so_far=len(all_findings))
+            self._emit_stage(
+                "exploit",
+                "started",
+                findings_so_far=len(all_findings),
+                files=[str(finding.file or "") for finding in verified],
+                symbols=self._finding_symbols(verified),
+                finding_ids=[finding.id for finding in verified],
+            )
             exploited: list[Finding] = []
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
             patched: list[Finding] = []
             if not self.no_exploit and not self._budget_exhausted():
                 exploiter_llm = self._get_native_client(
-                    "sourcehunt_exploit", self.exploiter_llm, budget_stage="exploit",
+                    "sourcehunt_exploit",
+                    self.exploiter_llm,
+                    budget_stage="exploit",
                 )
                 if exploiter_llm is not None:
                     eligible = filter_by_evidence(verified, "crash_reproduced")
                     has_sandbox = (
-                        self._sandbox_manager is not None
-                        or self.sandbox_factory is not None
+                        self._sandbox_manager is not None or self.sandbox_factory is not None
                     )
                     if eligible and has_sandbox:
                         agentic = AgenticExploiter(
@@ -1599,15 +1832,13 @@ class SourceHuntRunner:
                             budget_band=self._exploit_budget_band,
                             output_dir=str(self._ensure_output_dir_layout()),
                             project_name=(
-                                self.repo_url.split("/")[-1]
-                                if self.repo_url else "target"
+                                self.repo_url.split("/")[-1] if self.repo_url else "target"
                             ),
                         )
                         for finding in eligible:
                             if self._budget_exhausted():
                                 logger.info(
-                                    "Exploit phase halted: budget $%.2f "
-                                    "exhausted ($%.2f spent)",
+                                    "Exploit phase halted: budget $%.2f exhausted ($%.2f spent)",
                                     self.budget_usd,
                                     self._run_spent_usd(),
                                 )
@@ -1617,10 +1848,7 @@ class SourceHuntRunner:
                                 apply_exploiter_result(finding, exploit_result)
                                 if exploit_result.success:
                                     exploited.append(finding)
-                                if (
-                                    exploit_result.partial
-                                    and findings_pool is not None
-                                ):
+                                if exploit_result.partial and findings_pool is not None:
                                     finding["primitive_type"] = (
                                         exploit_result.primitive_type
                                         or finding.get("primitive_type", "")
@@ -1632,7 +1860,8 @@ class SourceHuntRunner:
                             except Exception:
                                 logger.warning(
                                     "Agentic exploiter failed for %s",
-                                    finding.get("id"), exc_info=True,
+                                    finding.get("id"),
+                                    exc_info=True,
                                 )
                     elif eligible:
                         e = Exploiter(exploiter_llm)
@@ -1650,23 +1879,21 @@ class SourceHuntRunner:
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
-            if (
-                self.enable_elaboration
-                and exploited
-                and not self._budget_exhausted()
-            ):
+            if self.enable_elaboration and exploited and not self._budget_exhausted():
                 from .elaboration import (
                     ElaborationAgent,
                     prioritize_for_elaboration,
                 )
 
                 elaboration_llm = self._get_native_client(
-                    "sourcehunt_exploit", self.exploiter_llm,
+                    "sourcehunt_exploit",
+                    self.exploiter_llm,
                     budget_stage="elaboration",
                 )
                 if elaboration_llm is not None:
                     targets = prioritize_for_elaboration(
-                        exploited, self._elaboration_cap,
+                        exploited,
+                        self._elaboration_cap,
                     )
                     if targets:
                         elab_agent = ElaborationAgent(
@@ -1677,15 +1904,13 @@ class SourceHuntRunner:
                             budget_band=self._exploit_budget_band,
                             output_dir=str(self._ensure_output_dir_layout()),
                             project_name=(
-                                self.repo_url.split("/")[-1]
-                                if self.repo_url else "target"
+                                self.repo_url.split("/")[-1] if self.repo_url else "target"
                             ),
                         )
                         for finding in targets:
                             if self._budget_exhausted():
                                 logger.info(
-                                    "Elaboration halted: budget $%.2f "
-                                    "exhausted ($%.2f spent)",
+                                    "Elaboration halted: budget $%.2f exhausted ($%.2f spent)",
                                     self.budget_usd,
                                     self._run_spent_usd(),
                                 )
@@ -1694,7 +1919,8 @@ class SourceHuntRunner:
                                 elab_result = await elab_agent.aattempt(finding)
                                 if elab_result.elaborated:
                                     elab_finding = _apply_elaboration(
-                                        finding, elab_result,
+                                        finding,
+                                        elab_result,
                                     )
                                     all_findings.append(elab_finding)
                                     elaborated.append(elab_finding)
@@ -1704,7 +1930,8 @@ class SourceHuntRunner:
                             except Exception:
                                 logger.warning(
                                     "Elaboration failed for %s",
-                                    finding.get("id"), exc_info=True,
+                                    finding.get("id"),
+                                    exc_info=True,
                                 )
 
             # 5.5. v0.3: Auto-patch mode (opt-in).
@@ -1712,7 +1939,9 @@ class SourceHuntRunner:
             # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
             if self.enable_auto_patch and verified and not self._budget_exhausted():
                 patcher_llm = self._get_native_client(
-                    "sourcehunt_exploit", self.exploiter_llm, budget_stage="auto_patch",
+                    "sourcehunt_exploit",
+                    self.exploiter_llm,
+                    budget_stage="auto_patch",
                 )
                 if patcher_llm is not None:
                     try:
@@ -1774,10 +2003,13 @@ class SourceHuntRunner:
                 # 5.86. v0.5: Queue findings into disclosure DB (spec 011).
                 try:
                     from .disclosure_db import DisclosureDB
+
                     disclosure_db = DisclosureDB()
                     try:
                         disclosure_db.queue_findings(
-                            verified, self.repo_url, self._session_id,
+                            verified,
+                            self.repo_url,
+                            self._session_id,
                         )
                     finally:
                         disclosure_db.close()
@@ -1788,6 +2020,7 @@ class SourceHuntRunner:
             if self._enable_artifact_store and exploited:
                 try:
                     from .artifact_store import ArtifactStore
+
                     artifact_store = ArtifactStore()
                     for f in exploited:
                         exploit_data = f.get("exploit") or f.get("poc")
@@ -1795,7 +2028,9 @@ class SourceHuntRunner:
                             if isinstance(exploit_data, str):
                                 exploit_data = exploit_data.encode()
                             artifact_store.store_exploit(
-                                f.get("id", ""), exploit_data, operator="pipeline",
+                                f.get("id", ""),
+                                exploit_data,
+                                operator="pipeline",
                             )
                 except Exception:
                     logger.warning("Artifact store failed", exc_info=True)
@@ -1803,44 +2038,59 @@ class SourceHuntRunner:
             # 5.88. v0.6: Auto-commit findings with root_cause_explained (spec 014).
             try:
                 from .commitment import CommitmentLog
+
                 committable = filter_by_evidence(verified, "root_cause_explained")
                 if committable:
                     commitment_log = CommitmentLog()
                     for f in committable:
                         commitment_log.commit_finding(f, project=self.repo_url)
                     logger.info(
-                        "Committed %d findings to commitment log", len(committable),
+                        "Committed %d findings to commitment log",
+                        len(committable),
                     )
             except Exception:
                 logger.warning("Auto-commitment failed", exc_info=True)
 
             self._emit_stage(
-                "exploit", "completed", findings_so_far=len(all_findings),
+                "exploit",
+                (
+                    "skipped"
+                    if self.no_exploit
+                    else "budget_exhausted"
+                    if self._budget_exhausted()
+                    else "completed"
+                ),
+                findings_so_far=len(all_findings),
                 detail=f"{len(exploited)} exploited",
+                files=[str(finding.file or "") for finding in all_findings],
+                symbols=self._finding_symbols(all_findings),
+                finding_ids=[finding.id for finding in all_findings],
             )
 
             # 6. Report
-            self._emit_stage("report", "started", findings_so_far=len(all_findings))
+            self._emit_stage(
+                "report",
+                "started",
+                findings_so_far=len(all_findings),
+                files=[str(finding.file or "") for finding in all_findings],
+                symbols=self._finding_symbols(all_findings),
+                finding_ids=[finding.id for finding in all_findings],
+            )
             assert self._spend_ledger is not None
             ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
             if ledger_tier_spend:
                 spent_per_tier = {
-                    tier: ledger_tier_spend.get(tier, 0.0)
-                    for tier in ("A", "B", "C")
+                    tier: ledger_tier_spend.get(tier, 0.0) for tier in ("A", "B", "C")
                 }
             ledger_band_spend = self._spend_ledger.spent_by("band", stage="hunt")
             if band_stats is not None and ledger_band_spend:
                 for band in ("fast", "standard", "deep"):
                     band_stats[f"{band}_cost"] = ledger_band_spend.get(band, 0.0)
-            ledger_subsystem_spend = self._spend_ledger.spent_by(
-                "stage"
-            ).get("subsystem_hunt", 0.0)
+            ledger_subsystem_spend = self._spend_ledger.spent_by("stage").get("subsystem_hunt", 0.0)
             if ledger_subsystem_spend:
                 subsystem_spent = ledger_subsystem_spend
 
-            run_status = (
-                "budget_exhausted" if self._budget_exhausted() else "completed"
-            )
+            run_status = "budget_exhausted" if self._budget_exhausted() else "completed"
             if run_status == "budget_exhausted":
                 pipeline_status.record(
                     "budget",
@@ -1851,7 +2101,8 @@ class SourceHuntRunner:
             _pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
             _subsystem_stats = (
                 {"subsystems_hunted": subsystems_hunted, "subsystem_spent_usd": subsystem_spent}
-                if subsystems_hunted > 0 else None
+                if subsystems_hunted > 0
+                else None
             )
             output_paths = self._write_report(
                 findings=all_findings,
@@ -1864,18 +2115,30 @@ class SourceHuntRunner:
                 budget_summary=budget_summary,
             )
 
+            report_status = "degraded" if self._last_reporting_error else "completed"
             self._emit_stage(
-                "report", "completed", findings_so_far=len(all_findings),
+                "report",
+                report_status,
+                findings_so_far=len(all_findings),
                 cost_usd=budget_summary["total_spent"],
+                files=[str(finding.file or "") for finding in all_findings],
+                symbols=self._finding_symbols(all_findings),
+                finding_ids=[finding.id for finding in all_findings],
+                error=self._last_reporting_error,
+            )
+            self._finalize_instrumentation(run_status)
+            output_paths.update(
+                {
+                    "instrumentation": str(self._instrumentation.summary_path),
+                    "instrumentation_events": str(self._instrumentation.events_path),
+                }
             )
 
             duration = time.monotonic() - start_time
             exit_findings = all_findings if self.no_verify else verified
             return SourceHuntResult(
                 exit_code=(
-                    3
-                    if run_status == "budget_exhausted"
-                    else self._exit_code(exit_findings)
+                    3 if run_status == "budget_exhausted" else self._exit_code(exit_findings)
                 ),
                 repo_url=self.repo_url,
                 repo_path=repo_path,
@@ -1897,8 +2160,9 @@ class SourceHuntRunner:
                 budget_usd=self.budget_usd,
             )
         finally:
-            if self._spend_ledger is not None and not self._spend_ledger.finalized:
-                self._spend_ledger.finalize("failed")
+            if self._spend_ledger is not None:
+                self._finalize_spend_ledger("failed")
+            self._finalize_instrumentation("failed")
             if self._sandbox_manager is not None:
                 try:
                     self._sandbox_manager.cleanup(remove_image=False)
@@ -2040,7 +2304,9 @@ class SourceHuntRunner:
                 if self.enable_patch_oracle and result.is_real:
                     result = await self._run_patch_oracle_v1(v, finding, repo_path, result)
                 apply_verifier_result(
-                    finding, result, session_id=self._session_id + "-v",
+                    finding,
+                    result,
+                    session_id=self._session_id + "-v",
                 )
                 if finding.get("verified"):
                     verified.append(finding)
@@ -2049,7 +2315,9 @@ class SourceHuntRunner:
                 break
             except Exception:
                 logger.warning(
-                    "Verifier failed for %s", finding.get("id"), exc_info=True,
+                    "Verifier failed for %s",
+                    finding.get("id"),
+                    exc_info=True,
                 )
         return verified
 
@@ -2077,10 +2345,14 @@ class SourceHuntRunner:
                 )
                 if self.enable_patch_oracle and verdict.advance:
                     verdict = await self._run_patch_oracle_v2(
-                        val, finding, repo_path, verdict,
+                        val,
+                        finding,
+                        repo_path,
+                        verdict,
                     )
                 apply_validator_verdict(
-                    finding, verdict,
+                    finding,
+                    verdict,
                     session_id=self._session_id + "-v",
                     discoverer_severity=discoverer_sev,
                 )
@@ -2094,7 +2366,9 @@ class SourceHuntRunner:
                 break
             except Exception:
                 logger.warning(
-                    "Validator failed for %s", finding.get("id"), exc_info=True,
+                    "Validator failed for %s",
+                    finding.get("id"),
+                    exc_info=True,
                 )
         return verified, rejected
 
@@ -2171,20 +2445,24 @@ class SourceHuntRunner:
             import datetime
 
             from .calibration import CalibrationRecord
-            self._calibration_store.append(CalibrationRecord(
-                finding_id=finding.get("id", ""),
-                session_id=self._session_id,
-                cwe=finding.get("cwe", ""),
-                discoverer_severity=discoverer_sev or "unknown",
-                validator_severity=verdict.severity_validated,
-                axes={k: v.passed for k, v in verdict.axes.items()},
-                timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            ))
+
+            self._calibration_store.append(
+                CalibrationRecord(
+                    finding_id=finding.get("id", ""),
+                    session_id=self._session_id,
+                    cwe=finding.get("cwe", ""),
+                    discoverer_severity=discoverer_sev or "unknown",
+                    validator_severity=verdict.severity_validated,
+                    axes={k: v.passed for k, v in verdict.axes.items()},
+                    timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+            )
         except Exception:
             logger.debug("Calibration record failed", exc_info=True)
 
     def _write_rejected_findings(self, rejected: list[Finding]) -> None:
         import json as _json
+
         session_dir = self._ensure_output_dir_layout()
         path = session_dir / "rejected_findings.jsonl"
         try:
@@ -2338,7 +2616,8 @@ class SourceHuntRunner:
         else:
             if gvisor_rt:
                 self.sandbox_factory = lambda **kw: manager.spawn(
-                    runtime=kw.pop("runtime", gvisor_rt), **kw,
+                    runtime=kw.pop("runtime", gvisor_rt),
+                    **kw,
                 )
             else:
                 self.sandbox_factory = manager.spawn
@@ -2353,6 +2632,26 @@ class SourceHuntRunner:
     ) -> SourceHuntResult:
         """depth=quick exit — only static findings, no LLM hunters."""
         all_findings = self._merge_static_findings([], preprocess_result)
+        target_files = [str(item.get("path") or "") for item in preprocess_result.file_targets]
+        finding_files = [str(finding.file or "") for finding in all_findings]
+        finding_symbols = self._finding_symbols(all_findings)
+        finding_ids = [finding.id for finding in all_findings]
+        self._emit_stage(
+            "hunt",
+            "skipped",
+            detail="Quick depth performs static analysis only",
+            files=target_files,
+        )
+        for stage in ("verify", "exploit"):
+            self._emit_stage(
+                stage,
+                "skipped",
+                findings_so_far=len(all_findings),
+                detail="Quick depth performs static analysis only",
+                files=finding_files,
+                symbols=finding_symbols,
+                finding_ids=finding_ids,
+            )
         # Populate KG even for the quick path
         if self.enable_knowledge_graph and all_findings:
             try:
@@ -2367,12 +2666,37 @@ class SourceHuntRunner:
                 fallback_description="Dollar cap reached; partial results retained",
             )
         budget_summary = self._finalize_spend_ledger(run_status)
+        self._emit_stage(
+            "report",
+            "started",
+            findings_so_far=len(all_findings),
+            files=finding_files,
+            symbols=finding_symbols,
+            finding_ids=finding_ids,
+        )
         output_paths = self._write_report(
             findings=all_findings,
             verified=[],
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
             pipeline_status=pipeline_status,
             budget_summary=budget_summary,
+        )
+        report_status = "degraded" if self._last_reporting_error else "completed"
+        self._emit_stage(
+            "report",
+            report_status,
+            findings_so_far=len(all_findings),
+            files=[str(finding.file or "") for finding in all_findings],
+            symbols=self._finding_symbols(all_findings),
+            finding_ids=[finding.id for finding in all_findings],
+            error=self._last_reporting_error,
+        )
+        self._finalize_instrumentation(run_status)
+        output_paths.update(
+            {
+                "instrumentation": str(self._instrumentation.summary_path),
+                "instrumentation_events": str(self._instrumentation.events_path),
+            }
         )
         duration = time.monotonic() - start_time
         return SourceHuntResult(
@@ -2407,12 +2731,23 @@ class SourceHuntRunner:
         """
         out = list(existing)
         for sf in preprocess_result.static_findings:
+            relative_file = Path(
+                os.path.relpath(sf.file_path, preprocess_result.repo_path)
+            ).as_posix()
             out.append(
                 Finding(
-                    id=f"static-{uuid.uuid4().hex[:8]}",
-                    file=Path(
-                        os.path.relpath(sf.file_path, preprocess_result.repo_path)
-                    ).as_posix(),
+                    id=stable_run_id(
+                        "static",
+                        {
+                            "run_id": getattr(self, "_session_id", "unscoped"),
+                            "file": relative_file,
+                            "line": sf.line_number,
+                            "type": sf.finding_type,
+                            "cwe": sf.cwe,
+                            "description": sf.description,
+                        },
+                    ),
+                    file=relative_file,
                     line_number=sf.line_number,
                     finding_type=sf.finding_type,
                     cwe=sf.cwe,
@@ -2425,6 +2760,21 @@ class SourceHuntRunner:
                 )
             )
         return out
+
+    @staticmethod
+    def _finding_symbols(findings: list[Finding]) -> list[str]:
+        symbols: set[str] = set()
+        for finding in findings:
+            trace = finding.vulnerability_trace or {}
+            for step in trace.get("steps", []):
+                function = (
+                    step.get("function", "")
+                    if isinstance(step, dict)
+                    else getattr(step, "function", "")
+                )
+                if function:
+                    symbols.add(str(function))
+        return sorted(symbols)
 
     def _exit_code(self, findings: list[Finding]) -> int:
         severities = {
@@ -2494,6 +2844,22 @@ class SourceHuntRunner:
 
     # --- Reporting ----------------------------------------------------------
 
+    def _record_reporting_failure(
+        self,
+        exc: Exception,
+        findings: list[Finding],
+    ) -> None:
+        """Retain reporting failures without allowing telemetry to mask them."""
+
+        try:
+            self._instrumentation.reporting_failure(
+                str(exc),
+                error_type=type(exc).__name__,
+                finding_ids=[finding.id for finding in findings],
+            )
+        except Exception:
+            logger.debug("Could not persist sourcehunt reporting failure", exc_info=True)
+
     def _write_report(
         self,
         findings: list[Finding],
@@ -2513,8 +2879,13 @@ class SourceHuntRunner:
         """
         try:
             from .reporter import write_sourcehunt_report
-        except ImportError:
+        except ImportError as exc:
             logger.warning("reporter.py not yet available; skipping report")
+            self._last_reporting_error = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            self._record_reporting_failure(exc, findings)
             return {}
         try:
             return write_sourcehunt_report(
@@ -2531,6 +2902,11 @@ class SourceHuntRunner:
                 pipeline_status=pipeline_status,
                 budget_summary=budget_summary,
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)
+            self._last_reporting_error = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            self._record_reporting_failure(exc, findings)
             return {}

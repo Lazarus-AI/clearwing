@@ -450,9 +450,57 @@ notice the type mismatch with declarations in `libavcodec/h264dec.h`.
 
 Do not count a candidate or an incomplete certificate as a successful
 finding. They are stage-level signals. The evaluation harness in
-`evaluations/ffmpeg_proof.yaml` records the expected mechanism, proof plans,
-predicates, fixed-commit decision, counterfactual relations, and cutover
-gates.
+`evaluations/sourcehunt_ground_truth.yaml` records the target files,
+functions, expected extracted fact symbols, entry point, source, sinks,
+transformation, invariant, guard,
+trigger constraints, expected runtime behavior, threat model, mechanism,
+proof plans, predicates, evidence kinds, and decision. The older
+`evaluations/ffmpeg_proof.yaml` remains a compact counterfactual-control
+description.
+
+To include FFmpeg in the identical local/frontier seven-level ablation matrix,
+first build the plan:
+
+```bash
+clearwing eval sourcehunt-plan \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --cases ffmpeg-h264-slice-sentinel \
+  --local-model Qwen3.5-35B \
+  --frontier-model YOUR_FRONTIER_MODEL \
+  --output "$CASE_DIR/eval-plan.json"
+```
+
+The plan's Level 1 arms receive no hint. Later levels cumulatively reveal the
+target file, target function, source/sink pair, invariant/path, full trace, and
+trigger. Every local/frontier pair has the same `context_id`. Run the plan
+only after preparing the vulnerable checkout and compilation database:
+
+```bash
+clearwing eval sourcehunt-run \
+  --plan "$CASE_DIR/eval-plan.json" \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --checkout ffmpeg-h264-slice-sentinel="$FFMPEG_DIR" \
+  --compile-commands ffmpeg-h264-slice-sentinel="$FFMPEG_DIR/compile_commands.json" \
+  --budget-per-run 10 \
+  --output-dir "$CASE_DIR/eval-sessions" \
+  --checkpoint "$CASE_DIR/eval-observations.json"
+```
+
+When using the full five-case plan, repeat `--checkout` (and the C/C++
+`--compile-commands`) for every case. The runner verifies each checkout's HEAD
+and tracked-file cleanliness against the ground-truth manifest, then
+automatically reloads its atomic checkpoint and resumes by stable run ID.
+Compile the baseline only after every planned arm completes:
+
+```bash
+clearwing eval sourcehunt-baseline \
+  --plan "$CASE_DIR/eval-plan.json" \
+  --observations "$CASE_DIR/eval-observations.json" \
+  --output "$CASE_DIR/eval-baseline.json"
+```
+
+The compiler fails on a partial matrix instead of silently inflating recall.
+Use `--allow-incomplete` only for a visibly marked progress report.
 
 ### Legacy PoC Stability Control
 

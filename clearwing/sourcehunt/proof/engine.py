@@ -15,7 +15,7 @@ from clearwing.llm.budget import spend_metadata
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 from ..preprocessor import Preprocessor
-from .candidates import CandidatePipeline, ThreatModelBuilder
+from .candidates import AssumptionBuilder, CandidatePipeline, ThreatModelBuilder
 from .certificates import CertificateCompiler
 from .context import ContextPacketBuilder
 from .exploration import ExploratoryLane
@@ -81,6 +81,7 @@ class ProofRunConfig:
     falsify: bool = True
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None
+    evaluation_hints: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -144,8 +145,12 @@ class ProofFlowRunner:
             "session_id": session_id,
             "status": "starting",
             "blind_boundary": {
-                "sealed": False,
+                "sealed": not bool(self.config.evaluation_hints),
                 "oracle_evidence_permitted": False,
+            },
+            "evaluation_ablation": {
+                "assisted": bool(self.config.evaluation_hints),
+                "hints": self.config.evaluation_hints,
             },
             "budget": {
                 "max_actions": self.config.max_actions,
@@ -231,7 +236,7 @@ class ProofFlowRunner:
                     },
                     "languages": languages,
                     "blind_boundary": {
-                        "sealed": True,
+                        "sealed": not bool(self.config.evaluation_hints),
                         "oracle_evidence_permitted": False,
                         "snapshot_id": snapshot.id,
                     },
@@ -354,8 +359,10 @@ class ProofFlowRunner:
             graph = ProofGraph(store, snapshot.id)
             plan_registry = ProofPlanRegistry()
             threat_builder = ThreatModelBuilder()
+            assumption_builder = AssumptionBuilder()
             for draft in generated_candidates:
                 candidate_threat = threat_builder.build(draft, extraction.facts)
+                assumptions = assumption_builder.build(draft, candidate_threat)
                 plans = plan_registry.select(draft)
                 obligations = plan_registry.instantiate(draft, plans)
                 payload = draft.model_dump(mode="python")
@@ -363,6 +370,7 @@ class ProofFlowRunner:
                     {
                         "id": "",
                         "threat_model_id": candidate_threat.logical_id,
+                        "assumption_ids": [assumption.logical_id for assumption in assumptions],
                         "proof_plan_ids": [plan.id for plan in plans],
                         "obligation_ids": [obligation.logical_id for obligation in obligations],
                     }
@@ -370,6 +378,8 @@ class ProofFlowRunner:
                 candidate = Candidate.model_validate(payload)
                 store.append(candidate_threat)
                 graph.add_candidate(candidate)
+                for assumption in assumptions:
+                    graph.add_assumption(assumption)
                 for obligation in obligations:
                     graph.add_obligation(obligation)
                 candidates.append(candidate)
@@ -462,6 +472,7 @@ class ProofFlowRunner:
                                     extraction.facts,
                                     extraction.completeness,
                                     threat_model=threat,
+                                    assumptions=list(graph.assumptions.values()),
                                 )
                             if not execution.completed:
                                 scheduler.complete(
@@ -727,6 +738,8 @@ class ProofFlowRunner:
                         list(graph.claims.values()),
                         completeness,
                         threat_model=threat_model,
+                        assumptions=list(graph.assumptions.values()),
+                        evaluation_hints=self.config.evaluation_hints,
                     )
                     store.append(packet)
                     try:

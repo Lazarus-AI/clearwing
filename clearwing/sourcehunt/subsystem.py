@@ -11,13 +11,15 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from clearwing.llm.budget import BudgetExceeded, spend_metadata
 from clearwing.sourcehunt.state import FileTarget, Finding, SubsystemTarget
+
+from .instrumentation import stable_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -81,14 +83,16 @@ def identify_subsystems_auto(
                 fp = f.get("path", "")
                 eps.extend(entry_points_by_file.get(fp, []))
 
-        subsystems.append(SubsystemTarget(
-            name=prefix.replace("/", "_"),
-            root_path=prefix,
-            files=capped_files,
-            entry_points=eps,
-            priority=priority,
-            source="auto",
-        ))
+        subsystems.append(
+            SubsystemTarget(
+                name=prefix.replace("/", "_"),
+                root_path=prefix,
+                files=capped_files,
+                entry_points=eps,
+                priority=priority,
+                source="auto",
+            )
+        )
 
     subsystems.sort(key=lambda s: s.priority, reverse=True)
     return subsystems[:max_subsystems]
@@ -165,6 +169,8 @@ class SubsystemHuntConfig:
     campaign_hint: str | None = None
     callgraph: Any = None
     project_name: str = "target"
+    trajectory_root: str | Path | None = None
+    instrumentation: Any = None
 
 
 class SubsystemHuntRunner:
@@ -193,23 +199,37 @@ class SubsystemHuntRunner:
 
         async def _guarded_run(subsystem: SubsystemTarget) -> list[Finding]:
             async with sem:
-                if (
-                    self.config.total_budget_usd > 0
-                    and self._spent >= self.config.total_budget_usd
-                ):
+                if self.config.total_budget_usd > 0 and self._spent >= self.config.total_budget_usd:
                     logger.info(
-                        "Subsystem %s skipped: total budget exhausted", subsystem.name,
+                        "Subsystem %s skipped: total budget exhausted",
+                        subsystem.name,
                     )
                     return []
-                with spend_metadata(subsystem=subsystem.name):
+                work_item_id = stable_run_id(
+                    "work",
+                    {
+                        "run_id": self.config.session_id_prefix,
+                        "subsystem": subsystem.name,
+                        "files": sorted(str(item.get("path") or "") for item in subsystem.files),
+                    },
+                )
+                with spend_metadata(
+                    subsystem=subsystem.name,
+                    work_item_id=work_item_id,
+                ):
                     findings, cost, tokens, stop = await self._run_one_subsystem(
-                        subsystem, self.config.budget_per_subsystem_usd,
+                        subsystem,
+                        self.config.budget_per_subsystem_usd,
+                        work_item_id=work_item_id,
                     )
                 self._spent += cost
                 self._subsystems_completed += 1
                 logger.info(
                     "Subsystem %s completed: %d findings, $%.4f, stop=%s",
-                    subsystem.name, len(findings), cost, stop,
+                    subsystem.name,
+                    len(findings),
+                    cost,
+                    stop,
                 )
                 if self.config.findings_pool is not None:
                     for f in findings:
@@ -219,10 +239,7 @@ class SubsystemHuntRunner:
                             logger.debug("findings_pool.add failed", exc_info=True)
                 return findings
 
-        tasks = [
-            asyncio.create_task(_guarded_run(s))
-            for s in self.config.subsystems
-        ]
+        tasks = [asyncio.create_task(_guarded_run(s)) for s in self.config.subsystems]
 
         for coro in asyncio.as_completed(tasks):
             try:
@@ -244,6 +261,8 @@ class SubsystemHuntRunner:
         self,
         subsystem: SubsystemTarget,
         budget_usd: float,
+        *,
+        work_item_id: str,
     ) -> tuple[list[Finding], float, int, str]:
         """Spawn sandbox, build agent, run, collect findings."""
         from .hunter import build_subsystem_hunter_agent
@@ -254,10 +273,37 @@ class SubsystemHuntRunner:
                 sandbox = await asyncio.to_thread(self.config.sandbox_factory)
             except Exception as e:
                 logger.warning(
-                    "sandbox_factory failed for subsystem %s: %s", subsystem.name, e,
+                    "sandbox_factory failed for subsystem %s: %s",
+                    subsystem.name,
+                    e,
                 )
 
-        session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
+        session_id = stable_run_id(
+            "hunter",
+            {
+                "run_id": self.config.session_id_prefix,
+                "work_item_id": work_item_id,
+            },
+        )
+        files = [str(item.get("path") or "") for item in subsystem.files]
+        symbols = sorted(
+            {
+                str(getattr(entry_point, "function_name", "") or "")
+                for entry_point in subsystem.entry_points
+                if getattr(entry_point, "function_name", "")
+            }
+        )
+        instrumentation = self.config.instrumentation
+        if instrumentation is not None:
+            instrumentation.record(
+                "work_item",
+                stage="hunt",
+                status="started",
+                files=files,
+                symbols=symbols,
+                work_item_id=work_item_id,
+                metadata={"subsystem": subsystem.name},
+            )
         try:
             hunter, ctx = build_subsystem_hunter_agent(
                 subsystem=subsystem,
@@ -271,25 +317,66 @@ class SubsystemHuntRunner:
                 campaign_hint=self.config.campaign_hint,
                 callgraph=self.config.callgraph,
             )
+            ctx.work_item_id = work_item_id
+            ctx.instrumentation = instrumentation
+            if self.config.trajectory_root is not None:
+                ctx.trajectory_dir = Path(self.config.trajectory_root) / work_item_id
             result = await asyncio.wait_for(
                 hunter.arun(),
                 timeout=self.config.timeout_seconds,
             )
+            findings = list(result.findings)
+            if instrumentation is not None:
+                instrumentation.record(
+                    "work_item",
+                    stage="hunt",
+                    status=result.stop_reason,
+                    files=files,
+                    symbols=symbols,
+                    work_item_id=work_item_id,
+                    finding_ids=[finding.id for finding in findings],
+                    metadata={
+                        "subsystem": subsystem.name,
+                        "cost_usd": result.cost_usd,
+                        "tokens": result.tokens_used,
+                    },
+                )
             return (
-                list(result.findings),
+                findings,
                 result.cost_usd,
                 result.tokens_used,
                 result.stop_reason,
             )
         except asyncio.TimeoutError:
-            logger.warning("Subsystem %s timed out after %ds", subsystem.name, self.config.timeout_seconds)
+            logger.warning(
+                "Subsystem %s timed out after %ds", subsystem.name, self.config.timeout_seconds
+            )
+            if instrumentation is not None:
+                instrumentation.record(
+                    "work_item",
+                    stage="hunt",
+                    status="timeout",
+                    files=files,
+                    symbols=symbols,
+                    work_item_id=work_item_id,
+                )
             if "ctx" in locals():
                 return (list(ctx.findings), 0.0, 0, "timeout")
             return ([], 0.0, 0, "timeout")
         except BudgetExceeded:
             raise
-        except Exception:
+        except Exception as exc:
             logger.warning("Subsystem %s failed", subsystem.name, exc_info=True)
+            if instrumentation is not None:
+                instrumentation.record(
+                    "work_item",
+                    stage="hunt",
+                    status="failed",
+                    files=files,
+                    symbols=symbols,
+                    work_item_id=work_item_id,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
             return ([], 0.0, 0, "error")
         finally:
             if sandbox is not None:

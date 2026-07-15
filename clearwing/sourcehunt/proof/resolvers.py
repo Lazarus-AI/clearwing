@@ -50,6 +50,7 @@ class BoundedJudgment(StrictModel):
     cited_fact_ids: list[str] = Field(default_factory=list)
     cited_evidence_ids: list[str] = Field(default_factory=list)
     cited_claim_ids: list[str] = Field(default_factory=list)
+    cited_assumption_ids: list[str] = Field(default_factory=list)
     missing_context: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
 
@@ -114,10 +115,7 @@ class MechanicalResolver:
             fact
             for fact in facts
             if fact.kind == "assignment"
-            and any(
-                sink in str(fact.properties.get("lhs", ""))
-                for sink in candidate.state_sinks
-            )
+            and any(sink in str(fact.properties.get("lhs", "")) for sink in candidate.state_sinks)
         ]
         if not assignments:
             return None
@@ -126,8 +124,7 @@ class MechanicalResolver:
             obligation,
             assignments,
             conclusion=(
-                "A live identifier is represented in the same storage used by "
-                "the reserved value."
+                "A live identifier is represented in the same storage used by the reserved value."
             ),
             evidence_kind="static_representation_assignment",
         )
@@ -158,14 +155,10 @@ class MechanicalResolver:
                     "identifier range is unresolved."
                 ),
             )
-        if (
-            completeness.items.get("types")
-            and completeness.items["types"].status
-            in {
-                "unresolved",
-                "not_available",
-            }
-        ):
+        if completeness.items.get("types") and completeness.items["types"].status in {
+            "unresolved",
+            "not_available",
+        }:
             return Resolution(
                 status=ObligationStatus.BLOCKED,
                 blocked_reason="Type-domain completeness is insufficient.",
@@ -175,8 +168,7 @@ class MechanicalResolver:
             obligation,
             [*assignments, *sentinel_facts, *counters, *typed_sources],
             conclusion=(
-                "The extracted identifier range includes the reserved "
-                "representation value."
+                "The extracted identifier range includes the reserved representation value."
             ),
             evidence_kind="static_domain_overlap",
         )
@@ -192,10 +184,7 @@ class MechanicalResolver:
             fact
             for fact in facts
             if fact.kind == "assignment"
-            and any(
-                sink in str(fact.properties.get("lhs", ""))
-                for sink in candidate.state_sinks
-            )
+            and any(sink in str(fact.properties.get("lhs", "")) for sink in candidate.state_sinks)
         ]
         effective: list[Fact] = []
         for guard in (fact for fact in facts if fact.kind == "guard"):
@@ -208,8 +197,7 @@ class MechanicalResolver:
                 continue
             control_effect = str(guard.properties.get("control_effect", ""))
             if not (
-                control_effect
-                or re.search(r"\b(?:return|raise|throw|goto|break)\b", expression)
+                control_effect or re.search(r"\b(?:return|raise|throw|goto|break)\b", expression)
             ):
                 continue
             for assignment in assignments:
@@ -252,11 +240,7 @@ class MechanicalResolver:
         completeness: CompletenessManifest,
     ) -> Resolution | None:
         del completeness
-        accesses = [
-            fact
-            for fact in facts
-            if fact.kind in {"memory_access", "memory_write"}
-        ]
+        accesses = [fact for fact in facts if fact.kind in {"memory_access", "memory_write"}]
         if not accesses:
             return None
         return self._supported(
@@ -369,9 +353,7 @@ class MechanicalResolver:
         supports: bool,
     ) -> Resolution:
         claim_predicate = (
-            obligation.predicate
-            if supports
-            else f"counterexample_to:{obligation.predicate}"
+            obligation.predicate if supports else f"counterexample_to:{obligation.predicate}"
         )
         claim = Claim(
             snapshot_id=candidate.snapshot_id,
@@ -387,11 +369,7 @@ class MechanicalResolver:
             observations=[
                 {
                     "fact_id": fact.id,
-                    "location": (
-                        fact.location.model_dump(mode="json")
-                        if fact.location
-                        else None
-                    ),
+                    "location": (fact.location.model_dump(mode="json") if fact.location else None),
                     "observation": _fact_text(fact),
                 }
                 for fact in facts
@@ -432,9 +410,11 @@ class BoundedModelResolver:
 
     SYSTEM_PROMPT = """You resolve one atomic vulnerability proof obligation.
 Use only the supplied packet. Unknown or missing edges remain unknown. Cite
-every fact used. Do not infer remote reachability, exploitability, or memory
-corruption from a crash alone. Return §blocked§ when named missing context is
-required, and §conflicting_evidence§ when supplied facts conflict."""
+every fact, evidence item, prior claim, and assumption used by its supplied
+ID. Assumptions remain labeled assumptions and cannot prove themselves. Do
+not infer remote reachability, exploitability, or memory corruption from a
+crash alone. Return §blocked§ when named missing context is required, and
+§conflicting_evidence§ when supplied facts conflict."""
 
     def __init__(self, llm: Any):
         self.llm = llm
@@ -456,6 +436,7 @@ required, and §conflicting_evidence§ when supplied facts conflict."""
         allowed_facts = set(packet.fact_ids)
         allowed_evidence = set(packet.evidence_ids)
         allowed_claims = set(packet.claim_ids)
+        allowed_assumptions = set(packet.assumption_ids)
         if not set(judgment.cited_fact_ids) <= allowed_facts:
             return Resolution(
                 status=ObligationStatus.BLOCKED,
@@ -471,16 +452,26 @@ required, and §conflicting_evidence§ when supplied facts conflict."""
                 status=ObligationStatus.BLOCKED,
                 blocked_reason="Model cited claims outside its context packet.",
             )
-        status = ObligationStatus(judgment.status)
-        if status in {ObligationStatus.PROVEN, ObligationStatus.DISPROVEN} and not (
-            judgment.cited_fact_ids
-            or judgment.cited_evidence_ids
-            or judgment.cited_claim_ids
-        ):
+        if not set(judgment.cited_assumption_ids) <= allowed_assumptions:
             return Resolution(
                 status=ObligationStatus.BLOCKED,
-                blocked_reason="Model conclusion has no cited packet evidence.",
+                blocked_reason="Model cited assumptions outside its context packet.",
             )
+        status = ObligationStatus(judgment.status)
+        if status in {ObligationStatus.PROVEN, ObligationStatus.DISPROVEN}:
+            has_support = bool(
+                judgment.cited_fact_ids or judgment.cited_evidence_ids or judgment.cited_claim_ids
+            )
+            if not has_support:
+                reason = (
+                    "Assumptions alone cannot resolve a proof obligation."
+                    if judgment.cited_assumption_ids
+                    else "Model conclusion has no cited packet evidence."
+                )
+                return Resolution(
+                    status=ObligationStatus.BLOCKED,
+                    blocked_reason=reason,
+                )
         if status in {ObligationStatus.UNKNOWN, ObligationStatus.BLOCKED}:
             return Resolution(
                 status=status,
@@ -490,14 +481,13 @@ required, and §conflicting_evidence§ when supplied facts conflict."""
         claim = Claim(
             snapshot_id=candidate.snapshot_id,
             predicate=(
-                obligation.predicate
-                if supports
-                else f"counterexample_to:{obligation.predicate}"
+                obligation.predicate if supports else f"counterexample_to:{obligation.predicate}"
             ),
             subject=candidate.logical_id,
             object=judgment.conclusion,
             status=ObligationStatus.PROVEN,
             scope={"obligation_id": obligation.logical_id},
+            assumption_ids=judgment.cited_assumption_ids,
         )
         evidence = Evidence(
             snapshot_id=candidate.snapshot_id,
@@ -508,6 +498,7 @@ required, and §conflicting_evidence§ when supplied facts conflict."""
                     "cited_fact_ids": judgment.cited_fact_ids,
                     "cited_evidence_ids": judgment.cited_evidence_ids,
                     "cited_claim_ids": judgment.cited_claim_ids,
+                    "cited_assumption_ids": judgment.cited_assumption_ids,
                     "limitations": judgment.limitations,
                 }
             ],
@@ -534,6 +525,7 @@ required, and §conflicting_evidence§ when supplied facts conflict."""
                 *judgment.cited_fact_ids,
                 *judgment.cited_evidence_ids,
                 *judgment.cited_claim_ids,
+                *judgment.cited_assumption_ids,
             ],
             conclusion_claim_ids=[claim.logical_id],
             limitations=judgment.limitations,

@@ -2117,6 +2117,12 @@ scenario and migration contract for final replacement of the legacy default.
 
 The migration implementation is now present behind `--flow proof`:
 
+**Phase 0 implementation: 100%. Phase 1 implementation: 100%.** The
+percentages describe repository implementation and test coverage, not a claim
+that an unrun paid-model campaign produced measurements. Empirical campaign
+reports remain separately versioned artifacts, and the baseline compiler now
+refuses to label a partial matrix complete.
+
 - Strict snapshot, fact, evidence, claim, assumption, threat-model,
   candidate, obligation, action, derivation, context-packet, and certificate
   schemas.
@@ -2144,6 +2150,15 @@ The migration implementation is now present behind `--flow proof`:
 - Action-attributed model-call telemetry, calibration-ready run metrics,
   finalized falsification views, and a combined proof/spend manifest that
   cannot be overwritten by ledger checkpointing.
+- Session-local legacy instrumentation with stable run, work-item, model-call,
+  tool-action, trajectory-event, and finding joins; per-stage file/symbol
+  inventories; and separately retained reporting failures.
+- A strict five-case intermediate-ground-truth manifest, seven-level ablation
+  planner, resumable local/frontier campaign executor, session scorer, and
+  completeness-gated precision/recall/cost/failure-stage baseline compiler.
+- Live assumption records in candidate graphs, bounded packets, falsifier
+  packets, certificates, and reports. Assumption revisions now stale dependent
+  claims and obligations and persist stale certificate successor revisions.
 
 This is a migration release, not an evidence-free default flip. `legacy`
 remains the default until measured frontier recall is no worse than legacy,
@@ -2158,25 +2173,67 @@ an accepted finding.
 
 ### Phase 0: Instrument the current funnel
 
-- Assign stable IDs to runs, work items, model calls, tool actions, and
+- [x] Assign stable IDs to runs, work items, model calls, tool actions, and
   findings.
-- Record which files and symbols enter each stage.
-- Preserve hunter trajectories and reporting failures.
-- Add intermediate ground truth to representative CVE evaluations.
-- Run staged ablations across frontier and local models.
-- Establish baseline precision, recall, cost, and failure-stage metrics.
+- [x] Record which files and symbols enter each stage.
+- [x] Preserve hunter trajectories and reporting failures.
+- [x] Add intermediate ground truth to representative CVE evaluations.
+- [x] Provide and test a resumable staged-ablation runner that executes
+  identical hint packets across frontier and local models.
+- [x] Establish a completeness-gated baseline compiler for precision, recall,
+  cost, unsupported claims, report failures, and first-failure-stage metrics.
 
 This phase determines where mechanization will yield the largest return.
 
+The ground truth lives in
+`evaluations/sourcehunt_ground_truth.yaml`. A reproducible campaign uses:
+
+~~~bash
+clearwing eval sourcehunt-plan \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --local-model LOCAL_MODEL \
+  --frontier-model FRONTIER_MODEL \
+  --output results/sourcehunt-eval/plan.json
+
+clearwing eval sourcehunt-run \
+  --plan results/sourcehunt-eval/plan.json \
+  --ground-truth evaluations/sourcehunt_ground_truth.yaml \
+  --checkout CASE_ID=/path/to/vulnerable/checkout \
+  --budget-per-run 10 \
+  --output-dir results/sourcehunt-eval/sessions \
+  --checkpoint results/sourcehunt-eval/observations.json
+
+clearwing eval sourcehunt-baseline \
+  --plan results/sourcehunt-eval/plan.json \
+  --observations results/sourcehunt-eval/observations.json \
+  --output results/sourcehunt-eval/baseline.json
+~~~
+
+`sourcehunt-run` verifies that each supplied checkout is at the manifest's
+vulnerable commit before dispatch. It requires a positive per-run budget,
+rejects tracked checkout changes, checkpoints atomically after every arm, and
+automatically resumes the checkpoint by stable run ID. C/C++ cases also
+require a per-case `--compile-commands CASE_ID=PATH`; runtime evidence can be
+provided with `--validation-manifest CASE_ID=PATH`. Level 1 supplies no oracle
+hint. Levels 2–7 reveal only their declared cumulative information. Each
+local/frontier pair receives the exact same serialized hint packet. Assisted
+hints are recorded in the proof manifest and packets but are never accepted as
+evidence. `sourcehunt-baseline` validates every observation against its plan
+and fails closed when any planned arm is missing unless `--allow-incomplete`
+is explicitly requested, in which case the report is visibly marked
+incomplete.
+
 ### Phase 1: Proof substrate
 
-- Implement snapshot, fact, evidence, claim, assumption, obligation,
+- [x] Implement snapshot, fact, evidence, claim, assumption, obligation,
   action, derivation, and certificate schemas.
-- Add immutable artifact storage and provenance.
-- Make trace steps authoritative rather than conversation-only.
-- Allow findings to reference evidence IDs.
-- Implement dependency invalidation and stale-state propagation.
-- Emit incomplete certificates when a run exhausts its budget.
+- [x] Add immutable artifact storage and provenance.
+- [x] Make trace steps authoritative rather than conversation-only.
+- [x] Allow findings to reference evidence IDs.
+- [x] Implement dependency invalidation and stale-state propagation, including
+  durable stale certificate revisions for file, symbol, evidence, and
+  assumption changes.
+- [x] Emit incomplete certificates when a run exhausts its budget.
 
 This phase should initially coexist with the current hunter.
 

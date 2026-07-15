@@ -104,16 +104,13 @@ class CertificateCompiler:
         )
         evidence = self._candidate_evidence(obligations)
         report_claims = self._report_claims(obligations)
-        dependencies = [
-            fact for fact in facts if fact.id in set(candidate.fact_ids)
-        ]
-        files = sorted(
-            {
-                fact.location.file
-                for fact in dependencies
-                if fact.location is not None
-            }
-        )
+        assumption_ids = set(candidate.assumption_ids)
+        for claim_id in audited:
+            claim = self._claim(claim_id)
+            if claim is not None:
+                assumption_ids.update(claim.assumption_ids)
+        dependencies = [fact for fact in facts if fact.id in set(candidate.fact_ids)]
+        files = sorted({fact.location.file for fact in dependencies if fact.location is not None})
         symbols = sorted(
             {
                 fact.subject
@@ -125,10 +122,7 @@ class CertificateCompiler:
         if rejection is not None:
             kind = CertificateKind.REJECTION
             decision = "disproven"
-            reason = (
-                f"Decisive proof obligation was disproven: "
-                f"{rejection.predicate}"
-            )
+            reason = f"Decisive proof obligation was disproven: {rejection.predicate}"
             severity = None
         else:
             hard_evidence_missing = self._missing_hard_evidence(candidate, evidence)
@@ -146,10 +140,7 @@ class CertificateCompiler:
                 obligation.predicate.endswith("security_boundary")
                 and obligation.status == ObligationStatus.PROVEN
                 for obligation in obligations
-            ) or not any(
-                "spatial_safety" == family
-                for family in candidate.invariant_families
-            )
+            ) or not any("spatial_safety" == family for family in candidate.invariant_families)
             if (
                 obligations
                 and mandatory_complete
@@ -175,8 +166,7 @@ class CertificateCompiler:
                     reasons.append("one or more proven obligations lack valid evidence")
                 if hard_evidence_missing:
                     reasons.append(
-                        "missing decisive evidence: "
-                        + ", ".join(sorted(hard_evidence_missing))
+                        "missing decisive evidence: " + ", ".join(sorted(hard_evidence_missing))
                     )
                 if not falsification_complete:
                     reasons.append("finite falsification plan is incomplete")
@@ -213,11 +203,10 @@ class CertificateCompiler:
             proof_plan_ids=candidate.proof_plan_ids,
             decision=decision,
             reason=reason,
-            threat_model_id=(
-                threat_model.logical_id if threat_model is not None else None
-            ),
+            threat_model_id=(threat_model.logical_id if threat_model is not None else None),
             claim_ids=sorted(audited),
             evidence_ids=sorted(evidence),
+            assumption_ids=sorted(assumption_ids),
             unresolved_obligation_ids=sorted(set(unresolved)),
             blocked_obligation_ids=sorted(set(blocked)),
             falsification_action_ids=falsification_ids,
@@ -324,10 +313,7 @@ class CertificateCompiler:
         missing: set[str] = set()
         for plan_id in candidate.proof_plan_ids:
             plan = self.plan_registry.get(plan_id)
-            if (
-                plan.decisive_evidence_kinds
-                and not plan.decisive_evidence_kinds & evidence_kinds
-            ):
+            if plan.decisive_evidence_kinds and not plan.decisive_evidence_kinds & evidence_kinds:
                 missing.add(plan_id)
         return missing
 
