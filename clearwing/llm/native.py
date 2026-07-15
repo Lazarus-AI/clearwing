@@ -26,6 +26,17 @@ from pydantic import BaseModel, RootModel
 
 logger = logging.getLogger(__name__)
 
+# Per-file hunter runs can legitimately take up to ~a day against a slow local
+# model (large tier-A budgets, big files), so the socket-level read timeout
+# needs to be long enough to survive that instead of the "Timeout on reading
+# data from socket" errors seen when the underlying genai-pyo3 defaults were
+# left unset. connect_timeout_seconds is kept short-ish since establishing the
+# TCP/TLS connection itself should never take long, even over a flaky
+# link-local hop; it's only widened a bit for headroom.
+_LLM_CONNECT_TIMEOUT_SECONDS: float = 60.0
+_LLM_READ_TIMEOUT_SECONDS: float = 86_400.0  # 24h
+_LLM_TOTAL_TIMEOUT_SECONDS: float = 90_000.0  # 25h, headroom over read timeout
+
 
 # ---------------------------------------------------------------------------
 # reasoning_effort auto-detection
@@ -549,13 +560,26 @@ class AsyncLLMClient:
                     self.api_key,
                     base_url,
                     default_headers=default_headers,
+                    connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                    timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
                 )
             return client_cls.with_base_url(
-                rust_provider, base_url, default_headers=default_headers
+                rust_provider,
+                base_url,
+                default_headers=default_headers,
+                connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
             )
         if self.api_key:
             return client_cls.with_api_key(
-                rust_provider, self.api_key, default_headers=default_headers
+                rust_provider,
+                self.api_key,
+                default_headers=default_headers,
+                connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
             )
         raise RuntimeError(
             f"Cannot build LLM client for model={self.model_name} "
