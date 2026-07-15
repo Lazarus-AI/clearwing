@@ -71,6 +71,12 @@ def add_parser(subparsers):
         help="Phase-3 action-utility calibration JSON produced by clearwing eval",
     )
     parser.add_argument(
+        "--proof-learning-registry",
+        default=None,
+        metavar="PATH",
+        help="Explicitly promoted Phase-5 mechanism registry (not for strict blind baselines)",
+    )
+    parser.add_argument(
         "--build-configuration",
         default="default",
         metavar="NAME",
@@ -1152,6 +1158,7 @@ def handle(cli, args):
         proof_compile_commands=args.compile_commands,
         proof_validation_manifest=args.validation_manifest,
         proof_scheduler_calibration=args.scheduler_calibration,
+        proof_learning_registry=args.proof_learning_registry,
         proof_build_configuration=args.build_configuration,
         proof_clang_binary=args.clang_binary,
         proof_max_actions=args.proof_max_actions,

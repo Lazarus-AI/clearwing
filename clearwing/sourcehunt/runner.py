@@ -239,6 +239,7 @@ class SourceHuntRunner:
         proof_compile_commands: str | None = None,
         proof_validation_manifest: str | None = None,
         proof_scheduler_calibration: str | None = None,
+        proof_learning_registry: str | None = None,
         proof_build_configuration: str = "default",
         proof_clang_binary: str = "clang",
         proof_max_actions: int = 200,
@@ -366,6 +367,11 @@ class SourceHuntRunner:
                 proof_scheduler_calibration
                 if proof_scheduler_calibration is not None
                 else p.scheduler_calibration
+            )
+            proof_learning_registry = (
+                proof_learning_registry
+                if proof_learning_registry is not None
+                else p.learning_registry
             )
             proof_build_configuration = (
                 proof_build_configuration
@@ -515,6 +521,7 @@ class SourceHuntRunner:
         self._proof_compile_commands = proof_compile_commands
         self._proof_validation_manifest = proof_validation_manifest
         self._proof_scheduler_calibration = proof_scheduler_calibration
+        self._proof_learning_registry = proof_learning_registry
         self._proof_build_configuration = proof_build_configuration
         self._proof_clang_binary = proof_clang_binary
         self._proof_max_actions = proof_max_actions
@@ -759,6 +766,7 @@ class SourceHuntRunner:
                 compile_commands=self._proof_compile_commands,
                 validation_manifest=self._proof_validation_manifest,
                 scheduler_calibration=self._proof_scheduler_calibration,
+                learning_registry=self._proof_learning_registry,
                 build_configuration=self._proof_build_configuration,
                 clang_binary=self._proof_clang_binary,
                 max_actions=self._proof_max_actions,

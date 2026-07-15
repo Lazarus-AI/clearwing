@@ -2118,12 +2118,13 @@ scenario and migration contract for final replacement of the legacy default.
 The migration implementation is now present behind `--flow proof`:
 
 **Phase 0 implementation: 100%. Phase 1 implementation: 100%. Phase 2
-implementation: 100%. Phase 3 implementation: 100%.** These percentages
-describe repository implementation and fixture-level acceptance coverage, not
-a claim that an unrun paid-model or FFmpeg campaign produced measurements.
-Empirical campaign reports remain separately versioned artifacts, and the
-baseline and counterfactual compilers refuse to label partial matrices
-complete.
+implementation: 100%. Phase 3 implementation: 100%. Phase 4 implementation:
+100%. Phase 5 implementation: 100%.** These percentages describe repository
+implementation and fixture-level acceptance coverage, not a claim that an
+unrun paid-model or FFmpeg campaign produced measurements. Empirical campaign
+reports remain separately versioned artifacts, and the baseline,
+counterfactual, and learning-coverage compilers keep those measurements
+separate from implementation status.
 
 - Strict snapshot, fact, evidence, claim, assumption, threat-model,
   candidate, obligation, action, derivation, context-packet, and certificate
@@ -2175,6 +2176,16 @@ complete.
   and spend, enforced structured/exploratory allocation, candidate starvation
   prevention, explicit local/frontier model identities, and escalation audit
   telemetry.
+- Bug-class-specific Phase 4 resolvers, completeness dimensions, falsification
+  checklists, and decisive dynamic evidence gates for parser, authorization,
+  temporal, state-machine, cryptographic, injection, concurrency, and resource
+  investigations. An incidental guard, encoder, lock, or limit marker cannot
+  prove safety without effectiveness or complete supporting analysis.
+- Typed exploratory retrospectives, explicit reviewed promotion into a
+  content-addressed learning registry, mechanical promoted-mechanism candidate
+  generation, reviewed bindings to installed proof plans, mandatory rejection
+  and counterfactual regression specifications, and before/after local-model
+  coverage reports.
 
 This is a migration release, not an evidence-free default flip. `legacy`
 remains the default until measured frontier recall is no worse than legacy,
@@ -2313,26 +2324,78 @@ on the complete local/frontier campaign meeting the cutover gates above.
 
 ### Phase 4: Additional proof plans
 
-Add proof plans and validation backends in measured order:
+Proof plans and validation backends are implemented in measured order:
 
-1. Parser and integer-domain safety.
-2. Authorization and tenancy isolation.
-3. Temporal memory safety.
-4. State-machine and protocol safety.
-5. Cryptographic property violations.
-6. Injection, path, command, and deserialization boundaries.
-7. Concurrency and resource-exhaustion classes.
+- [x] Parser and integer-domain safety.
+- [x] Authorization and tenancy isolation.
+- [x] Temporal memory safety.
+- [x] State-machine and protocol safety.
+- [x] Cryptographic property violations.
+- [x] Injection, path, command, and deserialization boundaries.
+- [x] Concurrency and resource-exhaustion classes.
 
-Each plan must ship with positive, negative, and counterfactual tests.
+Each plan has typed obligations, at least one decisive rejection path, hard
+runtime-evidence gates where appropriate, a finite falsification checklist,
+and positive, negative, rename, and move counterfactual fixtures. Validation
+manifests can route sanitizer, fuzzing, symbolic, model-checking, differential,
+protocol, race, schedule, load, fault-injection, configuration-matrix, and
+patch-differential actions through the same sandboxed evidence boundary.
+
+Phase 4 completion is repository and fixture completion. Production recall,
+precision, and backend yield for each bug class remain empirical campaign
+results and must not be inferred from the implementation percentage.
 
 ### Phase 5: Exploration and learning flywheel
 
-- Add bounded exploratory tasks and budget accounting.
-- Add structured retrospectives for novel discoveries.
-- Promote validated mechanisms into candidate generators and proof plans.
-- Generate rejection and counterfactual regression cases.
-- Measure whether exploratory discoveries improve future local-model
+- [x] Add bounded exploratory tasks and budget accounting.
+- [x] Add structured retrospectives for novel discoveries.
+- [x] Promote validated mechanisms into candidate generators and proof-plan
+  profiles.
+- [x] Generate rejection and counterfactual regression specifications.
+- [x] Measure whether exploratory discoveries improve future local-model
   coverage.
+
+Exploratory output never becomes policy directly. Only an exploratory
+candidate with a finding certificate, audited evidence, evidence-linked report
+claims, a reusable structural fact signature, and completed falsification is
+eligible. Promotion is an explicit operator action:
+
+~~~bash
+clearwing eval sourcehunt-promote \
+  --retrospectives results/proof-session/learning/retrospectives.json \
+  --output results/sourcehunt-learning/registry.json
+~~~
+
+The registry stores content-addressed generator seeds, reviewed bindings to
+installed typed proof plans, and the required original, guarded/policy,
+renamed, moved, unreachable, and decoy regression matrix. Unknown plan IDs
+fail preflight. A later run applies the structural seed mechanically:
+
+~~~bash
+clearwing sourcehunt /path/to/repository \
+  --flow proof \
+  --proof-learning-registry results/sourcehunt-learning/registry.json \
+  --output-dir results/proof-learned
+~~~
+
+Supplying a learning registry makes a run assisted and unseals the strict
+blind-evaluation boundary. The registry and digest are retained as immutable
+run artifacts. Compare actual before/after sessions with:
+
+~~~bash
+clearwing eval sourcehunt-learning-coverage \
+  --registry results/sourcehunt-learning/registry.json \
+  --before-session results/before/session-id \
+  --after-session results/after/session-id \
+  --output results/sourcehunt-learning/coverage.json
+~~~
+
+The report measures structured rediscovery, terminal local-only obligation
+completion, and frontier actions for promoted mechanisms only. It reports
+improvement only when structured rediscovery and the count of local-only
+resolved obligations both increase without a regression in the local-only
+completion rate. These are observed session measurements, not model
+self-assessment.
 
 ## Initial vertical-slice acceptance criteria
 

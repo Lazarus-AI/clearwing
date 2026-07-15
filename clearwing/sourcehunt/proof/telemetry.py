@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from .models import Action, ActionStatus, Obligation, ObligationStatus
+from .models import Action, ActionStatus, Candidate, Obligation, ObligationStatus
 from .scheduler import is_dynamic_action
 from .store import ProofStore
 
@@ -32,6 +32,7 @@ class ProofTelemetryCompiler:
 
     def compile(self) -> dict[str, Any]:
         actions = list(self.store.latest(Action).values())
+        candidates = list(self.store.latest(Candidate).values())
         obligations = list(self.store.latest(Obligation).values())
         calls = _read_settled_calls(self.store.root / "spend-ledger.jsonl")
         calls_by_action: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -93,6 +94,15 @@ class ProofTelemetryCompiler:
             if action.status == ActionStatus.COMPLETED and action.output_claim_ids
         ]
         local_actions = [action for action in model_actions if action.model_route == "proof_local"]
+        candidate_generators = Counter(candidate.generator for candidate in candidates)
+        exploratory_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.generator == "bounded-exploratory-lane"
+        ]
+        promoted_candidates = [
+            candidate for candidate in candidates if candidate.generator.startswith("promoted:")
+        ]
         linked_call_ids = {
             str(call.get("call_id") or "unknown")
             for linked in calls_by_action.values()
@@ -103,6 +113,7 @@ class ProofTelemetryCompiler:
             "session_dir": str(self.store.root),
             "totals": {
                 "actions": len(actions),
+                "candidates": len(candidates),
                 "model_actions": len(model_actions),
                 "dynamic_actions": sum(is_dynamic_action(action.template) for action in actions),
                 "physical_model_calls": len(calls),
@@ -124,6 +135,7 @@ class ProofTelemetryCompiler:
             "action_statuses": dict(sorted(action_statuses.items())),
             "obligation_statuses": dict(sorted(obligation_statuses.items())),
             "by_action_template": action_groups,
+            "by_candidate_generator": dict(sorted(candidate_generators.items())),
             "by_model_route": route_groups,
             "by_obligation_predicate": predicate_groups,
             "model_call_linkage": {
@@ -145,6 +157,19 @@ class ProofTelemetryCompiler:
                 "frontier_ambiguity_resolution_rate": _ratio(
                     len(resolved_frontier_escalations),
                     len(valid_frontier_escalations),
+                ),
+            },
+            "learning": {
+                "exploratory_candidates": len(exploratory_candidates),
+                "promoted_candidates": len(promoted_candidates),
+                "structured_candidates": (
+                    len(candidates) - len(exploratory_candidates) - len(promoted_candidates)
+                ),
+                "promoted_mechanism_ids": sorted(
+                    {
+                        candidate.generator.removeprefix("promoted:")
+                        for candidate in promoted_candidates
+                    }
                 ),
             },
             "efficiency": {

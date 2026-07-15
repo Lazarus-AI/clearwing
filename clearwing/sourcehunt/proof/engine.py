@@ -31,6 +31,7 @@ from .extractors import (
 )
 from .falsifier import BoundedFalsifier, FalsificationPlanner
 from .graph import ProofGraph, revise
+from .learning import LearnedMechanismGenerator, LearningRegistry, RetrospectiveCompiler
 from .models import (
     Action,
     ActionStatus,
@@ -39,6 +40,8 @@ from .models import (
     CertificateKind,
     Claim,
     Derivation,
+    Evidence,
+    Obligation,
     ObligationStatus,
     RepositorySnapshot,
 )
@@ -72,6 +75,7 @@ class ProofRunConfig:
     compile_commands: str | None = None
     validation_manifest: str | None = None
     scheduler_calibration: str | None = None
+    learning_registry: str | None = None
     build_configuration: str = "default"
     clang_binary: str = "clang"
     max_actions: int = 200
@@ -148,11 +152,12 @@ class ProofFlowRunner:
             "session_id": session_id,
             "status": "starting",
             "blind_boundary": {
-                "sealed": not bool(self.config.evaluation_hints),
+                "sealed": not bool(self.config.evaluation_hints or self.config.learning_registry),
                 "oracle_evidence_permitted": False,
+                "learning_registry_supplied": bool(self.config.learning_registry),
             },
             "evaluation_ablation": {
-                "assisted": bool(self.config.evaluation_hints),
+                "assisted": bool(self.config.evaluation_hints or self.config.learning_registry),
                 "hints": self.config.evaluation_hints,
             },
             "budget": {
@@ -178,6 +183,31 @@ class ProofFlowRunner:
                 if self.config.scheduler_calibration
                 else None
             )
+            try:
+                learning_registry = (
+                    LearningRegistry.load(self.config.learning_registry)
+                    if self.config.learning_registry
+                    else None
+                )
+            except (OSError, ValueError) as exc:
+                raise ProofPreflightError(
+                    f"Invalid learning registry: {exc}",
+                    missing=("valid_learning_registry",),
+                ) from exc
+            plan_registry = ProofPlanRegistry()
+            if learning_registry is not None:
+                referenced_plan_ids = {
+                    plan_id
+                    for mechanism in learning_registry.mechanisms
+                    for plan_id in mechanism.generator_seed.proof_plan_ids
+                }
+                unknown_plan_ids = sorted(referenced_plan_ids - set(plan_registry.plans))
+                if unknown_plan_ids:
+                    raise ProofPreflightError(
+                        "Learning registry references unknown proof plans: "
+                        + ", ".join(unknown_plan_ids),
+                        missing=tuple(unknown_plan_ids),
+                    )
             command_runner = self.command_runner
             if {"c", "cpp"} & set(languages):
                 compile_commands = self._compile_commands_path(Path(repo_path))
@@ -212,6 +242,7 @@ class ProofFlowRunner:
                     "falsification": self.config.falsify,
                     "exploration_fraction": self.config.exploration_fraction,
                     "validation_manifest": bool(validation_manifest),
+                    "learning_registry": bool(learning_registry),
                 },
                 tool_versions={
                     "command_runner": (
@@ -246,6 +277,20 @@ class ProofFlowRunner:
                     "profile_count": len(scheduler_calibration.profiles),
                     "source_sessions": scheduler_calibration.source_sessions,
                 }
+            if self.config.learning_registry:
+                assert learning_registry is not None
+                learning_source = Path(self.config.learning_registry).expanduser().resolve()
+                learning_uri, learning_digest = store.store_artifact(
+                    learning_source.read_bytes(),
+                    media_type="application/json",
+                    name="proof-learning-registry.json",
+                )
+                manifest["learning_registry"] = {
+                    "artifact_uri": learning_uri,
+                    "digest": learning_digest,
+                    "mechanism_count": len(learning_registry.mechanisms),
+                    "strict_blind_baseline": False,
+                }
             manifest.update(
                 {
                     "snapshot_id": snapshot.id,
@@ -257,8 +302,11 @@ class ProofFlowRunner:
                     },
                     "languages": languages,
                     "blind_boundary": {
-                        "sealed": not bool(self.config.evaluation_hints),
+                        "sealed": not bool(
+                            self.config.evaluation_hints or self.config.learning_registry
+                        ),
                         "oracle_evidence_permitted": False,
+                        "learning_registry_supplied": bool(self.config.learning_registry),
                         "snapshot_id": snapshot.id,
                     },
                     "status": "extracting",
@@ -279,7 +327,10 @@ class ProofFlowRunner:
             files_analyzed = extraction.files_analyzed
             errors.extend(extraction.errors)
 
-            generation = CandidatePipeline().generate(
+            candidate_pipeline = CandidatePipeline()
+            if learning_registry is not None:
+                candidate_pipeline.generators.append(LearnedMechanismGenerator(learning_registry))
+            generation = candidate_pipeline.generate(
                 snapshot.id,
                 extraction.facts,
             )
@@ -378,7 +429,6 @@ class ProofFlowRunner:
                 },
             )
             graph = ProofGraph(store, snapshot.id)
-            plan_registry = ProofPlanRegistry()
             threat_builder = ThreatModelBuilder()
             assumption_builder = AssumptionBuilder()
             for draft in generated_candidates:
@@ -584,33 +634,19 @@ class ProofFlowRunner:
                 if certificate.kind == CertificateKind.FINDING
             ]
             findings = finding_payloads
-            retrospectives = [
-                {
-                    "candidate_id": candidate.logical_id,
-                    "mechanism": candidate.suspected_mechanism,
-                    "invariant_families": candidate.invariant_families,
-                    "fact_ids": candidate.fact_ids,
-                    "recommended_generator_seed": {
-                        "mechanism": candidate.suspected_mechanism,
-                        "required_invariants": candidate.suspected_invariants,
-                    },
-                }
-                for candidate in candidates
-                if candidate.experimental
-                and any(
-                    certificate.candidate_id == candidate.logical_id
-                    and certificate.kind == CertificateKind.FINDING
-                    for certificate in certificates
-                )
-            ]
-            if retrospectives:
-                store.write_json(
-                    "learning/retrospectives.json",
-                    {
-                        "snapshot_id": snapshot.id,
-                        "retrospectives": retrospectives,
-                    },
-                )
+            retrospective_bundle = RetrospectiveCompiler().compile_bundle(
+                snapshot.id,
+                candidates,
+                certificates,
+                extraction.facts,
+                list(store.latest(Obligation).values()),
+                list(store.latest(Action).values()),
+                list(store.latest(Evidence).values()),
+            )
+            retrospective_path = retrospective_bundle.write(
+                store.root / "learning" / "retrospectives.json"
+            )
+            paths["retrospectives"] = retrospective_path
             status = (
                 "incomplete"
                 if any(
@@ -623,6 +659,18 @@ class ProofFlowRunner:
                 {
                     "status": status,
                     "candidate_count": len(candidates),
+                    "learning": {
+                        "retrospective_count": len(retrospective_bundle.retrospectives),
+                        "promotion_eligible_count": sum(
+                            item.eligible_for_promotion
+                            for item in retrospective_bundle.retrospectives
+                        ),
+                        "registry_mechanism_count": (
+                            len(learning_registry.mechanisms)
+                            if learning_registry is not None
+                            else 0
+                        ),
+                    },
                     "certificate_counts": {
                         kind.value: sum(
                             1 for certificate in certificates if certificate.kind == kind

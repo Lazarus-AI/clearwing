@@ -35,6 +35,10 @@ class EvidencePolicy:
         "injection_differential",
         "race_detector_violation",
         "bounded_resource_exhaustion",
+        "fault_injection_violation",
+        "configuration_differential",
+        "patch_differential",
+        "protocol_transition_violation",
     }
     _REACHABILITY_KINDS = {
         "static_reachability",
@@ -45,6 +49,7 @@ class EvidencePolicy:
         "complete_unreachability_proof",
         "bounded_model_judgment",
         "falsification_counterexample",
+        "protocol_transition_violation",
     }
 
     def accepts(self, predicate: str, evidence: Evidence) -> bool:

@@ -689,6 +689,7 @@ async def execute_sourcehunt_run(
     compile_commands: str | None = None,
     validation_manifest: str | None = None,
     scheduler_calibration: str | None = None,
+    learning_registry: str | None = None,
     proof_max_actions: int = 200,
     proof_max_model_calls: int = 40,
     proof_max_dynamic_actions: int = 20,
@@ -730,6 +731,7 @@ async def execute_sourcehunt_run(
         ("compile_commands", compile_commands),
         ("validation_manifest", validation_manifest),
         ("scheduler_calibration", scheduler_calibration),
+        ("learning_registry", learning_registry),
     ):
         if path and not Path(path).expanduser().is_file():
             raise ValueError(f"{label} does not exist for {case.id}: {path}")
@@ -749,6 +751,7 @@ async def execute_sourcehunt_run(
         proof_compile_commands=compile_commands,
         proof_validation_manifest=validation_manifest,
         proof_scheduler_calibration=scheduler_calibration,
+        proof_learning_registry=learning_registry,
         proof_max_actions=proof_max_actions,
         proof_max_model_calls=proof_max_model_calls,
         proof_max_dynamic_actions=proof_max_dynamic_actions,

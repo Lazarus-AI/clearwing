@@ -41,6 +41,9 @@ _DYNAMIC_ACTIONS = {
     "race_detector",
     "schedule_perturbation",
     "load_test",
+    "fault_injection",
+    "configuration_matrix",
+    "patch_differential",
 }
 
 

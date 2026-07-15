@@ -31,6 +31,9 @@ Follow these rules if you want a meaningful recreation:
    runs cannot inject remembered mechanisms.
 5. For formal benchmarking, use a Clearwing checkout that has not been
    modified with FFmpeg-specific or H.264-specific local hints.
+6. Do not pass `--proof-learning-registry` to the strict blind pass. A registry
+   built from this FFmpeg case, its fix, or a related oracle makes the run an
+   assisted rescan and the manifest will record the blind boundary as unsealed.
 
 ## Prerequisites
 
@@ -350,6 +353,7 @@ spend-ledger.jsonl
 spend-summary.json
 certificates/{findings,rejections,incomplete}/
 artifacts/sha256/
+learning/retrospectives.json
 report.md
 findings.json
 findings.sarif
@@ -675,6 +679,64 @@ The repository also includes `evaluations/ffmpeg_proof.sh`, which automates
 the build and vulnerable run. It stops after sealing the vulnerable snapshot
 by default. After inspection, set `RUN_FIXED_CONTROL=1` to add the fixed
 control. Set `VALIDATION_MANIFEST` only when a retained trigger is available.
+
+## Post-Discovery Learning Flywheel
+
+This is an optional assisted experiment, never part of the blind FFmpeg score.
+After a genuinely exploratory candidate has earned a finding certificate and
+completed falsification, inspect its typed retrospective before promotion:
+
+```bash
+jq . "$SESSION_DIR/learning/retrospectives.json"
+
+clearwing eval sourcehunt-promote \
+  --retrospectives "$SESSION_DIR/learning/retrospectives.json" \
+  --output "$CASE_DIR/ffmpeg-learning-registry.json"
+```
+
+The promotion command ignores ineligible retrospectives. It does not turn raw
+model prose into executable policy: the registry contains a content-addressed
+structural generator seed, its reviewed binding to installed proof plans, and
+vulnerable, guarded/policy, renamed, moved, unreachable, and decoy regression
+specifications. Promotion fails if there is no eligible proof-carrying
+discovery.
+
+Apply the registry only to a later, explicitly labeled assisted control, such
+as a moved/renamed counterfactual or a different repository snapshot:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --flow proof \
+  --compile-commands compile_commands.json \
+  --proof-learning-registry "$CASE_DIR/ffmpeg-learning-registry.json" \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
+  --falsify \
+  --gvisor \
+  --output-dir "$CASE_DIR/results-proof-learned"
+```
+
+The run stores the registry and digest as immutable provenance and sets
+`blind_boundary.sealed` to `false`. Find the concrete session directory and
+compare it with a comparable pre-promotion session:
+
+```bash
+LEARNED_SESSION_DIR="$(dirname "$(find "$CASE_DIR/results-proof-learned" \
+  -mindepth 2 -maxdepth 2 -name manifest.json -print -quit)")"
+
+clearwing eval sourcehunt-learning-coverage \
+  --registry "$CASE_DIR/ffmpeg-learning-registry.json" \
+  --before-session "$SESSION_DIR" \
+  --after-session "$LEARNED_SESSION_DIR" \
+  --output "$CASE_DIR/ffmpeg-learning-coverage.json"
+```
+
+The coverage report distinguishes structured rediscovery from the original
+exploratory candidate and measures terminal local-only obligation completion
+and frontier use for promoted mechanisms only. It reports improvement only
+when rediscovery and the count of local-only resolved obligations increase
+without a completion-rate regression. Never compare a registry-assisted
+result to the strict blind run as if both had the same information boundary.
 
 ## Post-Discovery: Elaborate and Disclose
 

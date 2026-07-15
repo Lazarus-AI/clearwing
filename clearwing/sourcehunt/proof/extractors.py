@@ -1144,6 +1144,48 @@ class FactExtractor:
                     status=CompletenessStatus.COMPLETE,
                     basis="proof-fact-normalizer schema v1",
                 ),
+                "parser_ranges": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="normalized guards, offsets, and extents",
+                    limitations=["path-sensitive arithmetic ranges require a range backend"],
+                ),
+                "authorization_paths": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="policy-like guards and callgraph facts",
+                    limitations=[
+                        "framework middleware and indirect policy hooks may be unresolved"
+                    ],
+                ),
+                "lifetime_analysis": CompletenessItem(
+                    status=CompletenessStatus.NOT_AVAILABLE,
+                    basis="release/use syntax events only",
+                    limitations=["alias-aware ownership and lifetime analysis was not run"],
+                ),
+                "state_models": CompletenessItem(
+                    status=CompletenessStatus.NOT_AVAILABLE,
+                    basis="state assignments only",
+                    limitations=["no bounded transition model was supplied"],
+                ),
+                "cryptographic_contracts": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="cryptographic API syntax markers",
+                    limitations=["construction-specific security properties require contracts"],
+                ),
+                "encoding_analysis": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="interpreter calls and intraprocedural taint",
+                    limitations=["context-correct encoding and framework parameterization vary"],
+                ),
+                "concurrency_analysis": CompletenessItem(
+                    status=CompletenessStatus.NOT_AVAILABLE,
+                    basis="thread and synchronization syntax markers",
+                    limitations=["happens-before and schedule exploration were not run"],
+                ),
+                "resource_bounds": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="loop, guard, and allocation facts",
+                    limitations=["whole-request and distributed accounting are unresolved"],
+                ),
             },
         )
 

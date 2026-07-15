@@ -28,6 +28,9 @@ DynamicAction = Literal[
     "race_detector",
     "schedule_perturbation",
     "load_test",
+    "fault_injection",
+    "configuration_matrix",
+    "patch_differential",
 ]
 
 SuccessCondition = Literal[
@@ -48,6 +51,9 @@ _DECISIVE_EVIDENCE_KINDS = {
     "sanitizer_crash",
     "sanitizer_uaf",
     "symbolic_memory_violation",
+    "fault_injection_violation",
+    "configuration_differential",
+    "patch_differential",
 }
 
 

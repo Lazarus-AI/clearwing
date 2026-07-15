@@ -105,6 +105,70 @@ _FAMILY_TASKS = {
             ("policy_query", "guard_enumeration"),
         ),
     ),
+    "parser_safety": (
+        FalsificationTask(
+            "parser_range_contained",
+            "Prove that cursor and requested length remain inside every validated boundary.",
+            ("range_analysis", "symbolic_execution"),
+        ),
+        FalsificationTask(
+            "parser_rejects_trigger",
+            "Find a caller, decoder, or protocol guard that rejects the proposed input.",
+            ("guard_enumeration", "protocol_replay"),
+        ),
+    ),
+    "temporal_safety": (
+        FalsificationTask(
+            "object_reacquired",
+            "Prove that ownership or lifetime is restored before the suspected stale use.",
+            ("lifetime_query", "symbolic_execution"),
+        ),
+        FalsificationTask(
+            "alias_remains_live",
+            "Find an alias or reference-count invariant that keeps the object live.",
+            ("lifetime_query", "type_query"),
+        ),
+    ),
+    "state_machine_safety": (
+        FalsificationTask(
+            "transition_permitted",
+            "Show that the candidate transition is permitted from every reachable predecessor.",
+            ("state_model_query", "model_check"),
+        ),
+    ),
+    "cryptographic_safety": (
+        FalsificationTask(
+            "crypto_precondition_satisfied",
+            "Prove that the construction satisfies the relevant API and property preconditions.",
+            ("api_contract_query", "differential_test"),
+        ),
+        FalsificationTask(
+            "crypto_values_unobservable",
+            "Show that an attacker cannot observe or control the values needed for consequence.",
+            ("taint_query", "threat_model_query"),
+        ),
+    ),
+    "injection_safety": (
+        FalsificationTask(
+            "context_correct_encoding",
+            "Find parameterization or context-correct encoding before the interpreter boundary.",
+            ("guard_enumeration", "differential_test"),
+        ),
+    ),
+    "concurrency_safety": (
+        FalsificationTask(
+            "synchronization_orders_access",
+            "Prove that synchronization establishes a safe happens-before relation.",
+            ("race_detector", "schedule_perturbation"),
+        ),
+    ),
+    "resource_safety": (
+        FalsificationTask(
+            "resource_limit_enforced",
+            "Find a per-principal or global resource bound that contains the candidate growth.",
+            ("configuration_query", "load_test"),
+        ),
+    ),
 }
 
 

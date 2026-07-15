@@ -125,12 +125,13 @@ cases:
         - authorization_result_reused_across_resources
         - protected_operation_authorization_contrast
       expected_proof_plans:
-        - authorization-boundary-v1
+        - authorization-boundary-v2
       expected_predicates:
         - attacker_principal_established
         - expected_authorization_policy_established
         - actual_enforcement_path_established
         - unauthorized_operation_is_permitted
+        - unauthorized_capability_is_gained
       expected_evidence_kinds:
         - authorization_differential
       expected_decision: confirmed
@@ -189,11 +190,12 @@ cases:
         - normalized_path_escapes_destination
         - untrusted_data_reaches_interpreter_boundary
       expected_proof_plans:
-        - injection-boundary-v1
+        - injection-boundary-v2
       expected_predicates:
         - attacker_data_reaches_interpreter_boundary
         - required_structural_encoding_is_absent
         - input_changes_interpreted_structure
+        - interpreter_structure_change_crosses_security_boundary
       expected_evidence_kinds:
         - injection_differential
       expected_decision: confirmed
@@ -320,11 +322,12 @@ cases:
         - attacker_data_reaches_interpreter
         - untrusted_data_reaches_interpreter_boundary
       expected_proof_plans:
-        - injection-boundary-v1
+        - injection-boundary-v2
       expected_predicates:
         - attacker_data_reaches_interpreter_boundary
         - required_structural_encoding_is_absent
         - input_changes_interpreted_structure
+        - interpreter_structure_change_crosses_security_boundary
       expected_evidence_kinds:
         - injection_differential
       expected_decision: confirmed

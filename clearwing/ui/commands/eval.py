@@ -173,6 +173,11 @@ def add_parser(subparsers):
         default="",
         help="Optional Phase-3 action-utility calibration JSON",
     )
+    sourcehunt_run.add_argument(
+        "--proof-learning-registry",
+        default="",
+        help="Optional explicitly promoted Phase-5 mechanism registry",
+    )
     sourcehunt_run.add_argument("--output-dir", required=True)
     sourcehunt_run.add_argument("--checkpoint", required=True)
     sourcehunt_run.add_argument(
@@ -228,6 +233,33 @@ def add_parser(subparsers):
         metavar="NAME=SESSION_DIR",
     )
     sourcehunt_counterfactual.add_argument("--output", required=True)
+    sourcehunt_promote = sub.add_parser(
+        "sourcehunt-promote",
+        help="Promote eligible exploratory retrospectives into a proof registry",
+    )
+    sourcehunt_promote.add_argument(
+        "--retrospectives",
+        action="append",
+        required=True,
+        help="Retrospective bundle JSON; may be repeated",
+    )
+    sourcehunt_promote.add_argument("--output", required=True)
+    sourcehunt_learning_coverage = sub.add_parser(
+        "sourcehunt-learning-coverage",
+        help="Compare local-model coverage before and after a promoted registry",
+    )
+    sourcehunt_learning_coverage.add_argument("--registry", required=True)
+    sourcehunt_learning_coverage.add_argument(
+        "--before-session",
+        action="append",
+        required=True,
+    )
+    sourcehunt_learning_coverage.add_argument(
+        "--after-session",
+        action="append",
+        required=True,
+    )
+    sourcehunt_learning_coverage.add_argument("--output", required=True)
     compare.add_argument(
         "--format",
         choices=["table", "json", "markdown"],
@@ -246,7 +278,8 @@ def handle(cli, args):
         cli.console.print(
             "[yellow]Usage: clearwing eval <preprocessing|compare|sourcehunt-plan|"
             "sourcehunt-run|sourcehunt-observe|sourcehunt-baseline|"
-            "sourcehunt-calibrate|sourcehunt-counterfactual>[/yellow]",
+            "sourcehunt-calibrate|sourcehunt-counterfactual|sourcehunt-promote|"
+            "sourcehunt-learning-coverage>[/yellow]",
         )
         return
 
@@ -259,6 +292,8 @@ def handle(cli, args):
         "sourcehunt-baseline": _handle_sourcehunt_baseline,
         "sourcehunt-calibrate": _handle_sourcehunt_calibrate,
         "sourcehunt-counterfactual": _handle_sourcehunt_counterfactual,
+        "sourcehunt-promote": _handle_sourcehunt_promote,
+        "sourcehunt-learning-coverage": _handle_sourcehunt_learning_coverage,
     }
     handler = handlers.get(action)
     if handler:
@@ -506,6 +541,7 @@ def _handle_sourcehunt_run(cli, args):  # noqa: C901
                 compile_commands=compile_commands.get(spec.case_id),
                 validation_manifest=validation_manifests.get(spec.case_id),
                 scheduler_calibration=(args.scheduler_calibration or None),
+                learning_registry=(args.proof_learning_registry or None),
                 proof_max_actions=args.proof_max_actions,
                 proof_max_model_calls=args.proof_max_model_calls,
                 proof_max_dynamic_actions=args.proof_max_dynamic_actions,
@@ -599,4 +635,47 @@ def _handle_sourcehunt_counterfactual(cli, args):
     cli.console.print(
         f"[{color}]Counterfactual consistency {report.score.passed}/"
         f"{report.score.total}; wrote {target}[/{color}]"
+    )
+
+
+def _handle_sourcehunt_promote(cli, args):
+    from pathlib import Path
+
+    from ...sourcehunt.proof import LearningRegistry, RetrospectiveBundle
+
+    try:
+        bundles = [RetrospectiveBundle.load(path) for path in args.retrospectives]
+        output = Path(args.output).expanduser()
+        existing = LearningRegistry.load(output) if output.is_file() else None
+        registry = LearningRegistry.promote(bundles, existing=existing)
+        target = registry.write(output)
+    except Exception as exc:
+        cli.console.print(f"[red]Unable to promote sourcehunt learning: {exc}[/red]")
+        sys.exit(1)
+    cli.console.print(
+        f"[green]Wrote {len(registry.mechanisms)} promoted mechanisms to {target}[/green]"
+    )
+
+
+def _handle_sourcehunt_learning_coverage(cli, args):
+    from ...sourcehunt.proof import LearningCoverageCompiler, LearningRegistry
+
+    try:
+        registry = LearningRegistry.load(args.registry)
+        report = LearningCoverageCompiler().compare(
+            registry,
+            args.before_session,
+            args.after_session,
+        )
+        target = report.write(args.output)
+    except Exception as exc:
+        cli.console.print(f"[red]Unable to compare sourcehunt learning coverage: {exc}[/red]")
+        sys.exit(1)
+    color = "green" if report.improved else "yellow"
+    cli.console.print(
+        f"[{color}]Structured rediscovery delta {report.structured_rediscovery_delta:+d}; "
+        "local-only resolved obligation delta "
+        f"{report.local_only_resolved_obligation_delta:+d}; "
+        f"local-only delta {report.local_only_completion_rate_delta:+.3f}; "
+        f"wrote {target}[/{color}]"
     )
