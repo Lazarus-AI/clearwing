@@ -109,9 +109,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         The hunter MUST call this tool to report a vulnerability. Findings
         are appended to ctx.findings and surfaced via the hunter's output.
 
-        The `trace` argument is the authoritative vulnerability_trace stored
-        on the finding. Steps streamed via record_trace_step are live-panel
-        telemetry only and are NOT persisted here.
+        Steps emitted by `record_trace_step` are the authoritative trace and
+        are persisted on the finding. The optional `trace` argument remains a
+        compatibility fallback for callers that cannot stream steps.
 
         Args:
             file: Repo-relative file path where the finding lives.
@@ -133,28 +133,25 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             crypto_attack_class: Attack class (e.g. timing_side_channel,
                 parameter_validation, nonce_reuse, padding_oracle).
             key_material_exposed: Description of key material at risk.
-            trace: Authoritative dataflow trace as {"steps": [...],
-                "summary": "..."}, ordered from attacker-controlled entry to
-                the vulnerable sink. Each step is
-                {file, line, function?, code_snippet?, note?}.
+            trace: Optional compatibility trace or summary. Streamed trace
+                steps take precedence when present.
         """
-        # Build the authoritative VulnerabilityTrace from the explicit `trace`
-        # argument. Steps streamed via record_trace_step are live-panel
-        # telemetry only — record_finding does NOT harvest them, so the model
-        # must assemble and pass the full trace here.
-        if not trace or not trace.get("steps"):
-            return (
-                "ERROR: record_finding requires a `trace` argument with at "
-                "least one step — an ordered path from attacker-controlled "
-                "entry to the vulnerable sink. Steps you streamed via "
-                "record_trace_step are shown live but are NOT stored. "
-                'Assemble and pass the full trace: trace={"steps": [{"file": '
-                '..., "line": ..., "note": "ENTRY: ..."}, ...], "summary": "..."}.'
-            )
+        explicit_steps = trace.get("steps", []) if trace else []
         try:
+            authoritative_steps = (
+                list(ctx.trace_steps)
+                if ctx.trace_steps
+                else [TraceStep(**step) for step in explicit_steps]
+            )
+            if not authoritative_steps:
+                return (
+                    "ERROR: record_finding requires at least one trace step. "
+                    "Call record_trace_step while reading the entry-to-sink path, "
+                    "or pass a compatibility trace."
+                )
             vuln_trace = VulnerabilityTrace(
-                steps=[TraceStep(**s) for s in trace["steps"]],
-                summary=trace.get("summary", ""),
+                steps=authoritative_steps,
+                summary=(trace or {}).get("summary", ""),
             )
         except Exception as exc:
             return (
@@ -162,8 +159,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "`file` and `line`; optional `function`, `code_snippet`, `note`."
             )
         trace_dict = vuln_trace.model_dump()
-        # Reset the live-panel accumulator so the next finding's streamed trace
-        # starts fresh (these steps were never persisted onto the finding).
+        # Reset only after the authoritative steps are stored on the finding.
         ctx.trace_steps.clear()
 
         finding = Finding(
@@ -276,11 +272,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "trace": {
                         "type": "object",
                         "description": (
-                            "Authoritative dataflow trace: an ordered path from "
-                            "attacker-controlled entry to the vulnerable sink. "
-                            "Stored on the finding and independently re-verified. "
-                            "Steps streamed via record_trace_step are live-only "
-                            "and are NOT persisted."
+                            "Optional compatibility dataflow trace. Steps "
+                            "streamed via record_trace_step are authoritative "
+                            "and automatically persisted on the finding."
                         ),
                         "properties": {
                             "steps": {
@@ -338,7 +332,6 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "severity",
                     "cwe",
                     "description",
-                    "trace",
                 ],
                 "additionalProperties": False,
             },

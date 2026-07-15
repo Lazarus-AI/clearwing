@@ -97,6 +97,25 @@ class HuntTuning:
 
 
 @dataclass(frozen=True)
+class ProofConfig:
+    """Proof-carrying investigation controls used during migration."""
+
+    flow: str = "legacy"  # legacy | proof
+    compile_commands: str | None = None
+    validation_manifest: str | None = None
+    build_configuration: str = "default"
+    clang_binary: str = "clang"
+    max_actions: int = 200
+    max_model_calls: int = 40
+    max_dynamic_actions: int = 20
+    structured_fraction: float = 0.90
+    exploration_fraction: float = 0.10
+    retain_incomplete_certificates: bool = True
+    emit_rejection_certificates: bool = True
+    falsify: bool = True
+
+
+@dataclass(frozen=True)
 class SourceHuntConfig:
     """Top-level configuration container for SourceHuntRunner.
 
@@ -115,3 +134,4 @@ class SourceHuntConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     features: FeatureFlags = field(default_factory=FeatureFlags)
     tuning: HuntTuning = field(default_factory=HuntTuning)
+    proof: ProofConfig = field(default_factory=ProofConfig)
