@@ -479,7 +479,7 @@ def handle(cli, args):
     if args.output_dir is None:
         args.output_dir = default_results_dir("sourcehunt")
 
-    _log_level_name = "DEBUG" if getattr(args, "verbose", False) else args.log_level
+    _log_level_name = "DEBUG" if args.verbose else args.log_level
     logging.basicConfig(
         level=getattr(logging, _log_level_name),
         format="%(levelname)s: %(message)s",
