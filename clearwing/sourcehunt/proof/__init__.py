@@ -6,6 +6,11 @@ derivations, and terminal certificates. Models may help resolve bounded
 obligations, but this package remains the authoritative source of truth.
 """
 
+from .calibration import (
+    ActionUtilityProfile,
+    SchedulerCalibration,
+    SchedulerCalibrationCompiler,
+)
 from .candidates import (
     AllocationAccessGenerator,
     AssumptionBuilder,
@@ -68,6 +73,7 @@ from .models import (
     SourceLocation,
     ThreatModel,
 )
+from .normalization import NORMALIZATION_SCHEMA_VERSION, FactNormalizer
 from .plans import (
     DEFAULT_PLANS,
     ObligationTemplate,
@@ -94,7 +100,10 @@ from .store import ProofStore
 from .telemetry import ProofTelemetryCompiler
 from .validation import (
     CommandValidationBackend,
+    HarnessPreparationResult,
+    HarnessTemplateSpec,
     SanitizerValidationBackend,
+    TemplateHarnessBackend,
     ValidationCommandSpec,
     ValidationManifest,
     ValidationRequest,
@@ -105,6 +114,7 @@ __all__ = [
     "Action",
     "ActionScheduler",
     "ActionStatus",
+    "ActionUtilityProfile",
     "AllocationAccessGenerator",
     "AuthorizationBoundaryGenerator",
     "Assumption",
@@ -135,6 +145,7 @@ __all__ = [
     "ExtractionResult",
     "Fact",
     "FactExtractor",
+    "FactNormalizer",
     "ExploratoryLane",
     "ExploratoryProposal",
     "FalsificationPlanner",
@@ -142,9 +153,12 @@ __all__ = [
     "FalsificationJudgment",
     "FalsificationTask",
     "InvestigationBudget",
+    "HarnessPreparationResult",
+    "HarnessTemplateSpec",
     "InjectionBoundaryGenerator",
     "MechanicalResolver",
     "ModelRoutePolicy",
+    "NORMALIZATION_SCHEMA_VERSION",
     "Obligation",
     "ObligationStatus",
     "ObligationTemplate",
@@ -167,10 +181,13 @@ __all__ = [
     "SandboxCommandRunner",
     "SnapshotError",
     "SchedulerState",
+    "SchedulerCalibration",
+    "SchedulerCalibrationCompiler",
     "SanitizerValidationBackend",
     "SourceLocation",
     "StateMachineGenerator",
     "TemporalSafetyGenerator",
+    "TemplateHarnessBackend",
     "ThreatModel",
     "ThreatModelBuilder",
     "ValidationRequest",

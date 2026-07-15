@@ -59,9 +59,7 @@ class ProofStore:
         self._create_layout()
 
     def _create_layout(self) -> None:
-        directories = {
-            path.parent for path in _COLLECTIONS.values()
-        } | {
+        directories = {path.parent for path in _COLLECTIONS.values()} | {
             Path("artifacts/sha256"),
             Path("proof-graphs"),
             Path("falsification"),
@@ -147,11 +145,7 @@ class ProofStore:
         *,
         latest: bool = True,
     ) -> RecordT | None:
-        records = (
-            list(self.latest(model_type).values())
-            if latest
-            else self.read_all(model_type)
-        )
+        records = list(self.latest(model_type).values()) if latest else self.read_all(model_type)
         for record in records:
             if getattr(record, "id", "") == record_id:
                 return record
@@ -254,17 +248,15 @@ class ProofStore:
         self._atomic_json(path, certificate.model_dump(mode="json"))
 
     def _safe_named_path(self, directory: str, identifier: str, suffix: str) -> Path:
-        safe = "".join(
-            char for char in identifier if char.isalnum() or char in {"-", "_", "."}
-        )
+        safe = "".join(char for char in identifier if char.isalnum() or char in {"-", "_", "."})
         if not safe or safe != identifier:
             raise ValueError(f"Unsafe proof artifact identifier: {identifier!r}")
         return self.root / directory / f"{safe}{suffix}"
 
     def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
-        encoded = (
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode("utf-8")
+        encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         try:
@@ -274,9 +266,9 @@ class ProofStore:
             os.close(descriptor)
 
     def _atomic_json(self, path: Path, payload: dict[str, Any]) -> None:
-        encoded = (
-            json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n"
-        ).encode("utf-8")
+        encoded = (json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n").encode(
+            "utf-8"
+        )
         self._atomic_write(path, encoded)
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:

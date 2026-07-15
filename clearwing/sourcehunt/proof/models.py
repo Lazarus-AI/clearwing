@@ -342,6 +342,9 @@ class Action(VersionedRecord):
     status: ActionStatus = ActionStatus.PENDING
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     estimated_seconds: float = Field(default=0.0, ge=0.0)
+    started_at: str | None = None
+    completed_at: str | None = None
+    observed_seconds: float | None = Field(default=None, ge=0.0)
     expected_information_gain: float = Field(default=0.0, ge=0.0, le=1.0)
     output_evidence_ids: list[str] = Field(default_factory=list)
     output_claim_ids: list[str] = Field(default_factory=list)

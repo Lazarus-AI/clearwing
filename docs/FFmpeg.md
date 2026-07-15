@@ -123,6 +123,8 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --compile-commands compile_commands.json \
   --build-configuration asan-debug \
   --model-routing local-first \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
   --structured-budget 90% \
   --exploration-budget 10% \
   --proof-plan auto \
@@ -146,6 +148,11 @@ Why these flags:
 - `--model-routing local-first` sends bounded judgments to the small-model
   route, escalating the same atomic question to the frontier route only
   after a local attempt remains unresolved.
+- `--proof-local-model` and `--proof-frontier-model` give those two routes
+  distinct, auditable model identities. With a single OpenAI-compatible
+  endpoint, that endpoint must serve both names. With multi-provider config,
+  configure `proof_local` and `proof_frontier` routes; the flags override the
+  model on those existing routes.
 - `--structured-budget` and `--exploration-budget` make the exploratory lane
   a bounded minority rather than an unbounded whole-repository agent.
 - The three `--proof-max-*` limits are run-wide caps. Mechanical, dynamic,
@@ -204,6 +211,37 @@ The example repeats the production FFmpeg command three times. A sanitizer
 observation can establish only the scoped runtime obligation; it cannot by
 itself establish attacker reachability, a realistic deployment, remote code
 execution, or security impact.
+
+For a smaller target function that can be linked in isolation, the same
+manifest can use a reusable harness template instead of a handwritten
+command. Clearwing writes the generated source only to sandbox scratch,
+compiles it with libFuzzer, ASan, and UBSan, and retains the build artifact and
+runtime observation as separate evidence:
+
+```json
+{
+  "schema_version": 1,
+  "commands": [
+    {
+      "name": "fuzz isolated parser",
+      "action_template": "fuzz",
+      "obligation_predicate": "runtime_confirms_unsafe_memory_access",
+      "candidate_mechanism": "allocation_access_extent_contrast",
+      "harness_template": {
+        "target_function": "parse_packet",
+        "signature": "int parse_packet(const uint8_t *, size_t)",
+        "source_files": ["lib/parser.c"],
+        "include_dirs": ["include"],
+        "duration_seconds": 30
+      },
+      "success_condition": "sanitizer"
+    }
+  ]
+}
+```
+
+FFmpeg's full decoder is not a good isolated-template target, so the retained
+production trigger manifest remains the appropriate backend for this case.
 
 ## Optional Legacy Agentic Control
 
@@ -454,9 +492,10 @@ finding. They are stage-level signals. The evaluation harness in
 functions, expected extracted fact symbols, entry point, source, sinks,
 transformation, invariant, guard,
 trigger constraints, expected runtime behavior, threat model, mechanism,
-proof plans, predicates, evidence kinds, and decision. The older
-`evaluations/ffmpeg_proof.yaml` remains a compact counterfactual-control
-description.
+proof plans, predicates, evidence kinds, and decision.
+`evaluations/ffmpeg_proof.yaml` is the executable compact counterfactual
+contract used to score the vulnerable, fixed, renamed, moved, guarded,
+unreachable, decoy, and widened-domain sessions as one matrix.
 
 To include FFmpeg in the identical local/frontier seven-level ablation matrix,
 first build the plan:
@@ -497,10 +536,52 @@ clearwing eval sourcehunt-baseline \
   --plan "$CASE_DIR/eval-plan.json" \
   --observations "$CASE_DIR/eval-observations.json" \
   --output "$CASE_DIR/eval-baseline.json"
+
+clearwing eval sourcehunt-calibrate \
+  --observations "$CASE_DIR/eval-observations.json" \
+  --output "$CASE_DIR/scheduler-calibration.json"
 ```
 
 The compiler fails on a partial matrix instead of silently inflating recall.
 Use `--allow-incomplete` only for a visibly marked progress report.
+`sourcehunt-calibrate` learns action yield, cost, and elapsed-time profiles
+from observed proof actions; it does not consume model self-confidence. Apply
+the resulting artifact to a later direct run with:
+
+```bash
+clearwing sourcehunt "$FFMPEG_DIR" \
+  --flow proof \
+  --compile-commands compile_commands.json \
+  --scheduler-calibration "$CASE_DIR/scheduler-calibration.json" \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
+  --falsify \
+  --gvisor \
+  --output-dir "$CASE_DIR/results-proof-calibrated"
+```
+
+For another ablation campaign, pass the same artifact to
+`clearwing eval sourcehunt-run --scheduler-calibration ...` with a new plan or
+checkpoint. The run manifest records its digest and the scheduler records the
+profile used in each action's inputs.
+
+After producing every checkout variant declared by the compact manifest,
+evaluate causal consistency. The command fails if a session is missing or an
+unexpected session is supplied:
+
+```bash
+clearwing eval sourcehunt-counterfactual \
+  --manifest evaluations/ffmpeg_proof.yaml \
+  --session vulnerable="$CASE_DIR/results-proof-blind" \
+  --session fixed="$CASE_DIR/results-proof-fixed" \
+  --session renamed="$CASE_DIR/results-proof-renamed" \
+  --session moved="$CASE_DIR/results-proof-moved" \
+  --session guarded="$CASE_DIR/results-proof-guarded" \
+  --session unreachable="$CASE_DIR/results-proof-unreachable" \
+  --session decoy="$CASE_DIR/results-proof-decoy" \
+  --session widened-domain="$CASE_DIR/results-proof-widened" \
+  --output "$CASE_DIR/ffmpeg-counterfactual.json"
+```
 
 ### Legacy PoC Stability Control
 
@@ -573,6 +654,8 @@ clearwing sourcehunt "$FFMPEG_DIR" \
   --compile-commands compile_commands.json \
   --build-configuration asan-debug \
   --model-routing local-first \
+  --proof-local-model Qwen3.5-35B \
+  --proof-frontier-model YOUR_FRONTIER_MODEL \
   --structured-budget 90% \
   --exploration-budget 10% \
   --emit-rejection-certificates \

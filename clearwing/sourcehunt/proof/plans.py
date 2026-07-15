@@ -91,10 +91,20 @@ MEMORY_WRITE_PLAN = ProofPlan(
     invariant_families=frozenset({"spatial_safety"}),
     obligations=(
         ObligationTemplate(
+            "attacker_reachability",
+            "attacker_reaches_memory_operation",
+            "An attacker-controlled entry path reaches the candidate memory operation.",
+            available_actions=("reachability_query", "taint_query"),
+            decisive_rejection=True,
+        ),
+        ObligationTemplate(
             "access_reached",
             "incorrect_state_reaches_memory_access",
             "The suspected state or extent reaches a memory access.",
-            dependencies=("representation-domain-collision-v1:semantic_decision",),
+            dependencies=(
+                "attacker_reachability",
+                "representation-domain-collision-v1:semantic_decision",
+            ),
             available_actions=("slice_query", "reachability_query"),
             decisive_rejection=True,
         ),
@@ -382,11 +392,7 @@ class ProofPlanRegistry:
             return [self.plans[plan_id] for plan_id in selected_ids]
         if candidate.suspected_mechanism == "allocation_access_extent_contrast":
             return [self.plans["memory-write-v1"]]
-        selected = [
-            plan
-            for plan in self.plans.values()
-            if plan.invariant_families & families
-        ]
+        selected = [plan for plan in self.plans.values() if plan.invariant_families & families]
         return sorted(selected, key=lambda plan: plan.id)
 
     def instantiate(
@@ -415,11 +421,7 @@ class ProofPlanRegistry:
                 qualified = f"{plan.id}:{template.key}"
                 dependencies: list[str] = []
                 for dependency in template.dependencies:
-                    dependency_key = (
-                        dependency
-                        if ":" in dependency
-                        else f"{plan.id}:{dependency}"
-                    )
+                    dependency_key = dependency if ":" in dependency else f"{plan.id}:{dependency}"
                     target = placeholders.get(dependency_key)
                     if target is not None:
                         dependencies.append(target.logical_id)

@@ -2,12 +2,15 @@
 
 from .proof_flow import (
     CounterfactualExpectation,
+    CounterfactualManifest,
+    CounterfactualReport,
     CounterfactualScore,
     CutoverDecision,
     CutoverMetrics,
     GroundTruth,
     ProofEvalObservation,
     ProofFunnel,
+    evaluate_counterfactual_sessions,
     evaluate_cutover,
     inspect_proof_session,
     score_counterfactuals,
@@ -33,6 +36,8 @@ from .sourcehunt import (
 
 __all__ = [
     "CounterfactualExpectation",
+    "CounterfactualManifest",
+    "CounterfactualReport",
     "CounterfactualScore",
     "CutoverDecision",
     "CutoverMetrics",
@@ -54,6 +59,7 @@ __all__ = [
     "build_ablation_plan",
     "execute_sourcehunt_run",
     "evaluate_cutover",
+    "evaluate_counterfactual_sessions",
     "inspect_proof_session",
     "inspect_ablation_session",
     "run_ablation_campaign",

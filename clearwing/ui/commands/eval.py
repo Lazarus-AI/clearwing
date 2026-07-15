@@ -168,6 +168,11 @@ def add_parser(subparsers):
         default=[],
         metavar="CASE_ID=PATH",
     )
+    sourcehunt_run.add_argument(
+        "--scheduler-calibration",
+        default="",
+        help="Optional Phase-3 action-utility calibration JSON",
+    )
     sourcehunt_run.add_argument("--output-dir", required=True)
     sourcehunt_run.add_argument("--checkpoint", required=True)
     sourcehunt_run.add_argument(
@@ -200,6 +205,29 @@ def add_parser(subparsers):
         action="store_true",
         help="Emit a visibly incomplete report instead of failing",
     )
+    sourcehunt_calibrate = sub.add_parser(
+        "sourcehunt-calibrate",
+        help="Compile Phase-3 scheduler utility from proof evaluation sessions",
+    )
+    sourcehunt_calibrate.add_argument(
+        "--observations",
+        action="append",
+        required=True,
+        help="Observation JSON file; may be repeated",
+    )
+    sourcehunt_calibrate.add_argument("--output", required=True)
+    sourcehunt_counterfactual = sub.add_parser(
+        "sourcehunt-counterfactual",
+        help="Evaluate a complete vulnerable/counterfactual proof-session matrix",
+    )
+    sourcehunt_counterfactual.add_argument("--manifest", required=True)
+    sourcehunt_counterfactual.add_argument(
+        "--session",
+        action="append",
+        required=True,
+        metavar="NAME=SESSION_DIR",
+    )
+    sourcehunt_counterfactual.add_argument("--output", required=True)
     compare.add_argument(
         "--format",
         choices=["table", "json", "markdown"],
@@ -217,7 +245,8 @@ def handle(cli, args):
     if not action:
         cli.console.print(
             "[yellow]Usage: clearwing eval <preprocessing|compare|sourcehunt-plan|"
-            "sourcehunt-run|sourcehunt-observe|sourcehunt-baseline>[/yellow]",
+            "sourcehunt-run|sourcehunt-observe|sourcehunt-baseline|"
+            "sourcehunt-calibrate|sourcehunt-counterfactual>[/yellow]",
         )
         return
 
@@ -228,6 +257,8 @@ def handle(cli, args):
         "sourcehunt-observe": _handle_sourcehunt_observe,
         "sourcehunt-run": _handle_sourcehunt_run,
         "sourcehunt-baseline": _handle_sourcehunt_baseline,
+        "sourcehunt-calibrate": _handle_sourcehunt_calibrate,
+        "sourcehunt-counterfactual": _handle_sourcehunt_counterfactual,
     }
     handler = handlers.get(action)
     if handler:
@@ -474,6 +505,7 @@ def _handle_sourcehunt_run(cli, args):  # noqa: C901
                 budget_usd=args.budget_per_run,
                 compile_commands=compile_commands.get(spec.case_id),
                 validation_manifest=validation_manifests.get(spec.case_id),
+                scheduler_calibration=(args.scheduler_calibration or None),
                 proof_max_actions=args.proof_max_actions,
                 proof_max_model_calls=args.proof_max_model_calls,
                 proof_max_dynamic_actions=args.proof_max_dynamic_actions,
@@ -522,3 +554,49 @@ def _handle_sourcehunt_baseline(cli, args):
         cli.console.print(f"[red]Unable to aggregate sourcehunt baseline: {exc}[/red]")
         sys.exit(1)
     cli.console.print(f"[green]Wrote baseline to {target} and {markdown_target}[/green]")
+
+
+def _handle_sourcehunt_calibrate(cli, args):
+    from ...eval.sourcehunt import load_observations
+    from ...sourcehunt.proof import SchedulerCalibrationCompiler
+
+    try:
+        observations = load_observations(args.observations)
+        session_dirs = sorted(
+            {observation.session_dir for observation in observations if observation.flow == "proof"}
+        )
+        if not session_dirs:
+            raise ValueError("No proof-flow sessions were present in the observations")
+        calibration = SchedulerCalibrationCompiler().compile(session_dirs)
+        target = calibration.write(args.output)
+    except Exception as exc:
+        cli.console.print(f"[red]Unable to calibrate sourcehunt scheduler: {exc}[/red]")
+        sys.exit(1)
+    cli.console.print(
+        f"[green]Wrote {len(calibration.profiles)} scheduler profiles to {target}[/green]"
+    )
+
+
+def _handle_sourcehunt_counterfactual(cli, args):
+    from ...eval import CounterfactualManifest, evaluate_counterfactual_sessions
+
+    try:
+        sessions: dict[str, str] = {}
+        for assignment in args.session:
+            name, separator, session_dir = assignment.partition("=")
+            if not separator or not name or not session_dir:
+                raise ValueError(f"Invalid --session {assignment!r}; expected NAME=SESSION_DIR")
+            if name in sessions:
+                raise ValueError(f"Duplicate counterfactual session: {name}")
+            sessions[name] = session_dir
+        manifest = CounterfactualManifest.load(args.manifest)
+        report = evaluate_counterfactual_sessions(manifest, sessions)
+        target = report.write(args.output)
+    except Exception as exc:
+        cli.console.print(f"[red]Unable to evaluate counterfactual suite: {exc}[/red]")
+        sys.exit(1)
+    color = "green" if not report.score.failures else "yellow"
+    cli.console.print(
+        f"[{color}]Counterfactual consistency {report.score.passed}/"
+        f"{report.score.total}; wrote {target}[/{color}]"
+    )

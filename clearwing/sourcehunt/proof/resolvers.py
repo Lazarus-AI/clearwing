@@ -71,8 +71,10 @@ class MechanicalResolver:
             "live_identifier_domain_established": self._live_domain,
             "live_domain_overlaps_reserved_value": self._domain_overlap,
             "no_effective_upper_bound_guard": self._guard,
+            "attacker_reaches_memory_operation": self._reachability,
             "incorrect_state_reaches_memory_access": self._memory_access,
             "object_bounds_established": self._object_bounds,
+            "access_exceeds_live_object_bounds": self._bounds_violation,
             "attacker_controls_identifier_progression": self._taint_path,
             "attacker_controls_requested_extent": self._taint_path,
             "attacker_data_reaches_interpreter_boundary": self._taint_path,
@@ -251,6 +253,69 @@ class MechanicalResolver:
             evidence_kind="static_memory_access",
         )
 
+    def _reachability(
+        self,
+        candidate: Candidate,
+        obligation: Obligation,
+        facts: list[Fact],
+        completeness: CompletenessManifest,
+    ) -> Resolution | None:
+        explicit = [fact for fact in facts if fact.kind == "reachability"]
+        reachable = [
+            fact
+            for fact in explicit
+            if fact.object is True or fact.properties.get("reachable") is True
+        ]
+        if reachable:
+            return self._supported(
+                candidate,
+                obligation,
+                reachable,
+                conclusion="An extracted entry-to-operation path is reachable.",
+                evidence_kind="static_reachability_path",
+            )
+        unreachable = [
+            fact
+            for fact in explicit
+            if fact.object is False or fact.properties.get("reachable") is False
+        ]
+        if unreachable:
+            indirect = completeness.items.get("indirect_calls")
+            direct = completeness.items.get("direct_calls")
+            if (
+                indirect is not None
+                and direct is not None
+                and indirect.status == CompletenessStatus.COMPLETE
+                and direct.status == CompletenessStatus.COMPLETE
+            ):
+                return self._contradicted(
+                    candidate,
+                    obligation,
+                    unreachable,
+                    conclusion="Complete callgraph coverage proves the operation unreachable.",
+                    evidence_kind="complete_unreachability_proof",
+                )
+            return Resolution(
+                status=ObligationStatus.BLOCKED,
+                blocked_reason=(
+                    "A direct path was not found, but unresolved indirect calls prevent an "
+                    "unreachability conclusion."
+                ),
+            )
+        paths = [fact for fact in facts if fact.kind == "taint_path"]
+        if paths:
+            return self._supported(
+                candidate,
+                obligation,
+                paths,
+                conclusion="An extracted attacker-controlled path reaches the operation.",
+                evidence_kind="taint_reachability_path",
+            )
+        return Resolution(
+            status=ObligationStatus.BLOCKED,
+            blocked_reason="No attacker entry-to-memory-operation path is present in the packet.",
+        )
+
     def _object_bounds(
         self,
         candidate: Candidate,
@@ -266,8 +331,79 @@ class MechanicalResolver:
             candidate,
             obligation,
             allocations,
-            conclusion="An allocation expression establishes the candidate object extent.",
+            conclusion="A normalized allocation fact establishes the candidate object extent.",
             evidence_kind="static_allocation_extent",
+        )
+
+    def _bounds_violation(
+        self,
+        candidate: Candidate,
+        obligation: Obligation,
+        facts: list[Fact],
+        completeness: CompletenessManifest,
+    ) -> Resolution | None:
+        del completeness
+        allocations = [fact for fact in facts if fact.kind == "allocation"]
+        accesses = [fact for fact in facts if fact.kind == "memory_write"]
+        guards = [fact for fact in facts if fact.kind == "guard"]
+        if not allocations or not accesses:
+            return None
+        for allocation in allocations:
+            for access in accesses:
+                if not _same_target(allocation, access) or not _same_function(allocation, access):
+                    continue
+                preventing = [
+                    guard
+                    for guard in guards
+                    if _same_function(guard, access)
+                    and _line(guard) < _line(access)
+                    and _guard_prevents_extent(guard, allocation, access)
+                ]
+                if preventing:
+                    return self._contradicted(
+                        candidate,
+                        obligation,
+                        preventing,
+                        conclusion=(
+                            "A preceding rejecting guard constrains the access extent to the "
+                            "allocation extent."
+                        ),
+                        evidence_kind="dominating_spatial_guard",
+                    )
+                allocation_extent = _constant_extent(str(allocation.properties.get("extent") or ""))
+                access_extent = _constant_extent(str(access.properties.get("extent") or ""))
+                access_offset = _constant_extent(str(access.properties.get("offset") or "0"))
+                if (
+                    allocation_extent is not None
+                    and access_extent is not None
+                    and access_offset is not None
+                ):
+                    if access_offset + access_extent > allocation_extent:
+                        return self._supported(
+                            candidate,
+                            obligation,
+                            [allocation, access],
+                            conclusion=(
+                                "The normalized constant access interval exceeds the allocation "
+                                "extent."
+                            ),
+                            evidence_kind="static_extent_violation",
+                        )
+                    return self._contradicted(
+                        candidate,
+                        obligation,
+                        [allocation, access],
+                        conclusion=(
+                            "The normalized constant access interval is contained in the "
+                            "allocation extent."
+                        ),
+                        evidence_kind="static_extent_containment",
+                    )
+        return Resolution(
+            status=ObligationStatus.BLOCKED,
+            blocked_reason=(
+                "Allocation and access extents are normalized, but a range proof is still required."
+            ),
         )
 
     def _taint_path(
@@ -595,3 +731,48 @@ def _same_function(left: Fact, right: Fact) -> bool:
 
 def _line(fact: Fact) -> int:
     return fact.location.line if fact.location else 0
+
+
+def _same_target(allocation: Fact, access: Fact) -> bool:
+    allocated = re.sub(r"\s+", "", str(allocation.properties.get("target") or ""))
+    accessed = re.sub(r"\s+", "", str(access.properties.get("target") or ""))
+    return bool(allocated and accessed and allocated.lstrip("&") == accessed.lstrip("&"))
+
+
+def _guard_prevents_extent(guard: Fact, allocation: Fact, access: Fact) -> bool:
+    if not bool(guard.properties.get("rejecting")):
+        return False
+    allocation_symbols = set(allocation.properties.get("extent_symbols") or [])
+    access_symbols = set(access.properties.get("extent_symbols") or [])
+    if not allocation_symbols or not access_symbols:
+        return False
+    comparisons = guard.properties.get("comparisons")
+    if not isinstance(comparisons, list):
+        return False
+    for raw in comparisons:
+        if not isinstance(raw, dict):
+            continue
+        left = str(raw.get("left") or "")
+        right = str(raw.get("right") or "")
+        operator = str(raw.get("operator") or "")
+        if left in access_symbols and right in allocation_symbols and operator in {">", ">="}:
+            return True
+        if right in access_symbols and left in allocation_symbols and operator in {"<", "<="}:
+            return True
+    return False
+
+
+def _constant_extent(expression: str) -> int | None:
+    value = expression.strip()
+    if not value:
+        return None
+    if re.fullmatch(r"0[xX][0-9A-Fa-f]+|\d+", value):
+        return int(value, 0)
+    product = re.fullmatch(
+        r"\(?\s*(0[xX][0-9A-Fa-f]+|\d+)\s*\)?\s*\*\s*"
+        r"\(?\s*(0[xX][0-9A-Fa-f]+|\d+)\s*\)?",
+        value,
+    )
+    if product:
+        return int(product.group(1), 0) * int(product.group(2), 0)
+    return None

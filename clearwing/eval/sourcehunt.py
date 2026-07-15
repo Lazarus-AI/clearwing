@@ -688,6 +688,7 @@ async def execute_sourcehunt_run(
     budget_usd: float,
     compile_commands: str | None = None,
     validation_manifest: str | None = None,
+    scheduler_calibration: str | None = None,
     proof_max_actions: int = 200,
     proof_max_model_calls: int = 40,
     proof_max_dynamic_actions: int = 20,
@@ -728,6 +729,7 @@ async def execute_sourcehunt_run(
     for label, path in (
         ("compile_commands", compile_commands),
         ("validation_manifest", validation_manifest),
+        ("scheduler_calibration", scheduler_calibration),
     ):
         if path and not Path(path).expanduser().is_file():
             raise ValueError(f"{label} does not exist for {case.id}: {path}")
@@ -746,6 +748,7 @@ async def execute_sourcehunt_run(
         flow=spec.flow,
         proof_compile_commands=compile_commands,
         proof_validation_manifest=validation_manifest,
+        proof_scheduler_calibration=scheduler_calibration,
         proof_max_actions=proof_max_actions,
         proof_max_model_calls=proof_max_model_calls,
         proof_max_dynamic_actions=proof_max_dynamic_actions,

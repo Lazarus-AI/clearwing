@@ -2117,11 +2117,13 @@ scenario and migration contract for final replacement of the legacy default.
 
 The migration implementation is now present behind `--flow proof`:
 
-**Phase 0 implementation: 100%. Phase 1 implementation: 100%.** The
-percentages describe repository implementation and test coverage, not a claim
-that an unrun paid-model campaign produced measurements. Empirical campaign
-reports remain separately versioned artifacts, and the baseline compiler now
-refuses to label a partial matrix complete.
+**Phase 0 implementation: 100%. Phase 1 implementation: 100%. Phase 2
+implementation: 100%. Phase 3 implementation: 100%.** These percentages
+describe repository implementation and fixture-level acceptance coverage, not
+a claim that an unrun paid-model or FFmpeg campaign produced measurements.
+Empirical campaign reports remain separately versioned artifacts, and the
+baseline and counterfactual compilers refuse to label partial matrices
+complete.
 
 - Strict snapshot, fact, evidence, claim, assumption, threat-model,
   candidate, obligation, action, derivation, context-packet, and certificate
@@ -2159,6 +2161,20 @@ refuses to label a partial matrix complete.
 - Live assumption records in candidate graphs, bounded packets, falsifier
   packets, certificates, and reports. Assumption revisions now stale dependent
   claims and obligations and persist stale certificate successor revisions.
+- Versioned canonical allocation, access, length, cast, guard, and call facts;
+  allocation-versus-access spatial candidates; explicit attacker-reachability
+  and bounds obligations; and deterministic safe-containment and dominating-
+  guard rejection paths.
+- Reusable manifest-declared libFuzzer/ASan/UBSan harness templates that are
+  materialized and compiled inside the sandbox, with build and runtime
+  artifacts retained separately.
+- Manifest-driven vulnerable, fixed, renamed, moved, guarded, unreachable,
+  decoy, and widened-domain counterfactual scoring with exact-matrix
+  validation.
+- Portable scheduler-calibration artifacts compiled from observed action yield
+  and spend, enforced structured/exploratory allocation, candidate starvation
+  prevention, explicit local/frontier model identities, and escalation audit
+  telemetry.
 
 This is a migration release, not an evidence-free default flip. `legacy`
 remains the default until measured frontier recall is no worse than legacy,
@@ -2207,6 +2223,10 @@ clearwing eval sourcehunt-baseline \
   --plan results/sourcehunt-eval/plan.json \
   --observations results/sourcehunt-eval/observations.json \
   --output results/sourcehunt-eval/baseline.json
+
+clearwing eval sourcehunt-calibrate \
+  --observations results/sourcehunt-eval/observations.json \
+  --output results/sourcehunt-eval/scheduler-calibration.json
 ~~~
 
 `sourcehunt-run` verifies that each supplied checkout is at the manifest's
@@ -2222,6 +2242,26 @@ evidence. `sourcehunt-baseline` validates every observation against its plan
 and fails closed when any planned arm is missing unless `--allow-incomplete`
 is explicitly requested, in which case the report is visibly marked
 incomplete.
+
+The calibration command derives per-action information yield, cost, and time
+from completed proof sessions. A later proof run consumes the artifact with
+`--scheduler-calibration`; it never treats a model's self-reported confidence
+as calibration data. Counterfactual sessions are scored as one complete,
+causally related matrix:
+
+~~~bash
+clearwing eval sourcehunt-counterfactual \
+  --manifest evaluations/ffmpeg_proof.yaml \
+  --session vulnerable=/path/to/vulnerable/session \
+  --session fixed=/path/to/fixed/session \
+  --session renamed=/path/to/renamed/session \
+  --session moved=/path/to/moved/session \
+  --session guarded=/path/to/guarded/session \
+  --session unreachable=/path/to/unreachable/session \
+  --session decoy=/path/to/decoy/session \
+  --session widened-domain=/path/to/widened/session \
+  --output results/sourcehunt-eval/ffmpeg-counterfactual.json
+~~~
 
 ### Phase 1: Proof substrate
 
@@ -2239,28 +2279,37 @@ This phase should initially coexist with the current hunter.
 
 ### Phase 2: Spatial-memory-safety vertical slice
 
-- Normalize allocation, access, length, cast, guard, and callgraph facts.
-- Implement allocation-versus-access candidate generators.
-- Add the memory-write proof plan.
-- Build completeness-aware context packets.
-- Add bounded guard, reachability, and attacker-control resolvers.
-- Reuse or template sanitizer harnesses.
-- Implement the memory-safety falsifier.
-- Emit finding and rejection certificates.
-- Add patched, renamed, moved, unreachable, and decoy counterfactuals.
+- [x] Normalize allocation, access, length, cast, guard, and callgraph facts.
+- [x] Implement allocation-versus-access candidate generators.
+- [x] Add the memory-write proof plan.
+- [x] Build completeness-aware context packets.
+- [x] Add bounded guard, reachability, and attacker-control resolvers.
+- [x] Reuse or template sanitizer harnesses.
+- [x] Implement the memory-safety falsifier.
+- [x] Emit finding and rejection certificates.
+- [x] Add patched, renamed, moved, unreachable, and decoy counterfactuals.
 
 This vertical slice exercises nearly every architectural concept while
 remaining narrow enough for rigorous evaluation.
 
+Phase 2 completion means each mechanism exists as a typed, provenance-carrying
+repository feature with positive, rejection, incomplete-context, and
+counterfactual fixtures. It does not mean the full FFmpeg counterfactual
+checkout matrix or retained real-world trigger corpus has already been run.
+
 ### Phase 3: Scheduling and model routing
 
-- Replace file-level hunter assignments with candidate/action scheduling.
-- Add value-of-information estimates and action budgets.
-- Route deterministic actions before model calls.
-- Route small typed judgments to local models.
-- Escalate explicit unresolved obligations to stronger models.
-- Calibrate action utility using evaluation results.
-- Add starvation prevention and exploration allocation.
+- [x] Replace file-level hunter assignments with candidate/action scheduling.
+- [x] Add value-of-information estimates and action budgets.
+- [x] Route deterministic actions before model calls.
+- [x] Route small typed judgments to local models.
+- [x] Escalate explicit unresolved obligations to stronger models.
+- [x] Calibrate action utility using evaluation results.
+- [x] Add starvation prevention and exploration allocation.
+
+Phase 3 completion means those policies are enforced and audited in the proof
+engine. Their production thresholds remain empirical: rollout still depends
+on the complete local/frontier campaign meeting the cutover gates above.
 
 ### Phase 4: Additional proof plans
 

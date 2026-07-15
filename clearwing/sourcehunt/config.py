@@ -103,6 +103,7 @@ class ProofConfig:
     flow: str = "legacy"  # legacy | proof
     compile_commands: str | None = None
     validation_manifest: str | None = None
+    scheduler_calibration: str | None = None
     build_configuration: str = "default"
     clang_binary: str = "clang"
     max_actions: int = 200

@@ -26,9 +26,7 @@ def _parse_fraction(value: str) -> float:
     if percent or parsed > 1:
         parsed /= 100.0
     if not 0 <= parsed <= 1:
-        raise argparse.ArgumentTypeError(
-            "budget fraction must be between 0% and 100%"
-        )
+        raise argparse.ArgumentTypeError("budget fraction must be between 0% and 100%")
     return parsed
 
 
@@ -64,9 +62,13 @@ def add_parser(subparsers):
         "--validation-manifest",
         default=None,
         metavar="PATH",
-        help=(
-            "JSON manifest of sandboxed commands tied to proof obligations"
-        ),
+        help=("JSON manifest of sandboxed commands tied to proof obligations"),
+    )
+    parser.add_argument(
+        "--scheduler-calibration",
+        default=None,
+        metavar="PATH",
+        help="Phase-3 action-utility calibration JSON produced by clearwing eval",
     )
     parser.add_argument(
         "--build-configuration",
@@ -87,18 +89,30 @@ def add_parser(subparsers):
         help="Proof obligation model-routing policy (default: local-first)",
     )
     parser.add_argument(
+        "--proof-local-model",
+        default=None,
+        metavar="MODEL",
+        help="Model for bounded local judgments when using a single endpoint",
+    )
+    parser.add_argument(
+        "--proof-frontier-model",
+        default=None,
+        metavar="MODEL",
+        help="Stronger model used only after an unresolved local judgment",
+    )
+    parser.add_argument(
         "--structured-budget",
         type=_parse_fraction,
         default=0.90,
         metavar="PERCENT",
-        help="Proof action budget reserved for structured work (default: 90%)",
+        help="Proof action budget reserved for structured work (default: 90%%)",
     )
     parser.add_argument(
         "--exploration-budget",
         type=_parse_fraction,
         default=0.10,
         metavar="PERCENT",
-        help="Proof action budget reserved for exploration (default: 10%)",
+        help="Proof action budget reserved for exploration (default: 10%%)",
     )
     parser.add_argument(
         "--proof-plan",
@@ -340,7 +354,7 @@ def add_parser(subparsers):
         default=None,
         dest="exploit_budget",
         help="Exploit development budget band (default: auto from --depth). "
-             "standard=$25/1hr, deep=$200/4hr, campaign=$2000/12hr.",
+        "standard=$25/1hr, deep=$200/4hr, campaign=$2000/12hr.",
     )
     parser.add_argument(
         "--elaborate",
@@ -406,15 +420,18 @@ def add_parser(subparsers):
         help="Disable the shared findings pool (dedup + cross-agent queries)",
     )
     parser.add_argument(
-        "--gvisor", action="store_true",
+        "--gvisor",
+        action="store_true",
         help="Use gVisor runtime for container isolation",
     )
     parser.add_argument(
-        "--encrypt-artifacts", action="store_true",
+        "--encrypt-artifacts",
+        action="store_true",
         help="Enable encrypted artifact storage",
     )
     parser.add_argument(
-        "--no-behavior-monitor", action="store_true",
+        "--no-behavior-monitor",
+        action="store_true",
         help="Disable behavioral monitoring",
     )
     parser.add_argument(
@@ -524,27 +541,39 @@ def add_parser(subparsers):
         "(defaults to the retro-hunt target repo)",
     )
     parser.add_argument(
-        "--nday", action="store_true", default=False,
+        "--nday",
+        action="store_true",
+        default=False,
         help="N-day exploit pipeline mode",
     )
     parser.add_argument(
-        "--cve-list", metavar="PATH", default=None,
+        "--cve-list",
+        metavar="PATH",
+        default=None,
         help="File with CVE IDs for --nday (one per line: CVE-ID [commit_sha])",
     )
     parser.add_argument(
-        "--cve", metavar="CVE_ID", default=None,
+        "--cve",
+        metavar="CVE_ID",
+        default=None,
         help="Single CVE to exploit in --nday mode",
     )
     parser.add_argument(
-        "--patch-commit", metavar="SHA", default=None,
+        "--patch-commit",
+        metavar="SHA",
+        default=None,
         help="Git SHA of the patch commit for --nday --cve",
     )
     parser.add_argument(
-        "--recent-cves", action="store_true", default=False,
+        "--recent-cves",
+        action="store_true",
+        default=False,
         help="Auto-discover recent CVEs from git history for --nday",
     )
     parser.add_argument(
-        "--nday-days", type=int, default=90,
+        "--nday-days",
+        type=int,
+        default=90,
         help="Days to look back for --recent-cves (default: 90)",
     )
     parser.add_argument(
@@ -554,11 +583,15 @@ def add_parser(subparsers):
         help="Budget band per CVE in --nday mode (default: deep)",
     )
     parser.add_argument(
-        "--reveng", action="store_true", default=False,
+        "--reveng",
+        action="store_true",
+        default=False,
         help="Reverse engineering pipeline: decompile + reconstruct + hunt",
     )
     parser.add_argument(
-        "--arch", default="x86_64", choices=["x86_64"],
+        "--arch",
+        default="x86_64",
+        choices=["x86_64"],
         help="Target architecture for --reveng (default: x86_64; v1.0 supports x86_64 only)",
     )
     parser.add_argument(
@@ -632,6 +665,23 @@ def handle(cli, args):
     )
     if providers_cfg.get("providers") and not cli_override:
         provider_manager = ProviderManager.from_config(providers_cfg)
+        route_models = {
+            "proof_local": args.proof_local_model,
+            "proof_frontier": args.proof_frontier_model,
+        }
+        routes = {route.task: route for route in provider_manager.list_routes()}
+        for task, model in route_models.items():
+            if not model:
+                continue
+            route = routes.get(task)
+            if route is None:
+                raise ValueError(f"No configured provider route for {task}")
+            provider_manager.set_route(
+                task,
+                route.provider,
+                model,
+                reason="CLI proof-tier model override",
+            )
         cli.console.print("[dim]LLM: multi-endpoint per-task routing[/dim]")
     else:
         endpoint = resolve_llm_endpoint(
@@ -641,7 +691,18 @@ def handle(cli, args):
             config_provider=cli.config.get_provider_section() or None,
         )
         cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
-        provider_manager = ProviderManager.for_endpoint(endpoint)
+        task_model_overrides = {
+            task: model
+            for task, model in (
+                ("proof_local", args.proof_local_model),
+                ("proof_frontier", args.proof_frontier_model),
+            )
+            if model
+        }
+        provider_manager = ProviderManager.for_endpoint(
+            endpoint,
+            task_model_overrides=task_model_overrides,
+        )
 
     # Parse tier-split
     try:
@@ -720,14 +781,18 @@ def handle(cli, args):
 
         candidates: list[NdayCandidate] = []
         if args.cve:
-            candidates = [NdayCandidate(
-                cve_id=args.cve, patch_source=args.patch_commit or "",
-            )]
+            candidates = [
+                NdayCandidate(
+                    cve_id=args.cve,
+                    patch_source=args.patch_commit or "",
+                )
+            ]
         elif args.cve_list:
             candidates = parse_cve_list(args.cve_list)
         elif args.recent_cves:
             candidates = fetch_recent_cves(
-                args.local_path or args.repo, args.nday_days,
+                args.local_path or args.repo,
+                args.nday_days,
             )
         else:
             cli.console.print(
@@ -789,8 +854,7 @@ def handle(cli, args):
         binary_path = args.local_path or args.repo
         if not os.path.isfile(binary_path):
             cli.console.print(
-                f"[red]Error: --reveng requires a path to a binary file, "
-                f"got '{binary_path}'[/red]"
+                f"[red]Error: --reveng requires a path to a binary file, got '{binary_path}'[/red]"
             )
             sys.exit(1)
 
@@ -819,9 +883,7 @@ def handle(cli, args):
         cli.console.print(f"  Binary: {result.binary_path}")
         cli.console.print(f"  Status: {result.status}")
         if result.decompilation:
-            cli.console.print(
-                f"  Functions decompiled: {result.decompilation.total_functions}"
-            )
+            cli.console.print(f"  Functions decompiled: {result.decompilation.total_functions}")
         if result.reconstruction:
             cli.console.print(
                 f"  Functions reconstructed: {result.reconstruction.reconstructed_count}"
@@ -856,14 +918,14 @@ def handle(cli, args):
             args.output_dir,
         )
         if not session_id:
-            cli.console.print(
-                "[red]No session found. Use --elaborate-session SESSION_ID.[/red]"
-            )
+            cli.console.print("[red]No session found. Use --elaborate-session SESSION_ID.[/red]")
             sys.exit(1)
 
         if args.elaborate:
             finding = load_finding_from_session(
-                args.output_dir, session_id, args.elaborate,
+                args.output_dir,
+                session_id,
+                args.elaborate,
             )
             if finding is None:
                 cli.console.print(
@@ -871,7 +933,12 @@ def handle(cli, args):
                 )
                 sys.exit(1)
             _run_elaborate_interactive(
-                cli, args, finding, session_id, endpoint, provider_manager,
+                cli,
+                args,
+                finding,
+                session_id,
+                endpoint,
+                provider_manager,
             )
         else:
             all_findings = load_session_findings(args.output_dir, session_id)
@@ -882,7 +949,12 @@ def handle(cli, args):
                 cli.console.print("[yellow]No findings eligible for elaboration.[/yellow]")
                 sys.exit(0)
             _run_elaborate_auto(
-                cli, args, targets, session_id, endpoint, provider_manager,
+                cli,
+                args,
+                targets,
+                session_id,
+                endpoint,
+                provider_manager,
             )
         sys.exit(0)
 
@@ -895,9 +967,7 @@ def handle(cli, args):
         all_findings = load_session_findings(args.output_dir, session_id)
         verified = [f for f in all_findings if f.get("verified")]
         if not verified:
-            cli.console.print(
-                f"[yellow]No verified findings in session {session_id}[/yellow]"
-            )
+            cli.console.print(f"[yellow]No verified findings in session {session_id}[/yellow]")
             sys.exit(0)
 
         store = CalibrationStore()
@@ -910,7 +980,9 @@ def handle(cli, args):
             sev = (f.get("severity_verified") or f.get("severity") or "?").upper()
             desc = f.get("description", "")[:80]
             cli.console.print(f"\n  [{sev}] {fid}: {desc}")
-            human = input("  Human severity (critical/high/medium/low/info, or skip): ").strip().lower()
+            human = (
+                input("  Human severity (critical/high/medium/low/info, or skip): ").strip().lower()
+            )
             if human in ("critical", "high", "medium", "low", "info"):
                 store.record_human_verdict(fid, session_id, human)
                 cli.console.print(f"  Recorded: {human}")
@@ -1064,9 +1136,7 @@ def handle(cli, args):
         redundancy_override=args.redundancy,
         shard_entry_points=True if args.shard_entry_points else None,
         min_shard_rank=args.min_shard_rank,
-        seed_corpus_sources=(
-            (["git_cve"] if args.seed_cves else []) or None
-        ),
+        seed_corpus_sources=((["git_cve"] if args.seed_cves else []) or None),
         enable_findings_pool=not args.no_findings_pool,
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
@@ -1081,6 +1151,7 @@ def handle(cli, args):
         flow=args.flow,
         proof_compile_commands=args.compile_commands,
         proof_validation_manifest=args.validation_manifest,
+        proof_scheduler_calibration=args.scheduler_calibration,
         proof_build_configuration=args.build_configuration,
         proof_clang_binary=args.clang_binary,
         proof_max_actions=args.proof_max_actions,
@@ -1192,8 +1263,7 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     cli.console.print(f"  File: {finding.get('file', '?')}:{finding.get('line_number', '?')}")
     cli.console.print(f"  CWE: {finding.get('cwe', 'N/A')}")
     cli.console.print(
-        f"  Current impact: "
-        f"{finding.get('exploit_impact') or finding.get('impact') or 'unknown'}"
+        f"  Current impact: {finding.get('exploit_impact') or finding.get('impact') or 'unknown'}"
     )
     cli.console.print(
         f"  Primitive: "
@@ -1268,9 +1338,7 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
 
         # Round-trip the assistant turn (carrying its tool_calls) so the next
         # turn's history is well-formed for strict providers.
-        messages.append(
-            ChatMessage("assistant", assistant_text, tool_calls=tool_calls or None)
-        )
+        messages.append(ChatMessage("assistant", assistant_text, tool_calls=tool_calls or None))
         usage = getattr(response, "usage", None)
         if usage is not None and getattr(usage, "cost_usd", None) is not None:
             total_cost += usage.cost_usd
@@ -1326,9 +1394,7 @@ def _run_elaborate_auto(cli, args, targets, session_id, endpoint, provider_manag
 
     from ...sourcehunt.elaboration import ElaborationAgent
 
-    cli.console.print(
-        f"\n[bold blue]Autonomous elaboration: {len(targets)} findings[/bold blue]"
-    )
+    cli.console.print(f"\n[bold blue]Autonomous elaboration: {len(targets)} findings[/bold blue]")
 
     try:
         llm = provider_manager.get_native_client("default")
@@ -1349,7 +1415,9 @@ def _run_elaborate_auto(cli, args, targets, session_id, endpoint, provider_manag
             cli.console.print(f"\n[bold]({i}/{len(targets)}) Elaborating {fid}...[/bold]")
             result = await agent.aattempt(finding)
             results.append(result)
-            status = "[green]UPGRADED[/green]" if result.elaborated else "[yellow]NOT UPGRADED[/yellow]"
+            status = (
+                "[green]UPGRADED[/green]" if result.elaborated else "[yellow]NOT UPGRADED[/yellow]"
+            )
             cli.console.print(f"  Result: {status}")
             if result.upgraded_impact:
                 cli.console.print(f"  Upgraded impact: {result.upgraded_impact}")

@@ -38,8 +38,11 @@ class EvidencePolicy:
     }
     _REACHABILITY_KINDS = {
         "static_reachability",
+        "static_reachability_path",
         "taint_path",
+        "taint_reachability_path",
         "coverage_trace",
+        "complete_unreachability_proof",
         "bounded_model_judgment",
         "falsification_counterexample",
     }

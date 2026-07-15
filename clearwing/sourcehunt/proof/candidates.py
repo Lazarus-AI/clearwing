@@ -142,36 +142,71 @@ class AllocationAccessGenerator:
     """Find allocation/access extent contrasts in the same bounded scope."""
 
     name = "allocation-access-contrast"
-    version = "1"
+    version = "2"
 
     def generate(self, snapshot_id: str, facts: list[Fact]) -> list[Candidate]:
         allocations = [fact for fact in facts if fact.kind == "allocation"]
         writes = [fact for fact in facts if fact.kind == "memory_write"]
         casts = [fact for fact in facts if fact.kind == "cast"]
         assignments = [fact for fact in facts if fact.kind == "assignment"]
+        lengths = [fact for fact in facts if fact.kind == "length"]
+        guards = [fact for fact in facts if fact.kind == "guard"]
+        calls = [
+            fact
+            for fact in facts
+            if fact.kind in {"call", "call_edge", "reachability", "taint_path"}
+        ]
         candidates: list[Candidate] = []
         for allocation in allocations:
-            related_writes = [write for write in writes if _same_scope(allocation, write)]
+            related_writes = [
+                write
+                for write in writes
+                if _same_scope(allocation, write) and _allocation_may_feed_access(allocation, write)
+            ]
             for write in related_writes:
                 allocation_expression = _expression(allocation)
                 write_expression = _expression(write)
-                allocation_ids = set(_identifiers(allocation_expression))
-                write_ids = set(_identifiers(write_expression))
-                if not allocation_ids or not write_ids:
-                    continue
+                allocation_extent = str(
+                    allocation.properties.get("extent") or allocation_expression
+                )
+                write_extent = str(write.properties.get("extent") or write_expression)
+                allocation_target = str(allocation.properties.get("target") or "")
+                write_target = str(write.properties.get("target") or "")
+                allocation_ids = set(
+                    allocation.properties.get("extent_symbols") or _identifiers(allocation_extent)
+                )
+                write_ids = set(
+                    write.properties.get("extent_symbols")
+                    or write.properties.get("offset_symbols")
+                    or _identifiers(write_extent)
+                )
                 local_casts = [fact for fact in casts if _same_scope(fact, allocation)]
                 local_assignments = [fact for fact in assignments if _same_scope(fact, allocation)]
-                if allocation_expression == write_expression:
-                    continue
-                source_symbols = sorted(
-                    identifier
-                    for identifier in allocation_ids | write_ids
-                    if any(token in identifier.lower() for token in ("len", "size", "count"))
-                )
+                local_lengths = [
+                    fact
+                    for fact in lengths
+                    if _same_file_function(fact, allocation)
+                    and fact.subject in allocation_ids | write_ids
+                ]
+                relevant_symbols = allocation_ids | write_ids
+                local_guards = [
+                    fact
+                    for fact in guards
+                    if _same_scope(fact, allocation)
+                    and relevant_symbols.intersection(
+                        set(
+                            fact.properties.get("guarded_symbols")
+                            or _identifiers(_expression(fact))
+                        )
+                    )
+                ]
+                local_calls = [fact for fact in calls if _same_file_function(fact, allocation)]
+                source_symbols = sorted(relevant_symbols)
+                target = write_target or allocation_target or "memory object"
                 candidates.append(
                     Candidate(
                         snapshot_id=snapshot_id,
-                        title="Allocation and write extents require a bounds proof",
+                        title=f"Allocation and write extents for {target} require a bounds proof",
                         invariant_families=[
                             "spatial_safety",
                             "representation_domain_safety",
@@ -181,18 +216,31 @@ class AllocationAccessGenerator:
                         transformations=[
                             _expression(fact) for fact in local_casts + local_assignments
                         ],
-                        state_sinks=[allocation_expression],
-                        impact_sinks=[write_expression],
+                        state_sinks=[allocation_target or allocation_expression],
+                        impact_sinks=[write_target or write_expression],
                         suspected_invariants=["accessed region is a subset of allocated region"],
                         fact_ids=[
                             fact.id
                             for fact in _unique_facts(
-                                [allocation, write, *local_casts, *local_assignments]
+                                [
+                                    allocation,
+                                    write,
+                                    *local_casts,
+                                    *local_assignments,
+                                    *local_lengths,
+                                    *local_guards,
+                                    *local_calls,
+                                ]
                             )
                         ],
                         generator=self.name,
                         generator_version=self.version,
-                        experimental=True,
+                        experimental=not bool(
+                            allocation.properties.get("extent")
+                            and write.properties.get("extent")
+                            and allocation_target
+                            and write_target
+                        ),
                     )
                 )
         return candidates
@@ -741,6 +789,36 @@ def _same_scope(left: Fact, right: Fact) -> bool:
     if left.location.function and right.location.function:
         return left.location.function == right.location.function
     return abs(left.location.line - right.location.line) <= 80
+
+
+def _same_file_function(left: Fact, right: Fact) -> bool:
+    if left.location is None or right.location is None:
+        return False
+    return (
+        left.location.file == right.location.file
+        and bool(left.location.function)
+        and left.location.function == right.location.function
+    )
+
+
+def _allocation_may_feed_access(allocation: Fact, access: Fact) -> bool:
+    allocation_target = str(allocation.properties.get("target") or "")
+    access_target = str(access.properties.get("target") or "")
+    if allocation_target and access_target:
+        return _canonical_target(allocation_target) == _canonical_target(access_target)
+    allocation_symbols = set(
+        allocation.properties.get("extent_symbols") or _identifiers(_expression(allocation))
+    )
+    access_symbols = set(
+        access.properties.get("extent_symbols")
+        or access.properties.get("offset_symbols")
+        or _identifiers(_expression(access))
+    )
+    return bool(allocation_symbols & access_symbols)
+
+
+def _canonical_target(value: str) -> str:
+    return re.sub(r"\s+", "", value).removeprefix("&")
 
 
 def _shares_function(fact: Fact, others: list[Fact]) -> bool:

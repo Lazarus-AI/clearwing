@@ -15,6 +15,7 @@ from clearwing.llm.budget import spend_metadata
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 from ..preprocessor import Preprocessor
+from .calibration import SchedulerCalibration
 from .candidates import AssumptionBuilder, CandidatePipeline, ThreatModelBuilder
 from .certificates import CertificateCompiler
 from .context import ContextPacketBuilder
@@ -56,6 +57,7 @@ from .telemetry import ProofTelemetryCompiler
 from .validation import (
     CommandValidationBackend,
     SanitizerValidationBackend,
+    TemplateHarnessBackend,
     ValidationManifest,
     ValidationRequest,
 )
@@ -69,6 +71,7 @@ class ProofRunConfig:
     session_id: str = ""
     compile_commands: str | None = None
     validation_manifest: str | None = None
+    scheduler_calibration: str | None = None
     build_configuration: str = "default"
     clang_binary: str = "clang"
     max_actions: int = 200
@@ -170,6 +173,11 @@ class ProofFlowRunner:
                 if self.config.validation_manifest
                 else None
             )
+            scheduler_calibration = (
+                SchedulerCalibration.load(self.config.scheduler_calibration)
+                if self.config.scheduler_calibration
+                else None
+            )
             command_runner = self.command_runner
             if {"c", "cpp"} & set(languages):
                 compile_commands = self._compile_commands_path(Path(repo_path))
@@ -224,6 +232,19 @@ class ProofFlowRunner:
                     "artifact_uri": validation_uri,
                     "digest": validation_digest,
                     "command_count": len(validation_manifest.commands),
+                }
+            if self.config.scheduler_calibration:
+                calibration_source = Path(self.config.scheduler_calibration).expanduser().resolve()
+                calibration_uri, calibration_digest = store.store_artifact(
+                    calibration_source.read_bytes(),
+                    media_type="application/json",
+                    name="scheduler-calibration.json",
+                )
+                manifest["scheduler_calibration"] = {
+                    "artifact_uri": calibration_uri,
+                    "digest": calibration_digest,
+                    "profile_count": len(scheduler_calibration.profiles),
+                    "source_sessions": scheduler_calibration.source_sessions,
                 }
             manifest.update(
                 {
@@ -394,6 +415,7 @@ class ProofFlowRunner:
                     structured_fraction=self.config.structured_fraction,
                     exploration_fraction=self.config.exploration_fraction,
                 ),
+                calibration=scheduler_calibration,
             )
             threats = store.latest_threats(snapshot.id)
             await self._investigate_candidates(
@@ -811,10 +833,31 @@ class ProofFlowRunner:
             cwd.relative_to(repo_path.resolve())
         except ValueError as exc:
             raise ProofPreflightError(f"Validation cwd escapes the repository: {spec.cwd}") from exc
+        evidence_ids: list[str] = []
+        command = tuple(spec.command)
+        if spec.harness_template is not None:
+            preparation = TemplateHarnessBackend(command_runner, store).prepare(
+                snapshot_id=candidate.snapshot_id,
+                candidate_id=candidate.logical_id,
+                spec=spec.harness_template,
+                repo_root=repo_path,
+                timeout_seconds=spec.timeout_seconds,
+            )
+            graph.reload()
+            evidence_ids.append(preparation.evidence.logical_id)
+            if not preparation.succeeded:
+                return (
+                    Resolution(
+                        status=ObligationStatus.BLOCKED,
+                        blocked_reason=preparation.error,
+                    ),
+                    evidence_ids,
+                )
+            command = preparation.command
         request = ValidationRequest(
             snapshot_id=candidate.snapshot_id,
             candidate_id=candidate.logical_id,
-            command=tuple(spec.command),
+            command=command,
             cwd=cwd,
             repeats=spec.repeats,
             timeout_seconds=spec.timeout_seconds,
@@ -836,7 +879,7 @@ class ProofFlowRunner:
         )
         result = backend.validate(request)
         graph.reload()
-        evidence_ids = [result.evidence.logical_id]
+        evidence_ids.append(result.evidence.logical_id)
         if result.reproductions < spec.required_reproductions:
             return (
                 Resolution(

@@ -81,6 +81,18 @@ class ProofTelemetryCompiler:
         }
         claim_outputs = {claim_id for action in actions for claim_id in action.output_claim_ids}
         model_actions = [action for action in actions if action.model_route]
+        frontier_actions = [
+            action for action in model_actions if action.model_route == "proof_frontier"
+        ]
+        valid_frontier_escalations = [
+            action for action in frontier_actions if _has_prior_local_ambiguity(action, actions)
+        ]
+        resolved_frontier_escalations = [
+            action
+            for action in valid_frontier_escalations
+            if action.status == ActionStatus.COMPLETED and action.output_claim_ids
+        ]
+        local_actions = [action for action in model_actions if action.model_route == "proof_local"]
         linked_call_ids = {
             str(call.get("call_id") or "unknown")
             for linked in calls_by_action.values()
@@ -117,6 +129,23 @@ class ProofTelemetryCompiler:
             "model_call_linkage": {
                 "linked_call_ids": sorted(linked_call_ids),
                 "unlinked_call_ids": sorted(unlinked_calls),
+            },
+            "routing": {
+                "local_actions": len(local_actions),
+                "frontier_actions": len(frontier_actions),
+                "frontier_with_prior_local_ambiguity": len(valid_frontier_escalations),
+                "frontier_without_prior_local_ambiguity": (
+                    len(frontier_actions) - len(valid_frontier_escalations)
+                ),
+                "frontier_resolved_explicit_ambiguity": len(resolved_frontier_escalations),
+                "explicit_frontier_escalation_rate": _ratio(
+                    len(valid_frontier_escalations),
+                    len(frontier_actions),
+                ),
+                "frontier_ambiguity_resolution_rate": _ratio(
+                    len(resolved_frontier_escalations),
+                    len(valid_frontier_escalations),
+                ),
             },
             "efficiency": {
                 "evidence_per_1000_tokens": _per_thousand(
@@ -217,6 +246,19 @@ def _calls_for_action(
         if identifier in calls_by_action:
             return calls_by_action[identifier]
     return []
+
+
+def _has_prior_local_ambiguity(frontier: Action, actions: list[Action]) -> bool:
+    frontier_obligations = set(frontier.obligation_ids)
+    return any(
+        action.model_route == "proof_local"
+        and action.candidate_id == frontier.candidate_id
+        and bool(frontier_obligations & set(action.obligation_ids))
+        and action.template == frontier.template
+        and action.created_at <= frontier.created_at
+        and (action.status != ActionStatus.COMPLETED or not action.output_claim_ids)
+        for action in actions
+    )
 
 
 def _read_settled_calls(path: Path) -> list[dict[str, Any]]:
