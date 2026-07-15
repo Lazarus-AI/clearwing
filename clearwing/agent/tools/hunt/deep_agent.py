@@ -42,8 +42,13 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     """Build the deep agent tool set: execute, read_file, write_file,
     plus the shared reporting + findings-pool tools.
     """
+    # Deep hunters read source via read_file/execute (cat/sed/grep), not the
+    # constrained read_source_file that populates ctx.files_read. Mark the
+    # context so the reporting guard doesn't reject every trace step for a
+    # file it never saw a read_source_file call for.
+    ctx.agent_mode = "deep"
 
-    def execute(command: str, timeout: int = 300) -> dict:
+    def execute(command: str, timeout: int = 300, **_: object) -> dict:
         if ctx.sandbox is None:
             return {"error": "no sandbox available"}
         result = ctx.sandbox.exec(command, timeout=timeout)
@@ -55,7 +60,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "duration_seconds": round(result.duration_seconds, 2),
         }
 
-    def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = 2000, **_: object) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
         start = offset + 1
@@ -75,7 +80,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             return f"error reading {path}: {result.stderr.strip()}"
         return result.stdout
 
-    def write_file(path: str, contents: str) -> str:
+    def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
         ctx.sandbox.exec(f"mkdir -p $(dirname {shlex.quote(path)})", timeout=10)
@@ -105,12 +110,17 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     },
                 },
                 "required": ["command"],
+                "additionalProperties": False,
             },
             handler=execute,
         ),
         NativeToolSpec(
             name="read_file",
-            description="Read lines from a file in the container.",
+            description=(
+                "Read lines from a file in the container. "
+                "Parameters: path (required), offset (line offset, default 0), "
+                "limit (max lines, default 2000). No other parameters exist."
+            ),
             schema={
                 "type": "object",
                 "properties": {
@@ -130,6 +140,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     },
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             },
             handler=read_file,
         ),
@@ -149,6 +160,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     },
                 },
                 "required": ["path", "contents"],
+                "additionalProperties": False,
             },
             handler=write_file,
         ),

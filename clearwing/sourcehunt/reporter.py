@@ -33,6 +33,7 @@ def write_sourcehunt_report(
     pool_stats: dict | None = None,
     subsystem_stats: dict | None = None,
     pipeline_status: PipelineStatus | None = None,
+    budget_summary: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Write the requested formats. Returns {format: filesystem_path}."""
     formats = formats or ["sarif", "markdown", "json"]
@@ -67,6 +68,7 @@ def write_sourcehunt_report(
             pool_stats=pool_stats,
             subsystem_stats=subsystem_stats,
             pipeline_status=pipeline_status,
+            budget_summary=budget_summary,
         )
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md)
@@ -96,26 +98,40 @@ def write_sourcehunt_report(
                 }
                 for name, s in pipeline_status.stages.items()
             }
+        if budget_summary is not None:
+            json_data["budget"] = budget_summary
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f, indent=2, default=_json_default)
         paths["json"] = str(json_path)
 
-    # Always write a manifest
+    if budget_summary and budget_summary.get("ledger_path"):
+        paths["ledger"] = str(budget_summary["ledger_path"])
+
+    # Always write a manifest.  The run-scoped ledger may already have
+    # checkpointed a minimal running manifest; this atomically replaces it
+    # with the complete report index while preserving authoritative spend.
     manifest_path = session_dir / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "session_id": session_id,
-                "repo_url": repo_url,
-                "finding_count": len(findings),
-                "verified_count": len(verified_findings),
-                "spent_per_tier": spent_per_tier,
-                "total_spent": sum(spent_per_tier.values()),
-                "outputs": paths,
-            },
-            f,
-            indent=2,
-        )
+    manifest_data: dict[str, Any] = dict(budget_summary or {})
+    manifest_data.update(
+        {
+            "session_id": session_id,
+            "repo_url": repo_url,
+            "finding_count": len(findings),
+            "verified_count": len(verified_findings),
+            "spent_per_tier": spent_per_tier,
+            "total_spent": (
+                budget_summary["total_spent"]
+                if budget_summary is not None
+                else sum(spent_per_tier.values())
+            ),
+            "outputs": paths,
+        }
+    )
+    manifest_tmp = manifest_path.with_suffix(".json.tmp")
+    with open(manifest_tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest_data, f, indent=2)
+        f.flush()
+    manifest_tmp.replace(manifest_path)
     paths["manifest"] = str(manifest_path)
 
     return paths
@@ -183,6 +199,7 @@ def _render_markdown(
     pool_stats: dict | None = None,
     subsystem_stats: dict | None = None,
     pipeline_status: PipelineStatus | None = None,
+    budget_summary: dict[str, Any] | None = None,
 ) -> str:
     lines = []
     lines.append(f"# Sourcehunt Report — {session_id}")
@@ -195,7 +212,16 @@ def _render_markdown(
         f"B=${spent_per_tier.get('B', 0):.4f}, "
         f"C=${spent_per_tier.get('C', 0):.4f}"
     )
-    lines.append(f"- **Total spend:** ${sum(spent_per_tier.values()):.4f}")
+    total_spent = (
+        float(budget_summary["total_spent"])
+        if budget_summary is not None
+        else sum(spent_per_tier.values())
+    )
+    lines.append(f"- **Total spend:** ${total_spent:.4f}")
+    if budget_summary is not None:
+        lines.append(f"- **Run status:** {budget_summary.get('status', 'unknown')}")
+        if budget_summary.get("budget_usd", 0) > 0:
+            lines.append(f"- **Budget:** ${budget_summary['budget_usd']:.4f}")
     lines.append("")
 
     if band_stats:

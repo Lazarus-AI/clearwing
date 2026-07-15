@@ -26,6 +26,7 @@ from typing import Any, Literal, cast
 
 from clearwing.core.event_payloads import HuntProgressPayload
 from clearwing.core.events import EventBus
+from clearwing.llm.budget import BudgetExceeded, spend_metadata
 from clearwing.runners.parallel.executor import (
     TargetResult,
 )
@@ -366,6 +367,20 @@ class HunterPool:
     def total_spent(self) -> float:
         return sum(self._spent_per_tier.values())
 
+    @property
+    def budget_exhausted(self) -> bool:
+        return any(result.status == "budget_exhausted" for result in self._results.values())
+
+    @property
+    def completed_target_count(self) -> int:
+        return len(
+            {
+                result.target
+                for result in self._results.values()
+                if result.status == "completed"
+            }
+        )
+
     async def _run_tier_phase(
         self,
         work_items: list[WorkItem],
@@ -440,6 +455,7 @@ class HunterPool:
                             tier=tier,
                             band=wi.band,
                         )
+                await asyncio.gather(*in_flight, return_exceptions=True)
                 return spent
 
             for task in done:
@@ -453,6 +469,17 @@ class HunterPool:
                         status="cancelled",
                         tier=tier,
                         band=wi.band,
+                    )
+                except BudgetExceeded as exc:
+                    logger.info("tier %s hunter for %s stopped at budget", tier, key)
+                    self._cancelled = True
+                    result = TargetResult(
+                        target=key,
+                        status="budget_exhausted",
+                        error=str(exc),
+                        tier=tier,
+                        band=wi.band,
+                        stop_reason="budget_exhausted",
                     )
                 except Exception as exc:
                     logger.warning("tier %s hunter for %s failed: %s", tier, key, exc)
@@ -485,12 +512,28 @@ class HunterPool:
                     budget_remaining=max(0.0, budget - spent),
                 ))
 
-                if result.status == "completed" and self.config.findings_pool is not None:
+                if result.status == "completed" and result.findings:
                     for f in cast(list[Finding], result.findings):
-                        try:
-                            await self.config.findings_pool.add(f)
-                        except Exception:
-                            logger.debug("findings_pool.add failed", exc_info=True)
+                        trace = f.get("vulnerability_trace")
+                        trace_chain = ""
+                        if trace and trace.get("steps"):
+                            trace_chain = " | " + " -> ".join(
+                                f"{s.get('file', '?')}:{s.get('function') or '?'}"
+                                for s in trace["steps"]
+                            )
+                        logger.info(
+                            "Finding: %s:%s [%s] %.40s%s",
+                            f.get("file", "?"),
+                            f.get("line_number", "?"),
+                            f.get("severity", "?"),
+                            f.get("description", "") or "",
+                            trace_chain,
+                        )
+                        if self.config.findings_pool is not None:
+                            try:
+                                await self.config.findings_pool.add(f)
+                            except Exception:
+                                logger.debug("findings_pool.add failed", exc_info=True)
 
                 if result.status == "completed":
                     next_band = promotion_decision(
@@ -530,12 +573,18 @@ class HunterPool:
         entry_point: Any = None,
         seed_context: str | None = None,
     ) -> TargetResult:
-        findings, cost, tokens, stop_reason = await self._run_one_hunter(
-            file_target, cost_limit,
-            seed_transcript=seed_transcript,
-            entry_point=entry_point,
-            seed_context=seed_context,
-        )
+        with spend_metadata(
+            tier=tier,
+            band=band,
+            target=file_target.get("path", ""),
+            entry_point=(entry_point.function_name if entry_point else None),
+        ):
+            findings, cost, tokens, stop_reason = await self._run_one_hunter(
+                file_target, cost_limit,
+                seed_transcript=seed_transcript,
+                entry_point=entry_point,
+                seed_context=seed_context,
+            )
         return TargetResult(
             target=file_target.get("path", ""),
             status="completed",

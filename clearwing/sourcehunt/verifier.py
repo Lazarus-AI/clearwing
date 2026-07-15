@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from itertools import islice
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
 from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
@@ -202,6 +202,8 @@ class Verifier:
         try:
             response = await self.llm.aask_text(system=system_prompt, user=user_msg)
             content = response.first_text or ""
+        except BudgetExceeded:
+            raise
         except Exception as e:
             logger.warning("Verifier LLM call failed", exc_info=True)
             return VerifierResult(
@@ -395,6 +397,8 @@ class Verifier:
         try:
             response = await self.llm.aask_text(system=PATCH_ORACLE_PROMPT, user=user_msg)
             content = response.first_text or ""
+        except BudgetExceeded:
+            raise
         except Exception as e:
             logger.debug("Patch-oracle LLM call failed", exc_info=True)
             return False, "", f"llm error: {e}"

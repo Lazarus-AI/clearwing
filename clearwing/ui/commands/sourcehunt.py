@@ -1,5 +1,6 @@
 """Sourcehunt CLI subcommand — runs the Clearwing source-code vulnerability pipeline."""
 
+import argparse
 import logging
 import os
 import sys
@@ -11,12 +12,38 @@ def _format_budget(budget: float) -> str:
     return f"${budget:.2f}"
 
 
+def _parse_fraction(value: str) -> float:
+    text_value = value.strip()
+    percent = text_value.endswith("%")
+    if percent:
+        text_value = text_value[:-1]
+    try:
+        parsed = float(text_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a percentage or fraction, got {value!r}"
+        ) from exc
+    if percent or parsed > 1:
+        parsed /= 100.0
+    if not 0 <= parsed <= 1:
+        raise argparse.ArgumentTypeError(
+            "budget fraction must be between 0% and 100%"
+        )
+    return parsed
+
+
 def add_parser(subparsers):
     parser = subparsers.add_parser(
         "sourcehunt",
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "--flow",
+        choices=["legacy", "proof"],
+        default="legacy",
+        help="Investigation engine: legacy file agents or proof obligations (default: legacy)",
+    )
     parser.add_argument("--branch", default="main", help="Git branch to clone (default: main)")
     parser.add_argument(
         "--local-path", metavar="PATH", help="Use this local path instead of cloning"
@@ -26,6 +53,97 @@ def add_parser(subparsers):
         choices=["quick", "standard", "deep"],
         default="standard",
         help="Hunt depth (default: standard)",
+    )
+    parser.add_argument(
+        "--compile-commands",
+        default=None,
+        metavar="PATH",
+        help="C/C++ compilation database required by --flow proof",
+    )
+    parser.add_argument(
+        "--validation-manifest",
+        default=None,
+        metavar="PATH",
+        help=(
+            "JSON manifest of sandboxed commands tied to proof obligations"
+        ),
+    )
+    parser.add_argument(
+        "--build-configuration",
+        default="default",
+        metavar="NAME",
+        help="Name recorded for the proof snapshot's selected build configuration",
+    )
+    parser.add_argument(
+        "--clang-binary",
+        default="clang",
+        metavar="NAME",
+        help="Clang executable inside the proof analysis sandbox",
+    )
+    parser.add_argument(
+        "--model-routing",
+        choices=["local-first"],
+        default="local-first",
+        help="Proof obligation model-routing policy (default: local-first)",
+    )
+    parser.add_argument(
+        "--structured-budget",
+        type=_parse_fraction,
+        default=0.90,
+        metavar="PERCENT",
+        help="Proof action budget reserved for structured work (default: 90%)",
+    )
+    parser.add_argument(
+        "--exploration-budget",
+        type=_parse_fraction,
+        default=0.10,
+        metavar="PERCENT",
+        help="Proof action budget reserved for exploration (default: 10%)",
+    )
+    parser.add_argument(
+        "--proof-plan",
+        choices=["auto"],
+        default="auto",
+        help="Proof-plan selection policy (currently: auto)",
+    )
+    parser.add_argument(
+        "--proof-max-actions",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Maximum proof actions across the run (default: 200)",
+    )
+    parser.add_argument(
+        "--proof-max-model-calls",
+        type=int,
+        default=40,
+        metavar="N",
+        help="Maximum bounded model judgments (default: 40)",
+    )
+    parser.add_argument(
+        "--proof-max-dynamic-actions",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Maximum harness, fuzz, and runtime actions (default: 20)",
+    )
+    parser.add_argument(
+        "--retain-incomplete-certificates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Retain residual incomplete investigations (default: enabled)",
+    )
+    parser.add_argument(
+        "--emit-rejection-certificates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Emit evidence-backed rejected candidate certificates (default: enabled)",
+    )
+    parser.add_argument(
+        "--falsify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the finite independent falsification plan (default: enabled)",
     )
     parser.add_argument(
         "--agent-mode",
@@ -112,6 +230,13 @@ def add_parser(subparsers):
         help="Skip per-file hunting; only run subsystem hunts.",
     )
     parser.add_argument(
+        "--no-rank",
+        action="store_true",
+        default=False,
+        dest="no_rank",
+        help="Skip the ranker; assign default priority scores to all files.",
+    )
+    parser.add_argument(
         "--seed-corpus",
         default=None,
         dest="seed_corpus",
@@ -139,7 +264,28 @@ def add_parser(subparsers):
         help="Max dollars to spend (default: unlimited; 0 = unlimited)",
     )
     parser.add_argument(
+        "--input-price-per-million",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Explicit input-token price for models without built-in pricing",
+    )
+    parser.add_argument(
+        "--output-price-per-million",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Explicit output-token price for models without built-in pricing",
+    )
+    parser.add_argument(
         "--max-parallel", type=int, default=8, help="Max concurrent hunters (default: 8)"
+    )
+    parser.add_argument(
+        "--sandbox-cpus",
+        type=float,
+        default=None,
+        metavar="N",
+        help="CPU limit per sandbox (default: auto; 0 disables the limit)",
     )
     parser.add_argument(
         "--tier-split",
@@ -453,6 +599,12 @@ def add_parser(subparsers):
         default=["all"],
         help="Output formats to write (default: all)",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Show a live LLM-activity panel (token counts, cost, latency) while running",
+    )
     return parser
 
 
@@ -468,16 +620,28 @@ def handle(cli, args):
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
 
-    # Resolve the LLM endpoint once at the top of the command.
-    # CLI > env > ~/.clearwing/config.yaml > ANTHROPIC_API_KEY default.
-    endpoint = resolve_llm_endpoint(
-        cli_model=args.model,
-        cli_base_url=getattr(args, "base_url", None),
-        cli_api_key=getattr(args, "api_key", None),
-        config_provider=cli.config.get_provider_section() or None,
+    # Build the provider manager.
+    #   - A multi-endpoint config (`providers:`/`routes:`/`task_models:`) enables
+    #     per-task model routing (e.g. cheap ranker, strong hunter, independent
+    #     verifier) — used when present and no CLI endpoint override is given.
+    #   - Otherwise resolve a single endpoint (CLI > env > singular `provider:`
+    #     block > ANTHROPIC_API_KEY default) that serves every task.
+    providers_cfg = cli.config.get_providers_config()
+    cli_override = bool(
+        args.model or getattr(args, "base_url", None) or getattr(args, "api_key", None)
     )
-    cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
-    provider_manager = ProviderManager.for_endpoint(endpoint)
+    if providers_cfg.get("providers") and not cli_override:
+        provider_manager = ProviderManager.from_config(providers_cfg)
+        cli.console.print("[dim]LLM: multi-endpoint per-task routing[/dim]")
+    else:
+        endpoint = resolve_llm_endpoint(
+            cli_model=args.model,
+            cli_base_url=getattr(args, "base_url", None),
+            cli_api_key=getattr(args, "api_key", None),
+            config_provider=cli.config.get_provider_section() or None,
+        )
+        cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
+        provider_manager = ProviderManager.for_endpoint(endpoint)
 
     # Parse tier-split
     try:
@@ -517,7 +681,7 @@ def handle(cli, args):
         # Build an LLM for rule generation via the same resolved
         # endpoint as the rest of the pipeline.
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             cli.console.print(
@@ -576,7 +740,7 @@ def handle(cli, args):
             sys.exit(0)
 
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             sys.exit(1)
@@ -631,7 +795,7 @@ def handle(cli, args):
             sys.exit(1)
 
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             sys.exit(1)
@@ -682,7 +846,6 @@ def handle(cli, args):
     # Elaborate mode: interactive HITL or autonomous agent
     if args.elaborate or args.elaborate_auto:
         from ...sourcehunt.elaboration import (
-            ElaborationAgent,
             find_latest_session,
             load_finding_from_session,
             load_session_findings,
@@ -755,7 +918,7 @@ def handle(cli, args):
                 cli.console.print("  Skipped")
 
         stats = store.stats()
-        cli.console.print(f"\n[bold]Calibration stats:[/bold]")
+        cli.console.print("\n[bold]Calibration stats:[/bold]")
         cli.console.print(f"  Total records: {stats['total_records']}")
         cli.console.print(f"  Human reviewed: {stats['human_reviewed']}")
         cli.console.print(f"  Exact match rate: {stats['exact_match_rate']:.1%}")
@@ -792,6 +955,7 @@ def handle(cli, args):
                 branch=args.branch,
                 depth=args.depth,
                 budget_usd=args.budget,
+                sandbox_cpus=args.sandbox_cpus,
                 output_dir=args.output_dir,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
@@ -836,6 +1000,7 @@ def handle(cli, args):
                 output_dir=args.output_dir,
                 depth=args.depth,
                 budget_usd=args.budget,
+                sandbox_cpus=args.sandbox_cpus,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
             )
@@ -864,6 +1029,8 @@ def handle(cli, args):
         local_path=args.local_path,
         depth=args.depth,
         budget_usd=args.budget,
+        input_price_per_million=getattr(args, "input_price_per_million", None),
+        output_price_per_million=getattr(args, "output_price_per_million", None),
         max_parallel=args.max_parallel,
         tier_budget=tier_budget,
         output_dir=args.output_dir,
@@ -904,16 +1071,57 @@ def handle(cli, args):
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
         no_per_file_hunt=args.no_per_file_hunt,
+        no_rank=args.no_rank,
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
         respect_gitignore=args.respect_gitignore,
+        live=args.live,
+        sandbox_cpus=args.sandbox_cpus,
+        flow=args.flow,
+        proof_compile_commands=args.compile_commands,
+        proof_validation_manifest=args.validation_manifest,
+        proof_build_configuration=args.build_configuration,
+        proof_clang_binary=args.clang_binary,
+        proof_max_actions=args.proof_max_actions,
+        proof_max_model_calls=args.proof_max_model_calls,
+        proof_max_dynamic_actions=args.proof_max_dynamic_actions,
+        proof_structured_fraction=args.structured_budget,
+        proof_exploration_fraction=args.exploration_budget,
+        retain_incomplete_certificates=args.retain_incomplete_certificates,
+        emit_rejection_certificates=args.emit_rejection_certificates,
+        falsify=args.falsify,
     )
 
     cli.console.print(
-        f"[bold blue]Sourcehunt: {args.repo} depth={args.depth} "
+        f"[bold blue]Sourcehunt: {args.repo} flow={args.flow} depth={args.depth} "
         f"budget={_format_budget(args.budget)}[/bold blue]"
     )
+
+    # Wire EventBus → console/logger for live feedback.
+    # When --live is active, Rich Live owns the terminal — use logging so
+    # messages scroll above the pinned panel. Otherwise print directly.
+    from ...core.events import EventBus, EventType
+
+    bus = EventBus()
+    _live_logger = logging.getLogger("clearwing.sourcehunt.live")
+    _live_logger.setLevel(logging.INFO)
+
+    def _on_finding(data):
+        if not isinstance(data, dict):
+            return
+        sev = (data.get("severity") or "info").upper()
+        file = data.get("file", "?")
+        line = data.get("line_number", "?")
+        desc = (data.get("description") or "")[:120]
+        msg = f"FINDING [{sev}] {file}:{line} — {desc}"
+        _live_logger.info(msg)
+
+    def _on_tool_start(data):
+        pass  # reads are shown in the LLM activity panel only
+
+    bus.subscribe(EventType.FINDING_RECORDED, _on_finding)
+    bus.subscribe(EventType.TOOL_START, _on_tool_start)
 
     try:
         result = runner.run()
@@ -923,9 +1131,16 @@ def handle(cli, args):
     except (ValueError, RuntimeError) as exc:
         cli.console.print(f"[red]Error: {exc}[/red]")
         sys.exit(1)
+    finally:
+        bus.unsubscribe(EventType.FINDING_RECORDED, _on_finding)
+        bus.unsubscribe(EventType.TOOL_START, _on_tool_start)
 
     # Summary
-    cli.console.print("\n[bold]Sourcehunt complete[/bold]")
+    if result.status == "budget_exhausted":
+        cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
+        cli.console.print("  Status: partial (budget exhausted)")
+    else:
+        cli.console.print("\n[bold]Sourcehunt complete[/bold]")
     cli.console.print(f"  Session: {result.session_id}")
     cli.console.print(f"  Duration: {result.duration_seconds:.1f}s")
     cli.console.print(f"  Files ranked: {result.files_ranked}")
@@ -969,7 +1184,6 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     from rich.prompt import Prompt
 
     from ...sourcehunt.elaboration import (
-        ElaborationAgent,
         _build_elaboration_prompt,
         build_elaboration_tools,
     )
@@ -988,18 +1202,25 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     cli.console.print("\nType your guidance to upgrade the exploit. Type 'quit' to end.\n")
 
     try:
-        llm = provider_manager.get_llm("default")
+        llm = provider_manager.get_native_client("default")
     except Exception as e:
         cli.console.print(f"[red]Could not build LLM: {e}[/red]")
         sys.exit(1)
 
     system_prompt = _build_elaboration_prompt(finding)
-    messages: list[dict] = [
-        {"role": "user", "content": (
-            f"I'm working with you to upgrade the exploit for finding {finding.get('id', '?')}. "
-            f"The current impact is {finding.get('exploit_impact') or 'unknown'}. "
-            f"Let's start by reviewing what we have."
-        )},
+    from clearwing.llm import ChatMessage
+    from clearwing.llm.native import response_text
+
+    messages: list[ChatMessage] = [
+        ChatMessage(
+            "user",
+            (
+                f"I'm working with you to upgrade the exploit for finding "
+                f"{finding.get('id', '?')}. "
+                f"The current impact is {finding.get('exploit_impact') or 'unknown'}. "
+                f"Let's start by reviewing what we have."
+            ),
+        ),
     ]
 
     from ...agent.tools.hunt.sandbox import HunterContext
@@ -1011,45 +1232,48 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
         specialist="elaboration",
     )
     tools = build_elaboration_tools(ctx, finding)
-    tool_schemas = [{"name": t.name, "description": t.description, "input_schema": t.schema} for t in tools]
     tool_handlers = {t.name: t.handler for t in tools}
 
     total_cost = 0.0
 
     async def _chat_turn(user_input: str) -> str:
         nonlocal total_cost
-        messages.append({"role": "user", "content": user_input})
+        messages.append(ChatMessage("user", user_input))
         try:
+            # Native client takes NativeToolSpec objects directly and threads
+            # them through the call; tool calls come back on
+            # `response.tool_calls` as genai ToolCall objects.
             response = await llm.achat(
                 messages=messages,
                 system=system_prompt,
-                tools=tool_schemas,
+                tools=tools,
             )
         except Exception as e:
             return f"[red]LLM error: {e}[/red]"
 
-        assistant_text = ""
-        content_blocks = response.content if hasattr(response, "content") else []
-        for block in content_blocks:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    assistant_text += block.get("text", "")
-                elif block.get("type") == "tool_use":
-                    tool_name = block.get("name", "")
-                    tool_input = block.get("input", {})
-                    handler = tool_handlers.get(tool_name)
-                    if handler:
-                        try:
-                            tool_result = handler(**tool_input)
-                            cli.console.print(f"  [dim]Tool {tool_name}: {tool_result}[/dim]")
-                        except Exception as e:
-                            cli.console.print(f"  [red]Tool {tool_name} error: {e}[/red]")
+        assistant_text = response_text(response)
+        tool_calls = list(response.tool_calls)
+        for tool_call in tool_calls:
+            tool_name = tool_call.fn_name
+            tool_input = tool_call.fn_arguments
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            handler = tool_handlers.get(tool_name)
+            if handler:
+                try:
+                    tool_result = handler(**tool_input)
+                    cli.console.print(f"  [dim]Tool {tool_name}: {tool_result}[/dim]")
+                except Exception as e:
+                    cli.console.print(f"  [red]Tool {tool_name} error: {e}[/red]")
 
-        messages.append({"role": "assistant", "content": content_blocks})
-        if hasattr(response, "usage"):
-            usage = response.usage
-            if hasattr(usage, "cost_usd"):
-                total_cost += usage.cost_usd
+        # Round-trip the assistant turn (carrying its tool_calls) so the next
+        # turn's history is well-formed for strict providers.
+        messages.append(
+            ChatMessage("assistant", assistant_text, tool_calls=tool_calls or None)
+        )
+        usage = getattr(response, "usage", None)
+        if usage is not None and getattr(usage, "cost_usd", None) is not None:
+            total_cost += usage.cost_usd
 
         return assistant_text
 
@@ -1107,7 +1331,7 @@ def _run_elaborate_auto(cli, args, targets, session_id, endpoint, provider_manag
     )
 
     try:
-        llm = provider_manager.get_llm("default")
+        llm = provider_manager.get_native_client("default")
     except Exception as e:
         cli.console.print(f"[red]Could not build LLM: {e}[/red]")
         sys.exit(1)

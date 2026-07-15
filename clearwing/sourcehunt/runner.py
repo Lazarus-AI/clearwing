@@ -10,7 +10,9 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -22,6 +24,7 @@ from typing import Any
 
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
+from clearwing.llm.budget import BudgetExceeded, SpendLedger
 from clearwing.llm.native import AsyncLLMClient
 from clearwing.providers import (
     ProviderManager,
@@ -45,7 +48,7 @@ from .mechanism_memory import (
 )
 from .patcher import AutoPatcher, apply_patch_attempt
 from .poc_runner import build_rerun_poc_callback
-from .pool import BandBudget, HunterPool, HuntPoolConfig, TierBudget
+from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
 from .state import (
@@ -70,7 +73,7 @@ logger = logging.getLogger(__name__)
 class SourceHuntResult:
     """Result of a complete sourcehunt run."""
 
-    exit_code: int  # 0=clean, 1=medium, 2=critical/high
+    exit_code: int  # 0=clean, 1=medium, 2=critical/high, 3=incomplete/budget
     repo_url: str
     repo_path: str
     findings: list[Finding]
@@ -88,6 +91,8 @@ class SourceHuntResult:
     subsystem_spent_usd: float = 0.0
     elaborated_findings: list[Finding] = field(default_factory=list)
     pipeline_status: PipelineStatus = field(default_factory=PipelineStatus)
+    status: str = "completed"
+    budget_usd: float = 0.0
 
     @property
     def critical_count(self) -> int:
@@ -159,6 +164,8 @@ class SourceHuntRunner:
         local_path: str | None = None,
         depth: str = "standard",  # quick | standard | deep
         budget_usd: float = 0.0,
+        input_price_per_million: float | None = None,
+        output_price_per_million: float | None = None,
         max_parallel: int = 8,
         tier_budget: TierBudget | None = None,
         output_dir: str | None = None,
@@ -208,6 +215,7 @@ class SourceHuntRunner:
         enable_subsystem_hunt: bool = False,
         subsystem_paths: list[str] | None = None,
         no_per_file_hunt: bool = False,
+        no_rank: bool = False,
         subsystem_budget_usd: float = 0.0,
         subsystem_max_parallel: int = 4,
         enable_behavior_monitor: bool = True,
@@ -216,8 +224,23 @@ class SourceHuntRunner:
         preprocessing: bool = True,
         seed_harness_crashes: bool = False,
         respect_gitignore: bool = False,
+        live: bool = False,
+        sandbox_cpus: float | None = None,
         *,
         config: SourceHuntConfig | None = None,
+        flow: str = "legacy",
+        proof_compile_commands: str | None = None,
+        proof_validation_manifest: str | None = None,
+        proof_build_configuration: str = "default",
+        proof_clang_binary: str = "clang",
+        proof_max_actions: int = 200,
+        proof_max_model_calls: int = 40,
+        proof_max_dynamic_actions: int = 20,
+        proof_structured_fraction: float = 0.90,
+        proof_exploration_fraction: float = 0.10,
+        retain_incomplete_certificates: bool = True,
+        emit_rejection_certificates: bool = True,
+        falsify: bool = True,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -233,6 +256,16 @@ class SourceHuntRunner:
             depth = depth if depth != "standard" else t.depth
             # Budget params
             budget_usd = budget_usd if budget_usd != 0.0 else b.budget_usd
+            input_price_per_million = (
+                input_price_per_million
+                if input_price_per_million is not None
+                else b.input_price_per_million
+            )
+            output_price_per_million = (
+                output_price_per_million
+                if output_price_per_million is not None
+                else b.output_price_per_million
+            )
             max_parallel = max_parallel if max_parallel != 8 else b.max_parallel
             tier_budget = tier_budget if tier_budget is not None else b.tier_budget
             exploit_budget = (
@@ -295,6 +328,7 @@ class SourceHuntRunner:
             enable_calibration = enable_calibration and f.enable_calibration
             enable_artifact_store = enable_artifact_store or f.enable_artifact_store
             no_per_file_hunt = no_per_file_hunt or f.no_per_file_hunt
+            no_rank = no_rank or f.no_rank
             seed_harness_crashes = seed_harness_crashes or f.seed_harness_crashes
             preprocessing = preprocessing and f.preprocessing
             adversarial_verifier = adversarial_verifier and f.adversarial_verifier
@@ -351,12 +385,80 @@ class SourceHuntRunner:
             gvisor_runtime = (
                 gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             )
+            sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
+            p = config.proof
+            flow = flow if flow != "legacy" else p.flow
+            proof_compile_commands = (
+                proof_compile_commands
+                if proof_compile_commands is not None
+                else p.compile_commands
+            )
+            proof_validation_manifest = (
+                proof_validation_manifest
+                if proof_validation_manifest is not None
+                else p.validation_manifest
+            )
+            proof_build_configuration = (
+                proof_build_configuration
+                if proof_build_configuration != "default"
+                else p.build_configuration
+            )
+            proof_clang_binary = (
+                proof_clang_binary
+                if proof_clang_binary != "clang"
+                else p.clang_binary
+            )
+            proof_max_actions = (
+                proof_max_actions if proof_max_actions != 200 else p.max_actions
+            )
+            proof_max_model_calls = (
+                proof_max_model_calls
+                if proof_max_model_calls != 40
+                else p.max_model_calls
+            )
+            proof_max_dynamic_actions = (
+                proof_max_dynamic_actions
+                if proof_max_dynamic_actions != 20
+                else p.max_dynamic_actions
+            )
+            proof_structured_fraction = (
+                proof_structured_fraction
+                if proof_structured_fraction != 0.90
+                else p.structured_fraction
+            )
+            proof_exploration_fraction = (
+                proof_exploration_fraction
+                if proof_exploration_fraction != 0.10
+                else p.exploration_fraction
+            )
+            retain_incomplete_certificates = (
+                retain_incomplete_certificates
+                and p.retain_incomplete_certificates
+            )
+            emit_rejection_certificates = (
+                emit_rejection_certificates and p.emit_rejection_certificates
+            )
+            falsify = falsify and p.falsify
 
         if not repo_url:
             raise ValueError(
                 "repo_url is required — pass it directly or via "
                 "config=SourceHuntConfig(target=TargetConfig(repo_url=...))"
             )
+        if sandbox_cpus is not None and (not math.isfinite(sandbox_cpus) or sandbox_cpus < 0):
+            raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
+        if flow not in {"legacy", "proof"}:
+            raise ValueError("flow must be 'legacy' or 'proof'")
+        if proof_max_actions < 1:
+            raise ValueError("proof_max_actions must be positive")
+        if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
+            raise ValueError("proof action sub-budgets cannot be negative")
+        if not 0 <= proof_structured_fraction <= 1:
+            raise ValueError("proof_structured_fraction must be between 0 and 1")
+        if not 0 <= proof_exploration_fraction <= 1:
+            raise ValueError("proof_exploration_fraction must be between 0 and 1")
+        if proof_structured_fraction + proof_exploration_fraction > 1.000001:
+            raise ValueError("proof structured and exploration budgets exceed 100%")
 
         # Store the config for introspection (None if constructed the old way)
         self._config = config
@@ -366,6 +468,8 @@ class SourceHuntRunner:
         self.local_path = local_path
         self.depth = depth
         self.budget_usd = budget_usd
+        self.input_price_per_million = input_price_per_million
+        self.output_price_per_million = output_price_per_million
         self.max_parallel = max_parallel
         self.tier_budget = tier_budget or TierBudget()
         if output_dir is None:
@@ -428,16 +532,34 @@ class SourceHuntRunner:
         self._enable_subsystem_hunt = enable_subsystem_hunt or bool(subsystem_paths)
         self._subsystem_paths = subsystem_paths
         self._no_per_file_hunt = no_per_file_hunt
+        self._no_rank = no_rank
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
         self._injected_findings_pool = None
         self._injected_historical_db = None
         self._enable_behavior_monitor = enable_behavior_monitor
         self._enable_artifact_store = enable_artifact_store
+        self._sandbox_cpus = None if sandbox_cpus is None else float(sandbox_cpus)
         self._gvisor_runtime = self._check_runtime_available(gvisor_runtime)
         self._preprocessing = preprocessing
         self._seed_harness_crashes = seed_harness_crashes
         self._respect_gitignore = respect_gitignore
+        self._live = live
+        self._spend_ledger: SpendLedger | None = None
+        self._metered_clients: dict[tuple[int, str], AsyncLLMClient] = {}
+        self._flow = flow
+        self._proof_compile_commands = proof_compile_commands
+        self._proof_validation_manifest = proof_validation_manifest
+        self._proof_build_configuration = proof_build_configuration
+        self._proof_clang_binary = proof_clang_binary
+        self._proof_max_actions = proof_max_actions
+        self._proof_max_model_calls = proof_max_model_calls
+        self._proof_max_dynamic_actions = proof_max_dynamic_actions
+        self._proof_structured_fraction = proof_structured_fraction
+        self._proof_exploration_fraction = proof_exploration_fraction
+        self._retain_incomplete_certificates = retain_incomplete_certificates
+        self._emit_rejection_certificates = emit_rejection_certificates
+        self._falsify = falsify
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -496,6 +618,13 @@ class SourceHuntRunner:
             return "deep"
         return "standard"
 
+    def _run_spent_usd(self) -> float:
+        """Return spend recorded by this run's atomic ledger."""
+
+        if self._spend_ledger is None:
+            return 0.0
+        return self._spend_ledger.spent_usd
+
     @property
     def _shard_entry_points(self) -> bool:
         if self._shard_entry_points_override is not None:
@@ -518,15 +647,279 @@ class SourceHuntRunner:
             detail=detail,
         ))
 
+    def _ensure_spend_ledger(self) -> SpendLedger:
+        if self._spend_ledger is None:
+            self._spend_ledger = SpendLedger(
+                limit_usd=self.budget_usd,
+                session_id=self._session_id,
+                repo_url=self.repo_url,
+                output_dir=self.output_dir,
+                input_price_per_million=self.input_price_per_million,
+                output_price_per_million=self.output_price_per_million,
+                manifest_filename=(
+                    "spend-summary.json"
+                    if self._flow == "proof"
+                    else "manifest.json"
+                ),
+            )
+        return self._spend_ledger
+
+    def _budget_exhausted(self) -> bool:
+        return self._spend_ledger is not None and self._spend_ledger.exhausted
+
+    def _preflight_budget_clients(self) -> None:
+        """Validate every model this run may use before the first paid call."""
+
+        if self._spend_ledger is None or not self._spend_ledger.enforcing:
+            return
+        roles: list[tuple[str, AsyncLLMClient | None, str]] = []
+        if not self._no_rank:
+            roles.append(("ranker", self.ranker_llm, "rank"))
+        if self.depth != "quick":
+            roles.append(("hunter", self.hunter_llm, "hunt"))
+            if not self.no_verify:
+                roles.append(("verifier", self.verifier_llm, "verify"))
+            if not self.no_exploit or self.enable_auto_patch or self.enable_elaboration:
+                roles.append(("sourcehunt_exploit", self.exploiter_llm, "exploit"))
+        for task, override, stage in roles:
+            self._get_native_client(task, override, budget_stage=stage)
+
+    def _finalize_spend_ledger(self, status: str | None = None) -> dict[str, Any]:
+        ledger = self._ensure_spend_ledger()
+        if ledger.finalized:
+            return ledger.snapshot()
+        return ledger.finalize(status)
+
     def run(self) -> SourceHuntResult:
-        return asyncio.run(self.arun())
+        from clearwing.ui.llm_activity import llm_activity_panel
+
+        self._ensure_spend_ledger()
+        with llm_activity_panel(
+            live=self._live,
+            budget_usd=self.budget_usd or None,
+            spend_ledger=self._spend_ledger,
+        ):
+            return asyncio.run(self.arun())
+
+    async def _arun_proof_flow(self) -> SourceHuntResult:
+        """Run the proof-carrying engine and adapt its typed output."""
+
+        from .proof.engine import ProofFlowRunner, ProofRunConfig
+
+        ledger = self._ensure_spend_ledger()
+
+        def model_client(route: str) -> AsyncLLMClient | None:
+            override = (
+                self.verifier_llm
+                if route == "proof_falsifier"
+                else self.hunter_llm
+            )
+            return self._get_native_client(
+                route,
+                override,
+                budget_stage=route,
+            )
+
+        if ledger.enforcing and self._proof_max_model_calls > 0:
+            routes = ["proof_local", "proof_frontier"]
+            if self._proof_exploration_fraction > 0:
+                routes.append("proof_exploration")
+            if self._falsify:
+                routes.append("proof_falsifier")
+            for route in routes:
+                model_client(route)
+
+        proof_runner = ProofFlowRunner(
+            repo_url=self.repo_url,
+            branch=self.branch,
+            local_path=self.local_path,
+            config=ProofRunConfig(
+                output_dir=self.output_dir,
+                session_id=self._session_id,
+                compile_commands=self._proof_compile_commands,
+                validation_manifest=self._proof_validation_manifest,
+                build_configuration=self._proof_build_configuration,
+                clang_binary=self._proof_clang_binary,
+                max_actions=self._proof_max_actions,
+                max_model_calls=self._proof_max_model_calls,
+                max_dynamic_actions=self._proof_max_dynamic_actions,
+                structured_fraction=self._proof_structured_fraction,
+                exploration_fraction=self._proof_exploration_fraction,
+                retain_incomplete_certificates=(
+                    self._retain_incomplete_certificates
+                ),
+                emit_rejection_certificates=(
+                    self._emit_rejection_certificates
+                ),
+                falsify=self._falsify,
+                gvisor_runtime=self._gvisor_runtime,
+                sandbox_cpus=self._sandbox_cpus,
+            ),
+            model_client_factory=model_client,
+        )
+        self._emit_stage("proof", "started")
+        try:
+            proof_result = await proof_runner.arun()
+            run_status = (
+                "budget_exhausted"
+                if ledger.exhausted
+                else proof_result.status
+            )
+            proof_manifest = self._read_proof_manifest(proof_result.session_id)
+            budget_summary = self._finalize_spend_ledger(run_status)
+            self._finalize_proof_manifest(
+                proof_result,
+                proof_manifest=proof_manifest,
+                budget_summary=budget_summary,
+                status=run_status,
+            )
+        except Exception:
+            if not ledger.finalized:
+                ledger.finalize("failed")
+            self._emit_stage("proof", "failed")
+            raise
+
+        findings: list[Finding] = []
+        known_fields = set(Finding.__dataclass_fields__)
+        for payload in proof_result.findings:
+            base = {
+                key: value
+                for key, value in payload.items()
+                if key in known_fields and key != "extra"
+            }
+            base["cwe"] = base.get("cwe") or ""
+            base["severity_verified"] = base.get("severity")
+            base["hunter_session_id"] = proof_result.session_id
+            extra = {
+                key: value
+                for key, value in payload.items()
+                if key not in known_fields
+            }
+            findings.append(Finding(**base, extra=extra))
+
+        pipeline_status = PipelineStatus()
+        if proof_result.incomplete:
+            pipeline_status.record_degraded(
+                "proof",
+                "Residual obligation graph and incomplete certificates were retained",
+            )
+            self._emit_stage(
+                "proof",
+                "incomplete",
+                findings_so_far=len(findings),
+            )
+        else:
+            pipeline_status.record_succeeded("proof")
+            self._emit_stage(
+                "proof",
+                "completed",
+                findings_so_far=len(findings),
+            )
+
+        has_high = any(
+            finding.severity in {"critical", "high"} for finding in findings
+        )
+        has_medium = any(finding.severity == "medium" for finding in findings)
+        exit_code = (
+            3
+            if proof_result.incomplete or ledger.exhausted
+            else 2
+            if has_high
+            else 1
+            if has_medium
+            else 0
+        )
+        total_spent = float(budget_summary.get("total_spent", 0.0))
+        return SourceHuntResult(
+            exit_code=exit_code,
+            repo_url=self.repo_url,
+            repo_path=proof_result.repo_path,
+            findings=findings,
+            verified_findings=list(findings),
+            exploited_findings=[],
+            files_ranked=proof_result.files_analyzed,
+            files_hunted=len(proof_result.candidates),
+            duration_seconds=proof_result.duration_seconds,
+            cost_usd=total_spent,
+            spent_per_tier={"A": total_spent, "B": 0.0, "C": 0.0},
+            tokens_used=int(budget_summary.get("total_tokens", 0)),
+            output_paths=proof_result.output_paths,
+            session_id=proof_result.session_id,
+            pipeline_status=pipeline_status,
+            status=run_status,
+            budget_usd=self.budget_usd,
+        )
+
+    def _read_proof_manifest(self, session_id: str) -> dict[str, Any]:
+        """Capture the proof manifest before final spend-ledger checkpointing."""
+
+        path = Path(self.output_dir) / session_id / "manifest.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _finalize_proof_manifest(
+        self,
+        proof_result: Any,
+        *,
+        proof_manifest: dict[str, Any],
+        budget_summary: dict[str, Any],
+        status: str,
+    ) -> None:
+        """Atomically publish one combined proof, spend, and output index."""
+
+        session_dir = Path(self.output_dir) / proof_result.session_id
+        manifest_path = session_dir / "manifest.json"
+        outputs = dict(proof_result.output_paths)
+        ledger_path = budget_summary.get("ledger_path")
+        if ledger_path:
+            outputs["ledger"] = str(ledger_path)
+        spend_summary_path = budget_summary.get("spend_summary_path")
+        if spend_summary_path:
+            outputs["spend_summary"] = str(spend_summary_path)
+        outputs["manifest"] = str(manifest_path)
+
+        combined = dict(proof_manifest)
+        combined.update(
+            {
+                "engine": "proof",
+                "session_id": proof_result.session_id,
+                "status": status,
+                "proof_status": proof_result.status,
+                "complete": status == "completed" and not proof_result.incomplete,
+                "spend": budget_summary,
+                "total_spent": float(budget_summary.get("total_spent", 0.0)),
+                "input_tokens": int(budget_summary.get("input_tokens", 0)),
+                "cached_input_tokens": int(
+                    budget_summary.get("cached_input_tokens", 0)
+                ),
+                "output_tokens": int(budget_summary.get("output_tokens", 0)),
+                "total_tokens": int(budget_summary.get("total_tokens", 0)),
+                "model_call_count": int(budget_summary.get("call_count", 0)),
+                "outputs": outputs,
+            }
+        )
+        temporary = manifest_path.with_suffix(".json.tmp")
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump(combined, stream, indent=2, sort_keys=True, default=str)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, manifest_path)
+        proof_result.output_paths.update(outputs)
 
     async def arun(self) -> SourceHuntResult:
+        if self._flow == "proof":
+            return await self._arun_proof_flow()
         start_time = time.monotonic()
         self._ensure_output_dir_layout()
+        self._ensure_spend_ledger()
         pipeline_status = PipelineStatus()
         logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
         try:
+            self._preflight_budget_clients()
             # 1. Preprocess
             self._emit_stage("preprocess", "started")
             preprocess_result = self._preprocess()
@@ -537,10 +930,32 @@ class SourceHuntRunner:
             self._emit_stage("preprocess", "completed", detail=f"Enumerated {files_ranked} files")
             self._ensure_sandbox_factory(repo_path, files)
 
-            # 2. Rank — unless depth=quick AND no LLM available
-            ranker_llm = self._get_native_client("ranker", self.ranker_llm)
+            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
+            ranker_llm = (
+                None
+                if self._no_rank
+                else self._get_native_client(
+                    "ranker",
+                    self.ranker_llm,
+                    budget_stage="rank",
+                )
+            )
             self._emit_stage("rank", "started", detail=f"{len(files)} files")
-            if ranker_llm is not None and files:
+            if self._no_rank:
+                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+                for ft in files:
+                    ft["surface"] = ft.get("surface") or 3
+                    ft["influence"] = ft.get("influence") or 2
+                    ft["reachability"] = ft.get("reachability") or 3
+                    ft["priority"] = (
+                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
+                    )
+                pipeline_status.record_degraded(
+                    "ranker",
+                    "All files assigned default priority scores (--no-rank)",
+                )
+                self._emit_stage("rank", "degraded", detail="Skipped (--no-rank)")
+            elif ranker_llm is not None and files:
                 logger.info("Ranker starting on %d files", len(files))
                 try:
                     ranker_config = RankerConfig()
@@ -560,6 +975,14 @@ class SourceHuntRunner:
                     logger.info("Ranker completed")
                     pipeline_status.record_succeeded("ranker")
                     self._emit_stage("rank", "completed", detail=f"Ranked {len(files)} files")
+                except BudgetExceeded:
+                    logger.info("Ranker stopped because the run budget is exhausted")
+                    pipeline_status.record(
+                        "ranker",
+                        StageOutcome.SKIPPED,
+                        fallback_description="Budget exhausted; remaining files use heuristic ranks",
+                    )
+                    self._emit_stage("rank", "budget_exhausted", detail="Using heuristic ranks")
                 except Exception:
                     logger.warning("Ranker failed", exc_info=True)
                     pipeline_status.record_degraded(
@@ -582,6 +1005,18 @@ class SourceHuntRunner:
                         ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                     )
 
+            # Ensure a partial/failed rank pass still leaves every file
+            # schedulable by the deterministic fallback.
+            for ft in files:
+                ft["surface"] = ft.get("surface") or 3
+                ft["influence"] = ft.get("influence") or 2
+                ft["reachability"] = ft.get("reachability") or 3
+                ft["priority"] = ft.get("priority") or (
+                    ft["surface"] * 0.5
+                    + ft["influence"] * 0.2
+                    + ft["reachability"] * 0.3
+                )
+
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
                 return self._build_quick_result(
@@ -595,8 +1030,13 @@ class SourceHuntRunner:
             # 2.5. Harness Generator (crash-first ordering) — at depth=deep or
             #      when seed_harness_crashes is explicitly enabled (spec 018).
             seeded_crashes: list[SeededCrash] = []
-            if self.depth == "deep" or self._seed_harness_crashes:
-                harness_llm = self._get_native_client("hunter", self.hunter_llm)
+            if (
+                (self.depth == "deep" or self._seed_harness_crashes)
+                and not self._budget_exhausted()
+            ):
+                harness_llm = self._get_native_client(
+                    "hunter", self.hunter_llm, budget_stage="harness",
+                )
                 harness_sandbox = self._sandbox_manager or self.sandbox_factory
                 if harness_llm is not None and harness_sandbox is not None:
                     try:
@@ -611,6 +1051,13 @@ class SourceHuntRunner:
                             "Harness generator produced %d crashes from %d harnesses",
                             len(seeded_crashes),
                             hg_result.harnesses_generated,
+                        )
+                    except BudgetExceeded:
+                        logger.info("Harness generation stopped at the run budget")
+                        pipeline_status.record(
+                            "harness_generator",
+                            StageOutcome.SKIPPED,
+                            fallback_description="Budget exhausted; continuing without more harnesses",
                         )
                     except Exception:
                         logger.warning("Harness generator failed", exc_info=True)
@@ -711,7 +1158,9 @@ class SourceHuntRunner:
                     historical_db = None
 
             # 3. Tiered hunt
-            hunter_llm = self._get_native_client("hunter", self.hunter_llm)
+            hunter_llm = self._get_native_client(
+                "hunter", self.hunter_llm, budget_stage="hunt",
+            )
             all_findings: list[Finding] = []
             files_hunted = 0
             spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
@@ -719,7 +1168,7 @@ class SourceHuntRunner:
 
             if self._no_per_file_hunt:
                 logger.info("Per-file hunt skipped (--no-per-file-hunt)")
-            elif hunter_llm is not None and files:
+            elif hunter_llm is not None and files and not self._budget_exhausted():
                 self._emit_stage("hunt", "started", detail=f"{len(files)} files")
                 logger.info("HunterPool starting on %d files", len(files))
                 pool = HunterPool(
@@ -752,10 +1201,29 @@ class SourceHuntRunner:
                 try:
                     all_findings = await pool.arun()
                     logger.info("HunterPool completed with %d findings", len(all_findings))
-                    pipeline_status.record_succeeded("hunter_pool")
-                    self._emit_stage(
-                        "hunt", "completed", findings_so_far=len(all_findings),
-                        cost_usd=pool.total_spent, detail=f"{len(all_findings)} findings",
+                    if pool.budget_exhausted or self._budget_exhausted():
+                        pipeline_status.record(
+                            "hunter_pool",
+                            StageOutcome.SKIPPED,
+                            fallback_description="Budget exhausted; partial hunter results retained",
+                        )
+                        self._emit_stage(
+                            "hunt", "budget_exhausted", findings_so_far=len(all_findings),
+                            cost_usd=pool.total_spent,
+                            detail=f"{len(all_findings)} partial findings",
+                        )
+                    else:
+                        pipeline_status.record_succeeded("hunter_pool")
+                        self._emit_stage(
+                            "hunt", "completed", findings_so_far=len(all_findings),
+                            cost_usd=pool.total_spent, detail=f"{len(all_findings)} findings",
+                        )
+                except BudgetExceeded:
+                    logger.info("HunterPool stopped because the run budget is exhausted")
+                    pipeline_status.record(
+                        "hunter_pool",
+                        StageOutcome.SKIPPED,
+                        fallback_description="Budget exhausted; partial hunter results retained",
                     )
                 except Exception:
                     logger.warning("HunterPool run failed", exc_info=True)
@@ -773,13 +1241,7 @@ class SourceHuntRunner:
                     "deep_cost": pool.spent_per_band.get("deep", 0.0),
                     "promotions": pool.promotion_counts,
                 }
-                files_hunted = sum(
-                    [
-                        p.get("tier") in ("A", "B", "C")
-                        for p in files
-                        if p.get("tier") != "C" or self.tier_budget.tier_c_fraction > 0
-                    ]
-                )
+                files_hunted = pool.completed_target_count
             else:
                 logger.info("HunterPool skipped; no LLM available")
 
@@ -822,12 +1284,27 @@ class SourceHuntRunner:
             # 3.7. Subsystem hunt (spec 006)
             subsystems_hunted = 0
             subsystem_spent = 0.0
-            if self._enable_subsystem_hunt and hunter_llm is not None:
+            if (
+                self._enable_subsystem_hunt
+                and hunter_llm is not None
+                and self._budget_exhausted()
+            ):
+                logger.info(
+                    "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
+                    self.budget_usd,
+                    self._run_spent_usd(),
+                )
+            elif self._enable_subsystem_hunt and hunter_llm is not None:
                 from .subsystem import (
                     SubsystemHuntConfig,
-                    SubsystemHuntRunner as SubsysRunner,
                     identify_subsystems_auto,
                     subsystem_from_path,
+                )
+                from .subsystem import (
+                    SubsystemHuntRunner as SubsysRunner,
+                )
+                subsystem_llm = self._get_native_client(
+                    "hunter", self.hunter_llm, budget_stage="subsystem_hunt",
                 )
 
                 subsystem_targets: list = []
@@ -858,13 +1335,28 @@ class SourceHuntRunner:
                             "  %s (%d files, priority=%.2f)",
                             st.name, len(st.files), st.priority,
                         )
+                    # Bound the whole subsystem phase to whatever --budget is
+                    # left, split evenly across targets, so 3 subsystems can't
+                    # each burn the internal $100 default ($300 total) past the
+                    # budget the user set. Falls back to the explicit override /
+                    # $100 default only when no --budget is in play.
+                    if self.budget_usd:
+                        assert self._spend_ledger is not None
+                        remaining = self._spend_ledger.remaining_usd or 0.0
+                        per_subsystem_budget = remaining / len(subsystem_targets)
+                        if self._subsystem_budget_usd:
+                            per_subsystem_budget = min(
+                                per_subsystem_budget, self._subsystem_budget_usd,
+                            )
+                    else:
+                        per_subsystem_budget = self._subsystem_budget_usd or 100.0
                     subsys_runner = SubsysRunner(SubsystemHuntConfig(
                         subsystems=subsystem_targets,
                         repo_path=repo_path,
                         sandbox_factory=self.sandbox_factory,
-                        llm=hunter_llm,
+                        llm=subsystem_llm,
                         max_parallel=self._subsystem_max_parallel,
-                        budget_per_subsystem_usd=self._subsystem_budget_usd or 100.0,
+                        budget_per_subsystem_usd=per_subsystem_budget,
                         findings_pool=findings_pool,
                         session_id_prefix=f"{self._session_id}-subsys",
                         sandbox_manager=self._sandbox_manager,
@@ -895,42 +1387,64 @@ class SourceHuntRunner:
                 detail=f"{len(all_findings)} findings to verify",
             )
             if not self.no_verify:
-                verifier_llm = self._get_native_client("verifier", self.verifier_llm)
-                if verifier_llm is not None:
-                    if self.validator_mode == "v2":
-                        verified, rejected = await self._verify_v2(
-                            verifier_llm, all_findings, repo_path,
-                        )
-                    else:
-                        verified = await self._verify_v1(
-                            verifier_llm, all_findings, repo_path,
-                        )
-                else:
-                    for f in all_findings:
-                        f["verified"] = True
-                    verified = all_findings
-                    pipeline_status.record_degraded(
+                if self._budget_exhausted():
+                    pipeline_status.record(
                         "verifier",
-                        "Findings auto-verified without independent review",
+                        StageOutcome.SKIPPED,
+                        fallback_description="Budget exhausted; findings remain unverified",
                     )
+                else:
+                    verifier_llm = self._get_native_client(
+                        "verifier", self.verifier_llm, budget_stage="verify",
+                    )
+                    if verifier_llm is not None:
+                        if self.validator_mode == "v2":
+                            verified, rejected = await self._verify_v2(
+                                verifier_llm, all_findings, repo_path,
+                            )
+                        else:
+                            verified = await self._verify_v1(
+                                verifier_llm, all_findings, repo_path,
+                            )
+                    else:
+                        for f in all_findings:
+                            f["verified"] = True
+                        verified = all_findings
+                        pipeline_status.record_degraded(
+                            "verifier",
+                            "Findings auto-verified without independent review",
+                        )
             else:
-                verified = all_findings
+                for finding in all_findings:
+                    finding["verified"] = False
+                verified = []
                 pipeline_status.record(
                     "verifier", StageOutcome.SKIPPED,
                     fallback_description="Verification skipped (--no-verify)",
                 )
 
+            verify_detail = (
+                "Verification skipped (--no-verify)"
+                if self.no_verify
+                else f"{len(verified)} verified, {len(rejected)} rejected"
+            )
             self._emit_stage(
                 "verify", "completed", findings_so_far=len(all_findings),
-                detail=f"{len(verified)} verified, {len(rejected)} rejected",
+                detail=verify_detail,
             )
             if rejected:
                 self._write_rejected_findings(rejected)
 
             # 4.5. v0.3: Extract mechanisms from verified findings and persist them
             #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
-            if self._mechanism_store is not None and verified:
-                verifier_llm_for_extract = self._get_native_client("verifier", self.verifier_llm)
+            if (
+                self._mechanism_store is not None
+                and verified
+                and not self._budget_exhausted()
+            ):
+                verifier_llm_for_extract = self._get_native_client(
+                    "verifier", self.verifier_llm, budget_stage="mechanism_extraction",
+                )
                 if verifier_llm_for_extract is not None:
                     try:
                         extractor = MechanismExtractor(verifier_llm_for_extract)
@@ -938,6 +1452,8 @@ class SourceHuntRunner:
                             mech = await extractor.aextract(finding, source_repo=self.repo_url)
                             if mech is not None:
                                 self._mechanism_store.append(mech)
+                    except BudgetExceeded:
+                        logger.info("Mechanism extraction stopped at the run budget")
                     except Exception:
                         logger.warning("Mechanism extraction failed", exc_info=True)
                         pipeline_status.record_degraded(
@@ -951,8 +1467,10 @@ class SourceHuntRunner:
             #       match as a new suspicion-level finding linked back to the
             #       original. v0.3 scope: we surface the matches in the report;
             #       we don't re-spawn hunters on each match (that's a v1.0 pass).
-            if self.enable_variant_loop and verified:
-                variant_llm = self._get_native_client("verifier", self.verifier_llm)
+            if self.enable_variant_loop and verified and not self._budget_exhausted():
+                variant_llm = self._get_native_client(
+                    "verifier", self.verifier_llm, budget_stage="variant_loop",
+                )
                 if variant_llm is not None:
                     try:
                         loop = VariantLoop(
@@ -998,6 +1516,8 @@ class SourceHuntRunner:
                             variant_result.patterns_generated,
                             variant_result.matches_found,
                         )
+                    except BudgetExceeded:
+                        logger.info("Variant loop stopped at the run budget")
                     except Exception:
                         logger.warning("Variant loop failed", exc_info=True)
                         pipeline_status.record_degraded(
@@ -1011,10 +1531,13 @@ class SourceHuntRunner:
                 self.enable_stability_verification
                 and verified
                 and self._sandbox_manager is not None
+                and not self._budget_exhausted()
             ):
                 from .stability import StabilityVerifier, apply_stability_result
 
-                stability_llm = self._get_native_client("verifier", self.verifier_llm)
+                stability_llm = self._get_native_client(
+                    "verifier", self.verifier_llm, budget_stage="stability",
+                )
                 sv = StabilityVerifier(
                     sandbox_manager=self._sandbox_manager,
                     hardening_llm=stability_llm,
@@ -1039,6 +1562,9 @@ class SourceHuntRunner:
                                 finding.get("id"),
                                 sr.success_rate * 100,
                             )
+                    except BudgetExceeded:
+                        logger.info("Stability verification stopped at the run budget")
+                        break
                     except Exception:
                         logger.warning(
                             "Stability check failed for %s",
@@ -1054,8 +1580,10 @@ class SourceHuntRunner:
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
             patched: list[Finding] = []
-            if not self.no_exploit:
-                exploiter_llm = self._get_native_client("sourcehunt_exploit", self.exploiter_llm)
+            if not self.no_exploit and not self._budget_exhausted():
+                exploiter_llm = self._get_native_client(
+                    "sourcehunt_exploit", self.exploiter_llm, budget_stage="exploit",
+                )
                 if exploiter_llm is not None:
                     eligible = filter_by_evidence(verified, "crash_reproduced")
                     has_sandbox = (
@@ -1076,6 +1604,14 @@ class SourceHuntRunner:
                             ),
                         )
                         for finding in eligible:
+                            if self._budget_exhausted():
+                                logger.info(
+                                    "Exploit phase halted: budget $%.2f "
+                                    "exhausted ($%.2f spent)",
+                                    self.budget_usd,
+                                    self._run_spent_usd(),
+                                )
+                                break
                             try:
                                 exploit_result = await agentic.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
@@ -1089,9 +1625,10 @@ class SourceHuntRunner:
                                         exploit_result.primitive_type
                                         or finding.get("primitive_type", "")
                                     )
-                                    await findings_pool.add(
-                                        finding, session_id=self._session_id,
-                                    )
+                                    await findings_pool.add(finding)
+                            except BudgetExceeded:
+                                logger.info("Exploit generation stopped at the run budget")
+                                break
                             except Exception:
                                 logger.warning(
                                     "Agentic exploiter failed for %s",
@@ -1105,12 +1642,19 @@ class SourceHuntRunner:
                                 apply_exploiter_result(finding, exploit_result)
                                 if exploit_result.success:
                                     exploited.append(finding)
+                            except BudgetExceeded:
+                                logger.info("Exploit triage stopped at the run budget")
+                                break
                             except Exception:
                                 logger.warning("Exploiter failed", exc_info=True)
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
-            if self.enable_elaboration and exploited:
+            if (
+                self.enable_elaboration
+                and exploited
+                and not self._budget_exhausted()
+            ):
                 from .elaboration import (
                     ElaborationAgent,
                     prioritize_for_elaboration,
@@ -1118,6 +1662,7 @@ class SourceHuntRunner:
 
                 elaboration_llm = self._get_native_client(
                     "sourcehunt_exploit", self.exploiter_llm,
+                    budget_stage="elaboration",
                 )
                 if elaboration_llm is not None:
                     targets = prioritize_for_elaboration(
@@ -1137,6 +1682,14 @@ class SourceHuntRunner:
                             ),
                         )
                         for finding in targets:
+                            if self._budget_exhausted():
+                                logger.info(
+                                    "Elaboration halted: budget $%.2f "
+                                    "exhausted ($%.2f spent)",
+                                    self.budget_usd,
+                                    self._run_spent_usd(),
+                                )
+                                break
                             try:
                                 elab_result = await elab_agent.aattempt(finding)
                                 if elab_result.elaborated:
@@ -1145,6 +1698,9 @@ class SourceHuntRunner:
                                     )
                                     all_findings.append(elab_finding)
                                     elaborated.append(elab_finding)
+                            except BudgetExceeded:
+                                logger.info("Elaboration stopped at the run budget")
+                                break
                             except Exception:
                                 logger.warning(
                                     "Elaboration failed for %s",
@@ -1154,8 +1710,10 @@ class SourceHuntRunner:
             # 5.5. v0.3: Auto-patch mode (opt-in).
             # The verify-by-recompile gate is MANDATORY — a patch is only marked
             # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
-            if self.enable_auto_patch and verified:
-                patcher_llm = self._get_native_client("sourcehunt_exploit", self.exploiter_llm)
+            if self.enable_auto_patch and verified and not self._budget_exhausted():
+                patcher_llm = self._get_native_client(
+                    "sourcehunt_exploit", self.exploiter_llm, budget_stage="auto_patch",
+                )
                 if patcher_llm is not None:
                     try:
                         patcher = AutoPatcher(patcher_llm)
@@ -1193,6 +1751,8 @@ class SourceHuntRunner:
                                 patched.append(finding)
                                 if self.auto_pr:
                                     self._open_draft_pr(finding, attempt)
+                    except BudgetExceeded:
+                        logger.info("Auto-patching stopped at the run budget")
                     except Exception:
                         logger.warning("Auto-patcher failed", exc_info=True)
 
@@ -1261,6 +1821,33 @@ class SourceHuntRunner:
 
             # 6. Report
             self._emit_stage("report", "started", findings_so_far=len(all_findings))
+            assert self._spend_ledger is not None
+            ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
+            if ledger_tier_spend:
+                spent_per_tier = {
+                    tier: ledger_tier_spend.get(tier, 0.0)
+                    for tier in ("A", "B", "C")
+                }
+            ledger_band_spend = self._spend_ledger.spent_by("band", stage="hunt")
+            if band_stats is not None and ledger_band_spend:
+                for band in ("fast", "standard", "deep"):
+                    band_stats[f"{band}_cost"] = ledger_band_spend.get(band, 0.0)
+            ledger_subsystem_spend = self._spend_ledger.spent_by(
+                "stage"
+            ).get("subsystem_hunt", 0.0)
+            if ledger_subsystem_spend:
+                subsystem_spent = ledger_subsystem_spend
+
+            run_status = (
+                "budget_exhausted" if self._budget_exhausted() else "completed"
+            )
+            if run_status == "budget_exhausted":
+                pipeline_status.record(
+                    "budget",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Dollar cap reached; partial results retained",
+                )
+            budget_summary = self._finalize_spend_ledger(run_status)
             _pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
             _subsystem_stats = (
                 {"subsystems_hunted": subsystems_hunted, "subsystem_spent_usd": subsystem_spent}
@@ -1274,16 +1861,22 @@ class SourceHuntRunner:
                 pool_stats=_pool_stats,
                 subsystem_stats=_subsystem_stats,
                 pipeline_status=pipeline_status,
+                budget_summary=budget_summary,
             )
 
             self._emit_stage(
                 "report", "completed", findings_so_far=len(all_findings),
-                cost_usd=sum(spent_per_tier.values()) + subsystem_spent,
+                cost_usd=budget_summary["total_spent"],
             )
 
             duration = time.monotonic() - start_time
+            exit_findings = all_findings if self.no_verify else verified
             return SourceHuntResult(
-                exit_code=self._exit_code(verified),
+                exit_code=(
+                    3
+                    if run_status == "budget_exhausted"
+                    else self._exit_code(exit_findings)
+                ),
                 repo_url=self.repo_url,
                 repo_path=repo_path,
                 findings=all_findings,
@@ -1292,16 +1885,20 @@ class SourceHuntRunner:
                 files_ranked=files_ranked,
                 files_hunted=files_hunted,
                 duration_seconds=round(duration, 2),
-                cost_usd=sum(spent_per_tier.values()) + subsystem_spent,
+                cost_usd=budget_summary["total_spent"],
                 spent_per_tier=spent_per_tier,
-                tokens_used=0,  # filled by cost tracker if attached
+                tokens_used=budget_summary["total_tokens"],
                 output_paths=output_paths,
                 session_id=self._session_id,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
                 pipeline_status=pipeline_status,
+                status=run_status,
+                budget_usd=self.budget_usd,
             )
         finally:
+            if self._spend_ledger is not None and not self._spend_ledger.finalized:
+                self._spend_ledger.finalize("failed")
             if self._sandbox_manager is not None:
                 try:
                     self._sandbox_manager.cleanup(remove_image=False)
@@ -1353,9 +1950,8 @@ class SourceHuntRunner:
         kg = self._knowledge_graph
         if kg is None:
             try:
-                from clearwing.data.knowledge import KnowledgeGraph
-
                 from clearwing.core.config import clearwing_home
+                from clearwing.data.knowledge import KnowledgeGraph
 
                 kg = KnowledgeGraph(
                     persist_path=str(clearwing_home() / "knowledge_graph.json"),
@@ -1448,6 +2044,9 @@ class SourceHuntRunner:
                 )
                 if finding.get("verified"):
                     verified.append(finding)
+            except BudgetExceeded:
+                logger.info("Verification stopped at the run budget")
+                break
             except Exception:
                 logger.warning(
                     "Verifier failed for %s", finding.get("id"), exc_info=True,
@@ -1490,6 +2089,9 @@ class SourceHuntRunner:
                 else:
                     rejected.append(finding)
                 self._record_calibration(finding, verdict, discoverer_sev)
+            except BudgetExceeded:
+                logger.info("Validation stopped at the run budget")
+                break
             except Exception:
                 logger.warning(
                     "Validator failed for %s", finding.get("id"), exc_info=True,
@@ -1523,6 +2125,8 @@ class SourceHuntRunner:
             result.patch_oracle_passed = passed
             result.patch_oracle_diff = diff
             result.patch_oracle_notes = notes
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.debug("Patch-oracle pass failed", exc_info=True)
         return result
@@ -1554,6 +2158,8 @@ class SourceHuntRunner:
             verdict.patch_oracle_passed = passed
             verdict.patch_oracle_diff = diff
             verdict.patch_oracle_notes = notes
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.debug("Patch-oracle pass failed", exc_info=True)
         return verdict
@@ -1562,8 +2168,9 @@ class SourceHuntRunner:
         if self._calibration_store is None:
             return
         try:
-            from .calibration import CalibrationRecord
             import datetime
+
+            from .calibration import CalibrationRecord
             self._calibration_store.append(CalibrationRecord(
                 finding_id=finding.get("id", ""),
                 session_id=self._session_id,
@@ -1687,6 +2294,7 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
+                default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()
         except Exception as exc:
@@ -1698,14 +2306,31 @@ class SourceHuntRunner:
             logger.debug("HunterSandbox initialization failed", exc_info=True)
             return
 
-        logger.info("HunterSandbox ready image=%s", image_tag)
+        cpu_limit = manager.default_cpu_limit
+        available_cpus = manager.available_cpus
+        logger.info(
+            "HunterSandbox ready image=%s cpu_limit=%.2f available_cpus=%.2f",
+            image_tag,
+            cpu_limit,
+            available_cpus,
+        )
+        aggregate_limit = cpu_limit * self.max_parallel
+        if cpu_limit > 0 and aggregate_limit > available_cpus:
+            logger.warning(
+                "Sandbox CPU limits are per-container: max_parallel=%d x %.2f CPUs "
+                "= %.2f, exceeding the detected %.2f CPUs. Lower --max-parallel or "
+                "--sandbox-cpus to preserve aggregate host headroom.",
+                self.max_parallel,
+                cpu_limit,
+                aggregate_limit,
+                available_cpus,
+            )
         self._sandbox_manager = manager
         gvisor_rt = self._gvisor_runtime
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(
                 writable_workspace=True,
                 memory_mb=kw.pop("memory_mb", 16384),
-                cpus=kw.pop("cpus", 8.0),
                 timeout_seconds=kw.pop("timeout_seconds", 600),
                 runtime=kw.pop("runtime", gvisor_rt),
                 **kw,
@@ -1734,14 +2359,24 @@ class SourceHuntRunner:
                 self._populate_knowledge_graph_source(repo_path, all_findings)
             except Exception:
                 logger.warning("Knowledge graph population failed", exc_info=True)
+        run_status = "budget_exhausted" if self._budget_exhausted() else "completed"
+        if run_status == "budget_exhausted" and pipeline_status is not None:
+            pipeline_status.record(
+                "budget",
+                StageOutcome.SKIPPED,
+                fallback_description="Dollar cap reached; partial results retained",
+            )
+        budget_summary = self._finalize_spend_ledger(run_status)
         output_paths = self._write_report(
             findings=all_findings,
             verified=[],
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+            pipeline_status=pipeline_status,
+            budget_summary=budget_summary,
         )
         duration = time.monotonic() - start_time
         return SourceHuntResult(
-            exit_code=self._exit_code(all_findings),
+            exit_code=(3 if run_status == "budget_exhausted" else self._exit_code(all_findings)),
             repo_url=self.repo_url,
             repo_path=repo_path,
             findings=all_findings,
@@ -1750,12 +2385,14 @@ class SourceHuntRunner:
             files_ranked=files_ranked,
             files_hunted=0,
             duration_seconds=round(duration, 2),
-            cost_usd=0.0,
+            cost_usd=budget_summary["total_spent"],
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
-            tokens_used=0,
+            tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
+            status=run_status,
+            budget_usd=self.budget_usd,
         )
 
     def _merge_static_findings(
@@ -1801,39 +2438,12 @@ class SourceHuntRunner:
 
     # --- LLM resolution -----------------------------------------------------
 
-    def _get_llm(self, task: str, override: Any) -> Any:
-        """Return an LLM for the given task, or None if not available.
-
-        Resolution order:
-          1. Explicit kwarg override (ranker_llm=, hunter_llm=, etc.)
-          2. self.provider_manager — the centralized source of truth.
-             When set, ALL tasks use the same configured provider.
-             Failures propagate (no silent fallthrough to defaults).
-          3. self.model_override → resolve_llm_endpoint(cli_model=...)
-          4. resolve_llm_endpoint() from env/config
-          5. None — caller falls back to a no-LLM path
-        """
-        if override is not None:
-            return override
-
-        if self.provider_manager is not None:
-            return self.provider_manager.get_llm(task)
-
-        if self.model_override:
-            return self._build_llm_from_model_string(self.model_override)
-
-        try:
-            endpoint = resolve_llm_endpoint()
-            if endpoint.api_key:
-                return ProviderManager.for_endpoint(endpoint).get_llm(task)
-        except Exception:
-            logger.debug("Default endpoint resolution failed for task=%s", task, exc_info=True)
-        return None
-
     def _get_native_client(
         self,
         task: str,
         override: AsyncLLMClient | None,
+        *,
+        budget_stage: str | None = None,
     ) -> AsyncLLMClient | None:
         """Return a native async LLM client for sourcehunt tasks.
 
@@ -1841,36 +2451,38 @@ class SourceHuntRunner:
         the single source of truth — failures propagate instead of
         silently falling through to a different provider/model.
         """
+        client: AsyncLLMClient | None = None
         if override is not None:
-            return override
+            client = override
+        elif self.provider_manager is not None:
+            client = self.provider_manager.get_native_client(task)
+        elif self.model_override:
+            client = self._build_native_from_model_string(self.model_override)
+        else:
+            try:
+                endpoint = resolve_llm_endpoint()
+                if endpoint.api_key:
+                    client = ProviderManager.for_endpoint(endpoint).get_native_client(task)
+            except Exception:
+                logger.debug(
+                    "Default endpoint native resolution failed for task=%s",
+                    task,
+                    exc_info=True,
+                )
 
-        if self.provider_manager is not None:
-            return self.provider_manager.get_native_client(task)
-
-        if self.model_override:
-            return self._build_native_from_model_string(self.model_override)
-
-        try:
-            endpoint = resolve_llm_endpoint()
-            if endpoint.api_key:
-                return ProviderManager.for_endpoint(endpoint).get_native_client(task)
-        except Exception:
-            logger.debug("Default endpoint native resolution failed for task=%s", task, exc_info=True)
-        return None
-
-    def _build_llm_from_model_string(self, model: str) -> Any:
-        """Build a single LLM from a model string. Used by --model override.
-
-        Honors CLEARWING_BASE_URL / CLEARWING_API_KEY — so `--model
-        anthropic/claude-opus-4` + CLEARWING_BASE_URL=https://openrouter.ai/api/v1
-        lands on OpenRouter, not on Anthropic direct.
-        """
-        try:
-            endpoint = resolve_llm_endpoint(cli_model=model)
-            return ProviderManager.for_endpoint(endpoint).get_llm("default")
-        except Exception:
-            logger.warning("Failed to build LLM from model string", exc_info=True)
-            return None
+        if client is None or self._spend_ledger is None:
+            return client
+        # AsyncMock/MagicMock overrides are test seams rather than real
+        # transports. Production native clients expose with_spend_ledger.
+        if not isinstance(client, AsyncLLMClient):
+            return client
+        stage = budget_stage or task
+        key = (id(client), stage)
+        bound = self._metered_clients.get(key)
+        if bound is None:
+            bound = client.with_spend_ledger(self._spend_ledger, stage=stage)
+            self._metered_clients[key] = bound
+        return bound
 
     def _build_native_from_model_string(self, model: str) -> AsyncLLMClient | None:
         try:
@@ -1891,6 +2503,7 @@ class SourceHuntRunner:
         pool_stats: dict | None = None,
         subsystem_stats: dict | None = None,
         pipeline_status: PipelineStatus | None = None,
+        budget_summary: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         """Write SARIF / markdown / JSON outputs to the output directory.
 
@@ -1916,6 +2529,7 @@ class SourceHuntRunner:
                 pool_stats=pool_stats,
                 subsystem_stats=subsystem_stats,
                 pipeline_status=pipeline_status,
+                budget_summary=budget_summary,
             )
         except Exception:
             logger.warning("Reporter failed", exc_info=True)

@@ -277,9 +277,14 @@ _context_hooks_installed = False
 
 def _flush_js_log(tab_name: str) -> list[dict]:
     """Pull new entries from the browser-side log and ingest them."""
-    from clearwing.agent.tools.recon.browser_tools import _get_page
+    from clearwing.agent.tools.recon.browser_tools import _browser_state
 
-    page = _get_page(tab_name)
+    # Flushing is meaningful only for a page where hooks were already
+    # installed. Creating a new page here would launch Chromium and produce an
+    # uninstrumented, empty log as a side effect of a read operation.
+    page = _browser_state.get("tabs", {}).get(tab_name)
+    if page is None:
+        return []
     try:
         raw = page.evaluate(
             "window.__clearwing_crypto_flush"

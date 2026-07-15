@@ -24,6 +24,7 @@ from clearwing.agent.tools.hunt import (
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
+from clearwing.core.events import EventBus, EventType
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
@@ -787,6 +788,53 @@ Web frameworks have many legitimate idioms that look dangerous. When in doubt, c
 """
 
 
+TRACE_BUILDING_INSTRUCTIONS = """
+## Building a Vulnerability Trace
+
+Call `record_trace_step` after each relevant `read_source_file` result.
+Each accepted step immediately becomes authoritative investigation state
+and is automatically attached to the next `record_finding` call. Do not
+reconstruct the trace from memory when reporting.
+
+Record, in order:
+1. The attacker-controlled entry.
+2. Each relevant propagation, transformation, and path condition.
+3. The security-relevant sink.
+4. The finding, after the trace is coherent.
+
+Rules:
+- code_snippet in each step MUST come from a read_source_file result. Do
+  not paraphrase or reconstruct from memory.
+- note should describe: what role this step plays, what data is tainted,
+  and what assumptions must hold for execution to reach this point.
+- Assumptions must be consistent with your PoC inputs. If your trace says
+  "field==2" but your PoC sets "field=1", you have a contradiction —
+  resolve it before calling record_finding.
+- The streamed trace must contain at least one ENTRY step and one SINK step.
+"""
+
+
+DEEP_TRACE_INSTRUCTIONS = """
+## Building a Vulnerability Trace
+
+Call `record_trace_step` after each relevant `read_file` result. Each
+accepted step immediately becomes authoritative investigation state and is
+automatically attached to the next `record_finding` call. Record the entry,
+propagation and conditions, then the sink. Do not reconstruct the path from
+memory at reporting time.
+
+Rules:
+- code_snippet in each step MUST come from a read_file result. Do not
+  paraphrase or reconstruct from memory.
+- note should describe: what role this step plays, what data is tainted, and
+  what assumptions must hold for execution to reach this point.
+- Assumptions must be consistent with your PoC inputs. If your trace says
+  "field==2" but your PoC sets "field=1", resolve the contradiction before
+  calling record_finding.
+- The streamed trace must contain at least one ENTRY step and one SINK step.
+"""
+
+
 _SPECIALIST_PROMPTS = {
     "general": GENERAL_HUNTER_PROMPT,
     "memory_safety": MEMORY_SAFETY_HUNTER_PROMPT,
@@ -836,7 +884,7 @@ def _build_hunter_prompt(
         seeded_crash_block=seeded_crash_block,
         semgrep_hints_block=semgrep_hints_block,
     )
-    return prompt + HUNTER_EXECUTION_RULES
+    return prompt + HUNTER_EXECUTION_RULES + TRACE_BUILDING_INSTRUCTIONS
 
 
 def _build_propagation_prompt(file_target: FileTarget) -> str:
@@ -858,7 +906,7 @@ Tools:
 - execute(command): Run any shell command. gcc, gdb, strace, valgrind, make are all available.
 - read_file(path): Read a file from the container.
 - write_file(path, contents): Write a file in the container.
-- think(notes): Record your reasoning (visible in the audit trail).
+- record_trace_step(file, line, function, code_snippet, note): Record one step in the vulnerability dataflow trace as you read code. Build the trace incrementally from attacker entry to sink.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
 
 Project: {project_name}
@@ -967,7 +1015,7 @@ def _build_deep_agent_prompt(
         if count > 0:
             prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
 
-    return prompt
+    return prompt + DEEP_TRACE_INSTRUCTIONS
 
 
 def _build_unconstrained_prompt(
@@ -980,6 +1028,7 @@ def _build_unconstrained_prompt(
     entry_point: Any = None,
     seed_context: str | None = None,
     findings_pool: Any = None,
+    agent_mode: str = "constrained",
 ) -> str:
     """Build the unconstrained discovery prompt for any agent mode."""
     seed_parts: list[str] = []
@@ -1031,6 +1080,13 @@ def _build_unconstrained_prompt(
             prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
 
     prompt += "\n" + SELF_CHECK
+    # Deep mode reads via read_file/execute; the constrained instructions gate
+    # tracing on read_source_file (which deep hunters don't have), so route the
+    # deep path to the read_file-aware variant.
+    prompt += "\n" + (
+        DEEP_TRACE_INSTRUCTIONS if agent_mode == "deep"
+        else TRACE_BUILDING_INSTRUCTIONS
+    )
 
     return prompt
 
@@ -1156,7 +1212,7 @@ def _build_subsystem_prompt(
             ep_lines.append(f"  ... and {len(subsystem.entry_points) - 20} more")
         entry_points_block = "\n".join(ep_lines) + "\n"
 
-    return SUBSYSTEM_HUNT_PROMPT.format(
+    prompt = SUBSYSTEM_HUNT_PROMPT.format(
         subsystem_name=subsystem.name,
         project_name=project_name,
         file_count=len(subsystem.files),
@@ -1166,6 +1222,7 @@ def _build_subsystem_prompt(
         existing_findings_block=existing_findings_block,
         entry_points_block=entry_points_block,
     )
+    return prompt + TRACE_BUILDING_INSTRUCTIONS
 
 
 def build_subsystem_hunter_agent(
@@ -1337,13 +1394,25 @@ class NativeHunter:
             )
             total_input_tokens += response.usage.prompt_tokens or 0
             total_output_tokens += response.usage.completion_tokens or 0
+            # Older genai-pyo3 responses and lightweight test doubles may not
+            # expose prompt_tokens_details at all. Treat that the same as a
+            # response where nothing was cache-served.
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
             total_cost_usd += _estimate_cost_usd(
                 response.usage.prompt_tokens or 0,
                 response.usage.completion_tokens or 0,
                 self.llm.model_name,
+                cached_tokens,
             )
 
             last_assistant_text = response.first_text or ""
+            if last_assistant_text:
+                EventBus().emit(EventType.HUNTER_STATUS, {
+                    "hunter_target": self.ctx.file_path,
+                    "text": last_assistant_text,
+                    "step": step,
+                })
             tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
                 messages.append(
@@ -1467,13 +1536,56 @@ class NativeHunter:
             arguments = tool_call.fn_arguments
             if not isinstance(arguments, dict):
                 arguments = {}
+            # Strip hallucinated/mangled keys the model may emit (XML noise,
+            # invented params). Only pass keys declared in the tool schema.
+            allowed_keys = set(tool.schema.get("properties", {}).keys()) if tool.schema else None
+            if allowed_keys is not None:
+                arguments = {k: v for k, v in arguments.items() if k in allowed_keys}
+            # Reject calls missing required params (model emitted empty/partial args).
+            # Return an error string so the model can self-correct on next turn.
+            required = set(tool.schema.get("required", [])) if tool.schema else set()
+            missing = required - set(arguments.keys())
+            if missing:
+                logger.info(
+                    "Hunter tool %s missing required args %s for %s (retry expected)",
+                    tool_call.fn_name,
+                    sorted(missing),
+                    self.ctx.file_path,
+                )
+                return {
+                    "error": f"missing required arguments: {', '.join(sorted(missing))}. "
+                    f"Required: {', '.join(sorted(required))}. Please retry with all required params."
+                }
+            sandbox_id = (
+                self.ctx.sandbox.short_id if self.ctx.sandbox else None
+            )
+            if tool_call.fn_name in ("read_source_file", "read_file"):
+                offset = arguments.get("offset", 0)
+                limit = arguments.get("limit", 500)
+                EventBus().emit(EventType.TOOL_START, {
+                    "tool_name": tool_call.fn_name,
+                    "file": arguments.get("path", ""),
+                    "start_line": arguments.get("start_line", offset + 1),
+                    "end_line": arguments.get("end_line", offset + limit),
+                    "hunter_target": self.ctx.file_path,
+                    "sandbox_id": sandbox_id,
+                })
+            elif tool_call.fn_name == "execute":
+                EventBus().emit(EventType.TOOL_START, {
+                    "tool_name": "execute",
+                    "command": arguments.get("command", ""),
+                    "hunter_target": self.ctx.file_path,
+                    "sandbox_id": sandbox_id,
+                })
             return await tool.ainvoke(arguments)
         except Exception as exc:
             logger.warning(
-                "Hunter tool %s failed for %s: %s",
+                "Hunter tool %s failed for %s: %s | fn_arguments=%r fn_arguments_json=%r",
                 tool_call.fn_name,
                 self.ctx.file_path,
                 exc,
+                getattr(tool_call, "fn_arguments", None),
+                getattr(tool_call, "fn_arguments_json", None),
             )
             return {"error": f"{type(exc).__name__}: {exc}"}
         finally:
@@ -1573,9 +1685,10 @@ def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> 
         return _clip_text(str(value), 3000)
 
 
-def _estimate_cost_usd(input_tokens: int, output_tokens: int, model: str) -> float:
-    pricing = CostTracker.PRICING.get(model, CostTracker.PRICING[CostTracker._DEFAULT_MODEL])
-    return (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+def _estimate_cost_usd(
+    input_tokens: int, output_tokens: int, model: str, cached_tokens: int = 0
+) -> float:
+    return CostTracker.estimate_cost(input_tokens, output_tokens, model, cached_tokens)
 
 
 def build_hunter_agent(
@@ -1673,6 +1786,7 @@ def build_hunter_agent(
             entry_point=entry_point,
             seed_context=seed_context,
             findings_pool=findings_pool,
+            agent_mode=agent_mode,
         )
         if agent_mode == "deep":
             tools = build_deep_agent_tools(ctx)

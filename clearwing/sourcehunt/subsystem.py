@@ -12,9 +12,11 @@ import asyncio
 import fnmatch
 import logging
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
+from clearwing.llm.budget import BudgetExceeded, spend_metadata
 from clearwing.sourcehunt.state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
@@ -199,9 +201,10 @@ class SubsystemHuntRunner:
                         "Subsystem %s skipped: total budget exhausted", subsystem.name,
                     )
                     return []
-                findings, cost, tokens, stop = await self._run_one_subsystem(
-                    subsystem, self.config.budget_per_subsystem_usd,
-                )
+                with spend_metadata(subsystem=subsystem.name):
+                    findings, cost, tokens, stop = await self._run_one_subsystem(
+                        subsystem, self.config.budget_per_subsystem_usd,
+                    )
                 self._spent += cost
                 self._subsystems_completed += 1
                 logger.info(
@@ -225,6 +228,13 @@ class SubsystemHuntRunner:
             try:
                 findings = await coro
                 all_findings.extend(findings)
+            except BudgetExceeded:
+                logger.info("Subsystem hunt stopped because the run budget is exhausted")
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                break
             except Exception:
                 logger.warning("Subsystem hunt task failed", exc_info=True)
 
@@ -276,6 +286,8 @@ class SubsystemHuntRunner:
             if "ctx" in locals():
                 return (list(ctx.findings), 0.0, 0, "timeout")
             return ([], 0.0, 0, "timeout")
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.warning("Subsystem %s failed", subsystem.name, exc_info=True)
             return ([], 0.0, 0, "error")
