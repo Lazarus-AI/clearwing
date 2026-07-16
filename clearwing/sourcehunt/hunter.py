@@ -1387,7 +1387,7 @@ def build_subsystem_hunter_agent(
         prompt=prompt,
         tools=tools,
         ctx=ctx,
-        max_steps=100,
+        max_steps=200,
         agent_mode="deep",
         budget_usd=budget_usd,
         initial_user_message=(

@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -80,7 +81,7 @@ def cve_dataset(
                 "clone_url": e.get("clone_url", ""),
                 "vulnerable_commit": e.get("vulnerable_commit", ""),
                 "subsystem_paths": (
-                    [e["sourcehunt"]["subsystem"]]
+                    [e["sourcehunt"]["subsystem"]] + (e.get("files") or [])
                     if e.get("sourcehunt", {}).get("subsystem")
                     else e.get("files") or []
                 ),
@@ -263,6 +264,13 @@ def dynamic_runner_solver(
             file=sys.stderr, flush=True,
         )
         findings = [asdict(f) if not isinstance(f, dict) else f for f in result.findings]
+        state.metadata["eval_timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            state.metadata["git_commit"] = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent.parent, text=True
+            ).strip()
+        except Exception:
+            state.metadata["git_commit"] = "unknown"
         state.metadata["cost_usd"] = result.cost_usd
         state.metadata["session_id"] = result.session_id
         state.metadata["duration_seconds"] = result.duration_seconds
