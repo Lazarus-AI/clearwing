@@ -1210,8 +1210,31 @@ single-file bugs and cross-file bugs alike:
 - State corruption: shared state modified by one file but consumed by another
 - Inconsistent validation: input validated in one path but not another
 {existing_findings_block}{entry_points_block}
-Start by running semgrep_scan on the subsystem files to surface static analysis \
-hits, then read the code with those as initial hypotheses.
+Before calling any tools, reason through: what are the worst security outcomes \
+for this type of subsystem, and what code invariant prevents each? Use those as \
+your investigation hypotheses.
+
+Then run semgrep_scan on the subsystem. If semgrep returns findings, use those \
+as additional hypotheses. If semgrep returns nothing, proceed with your reasoned \
+hypotheses.
+
+For each hypothesis, work sink-first:
+1. Identify the dangerous operation (the sink: e.g. encrypt, free, write).
+2. grep for ALL direct callers of that sink in this subsystem.
+3. Read each caller's body and record what setup or guard calls it makes BEFORE \
+reaching the sink (e.g. state_init, null-check, lock_acquire, bounds_check).
+4. The set of guards that most callers perform is the INFERRED EXPECTED GUARD SET \
+for this sink — you don't need to know it upfront, the majority pattern tells you.
+5. Any caller that reaches the sink WITHOUT all expected guards is a candidate \
+finding — flag it immediately with flag_potential.
+This catches omission bugs: the vulnerability is not in what IS called but in \
+what ISN'T. Asymmetry between callers of the same sink is the strongest signal.
+
+As you read code, use flag_potential to bookmark suspicious lines without \
+committing to a finding. Call get_potentials periodically to review accumulated \
+leads across files — cross-file asymmetries often only become visible when you \
+compare leads side by side. Use dismiss_potential to rule out false positives \
+with a brief reason.
 
 IMPORTANT — commit early, don't over-explore:
 - Once you can state the vulnerable type, the bad arithmetic, and the downstream \

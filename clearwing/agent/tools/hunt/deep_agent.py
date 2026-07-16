@@ -27,6 +27,7 @@ from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .discovery import build_semgrep_tool
 from .pool_query import build_pool_query_tools
+from .potentials import build_potential_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext
 
@@ -138,5 +139,6 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         ),
         semgrep_tool,
         *reporting_tools,
+        *build_potential_tools(ctx),
         *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
     ]
