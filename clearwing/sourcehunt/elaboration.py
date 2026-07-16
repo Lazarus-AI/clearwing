@@ -18,7 +18,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient, BudgetExceeded, NativeToolSpec
+from pydantic import Field
+
+from clearwing.llm import AsyncLLMClient, BudgetExceeded, NativeToolSpec, ToolInputModel
 
 from .exploiter import EXPLOIT_BUDGET_BANDS
 from .state import (
@@ -29,6 +31,36 @@ from .state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class RecordElaborationResultInput(ToolInputModel):
+    elaborated: bool = Field(description="True if you upgraded the exploit to higher impact.")
+    upgraded_impact: str = Field(
+        default="",
+        description=(
+            "New impact if elaborated: code_execution, privilege_escalation, "
+            "sandbox_escape, cross_origin_bypass, remote_code_execution."
+        ),
+    )
+    upgraded_exploit_code: str = Field(
+        default="",
+        description="The upgraded exploit script or PoC.",
+    )
+    chained_findings: list[str] | None = Field(
+        default=None,
+        description="IDs of other findings used in the chain.",
+    )
+    upgrade_path: str = Field(
+        default="",
+        description=(
+            "Description of the upgrade path attempted (e.g., 'heap spray -> cross-origin bypass')."
+        ),
+    )
+    blocking_mitigations: list[str] | None = Field(
+        default=None,
+        description="Mitigations that prevented the upgrade.",
+    )
+    notes: str = Field(default="", description="Free-form notes about the attempt.")
 
 
 # --- Constants ---------------------------------------------------------------
@@ -189,49 +221,7 @@ def build_elaboration_tools(
             "Call this when you are done — whether you successfully "
             "upgraded the exploit or determined the upgrade isn't feasible."
         ),
-        schema={
-            "type": "object",
-            "properties": {
-                "elaborated": {
-                    "type": "boolean",
-                    "description": "True if you upgraded the exploit to higher impact.",
-                },
-                "upgraded_impact": {
-                    "type": "string",
-                    "description": (
-                        "New impact if elaborated: code_execution, "
-                        "privilege_escalation, sandbox_escape, "
-                        "cross_origin_bypass, remote_code_execution."
-                    ),
-                },
-                "upgraded_exploit_code": {
-                    "type": "string",
-                    "description": "The upgraded exploit script or PoC.",
-                },
-                "chained_findings": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "IDs of other findings used in the chain.",
-                },
-                "upgrade_path": {
-                    "type": "string",
-                    "description": (
-                        "Description of the upgrade path attempted "
-                        "(e.g., 'heap spray -> cross-origin bypass')."
-                    ),
-                },
-                "blocking_mitigations": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Mitigations that prevented the upgrade.",
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Free-form notes about the attempt.",
-                },
-            },
-            "required": ["elaborated"],
-        },
+        schema=RecordElaborationResultInput.model_json_schema(),
         handler=record_elaboration_result,
     )
 

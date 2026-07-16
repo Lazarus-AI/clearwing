@@ -18,12 +18,40 @@ import os
 import re
 import uuid
 
-from clearwing.llm import NativeToolSpec
+from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .discovery import _container_path, _normalize_path
 from .sandbox import HunterContext, _parse_variant_arg
 
 logger = logging.getLogger(__name__)
+
+
+class CompileFileInput(ToolInputModel):
+    file_path: str
+    sanitizers: list[str] | None = None
+    extra_flags: str = ""
+    sanitizer_variant: str = ""
+
+
+class RunWithSanitizerInput(ToolInputModel):
+    binary: str
+    argv: list[str] | None = None
+    stdin: str = ""
+    timeout: int = 30
+    sanitizer_variant: str = ""
+
+
+class WriteTestCaseInput(ToolInputModel):
+    filename: str
+    content: str
+
+
+class FuzzHarnessInput(ToolInputModel):
+    target_function: str = ""
+    signature: str = ""
+    harness_source: str = ""
+    duration_seconds: int = 30
+    sanitizer_variant: str = ""
 
 
 # --- Sanitizer parsing + libFuzzer template helpers ------------------------
@@ -302,7 +330,7 @@ def build_analysis_tools(ctx: HunterContext) -> list:
         return f"Wrote {len(content)} bytes to {scratch_path}"
 
     def fuzz_harness(
-        target_function: str,
+        target_function: str = "",
         signature: str = "",
         harness_source: str = "",
         duration_seconds: int = 30,
@@ -432,60 +460,25 @@ def build_analysis_tools(ctx: HunterContext) -> list:
         NativeToolSpec(
             name="compile_file",
             description="Compile a repo-relative file in the sandbox with sanitizers enabled.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "sanitizers": {"type": "array", "items": {"type": "string"}},
-                    "extra_flags": {"type": "string", "default": ""},
-                    "sanitizer_variant": {"type": "string", "default": ""},
-                },
-                "required": ["file_path"],
-            },
+            schema=CompileFileInput.model_json_schema(),
             handler=compile_file,
         ),
         NativeToolSpec(
             name="run_with_sanitizer",
             description="Run a binary in the sandbox and capture sanitizer crash evidence.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "binary": {"type": "string"},
-                    "argv": {"type": "array", "items": {"type": "string"}},
-                    "stdin": {"type": "string", "default": ""},
-                    "timeout": {"type": "integer", "default": 30},
-                    "sanitizer_variant": {"type": "string", "default": ""},
-                },
-                "required": ["binary"],
-            },
+            schema=RunWithSanitizerInput.model_json_schema(),
             handler=run_with_sanitizer,
         ),
         NativeToolSpec(
             name="write_test_case",
             description="Write a proof-of-concept or test input file into /scratch in the sandbox.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["filename", "content"],
-            },
+            schema=WriteTestCaseInput.model_json_schema(),
             handler=write_test_case,
         ),
         NativeToolSpec(
             name="fuzz_harness",
             description="Generate and run a libFuzzer harness for a target function in the sandbox.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "target_function": {"type": "string", "default": ""},
-                    "signature": {"type": "string", "default": ""},
-                    "harness_source": {"type": "string", "default": ""},
-                    "duration_seconds": {"type": "integer", "default": 30},
-                    "sanitizer_variant": {"type": "string", "default": ""},
-                },
-            },
+            schema=FuzzHarnessInput.model_json_schema(),
             handler=fuzz_harness,
         ),
     ]

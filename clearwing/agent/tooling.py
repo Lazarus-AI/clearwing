@@ -6,9 +6,11 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, get_type_hints
 
-from clearwing.llm.native import NativeToolSpec
+from pydantic import BaseModel, create_model
+
+from clearwing.llm.native import NativeToolSpec, ToolInputModel
 
 _TOOL_ACTIVE: ContextVar[bool] = ContextVar("_TOOL_ACTIVE", default=False)
 _TOOL_RESUME_DECISION: ContextVar[object] = ContextVar("_TOOL_RESUME_DECISION", default=Ellipsis)
@@ -40,27 +42,18 @@ def tool_execution_context(*, resume_decision: object = Ellipsis):
         _TOOL_ACTIVE.reset(token_active)
 
 
-class _ArgsSchema:
-    def __init__(self, schema: dict[str, Any]) -> None:
-        self._schema = schema
-
-    def schema(self) -> dict[str, Any]:
-        return self._schema
-
-    def model_json_schema(self) -> dict[str, Any]:
-        return self._schema
-
-
 @dataclass
 class AgentTool:
     func: Callable[..., Any]
     name: str
     description: str
-    input_schema: dict[str, Any]
-    args_schema: _ArgsSchema = field(init=False)
+    input_model: type[BaseModel]
+    input_schema: dict[str, Any] = field(init=False)
+    args_schema: type[BaseModel] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.args_schema = _ArgsSchema(self.input_schema)
+        self.args_schema = self.input_model
+        self.input_schema = self.input_model.model_json_schema()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.func(*args, **kwargs)
@@ -98,7 +91,7 @@ def tool(func: Callable[..., Any] | None = None, **decorator_kwargs: Any):
             func=fn,
             name=name,
             description=description,
-            input_schema=_build_schema(fn),
+            input_model=_build_input_model(fn),
         )
 
     if func is None:
@@ -120,10 +113,10 @@ def as_native_tool_spec(tool_obj: Any) -> NativeToolSpec:
         schema = getattr(tool_obj, "input_schema", None)
         if not isinstance(schema, dict):
             args_schema = getattr(tool_obj, "args_schema", None)
-            if args_schema is not None and hasattr(args_schema, "schema"):
-                schema = args_schema.schema()
-            elif args_schema is not None and hasattr(args_schema, "model_json_schema"):
+            if args_schema is not None and hasattr(args_schema, "model_json_schema"):
                 schema = args_schema.model_json_schema()
+            elif args_schema is not None and hasattr(args_schema, "schema"):
+                schema = args_schema.schema()
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
         handler = getattr(tool_obj, "func", None) or getattr(tool_obj, "invoke", None) or tool_obj
@@ -149,10 +142,10 @@ def _normalize_arguments(
     return params
 
 
-def _build_schema(fn: Callable[..., Any]) -> dict[str, Any]:
+def _build_input_model(fn: Callable[..., Any]) -> type[BaseModel]:
     signature = inspect.signature(fn)
-    properties: dict[str, Any] = {}
-    required: list[str] = []
+    annotations = get_type_hints(fn)
+    fields: dict[str, tuple[Any, Any]] = {}
 
     for name, parameter in signature.parameters.items():
         if parameter.kind not in (
@@ -160,43 +153,9 @@ def _build_schema(fn: Callable[..., Any]) -> dict[str, Any]:
             inspect.Parameter.KEYWORD_ONLY,
         ):
             continue
-        properties[name] = _schema_for_annotation(parameter.annotation)
-        if parameter.default is inspect._empty:
-            required.append(name)
+        annotation = annotations.get(name, Any)
+        default = ... if parameter.default is inspect._empty else parameter.default
+        fields[name] = (annotation, default)
 
-    schema: dict[str, Any] = {
-        "type": "object",
-        "properties": properties,
-        "additionalProperties": False,
-    }
-    if required:
-        schema["required"] = required
-    return schema
-
-
-def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
-    origin = getattr(annotation, "__origin__", None)
-    args = getattr(annotation, "__args__", ())
-
-    if annotation in {str, inspect._empty}:
-        return {"type": "string"}
-    if annotation is int:
-        return {"type": "integer"}
-    if annotation is float:
-        return {"type": "number"}
-    if annotation is bool:
-        return {"type": "boolean"}
-    if annotation in {dict, Any} or origin is dict:
-        return {"type": "object"}
-    if annotation is list or origin is list:
-        item_annotation = args[0] if args else Any
-        return {"type": "array", "items": _schema_for_annotation(item_annotation)}
-    if origin is tuple:
-        return {"type": "array"}
-    if origin is Callable:
-        return {"type": "string"}
-    if origin is None and hasattr(annotation, "__supertype__"):
-        return _schema_for_annotation(annotation.__supertype__)
-    if origin is None and getattr(annotation, "__module__", "") == "typing":
-        return {"type": "string"}
-    return {"type": "string"}
+    model_name = "".join(part.capitalize() for part in fn.__name__.split("_")) + "Input"
+    return create_model(model_name, __base__=ToolInputModel, **fields)

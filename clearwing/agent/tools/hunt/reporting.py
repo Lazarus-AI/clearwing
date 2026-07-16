@@ -15,13 +15,72 @@ from __future__ import annotations
 
 import uuid
 
+from pydantic import Field
+
 from clearwing.core.events import EventBus, EventType
 from clearwing.findings.types import TraceStep, VulnerabilityTrace
-from clearwing.llm import NativeToolSpec
+from clearwing.llm import NativeToolSpec, ToolInputModel
 from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.state import Finding
 
 from .sandbox import HunterContext
+
+
+class RecordTraceStepInput(ToolInputModel):
+    file: str = Field(description="Repo-relative file path")
+    line: int = Field(description="1-indexed line number")
+    function: str = Field(default="", description="Enclosing function name")
+    code_snippet: str = Field(
+        default="",
+        description="Exact code from read_source_file (do NOT fabricate)",
+    )
+    note: str = Field(
+        default="",
+        description="Free-form: role (entry/propagation/condition/sink), taint state, assumptions, reasoning",
+    )
+
+
+class CompatibilityTraceStepInput(ToolInputModel):
+    file: str = Field(description="Repo-relative file path")
+    line: int = Field(description="1-indexed line number")
+    function: str = ""
+    code_snippet: str = ""
+    note: str = Field(
+        default="",
+        description="Role (ENTRY/PROPAGATION/CONDITION/SINK), taint state, assumptions",
+    )
+
+
+class CompatibilityTraceInput(ToolInputModel):
+    steps: list[CompatibilityTraceStepInput] = Field(
+        description="Ordered steps from entry to sink; include at least one ENTRY step and one SINK step."
+    )
+    summary: str = Field(default="", description="One-line dataflow summary")
+
+
+class RecordFindingInput(ToolInputModel):
+    file: str
+    line_number: int
+    finding_type: str
+    severity: str
+    cwe: str
+    description: str
+    code_snippet: str = ""
+    crash_evidence: str = ""
+    poc: str = ""
+    confidence: str = "medium"
+    evidence_level: str = "suspicion"
+    crypto_protocol: str = ""
+    algorithm: str = ""
+    crypto_attack_class: str = ""
+    key_material_exposed: str = ""
+    trace: CompatibilityTraceInput | None = Field(
+        default=None,
+        description=(
+            "Optional compatibility dataflow trace. Steps streamed via "
+            "record_trace_step are authoritative and automatically persisted on the finding."
+        ),
+    )
 
 
 def build_reporting_tools(ctx: HunterContext) -> list:
@@ -237,128 +296,13 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "to vulnerable sink. The code_snippet MUST be copied from a "
                 "prior read_source_file result."
             ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "description": "Repo-relative file path",
-                    },
-                    "line": {
-                        "type": "integer",
-                        "description": "1-indexed line number",
-                    },
-                    "function": {
-                        "type": "string",
-                        "description": "Enclosing function name",
-                        "default": "",
-                    },
-                    "code_snippet": {
-                        "type": "string",
-                        "description": ("Exact code from read_source_file (do NOT fabricate)"),
-                        "default": "",
-                    },
-                    "note": {
-                        "type": "string",
-                        "description": (
-                            "Free-form: role (entry/propagation/condition/sink), "
-                            "taint state, assumptions, reasoning"
-                        ),
-                        "default": "",
-                    },
-                },
-                "required": ["file", "line"],
-                "additionalProperties": False,
-            },
+            schema=RecordTraceStepInput.model_json_schema(),
             handler=record_trace_step,
         ),
         NativeToolSpec(
             name="record_finding",
             description="Record a verified or suspected finding into the hunter state.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "file": {"type": "string"},
-                    "line_number": {"type": "integer"},
-                    "finding_type": {"type": "string"},
-                    "severity": {"type": "string"},
-                    "cwe": {"type": "string"},
-                    "description": {"type": "string"},
-                    "code_snippet": {"type": "string", "default": ""},
-                    "crash_evidence": {"type": "string", "default": ""},
-                    "poc": {"type": "string", "default": ""},
-                    "confidence": {"type": "string", "default": "medium"},
-                    "evidence_level": {"type": "string", "default": "suspicion"},
-                    "crypto_protocol": {"type": "string", "default": ""},
-                    "algorithm": {"type": "string", "default": ""},
-                    "crypto_attack_class": {"type": "string", "default": ""},
-                    "key_material_exposed": {"type": "string", "default": ""},
-                    "trace": {
-                        "type": "object",
-                        "description": (
-                            "Optional compatibility dataflow trace. Steps "
-                            "streamed via record_trace_step are authoritative "
-                            "and automatically persisted on the finding."
-                        ),
-                        "properties": {
-                            "steps": {
-                                "type": "array",
-                                "description": (
-                                    "Ordered steps from entry to sink; include at "
-                                    "least one ENTRY step and one SINK step."
-                                ),
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {
-                                            "type": "string",
-                                            "description": "Repo-relative file path",
-                                        },
-                                        "line": {
-                                            "type": "integer",
-                                            "description": "1-indexed line number",
-                                        },
-                                        "function": {
-                                            "type": "string",
-                                            "default": "",
-                                        },
-                                        "code_snippet": {
-                                            "type": "string",
-                                            "default": "",
-                                        },
-                                        "note": {
-                                            "type": "string",
-                                            "description": (
-                                                "Role (ENTRY/PROPAGATION/CONDITION/"
-                                                "SINK), taint state, assumptions"
-                                            ),
-                                            "default": "",
-                                        },
-                                    },
-                                    "required": ["file", "line"],
-                                    "additionalProperties": False,
-                                },
-                            },
-                            "summary": {
-                                "type": "string",
-                                "description": "One-line dataflow summary",
-                                "default": "",
-                            },
-                        },
-                        "required": ["steps"],
-                        "additionalProperties": False,
-                    },
-                },
-                "required": [
-                    "file",
-                    "line_number",
-                    "finding_type",
-                    "severity",
-                    "cwe",
-                    "description",
-                ],
-                "additionalProperties": False,
-            },
+            schema=RecordFindingInput.model_json_schema(),
             handler=record_finding,
         ),
     ]

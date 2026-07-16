@@ -18,11 +18,37 @@ import os
 import re
 from pathlib import Path
 
-from clearwing.llm import NativeToolSpec
+from pydantic import Field
+
+from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .sandbox import HunterContext
 
 logger = logging.getLogger(__name__)
+
+
+class ReadSourceFileInput(ToolInputModel):
+    path: str = Field(description="Repo-relative file path, e.g. 'src/foo.c'")
+    start_line: int = Field(default=1, description="First line to read (1-indexed)")
+    end_line: int = Field(
+        default=-1,
+        description="Last line to read (-1 means start_line + 500)",
+    )
+
+
+class ListSourceTreeInput(ToolInputModel):
+    dir_path: str = Field(default=".", description="Directory to list (repo-relative)")
+    max_depth: int = Field(default=2, description="Maximum directory depth to recurse")
+
+
+class GrepSourceInput(ToolInputModel):
+    pattern: str = Field(description="Regex pattern to search for")
+    path: str = Field(default=".", description="Directory or file to search in (repo-relative)")
+    file_glob: str = Field(default="", description="Glob filter for filenames, e.g. '*.c'")
+
+
+class FindCallersInput(ToolInputModel):
+    symbol: str = Field(description="Symbol name to search for references to")
 
 
 # --- Path + ripgrep helpers -------------------------------------------------
@@ -266,90 +292,25 @@ def build_discovery_tools(ctx: HunterContext) -> list:
                 "Read a repo-relative source file. Returns up to 500 lines. "
                 "Use start_line/end_line to read a specific range."
             ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Repo-relative file path, e.g. 'src/foo.c'",
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "default": 1,
-                        "description": "First line to read (1-indexed)",
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "default": -1,
-                        "description": "Last line to read (-1 means start_line + 500)",
-                    },
-                },
-                "required": ["path"],
-                "additionalProperties": False,
-            },
+            schema=ReadSourceFileInput.model_json_schema(),
             handler=read_source_file,
         ),
         NativeToolSpec(
             name="list_source_tree",
             description="List files and directories relative to the repo root.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "dir_path": {
-                        "type": "string",
-                        "default": ".",
-                        "description": "Directory to list (repo-relative)",
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "default": 2,
-                        "description": "Maximum directory depth to recurse",
-                    },
-                },
-                "additionalProperties": False,
-            },
+            schema=ListSourceTreeInput.model_json_schema(),
             handler=list_source_tree,
         ),
         NativeToolSpec(
             name="grep_source",
             description="Search the repo with a ripgrep-style regex and return up to 100 matches.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Regex pattern to search for",
-                    },
-                    "path": {
-                        "type": "string",
-                        "default": ".",
-                        "description": "Directory or file to search in (repo-relative)",
-                    },
-                    "file_glob": {
-                        "type": "string",
-                        "default": "",
-                        "description": "Glob filter for filenames, e.g. '*.c'",
-                    },
-                },
-                "required": ["pattern"],
-                "additionalProperties": False,
-            },
+            schema=GrepSourceInput.model_json_schema(),
             handler=grep_source,
         ),
         NativeToolSpec(
             name="find_callers",
             description="Find files and lines that reference a symbol.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Symbol name to search for references to",
-                    },
-                },
-                "required": ["symbol"],
-                "additionalProperties": False,
-            },
+            schema=FindCallersInput.model_json_schema(),
             handler=find_callers,
         ),
     ]
