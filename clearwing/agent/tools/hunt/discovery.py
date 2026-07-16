@@ -23,6 +23,7 @@ from pydantic import Field
 from clearwing.llm import NativeToolSpec, ToolInputModel
 from clearwing.sourcehunt.semgrep_sidecar import SemgrepSidecar, finding_to_dict
 
+from .potentials import build_potential_tools
 from .sandbox import HunterContext
 
 logger = logging.getLogger(__name__)
@@ -329,6 +330,7 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             handler=find_callers,
         ),
         build_semgrep_tool(ctx),
+        *build_potential_tools(ctx),
     ]
 
 
