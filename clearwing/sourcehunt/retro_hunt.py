@@ -25,8 +25,10 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from clearwing.llm import ChatModel
+from clearwing.llm import AsyncLLMClient, ChatMessage
+from clearwing.llm.native import response_text
 
+from .instrumentation import stable_run_id
 from .semgrep_sidecar import SemgrepSidecar
 from .state import Finding
 
@@ -135,7 +137,7 @@ class RetroHunter:
 
     def __init__(
         self,
-        llm: ChatModel,
+        llm: AsyncLLMClient,
         sidecar: SemgrepSidecar | None = None,
     ):
         self.llm = llm
@@ -186,16 +188,14 @@ class RetroHunter:
     def _generate_rule(self, cve_id: str, diff_text: str) -> dict | None:
         user_msg = f"CVE: {cve_id}\n\nPatch diff:\n\n{diff_text}"
         try:
-            response = self.llm.invoke(
-                [
-                    {"role": "system", "content": RULE_GEN_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ]
+            response = self.llm.chat(
+                messages=[ChatMessage("user", user_msg)],
+                system=RULE_GEN_SYSTEM_PROMPT,
             )
         except Exception:
             logger.debug("Retro-hunt rule-gen LLM call failed", exc_info=True)
             return None
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        content = response_text(response)
         match = re.search(r"\{[\s\S]*\}", content)
         if not match:
             return None
@@ -207,7 +207,7 @@ class RetroHunter:
 
     def _format_semgrep_rule(self, rule_info: dict) -> str:
         """Build a minimal Semgrep rule YAML from the parsed rule_info dict."""
-        rule_id = rule_info.get("rule_id", f"retro-hunt-{uuid.uuid4().hex[:6]}")
+        rule_id = rule_info.get("rule_id") or stable_run_id("retro-hunt", rule_info)
         description = rule_info.get("description", "")
         pattern = rule_info.get("pattern", "")
         severity = rule_info.get("severity", "WARNING")
@@ -278,6 +278,17 @@ class RetroHunter:
         severity_map = {"error": "high", "warning": "medium", "info": "low"}
         mapped_severity = severity_map.get(severity, "medium")
 
+        stable_finding_id = stable_run_id(
+            "retro",
+            {
+                "cve_id": cve_id,
+                "rule_id": rule_info.get("rule_id"),
+                "file": hit.get("file", ""),
+                "line": int(hit.get("line", 0)),
+                "check_id": hit.get("check_id", ""),
+                "code_snippet": hit.get("code_snippet", ""),
+            },
+        )
         return Finding(
             id=f"retro-{uuid.uuid4().hex[:8]}",
             file=hit.get("file", ""),
@@ -295,4 +306,5 @@ class RetroHunter:
             evidence_level="static_corroboration",
             discovered_by="retro_hunt",
             related_cve=cve_id,
+            extra={"stable_finding_id": stable_finding_id},
         )

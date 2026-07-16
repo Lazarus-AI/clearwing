@@ -1,0 +1,346 @@
+schema_version: 1
+cases:
+  - id: ffmpeg-h264-slice-sentinel
+    cves: []
+    repository: https://github.com/FFmpeg/FFmpeg.git
+    vulnerable_commit: 795bccdaf57772b1803914dee2f32d52776518e2
+    fixed_commit: 39e1969303a0b9ec5fb5f5eb643bf7a5b69c0a89
+    language: c
+    ground_truth:
+      target_files:
+        - libavcodec/h264_slice.c
+        - libavcodec/h264dec.h
+      target_functions:
+        - h264_slice_header_init
+      expected_fact_symbols:
+        - current_slice
+        - slice_num
+        - slice_table
+        - top_borders
+      entry_points:
+        - H.264 slice-header decode
+      sources:
+        - current_slice
+        - slice_num
+      sinks:
+        - slice_table
+        - top_borders
+      transformations:
+        - current_slice is incremented and stored as a 16-bit slice owner identifier
+        - slice ownership controls neighboring macroblock state access
+      invariants:
+        - live slice identifiers must not alias the 0xFFFF unowned sentinel
+        - neighboring macroblock accesses require a valid slice owner
+      guards:
+        - vulnerable snapshot lacks a dominating rejection of slice_num >= 0xFFFF
+      trigger_constraints:
+        - decode enough independently queued H.264 slices to reach identifier 0xFFFF
+        - continue decoding a boundary macroblock after the sentinel collision
+      reproduction_behavior:
+        - sanitizer reports an unsafe neighboring macroblock memory access
+      trace:
+        - role: source
+          file: libavcodec/h264_slice.c
+          symbol: current_slice
+        - role: transformation
+          file: libavcodec/h264_slice.c
+          symbol: slice_num
+        - role: state_sink
+          file: libavcodec/h264_slice.c
+          symbol: slice_table
+        - role: impact_sink
+          file: libavcodec/h264_slice.c
+          symbol: top_borders
+      expected_mechanisms:
+        - live_identifier_aliases_reserved_sentinel
+      expected_proof_plans:
+        - representation-domain-collision-v1
+        - memory-write-v1
+      expected_predicates:
+        - reserved_sentinel_established
+        - live_domain_overlaps_reserved_value
+        - no_effective_upper_bound_guard
+        - collision_changes_security_relevant_state
+        - attacker_reaches_memory_operation
+        - runtime_confirms_unsafe_memory_access
+      expected_evidence_kinds:
+        - sanitizer_crash
+        - sanitizer_uaf
+      expected_decision: confirmed
+      expected_cwes:
+        - CWE-787
+      threat_model:
+        attacker_principal: untrusted media supplier
+        attacker_capabilities:
+          - provide an H.264 bitstream
+        trust_boundary: untrusted media to decoder process
+        protected_asset: process memory integrity
+        capability_gained: corrupt decoder memory or terminate the decoder
+        security_property_violated: memory safety
+        deployment_assumptions:
+          - H.264 decoding and slice threading are enabled
+
+  - id: gitea-pre-receive-permission-cache
+    cves: [CVE-2026-27775]
+    repository: https://github.com/go-gitea/gitea.git
+    vulnerable_commit: f6e2ca4388a531c4a5996fc8043c38f1cf57897f
+    language: go
+    ground_truth:
+      target_files:
+        - routers/private/hook_pre_receive.go
+      target_functions:
+        - HookPreReceive
+      expected_fact_symbols:
+        - HookPreReceive
+        - refFullName
+        - canWrite
+      entry_points:
+        - authenticated Git push pre-receive hook
+      sources:
+        - pushed ref list
+        - authenticated user
+      sinks:
+        - branch write permission decision
+      transformations:
+        - a permission result for one ref is reused while processing another ref
+      invariants:
+        - authorization must be evaluated independently for every pushed ref
+      guards:
+        - every ref must be checked against its own branch protection policy
+      trigger_constraints:
+        - push at least two refs with different write permissions in one transaction
+      reproduction_behavior:
+        - a ref that should be denied is accepted after an allowed ref
+      trace:
+        - role: entry
+          file: routers/private/hook_pre_receive.go
+          symbol: HookPreReceive
+        - role: source
+          file: routers/private/hook_pre_receive.go
+          symbol: refFullName
+        - role: sink
+          file: routers/private/hook_pre_receive.go
+          symbol: canWrite
+      expected_mechanisms:
+        - authorization_result_reused_across_resources
+        - protected_operation_authorization_contrast
+      expected_proof_plans:
+        - authorization-boundary-v2
+      expected_predicates:
+        - attacker_principal_established
+        - expected_authorization_policy_established
+        - actual_enforcement_path_established
+        - unauthorized_operation_is_permitted
+        - unauthorized_capability_is_gained
+      expected_evidence_kinds:
+        - authorization_differential
+      expected_decision: confirmed
+      expected_cwes:
+        - CWE-863
+        - CWE-862
+      threat_model:
+        attacker_principal: authenticated repository contributor
+        attacker_capabilities:
+          - submit a multi-ref Git push
+        trust_boundary: contributor permissions to protected branch policy
+        protected_asset: protected repository refs
+        capability_gained: write a ref for which the contributor lacks permission
+        security_property_violated: authorization integrity
+        deployment_assumptions:
+          - protected branch policies differ across pushed refs
+
+  - id: junrar-backslash-path-traversal
+    cves: [CVE-2026-28208]
+    repository: https://github.com/junrar/junrar.git
+    vulnerable_commit: c7041fc07df2cc397ea46ba516933ee9725af250
+    language: java
+    ground_truth:
+      target_files:
+        - src/main/java/com/github/junrar/LocalFolderExtractor.java
+      target_functions:
+        - LocalFolderExtractor.extract
+      expected_fact_symbols:
+        - extract
+        - getFileName
+        - outputFile
+      entry_points:
+        - extraction of an attacker-supplied RAR archive
+      sources:
+        - archive entry name
+      sinks:
+        - filesystem output path
+      transformations:
+        - archive entry names containing backslashes are joined to the destination
+      invariants:
+        - normalized extraction output must remain beneath the destination directory
+      guards:
+        - containment must be checked after normalizing both slash conventions
+      trigger_constraints:
+        - use a backslash-based parent traversal in an archive entry name
+      reproduction_behavior:
+        - extraction creates or overwrites a file outside the destination directory
+      trace:
+        - role: source
+          file: src/main/java/com/github/junrar/LocalFolderExtractor.java
+          symbol: fileHeader.getFileName
+        - role: sink
+          file: src/main/java/com/github/junrar/LocalFolderExtractor.java
+          symbol: outputFile
+      expected_mechanisms:
+        - normalized_path_escapes_destination
+        - untrusted_data_reaches_interpreter_boundary
+      expected_proof_plans:
+        - injection-boundary-v2
+      expected_predicates:
+        - attacker_data_reaches_interpreter_boundary
+        - required_structural_encoding_is_absent
+        - input_changes_interpreted_structure
+        - interpreter_structure_change_crosses_security_boundary
+      expected_evidence_kinds:
+        - injection_differential
+      expected_decision: confirmed
+      expected_cwes:
+        - CWE-22
+        - CWE-74
+      threat_model:
+        attacker_principal: untrusted archive supplier
+        attacker_capabilities:
+          - choose archive entry names
+        trust_boundary: archive namespace to host filesystem
+        protected_asset: files outside the extraction destination
+        capability_gained: write outside the extraction directory
+        security_property_violated: filesystem path confinement
+        deployment_assumptions:
+          - the application extracts untrusted archives
+
+  - id: freerdp-cache-to-surface-oob
+    cves: [CVE-2026-40033]
+    repository: https://github.com/FreeRDP/FreeRDP.git
+    vulnerable_commit: 1d67eeb902638ecf1ed6e30e01f4e02e68e396c4
+    language: c
+    ground_truth:
+      target_files:
+        - libfreerdp/gdi/gfx.c
+      target_functions:
+        - gdi_CacheToSurface
+      expected_fact_symbols:
+        - gdi_CacheToSurface
+        - cacheEntry
+      entry_points:
+        - RDP graphics CacheToSurface command
+      sources:
+        - server-controlled cache entry dimensions
+      sinks:
+        - destination surface write
+      transformations:
+        - cache dimensions determine a copy extent without clamping to the surface
+      invariants:
+        - copied region must be contained in the destination surface allocation
+      guards:
+        - dimensions must be clamped or rejected before the graphics copy
+      trigger_constraints:
+        - a malicious RDP server supplies cache dimensions exceeding the surface
+      reproduction_behavior:
+        - sanitizer reports a heap out-of-bounds write in gdi_CacheToSurface
+      trace:
+        - role: source
+          file: libfreerdp/gdi/gfx.c
+          symbol: cacheEntry
+        - role: sink
+          file: libfreerdp/gdi/gfx.c
+          symbol: gdi_CacheToSurface
+      expected_mechanisms:
+        - allocation_access_extent_contrast
+      expected_proof_plans:
+        - memory-write-v1
+      expected_predicates:
+        - attacker_reaches_memory_operation
+        - incorrect_state_reaches_memory_access
+        - object_bounds_established
+        - access_exceeds_live_object_bounds
+        - concrete_trigger_satisfies_path
+        - behavior_occurs_in_realistic_configuration
+        - runtime_confirms_unsafe_memory_access
+        - unsafe_access_crosses_security_boundary
+      expected_evidence_kinds:
+        - sanitizer_crash
+      expected_decision: confirmed
+      expected_cwes:
+        - CWE-787
+      threat_model:
+        attacker_principal: malicious RDP server
+        attacker_capabilities:
+          - send crafted graphics commands
+        trust_boundary: remote RDP graphics data to client renderer
+        protected_asset: client process memory integrity
+        capability_gained: corrupt or terminate the RDP client
+        security_property_violated: memory safety
+        deployment_assumptions:
+          - the client connects to an attacker-controlled server
+
+  - id: praisonai-a2a-eval-injection
+    cves: [CVE-2026-47391]
+    repository: https://github.com/MervinPraison/PraisonAI.git
+    vulnerable_commit: bc73dd1db9089ea93648c5266b2d6ad9dcf85484
+    language: python
+    ground_truth:
+      target_files:
+        - examples/python/a2a/a2a-server.py
+      target_functions:
+        - handle_a2a_request
+      expected_fact_symbols:
+        - handle_a2a_request
+        - request
+        - eval
+      entry_points:
+        - unauthenticated A2A HTTP request
+      sources:
+        - request expression field
+      sinks:
+        - eval
+      transformations:
+        - request-controlled text is passed to Python eval
+      invariants:
+        - untrusted request data must never enter a general-purpose interpreter
+      guards:
+        - authentication or a non-evaluating expression parser must dominate eval
+      trigger_constraints:
+        - send an unauthenticated request containing a Python expression with side effects
+      reproduction_behavior:
+        - the server executes attacker-selected Python code
+      trace:
+        - role: entry
+          file: examples/python/a2a/a2a-server.py
+          symbol: handle_a2a_request
+        - role: source
+          file: examples/python/a2a/a2a-server.py
+          symbol: request
+        - role: sink
+          file: examples/python/a2a/a2a-server.py
+          symbol: eval
+      expected_mechanisms:
+        - attacker_data_reaches_interpreter
+        - untrusted_data_reaches_interpreter_boundary
+      expected_proof_plans:
+        - injection-boundary-v2
+      expected_predicates:
+        - attacker_data_reaches_interpreter_boundary
+        - required_structural_encoding_is_absent
+        - input_changes_interpreted_structure
+        - interpreter_structure_change_crosses_security_boundary
+      expected_evidence_kinds:
+        - injection_differential
+      expected_decision: confirmed
+      expected_cwes:
+        - CWE-95
+        - CWE-74
+      threat_model:
+        attacker_principal: unauthenticated remote client
+        attacker_capabilities:
+          - send an A2A HTTP request
+        trust_boundary: unauthenticated network input to Python interpreter
+        protected_asset: server process authority and host data
+        capability_gained: execute Python with server privileges
+        security_property_violated: code execution integrity
+        deployment_assumptions:
+          - the example A2A server is reachable over the network

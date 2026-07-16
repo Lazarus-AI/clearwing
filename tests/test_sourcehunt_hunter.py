@@ -360,6 +360,7 @@ class TestBuildHunterAgent:
             "run_with_sanitizer",
             "write_test_case",
             "fuzz_harness",
+            "record_trace_step",
             "record_finding",
         }
 
@@ -407,6 +408,7 @@ class TestBuildHunterAgent:
             "list_source_tree",
             "grep_source",
             "find_callers",
+            "record_trace_step",
             "record_finding",
         }
         assert "compile_file" not in tool_names
@@ -674,6 +676,13 @@ class TestRecordFinding:
                 "description": "memcpy with unchecked length",
                 "code_snippet": "memcpy(frame, input, input_len);",
                 "evidence_level": "static_corroboration",
+                "trace": {
+                    "steps": [
+                        {"file": "src/codec_a.c", "line": 3, "note": "ENTRY: input"},
+                        {"file": "src/codec_a.c", "line": 9, "note": "SINK: memcpy"},
+                    ],
+                    "summary": "input flows to memcpy unchecked",
+                },
             }
         )
         assert "Finding recorded" in msg
@@ -687,6 +696,11 @@ class TestRecordFinding:
         assert f["seeded_from_crash"] is False
         assert f["hunter_session_id"] == "sess-123"
         assert f["id"].startswith("hunter-")
+        assert len(f["id"]) == len("hunter-") + 8
+        assert f["extra"]["stable_finding_id"].startswith("hunter-")
+        assert len(f["extra"]["stable_finding_id"]) == len("hunter-") + 16
+        assert f["vulnerability_trace"]["summary"] == "input flows to memcpy unchecked"
+        assert len(f["vulnerability_trace"]["steps"]) == 2
 
     def test_seeded_from_crash_flag(self):
         ctx = HunterContext(
@@ -704,10 +718,57 @@ class TestRecordFinding:
                 "severity": "high",
                 "cwe": "CWE-416",
                 "description": "y",
+                "trace": {"steps": [{"file": "x.c", "line": 1, "note": "SINK: uaf"}]},
             }
         )
         assert ctx.findings[0]["seeded_from_crash"] is True
         assert ctx.findings[0]["discovered_by"] == "hunter:memory_safety"
+
+    def test_streamed_trace_is_required_and_authoritative(self):
+        """record_finding persists streamed steps without model reassembly."""
+        ctx = HunterContext(
+            repo_path=str(FIXTURE_C_PROPAGATION),
+            specialist="general",
+        )
+        tools = build_hunter_tools(ctx)
+        record = next(t for t in tools if t.name == "record_finding")
+        step = next(t for t in tools if t.name == "record_trace_step")
+
+        base = {
+            "file": "x.c",
+            "line_number": 1,
+            "finding_type": "oob",
+            "severity": "high",
+            "cwe": "CWE-787",
+            "description": "z",
+        }
+
+        # Missing trace -> instructive error, nothing recorded.
+        msg = record.invoke(dict(base))
+        assert msg.startswith("ERROR")
+        assert ctx.findings == []
+
+        # A streamed step becomes authoritative investigation state.
+        # (constrained mode gates record_trace_step on files_read.)
+        ctx.files_read.add("x.c")
+        step.invoke({"file": "x.c", "line": 1, "note": "ENTRY: streamed"})
+        assert len(ctx.trace_steps) == 1
+
+        # The compatibility trace cannot overwrite already-streamed evidence.
+        record.invoke(
+            {
+                **base,
+                "trace": {
+                    "steps": [{"file": "x.c", "line": 42, "note": "SINK: explicit"}],
+                    "summary": "explicit path",
+                },
+            }
+        )
+        vt = ctx.findings[0]["vulnerability_trace"]
+        assert len(vt["steps"]) == 1
+        assert vt["steps"][0]["line"] == 1
+        assert vt["steps"][0]["note"] == "ENTRY: streamed"
+        assert ctx.trace_steps == []  # accumulator reset
 
 
 # --- Sanitizer / rg parsing helpers -----------------------------------------

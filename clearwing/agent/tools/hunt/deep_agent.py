@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import shlex
 
-from clearwing.llm import NativeToolSpec
+from pydantic import Field
+
+from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
@@ -30,6 +32,22 @@ from .sandbox import HunterContext
 logger = logging.getLogger(__name__)
 
 _OUTPUT_CAP = 100_000  # 100 KB cap on stdout/stderr per execute call
+
+
+class ExecuteInput(ToolInputModel):
+    command: str = Field(description="Shell command to execute.")
+    timeout: int = Field(default=300, description="Timeout in seconds (default 300).")
+
+
+class ReadFileInput(ToolInputModel):
+    path: str = Field(description="Absolute path in the container.")
+    offset: int = Field(default=0, description="Line offset (0-based, default 0).")
+    limit: int = Field(default=2000, description="Max lines to return (default 2000).")
+
+
+class WriteFileInput(ToolInputModel):
+    path: str = Field(description="Absolute path in the container.")
+    contents: str = Field(description="File contents to write.")
 
 
 def _cap_output(text: str, label: str = "output") -> str:
@@ -42,8 +60,13 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     """Build the deep agent tool set: execute, read_file, write_file,
     plus the shared reporting + findings-pool tools.
     """
+    # Deep hunters read source via read_file/execute (cat/sed/grep), not the
+    # constrained read_source_file that populates ctx.files_read. Mark the
+    # context so the reporting guard doesn't reject every trace step for a
+    # file it never saw a read_source_file call for.
+    ctx.agent_mode = "deep"
 
-    def execute(command: str, timeout: int = 300) -> dict:
+    def execute(command: str, timeout: int = 300, **_: object) -> dict:
         if ctx.sandbox is None:
             return {"error": "no sandbox available"}
         result = ctx.sandbox.exec(command, timeout=timeout)
@@ -55,7 +78,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "duration_seconds": round(result.duration_seconds, 2),
         }
 
-    def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = 2000, **_: object) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
         start = offset + 1
@@ -75,7 +98,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             return f"error reading {path}: {result.stderr.strip()}"
         return result.stdout
 
-    def write_file(path: str, contents: str) -> str:
+    def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
         ctx.sandbox.exec(f"mkdir -p $(dirname {shlex.quote(path)})", timeout=10)
@@ -91,65 +114,23 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "Run a shell command inside the sandbox container. "
                 "Use for compilation, debugging, running tests, etc."
             ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute.",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (default 300).",
-                        "default": 300,
-                    },
-                },
-                "required": ["command"],
-            },
+            schema=ExecuteInput.model_json_schema(),
             handler=execute,
         ),
         NativeToolSpec(
             name="read_file",
-            description="Read lines from a file in the container.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path in the container.",
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Line offset (0-based, default 0).",
-                        "default": 0,
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max lines to return (default 2000).",
-                        "default": 2000,
-                    },
-                },
-                "required": ["path"],
-            },
+            description=(
+                "Read lines from a file in the container. "
+                "Parameters: path (required), offset (line offset, default 0), "
+                "limit (max lines, default 2000). No other parameters exist."
+            ),
+            schema=ReadFileInput.model_json_schema(),
             handler=read_file,
         ),
         NativeToolSpec(
             name="write_file",
             description="Write contents to a file in the container. Creates parent directories.",
-            schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path in the container.",
-                    },
-                    "contents": {
-                        "type": "string",
-                        "description": "File contents to write.",
-                    },
-                },
-                "required": ["path", "contents"],
-            },
+            schema=WriteFileInput.model_json_schema(),
             handler=write_file,
         ),
         *reporting_tools,

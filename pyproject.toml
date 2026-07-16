@@ -40,7 +40,7 @@ dependencies = [
     # Reporting
     "jinja2>=3.1.0",
     "reportlab>=4.0.0",
-    "genai-pyo3>=0.7.0b10.dev0",
+    "genai-pyo3>=0.7.0b14.dev3",
     "simple-term-menu>=1.6.0",
     "pydantic>=2.0.0",
     "pathspec>=0.10.0",
@@ -66,6 +66,7 @@ dependencies = [
     "tree-sitter-javascript>=0.21.0",
     "tree-sitter-go>=0.21.0",
     "tree-sitter-rust>=0.21.0",
+    "uv>=0.11.26",
 ]
 
 [project.optional-dependencies]
@@ -89,8 +90,11 @@ docs = [
     "mkdocs-material>=9.4.0",
     "mkdocstrings[python]>=0.24.0",
 ]
+inspect-ai = [
+    "inspect-ai>=0.3.0",
+]
 all = [
-    "clearwing[metasploit,browser,vector,dev,docs]",
+    "clearwing[metasploit,browser,vector,dev,docs,inspect-ai]",
 ]
 
 [project.urls]
@@ -199,3 +203,10 @@ module = [
 ]
 disallow_untyped_defs = true
 warn_unused_ignores = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+    "inspect-ai>=0.3.246",
+    "openai>=2.45.0",
+]

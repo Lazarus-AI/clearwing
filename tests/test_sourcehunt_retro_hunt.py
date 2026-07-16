@@ -25,8 +25,8 @@ from clearwing.sourcehunt.semgrep_sidecar import SemgrepFinding
 def _mock_llm(payload: dict) -> MagicMock:
     llm = MagicMock()
     resp = MagicMock()
-    resp.content = json.dumps(payload)
-    llm.invoke.return_value = resp
+    resp.first_text = json.dumps(payload)
+    llm.chat.return_value = resp
     return llm
 
 
@@ -93,14 +93,14 @@ class TestRetroHunterRuleGeneration:
     def test_generate_rule_bad_json_returns_none(self):
         llm = MagicMock()
         resp = MagicMock()
-        resp.content = "sorry no json"
-        llm.invoke.return_value = resp
+        resp.first_text = "sorry no json"
+        llm.chat.return_value = resp
         hunter = RetroHunter(llm=llm)
         assert hunter._generate_rule("CVE", "diff") is None
 
     def test_generate_rule_llm_exception_returns_none(self):
         llm = MagicMock()
-        llm.invoke.side_effect = Exception("rate limited")
+        llm.chat.side_effect = Exception("rate limited")
         hunter = RetroHunter(llm=llm)
         assert hunter._generate_rule("CVE", "diff") is None
 
@@ -197,6 +197,22 @@ class TestHuntEndToEnd:
         assert f["file"] == "src/codec.c"
         assert f["line_number"] == 42
 
+        repeated = hunter._hit_to_finding(
+            {
+                "file": "src/codec.c",
+                "line": 42,
+                "check_id": "retro-hunt-memcpy",
+                "code_snippet": "memcpy(buf, input, user_len);",
+                "severity": "ERROR",
+            },
+            "CVE-2024-TEST",
+            {"rule_id": "retro-hunt-memcpy", "description": "unchecked memcpy length"},
+        )
+        assert repeated.id != f.id
+        assert len(f.id) == len("retro-") + 8
+        assert repeated.extra["stable_finding_id"] == f.extra["stable_finding_id"]
+        assert len(f.extra["stable_finding_id"]) == len("retro-") + 16
+
     def test_hunt_with_semgrep_unavailable(self, tmp_path: Path):
         patch_file = tmp_path / "cve.patch"
         patch_file.write_text("--- a/x.c\n+++ b/x.c\n")
@@ -238,7 +254,7 @@ class TestHuntEndToEnd:
         patch_file.write_text("--- a/x.c\n+++ b/x.c\n")
 
         llm = MagicMock()
-        llm.invoke.side_effect = Exception("rate limited")
+        llm.chat.side_effect = Exception("rate limited")
         hunter = RetroHunter(llm=llm)
         result = hunter.hunt(
             cve_id="CVE-2024-TEST",

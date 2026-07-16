@@ -389,9 +389,14 @@ class TestRunnerSecurityOptions:
         runner = SourceHuntRunner(repo_url="test", depth="standard")
         assert runner._gvisor_runtime is None
 
-    def test_gvisor_runtime_configurable(self):
+    def test_gvisor_runtime_configurable(self, monkeypatch):
         from clearwing.sourcehunt.runner import SourceHuntRunner
 
+        monkeypatch.setattr(
+            SourceHuntRunner,
+            "_check_runtime_available",
+            staticmethod(lambda runtime: runtime),
+        )
         runner = SourceHuntRunner(
             repo_url="test",
             depth="standard",
