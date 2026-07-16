@@ -1230,6 +1230,17 @@ finding — flag it immediately with flag_potential.
 This catches omission bugs: the vulnerability is not in what IS called but in \
 what ISN'T. Asymmetry between callers of the same sink is the strongest signal.
 
+When you find a security check or guard, don't just confirm it exists — prove it \
+is sufficient. Enumerate at least three conditions under which it could fail:
+- Input encoding or separator differences (e.g. backslash vs forward slash on \
+non-Windows, unicode normalization, null bytes)
+- State the check didn't observe (e.g. check runs before a transformation that \
+changes the value)
+- Format vs OS contract mismatch (e.g. archive format allows paths the OS \
+interprets differently)
+If any bypass condition is plausible, treat the guard as absent for that input \
+class and flag it.
+
 As you read code, use flag_potential to bookmark suspicious lines without \
 committing to a finding. Call get_potentials periodically to review accumulated \
 leads across files — cross-file asymmetries often only become visible when you \
