@@ -2590,6 +2590,10 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
+                extra_packages=["python3-pip"],
+                post_install_commands=[
+                    "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true",
+                ],
                 default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()

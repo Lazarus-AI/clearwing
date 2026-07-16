@@ -3,7 +3,7 @@
 
 .PHONY: help install-dev lint format fmt type test test-strict build clean gate all docs docs-serve security-lint
 
-PY       := venv/bin/python
+PY       := python
 PYTEST   := $(PY) -m pytest
 RUFF     := $(PY) -m ruff
 MYPY     := $(PY) -m mypy

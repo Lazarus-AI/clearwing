@@ -1404,7 +1404,6 @@ class NativeHunter:
         total_cost_usd = 0.0
         repeated_tool_calls: dict[tuple[str, str], int] = {}
         tools_by_name = {tool.name: tool for tool in self.tools}
-        throttle_repeats = self.agent_mode == "constrained"
         last_assistant_text = ""
 
         step = 0
@@ -1518,12 +1517,21 @@ class NativeHunter:
                     if not isinstance(tool_arguments, dict):
                         tool_arguments = {}
 
-                    skipped = False
-                    if throttle_repeats:
-                        key = (tool_call.fn_name, tool_call.fn_arguments_json)
-                        repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
-                        if repeated_tool_calls[key] > 3:
-                            skipped = True
+                    # Keyed on a normalized prefix rather than the full argument
+                    # string: models stuck in a degenerate loop often reissue the
+                    # same call with a growing/mutating tail (e.g. appending
+                    # another redundant clause each turn), or with a small
+                    # numeric literal that creeps up each turn (e.g. `grep -B10`
+                    # widening to `-B1750` while going nowhere). Either would
+                    # dodge an exact-match dedup key while making no real
+                    # progress, and a mutating number near the start of a short
+                    # argument string would also dodge a raw-prefix key since it
+                    # shifts every character after it. Normalizing digit runs
+                    # before truncating catches both shapes.
+                    normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
+                    key = (tool_call.fn_name, normalized_args[:300])
+                    repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
+                    skipped = repeated_tool_calls[key] > 3
 
                     if skipped:
                         tool_output = {

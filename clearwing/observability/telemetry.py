@@ -44,6 +44,16 @@ class CostTracker:
         "claude-opus-4-7": {"input": 15.0, "output": 75.0},
         "claude-opus-4-6": {"input": 15.0, "output": 75.0},
         "claude-haiku-4-5": {"input": 0.80, "output": 4.0},
+        # Self-hosted / air-gapped inference has no real per-token API cost,
+        # but it must stay nonzero: HunterPool's tier dispatch gate
+        # (pool.py _submit_next: `spent >= budget`) uses accumulated cost as
+        # a proxy for work done to decide when to stop feeding it new files.
+        # A price of exactly 0.0 makes `spent` permanently 0, which disables
+        # that gate regardless of --budget and lets a hunt run against every
+        # file in the repo. This is nominal — ~1/1000th of Haiku pricing —
+        # so it still tracks token volume without applying real API rates to
+        # free local generations.
+        "local-model": {"input": 0.001, "output": 0.003},
         # Fireworks "Standard" serving path. cached_input applies to the subset
         # of input tokens served from the provider's prompt cache.
         "glm-5.2": {"input": 1.40, "cached_input": 0.14, "output": 4.40},

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -125,7 +124,7 @@ async def test_deep_mode_safety_cap():
 
 
 @pytest.mark.asyncio
-async def test_deep_mode_no_repeated_call_throttle():
+async def test_deep_mode_throttles_repeated_calls():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=10, budget_usd=0.0)
 
     call_count = [0]
@@ -143,12 +142,18 @@ async def test_deep_mode_no_repeated_call_throttle():
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_logger = MagicMock()
         mock_traj.for_hunter.return_value = mock_logger
-        result = await hunter.arun()
+        await hunter.arun()
 
-    # In deep mode, repeated calls should NOT be throttled
+    # Full-shell agents can get stuck in the same degenerate repetition loops
+    # as constrained ones (e.g. a local model reissuing the same shell
+    # command with no progress), so deep mode must throttle too.
     logged = mock_logger.log.call_args_list
-    skipped = [c for c in logged if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")]
-    assert len(skipped) == 0
+    skipped = [
+        c
+        for c in logged
+        if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
+    ]
+    assert len(skipped) > 0
 
 
 @pytest.mark.asyncio
@@ -175,10 +180,88 @@ async def test_constrained_mode_throttles_repeated_calls():
     # In constrained mode, after 3 identical calls the 4th+ should be skipped
     logged = mock_logger.log.call_args_list
     skipped = [
-        c for c in logged
-        if len(c[0]) > 1
-        and isinstance(c[0][1], dict)
-        and c[0][1].get("repeated_skip") is True
+        c
+        for c in logged
+        if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip") is True
+    ]
+    assert len(skipped) > 0
+
+
+@pytest.mark.asyncio
+async def test_throttles_calls_with_mutating_tail():
+    # Mirrors a real degenerate loop: the model reissues the same shell
+    # command each turn but appends another redundant clause, so the
+    # arguments string keeps growing and never matches exactly.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=10, budget_usd=0.0)
+
+    call_count = [0]
+
+    # A long shared prefix (like a real shell one-liner) followed by a
+    # growing tail — the dedup key truncates at 300 chars, so the prefix
+    # must be long enough to exceed that before the tail starts diverging.
+    shared_prefix = 'python3 -c "..."' + " or 'rest_framework' in d.lower()" * 15
+
+    async def achat_side_effect(**kwargs):
+        call_count[0] += 1
+        if call_count[0] >= 8:
+            return FakeResponse(text="done")
+        command = shared_prefix + " or 'x' in d" * call_count[0]
+        return FakeResponse(
+            tool_calls_list=[_make_tool_call("think", {"notes": command})],
+        )
+
+    llm.achat.side_effect = achat_side_effect
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_logger = MagicMock()
+        mock_traj.for_hunter.return_value = mock_logger
+        await hunter.arun()
+
+    logged = mock_logger.log.call_args_list
+    skipped = [
+        c
+        for c in logged
+        if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
+    ]
+    assert len(skipped) > 0
+
+
+@pytest.mark.asyncio
+async def test_throttles_calls_with_growing_numeric_prefix():
+    # Mirrors a real degenerate loop observed against crAPI: the model
+    # reissues the same short shell command but widens a numeric flag near
+    # the *front* of the string each turn (`grep -B10 ...` -> `-B1750 ...`).
+    # Because the whole argument string is short, a raw 300-char prefix is
+    # unique on every call (the diverging digits are included in the
+    # prefix), so a plain-prefix dedup key never matches and the loop runs
+    # unthrottled. Digits must be normalized before truncating for this to
+    # throttle.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=10, budget_usd=0.0)
+
+    call_count = [0]
+
+    async def achat_side_effect(**kwargs):
+        call_count[0] += 1
+        if call_count[0] >= 8:
+            return FakeResponse(text="done")
+        n = 10 + call_count[0] * 10
+        command = f'grep -B{n} -A5 "verify=False" views.py | head -{n + 20}'
+        return FakeResponse(
+            tool_calls_list=[_make_tool_call("think", {"notes": command})],
+        )
+
+    llm.achat.side_effect = achat_side_effect
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_logger = MagicMock()
+        mock_traj.for_hunter.return_value = mock_logger
+        await hunter.arun()
+
+    logged = mock_logger.log.call_args_list
+    skipped = [
+        c
+        for c in logged
+        if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
     ]
     assert len(skipped) > 0
 

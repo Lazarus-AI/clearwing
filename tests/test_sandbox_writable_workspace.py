@@ -163,6 +163,10 @@ class TestSourceHuntSandboxCpuWiring:
             repo_path="/tmp/repo",
             languages=["c"],
             deep_agent_mode=True,
+            extra_packages=["python3-pip"],
+            post_install_commands=[
+                "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true"
+            ],
             default_cpus=1.5,
         )
         assert runner.sandbox_factory is not None

@@ -47,6 +47,19 @@ def add_parser(subparsers):
         "--local-path", metavar="PATH", help="Use this local path instead of cloning"
     )
     parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        dest="log_level",
+        help="Logging verbosity (default: INFO)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Shorthand for --log-level DEBUG",
+    )
+    parser.add_argument(
         "--depth",
         choices=["quick", "standard", "deep"],
         default="standard",
@@ -657,7 +670,12 @@ def handle(cli, args):
     if args.output_dir is None:
         args.output_dir = default_results_dir("sourcehunt")
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
+    _log_level_name = "DEBUG" if args.verbose else args.log_level
+    logging.basicConfig(
+        level=getattr(logging, _log_level_name),
+        format="%(levelname)s: %(message)s",
+        force=True,
+    )
 
     # Build the provider manager.
     #   - A multi-endpoint config (`providers:`/`routes:`/`task_models:`) enables
