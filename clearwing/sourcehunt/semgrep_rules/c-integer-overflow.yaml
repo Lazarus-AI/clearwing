@@ -1,0 +1,59 @@
+rules:
+  # ── CWE-190: Integer overflow in C/C++ allocation size arithmetic ──────────
+  #
+  # Targets the pattern seen in CVE-2026-32316 (jq jvp_string_append):
+  #   uint32_t result = (a + b) * multiplier;
+  #   alloc(result);      ← undersized if (a+b) wraps first
+  #
+  # Also catches direct use of narrow-int multiplication as the alloc argument.
+
+  - id: c-uint32-mul-used-as-alloc-size
+    message: >
+      Potential CWE-190 integer overflow: uint32_t multiplication result used
+      as an allocation size. If the operands wrap at 2^32, the allocation will
+      be undersized and a subsequent copy may overflow the heap buffer.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-190"
+      confidence: MEDIUM
+    patterns:
+      - pattern: |
+          uint32_t $SIZE = ($A + $B) * $MULT;
+          ...
+          $ALLOC($SIZE, ...);
+      - pattern-not: |
+          uint32_t $SIZE = ($A + $B) * $MULT;
+          if ($SIZE < $A || ...) { ... }
+
+  - id: c-uint32-add-mul-in-alloc-arg
+    message: >
+      Potential CWE-190 integer overflow: (a + b) * c passed directly as an
+      allocation size where a and/or b are uint32_t. The addition may wrap
+      before the multiplication, producing an undersized buffer.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-190"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: malloc(($A + $B) * $MULT)
+      - pattern: realloc($PTR, ($A + $B) * $MULT)
+      - pattern: calloc($N, ($A + $B) * $MULT)
+      - pattern: jv_mem_alloc(($A + $B) * $MULT)
+
+  - id: c-narrow-int-overflow-before-size-extend
+    message: >
+      Potential CWE-190 integer overflow: arithmetic on a uint32_t (or smaller)
+      type that is then widened and used as an allocation size. The overflow
+      happens in the narrow domain before the implicit conversion.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-190"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          uint32_t $TMP = $EXPR;
+          ...
+          $ALLOC((size_t)$TMP, ...);
