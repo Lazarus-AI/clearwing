@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 
 from .builders import (
@@ -227,7 +228,13 @@ class HunterSandbox:
                 ",".join(sanitizers),
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64", network_mode="host")
+                result = subprocess.run(
+                    ["docker", "build", "--platform", "linux/amd64", "-t", tag, build_dir],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr or result.stdout)
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)

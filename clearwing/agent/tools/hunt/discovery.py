@@ -21,6 +21,7 @@ from pathlib import Path
 from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
+from clearwing.sourcehunt.semgrep_sidecar import SemgrepSidecar, finding_to_dict
 
 from .sandbox import HunterContext
 
@@ -49,6 +50,20 @@ class GrepSourceInput(ToolInputModel):
 
 class FindCallersInput(ToolInputModel):
     symbol: str = Field(description="Symbol name to search for references to")
+
+
+class SemgrepScanInput(ToolInputModel):
+    path: str = Field(
+        default=".",
+        description="Repo-relative file or directory to scan (default = repo root).",
+    )
+    config: str = Field(
+        default="",
+        description=(
+            "Semgrep config to use, e.g. 'p/security-audit' or a YAML rule path. "
+            "Leave empty to use clearwing's bundled rules only."
+        ),
+    )
 
 
 # --- Path + ripgrep helpers -------------------------------------------------
@@ -313,4 +328,64 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             schema=FindCallersInput.model_json_schema(),
             handler=find_callers,
         ),
+        build_semgrep_tool(ctx),
     ]
+
+
+def build_semgrep_tool(ctx: HunterContext) -> NativeToolSpec:
+    """Build the semgrep_scan NativeToolSpec bound to ctx.repo_path.
+
+    Exposed separately so deep_agent can include it without pulling in
+    the full discovery tool set.
+    """
+
+    def semgrep_scan(path: str = ".", config: str = "") -> list[dict]:
+        """Run Semgrep static analysis on a file or directory and return findings.
+
+        Clearwing's bundled CWE rules (integer overflow, etc.) are always
+        included alongside any extra config you specify. Results include file,
+        line, rule ID, severity, and a message. Follow up with read_source_file
+        or read_file to inspect the flagged code.
+
+        Args:
+            path: Repo-relative file or directory to scan. Default = repo root.
+            config: Additional semgrep config, e.g. 'p/security-audit'. Optional.
+        """
+        try:
+            rel = _normalize_path(ctx.repo_path, path)
+        except ValueError as e:
+            return [{"error": str(e)}]
+        scan_path = os.path.join(ctx.repo_path, rel)
+        sidecar = SemgrepSidecar(
+            config=config if config else "p/security-audit",
+            respect_gitignore=False,
+        )
+        if not sidecar.available:
+            return [{"error": "semgrep is not installed on the host"}]
+        logger.info("[%s] semgrep_scan %s", ctx.file_path, rel)
+        findings = sidecar.run_scan(scan_path, base_path=ctx.repo_path)
+        logger.info("[%s] semgrep_scan complete: %d findings", ctx.file_path, len(findings))
+        for hit in findings:
+            logger.info(
+                "[%s] semgrep hit: %s:%d [%s] %s",
+                ctx.file_path,
+                hit.file,
+                hit.line,
+                hit.check_id.split(".")[-1],
+                hit.message[:120].replace("\n", " "),
+            )
+        if not findings:
+            return [{"info": "no findings"}]
+        return [finding_to_dict(f) for f in findings]
+
+    return NativeToolSpec(
+        name="semgrep_scan",
+        description=(
+            "Run Semgrep static analysis on a repo file or directory. "
+            "Returns findings with file, line, rule ID, severity, and message. "
+            "Clearwing's bundled CWE rules (e.g. CWE-190 integer overflow) are always included. "
+            "Call this early to surface high-signal patterns before reading code."
+        ),
+        schema=SemgrepScanInput.model_json_schema(),
+        handler=semgrep_scan,
+    )

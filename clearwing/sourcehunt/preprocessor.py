@@ -388,6 +388,11 @@ class Preprocessor:
                     semgrep_findings_objs = sidecar.run_scan(repo_path)
                     semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]
                     self._apply_semgrep_hints(file_targets, semgrep_findings)
+                    logger.info(
+                        "Semgrep sidecar: %d findings across %d files",
+                        len(semgrep_findings),
+                        len({f.get("file") for f in semgrep_findings}),
+                    )
                 else:
                     logger.info("Semgrep binary not found; sidecar skipped")
             except Exception:

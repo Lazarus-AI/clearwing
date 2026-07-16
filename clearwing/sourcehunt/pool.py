@@ -209,6 +209,7 @@ class HuntPoolConfig:
     entry_points_by_file: dict = field(default_factory=dict)  # {path: [EntryPoint]}
     seed_corpus_by_file: dict = field(default_factory=dict)  # {path: [SeedCorpusEntry]}
     shard_entry_points: bool = False
+    max_findings: int = 0  # stop dispatching new work after N findings (0 = no limit)
     findings_pool: Any = None  # FindingsPool | None — spec 005
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None

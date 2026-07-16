@@ -42,13 +42,13 @@ class BuildRecipe:
         return compute_sanitizer_env(self, sanitizers)
 
 
-# Per-language base images. gcc:13 ships libasan/libubsan; rust uses the
-# nightly image for sanitizer support; python doesn't need a build but does
-# benefit from gcc for native extensions. unknown uses debian:11-slim (bullseye)
-# which has ltrace; debian:12 (bookworm) dropped it.
+# Per-language base images. gcc:12-bullseye ships libasan/libubsan on Debian 11
+# (bullseye) which retains ltrace; gcc:13 is bookworm-based and dropped ltrace.
+# rust uses the slim image; python doesn't need a build but benefits from gcc
+# for native extensions. unknown uses debian:11-slim for the same ltrace reason.
 DEFAULT_BASE_IMAGES = {
-    "c": "gcc:13",
-    "cpp": "gcc:13",
+    "c": "gcc:12-bullseye",
+    "cpp": "gcc:12-bullseye",
     "rust": "rust:1-slim",
     "go": "golang:1.22",
     "python": "python:3.12-slim",
