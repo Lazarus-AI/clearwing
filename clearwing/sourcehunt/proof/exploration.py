@@ -71,11 +71,7 @@ invariant family whenever possible."""
                     "id": fact.id,
                     "kind": fact.kind,
                     "subject": fact.subject,
-                    "location": (
-                        fact.location.model_dump(mode="json")
-                        if fact.location
-                        else None
-                    ),
+                    "location": (fact.location.model_dump(mode="json") if fact.location else None),
                     "properties": fact.properties,
                 }
                 for fact in selected
@@ -98,9 +94,7 @@ invariant family whenever possible."""
             if not set(proposal.cited_fact_ids) <= allowed:
                 continue
             invariant_families = [
-                family
-                for family in proposal.invariant_families
-                if family in _INVARIANT_FAMILIES
+                family for family in proposal.invariant_families if family in _INVARIANT_FAMILIES
             ]
             if not invariant_families:
                 continue

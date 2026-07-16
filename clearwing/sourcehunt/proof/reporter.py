@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .models import Candidate, Certificate, CertificateKind, Fact
+from .models import Assumption, Candidate, Certificate, CertificateKind, Fact
 from .store import ProofStore
 
 
@@ -20,9 +20,7 @@ class ProofReporter:
         candidates: list[Candidate],
         facts: list[Fact],
     ) -> dict[str, Path]:
-        candidate_by_id = {
-            candidate.logical_id: candidate for candidate in candidates
-        }
+        candidate_by_id = {candidate.logical_id: candidate for candidate in candidates}
         finding_payloads = [
             self.to_finding(
                 certificate,
@@ -30,7 +28,7 @@ class ProofReporter:
                 facts,
             )
             for certificate in certificates
-            if certificate.kind == CertificateKind.FINDING
+            if certificate.kind == CertificateKind.FINDING and certificate.validity == "current"
         ]
         findings_path = self.store.root / "findings.json"
         findings_path.write_text(
@@ -65,9 +63,7 @@ class ProofReporter:
         facts: list[Fact],
     ) -> dict[str, Any]:
         relevant = [
-            fact
-            for fact in facts
-            if candidate is not None and fact.id in set(candidate.fact_ids)
+            fact for fact in facts if candidate is not None and fact.id in set(candidate.fact_ids)
         ]
         located = next((fact for fact in relevant if fact.location is not None), None)
         statement = (
@@ -82,9 +78,7 @@ class ProofReporter:
             "certificate_id": certificate.logical_id,
             "file": located.location.file if located and located.location else "",
             "line_number": located.location.line if located and located.location else 1,
-            "finding_type": (
-                candidate.suspected_mechanism if candidate else "proof_finding"
-            ),
+            "finding_type": (candidate.suspected_mechanism if candidate else "proof_finding"),
             "title": candidate.title if candidate else certificate.candidate_id,
             "description": statement,
             "severity": certificate.severity or "info",
@@ -96,6 +90,8 @@ class ProofReporter:
             "claim_ids": certificate.claim_ids,
             "proof_plan_ids": certificate.proof_plan_ids,
             "unresolved_obligation_ids": certificate.unresolved_obligation_ids,
+            "assumption_ids": certificate.assumption_ids,
+            "certificate_validity": certificate.validity,
         }
 
     def _markdown(
@@ -118,18 +114,41 @@ class ProofReporter:
                     "",
                     f"- Certificate: §{certificate.id}§",
                     f"- Decision: §{certificate.decision}§",
+                    f"- Validity: §{certificate.validity}§",
                     f"- Reason: {certificate.reason}",
                     f"- Proof plans: {', '.join(certificate.proof_plan_ids) or 'none'}",
                     "",
                 ]
             )
+            assumptions = [
+                assumption
+                for assumption_id in certificate.assumption_ids
+                if (assumption := self.store.get(Assumption, assumption_id)) is not None
+            ]
+            if assumptions:
+                lines.extend(["### Assumptions", ""])
+                for assumption in assumptions:
+                    evidence = ", ".join(f"§{item}§" for item in assumption.evidence_ids) or "none"
+                    lines.append(
+                        f"- [{assumption.status.value}] {assumption.statement} "
+                        f"Evidence: {evidence}."
+                    )
+                lines.append("")
+            if certificate.validity == "stale":
+                lines.extend(
+                    [
+                        "### Stale certificate",
+                        "",
+                        f"- Reason: {certificate.stale_reason or 'dependency changed'}",
+                        f"- Invalidated by: {', '.join(certificate.invalidated_by) or 'unknown'}",
+                        "",
+                    ]
+                )
             if certificate.report_claims:
                 lines.extend(["### Audited claims", ""])
                 for claim in certificate.report_claims:
                     statement = claim.get("statement") or claim.get("predicate")
-                    evidence_ids = ", ".join(
-                        f"§{item}§" for item in claim.get("evidence_ids", [])
-                    )
+                    evidence_ids = ", ".join(f"§{item}§" for item in claim.get("evidence_ids", []))
                     lines.append(f"- {statement} Evidence: {evidence_ids}.")
                 lines.append("")
             if certificate.unresolved_obligation_ids:
@@ -170,9 +189,7 @@ class ProofReporter:
         }
         return {
             "version": "2.1.0",
-            "$schema": (
-                "https://json.schemastore.org/sarif-2.1.0.json"
-            ),
+            "$schema": ("https://json.schemastore.org/sarif-2.1.0.json"),
             "runs": [
                 {
                     "tool": {
@@ -190,12 +207,8 @@ class ProofReporter:
                                 [
                                     {
                                         "physicalLocation": {
-                                            "artifactLocation": {
-                                                "uri": finding["file"]
-                                            },
-                                            "region": {
-                                                "startLine": finding["line_number"]
-                                            },
+                                            "artifactLocation": {"uri": finding["file"]},
+                                            "region": {"startLine": finding["line_number"]},
                                         }
                                     }
                                 ]

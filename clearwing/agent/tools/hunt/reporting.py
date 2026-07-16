@@ -20,6 +20,7 @@ from pydantic import Field
 from clearwing.core.events import EventBus, EventType
 from clearwing.findings.types import TraceStep, VulnerabilityTrace
 from clearwing.llm import NativeToolSpec, ToolInputModel
+from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.state import Finding
 
 from .sandbox import HunterContext
@@ -112,10 +113,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # it would reject every trace step. Skip the guard in deep mode;
         # downstream validators independently re-verify the assembled trace.
         if ctx.agent_mode != "deep" and file not in ctx.files_read:
-            return (
-                f"ERROR: file '{file}' has not been read yet. "
-                "Call read_source_file first."
-            )
+            return f"ERROR: file '{file}' has not been read yet. Call read_source_file first."
         step = TraceStep(
             file=file,
             line=line,
@@ -125,14 +123,17 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         )
         ctx.trace_steps.append(step)
         n = len(ctx.trace_steps)
-        EventBus().emit(EventType.TRACE_STEP, {
-            "hunter_target": ctx.file_path,
-            "file": file,
-            "line": line,
-            "function": function,
-            "note": note,
-            "step_number": n,
-        })
+        EventBus().emit(
+            EventType.TRACE_STEP,
+            {
+                "hunter_target": ctx.file_path,
+                "file": file,
+                "line": line,
+                "function": function,
+                "note": note,
+                "step_number": n,
+            },
+        )
         # Echo the full accumulated trace back into the conversation so the
         # growing dataflow path stays part of the message sequence the model
         # reasons over before calling record_finding.
@@ -221,7 +222,26 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # Reset only after the authoritative steps are stored on the finding.
         ctx.trace_steps.clear()
 
+        stable_finding_id = stable_run_id(
+            "hunter",
+            {
+                "run_id": ctx.session_id or "",
+                "work_item_id": ctx.work_item_id or "",
+                "file": file,
+                "line": line_number,
+                "type": finding_type,
+                "cwe": cwe,
+                "description": description,
+                "trace": trace_dict,
+            },
+        )
+        finding_metadata = {"stable_finding_id": stable_finding_id}
+        if ctx.work_item_id:
+            finding_metadata["work_item_id"] = ctx.work_item_id
+
         finding = Finding(
+            # Keep the public legacy identifier shape stable. Evaluation and
+            # instrumentation use the deterministic identifier in ``extra``.
             id=f"hunter-{uuid.uuid4().hex[:8]}",
             file=file,
             line_number=line_number,
@@ -242,19 +262,25 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             crypto_attack_class=crypto_attack_class or None,
             key_material_exposed=key_material_exposed or None,
             vulnerability_trace=trace_dict,
+            extra=finding_metadata,
         )
         ctx.findings.append(finding)
-        EventBus().emit(EventType.FINDING_RECORDED, {
-            "file": file,
-            "line_number": line_number,
-            "finding_type": finding_type,
-            "severity": severity,
-            "cwe": cwe,
-            "description": description,
-            "confidence": confidence,
-            "evidence_level": evidence_level,
-            "hunter_target": ctx.file_path,
-        })
+        EventBus().emit(
+            EventType.FINDING_RECORDED,
+            {
+                "finding_id": finding.id,
+                "stable_finding_id": stable_finding_id,
+                "file": file,
+                "line_number": line_number,
+                "finding_type": finding_type,
+                "severity": severity,
+                "cwe": cwe,
+                "description": description,
+                "confidence": confidence,
+                "evidence_level": evidence_level,
+                "hunter_target": ctx.file_path,
+            },
+        )
         trace_msg = f", trace={len(trace_dict['steps'])} steps" if trace_dict else ""
         return (
             f"Finding recorded: {finding_type} at {file}:{line_number} "

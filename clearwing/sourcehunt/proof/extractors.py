@@ -21,6 +21,7 @@ from .models import (
     Provenance,
     SourceLocation,
 )
+from .normalization import FactNormalizer
 from .store import ProofStore
 
 SUPPORTED_LANGUAGES = frozenset(
@@ -108,10 +109,13 @@ class CommandRunner(Protocol):
         *,
         cwd: Path,
         timeout: int,
-    ) -> CommandResult:
-        ...
+    ) -> CommandResult: ...
 
-    def map_path(self, path: Path) -> str:
+    def map_path(self, path: Path) -> str: ...
+
+    def write_file(self, path: str, content: bytes) -> None:
+        """Write a generated validation artifact inside the sandbox."""
+
         ...
 
 
@@ -200,6 +204,11 @@ class SandboxCommandRunner:
             timed_out=bool(result.timed_out),
         )
 
+    def write_file(self, path: str, content: bytes) -> None:
+        if not path.startswith("/scratch/") or ".." in Path(path).parts:
+            raise ProofPreflightError("Generated files must remain under /scratch")
+        self.container.write_file(path, content)
+
 
 @dataclass(frozen=True)
 class CompilationCommand:
@@ -231,9 +240,7 @@ class CompilationDatabase:
         commands: list[CompilationCommand] = []
         for index, entry in enumerate(raw):
             if not isinstance(entry, dict):
-                raise ProofPreflightError(
-                    f"Compilation database entry {index} is not an object"
-                )
+                raise ProofPreflightError(f"Compilation database entry {index} is not an object")
             directory = Path(str(entry.get("directory") or self.repo_root))
             if not directory.is_absolute():
                 directory = self.repo_root / directory
@@ -353,12 +360,10 @@ class FactExtractor:
                 )
 
         facts.extend(clang_facts)
-        structural_facts, structural_analysis, structural_errors = (
-            self._structural_facts(files)
-        )
+        structural_facts, structural_analysis, structural_errors = self._structural_facts(files)
         facts.extend(structural_facts)
         errors.extend(structural_errors)
-        facts = _deduplicate_facts(facts)
+        facts = FactNormalizer().normalize(_deduplicate_facts(facts))
         completeness = self._completeness(
             files=files,
             files_analyzed=files_analyzed,
@@ -673,7 +678,9 @@ class FactExtractor:
 
         extension = command.file.suffix.lower()
         compiler = "clang++" if extension in {".cpp", ".cc", ".cxx"} else self.config.clang_binary
-        mapped_file = self.command_runner.map_path(command.file) if self.command_runner else str(command.file)
+        mapped_file = (
+            self.command_runner.map_path(command.file) if self.command_runner else str(command.file)
+        )
         if not any(_same_source_argument(argument, mapped_file) for argument in filtered):
             filtered.append(mapped_file)
         return [
@@ -743,9 +750,7 @@ class FactExtractor:
             if location is None:
                 continue
             raw_type_info = node.get("type")
-            type_info: dict[str, Any] = (
-                raw_type_info if isinstance(raw_type_info, dict) else {}
-            )
+            type_info: dict[str, Any] = raw_type_info if isinstance(raw_type_info, dict) else {}
             qual_type = str(type_info.get("qualType") or "")
             properties: dict[str, Any] = {
                 "ast_kind": kind,
@@ -843,10 +848,7 @@ class FactExtractor:
                     )
                 )
             if _GUARD_PATTERN.search(stripped):
-                following = " ".join(
-                    item.strip()
-                    for item in lines[line_number : line_number + 3]
-                )
+                following = " ".join(item.strip() for item in lines[line_number : line_number + 3])
                 facts.append(
                     self._line_fact(
                         "guard",
@@ -858,9 +860,7 @@ class FactExtractor:
                         language=language,
                         expression=stripped,
                         operators=_comparison_operators(stripped),
-                        control_effect=(
-                            _first_control_effect(f"{stripped} {following}")
-                        ),
+                        control_effect=(_first_control_effect(f"{stripped} {following}")),
                     )
                 )
             if _SENTINEL_PATTERN.search(stripped):
@@ -1050,23 +1050,17 @@ class FactExtractor:
             analyzed_all = translation_units <= clang_analyzed
             compilation_item = CompletenessItem(
                 status=(
-                    CompletenessStatus.COMPLETE
-                    if analyzed_all
-                    else CompletenessStatus.PARTIAL
+                    CompletenessStatus.COMPLETE if analyzed_all else CompletenessStatus.PARTIAL
                 ),
                 basis=str(compilation_db.path) if compilation_db else "",
                 limitations=[] if analyzed_all else ["some translation units were unresolved"],
                 unresolved=[
-                    str(error.get("file", ""))
-                    for error in clang_errors
-                    if error.get("file")
+                    str(error.get("file", "")) for error in clang_errors if error.get("file")
                 ],
             )
             type_item = CompletenessItem(
                 status=(
-                    CompletenessStatus.COMPLETE
-                    if analyzed_all
-                    else CompletenessStatus.PARTIAL
+                    CompletenessStatus.COMPLETE if analyzed_all else CompletenessStatus.PARTIAL
                 ),
                 basis="clang-ast",
                 limitations=[] if analyzed_all else ["failed translation units"],
@@ -1146,14 +1140,58 @@ class FactExtractor:
                     basis=self.config.build_configuration,
                     limitations=["only the selected build configuration was analyzed"],
                 ),
+                "memory_fact_normalization": CompletenessItem(
+                    status=CompletenessStatus.COMPLETE,
+                    basis="proof-fact-normalizer schema v1",
+                ),
+                "parser_ranges": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="normalized guards, offsets, and extents",
+                    limitations=["path-sensitive arithmetic ranges require a range backend"],
+                ),
+                "authorization_paths": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="policy-like guards and callgraph facts",
+                    limitations=[
+                        "framework middleware and indirect policy hooks may be unresolved"
+                    ],
+                ),
+                "lifetime_analysis": CompletenessItem(
+                    status=CompletenessStatus.NOT_AVAILABLE,
+                    basis="release/use syntax events only",
+                    limitations=["alias-aware ownership and lifetime analysis was not run"],
+                ),
+                "state_models": CompletenessItem(
+                    status=CompletenessStatus.NOT_AVAILABLE,
+                    basis="state assignments only",
+                    limitations=["no bounded transition model was supplied"],
+                ),
+                "cryptographic_contracts": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="cryptographic API syntax markers",
+                    limitations=["construction-specific security properties require contracts"],
+                ),
+                "encoding_analysis": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="interpreter calls and intraprocedural taint",
+                    limitations=["context-correct encoding and framework parameterization vary"],
+                ),
+                "concurrency_analysis": CompletenessItem(
+                    status=CompletenessStatus.NOT_AVAILABLE,
+                    basis="thread and synchronization syntax markers",
+                    limitations=["happens-before and schedule exploration were not run"],
+                ),
+                "resource_bounds": CompletenessItem(
+                    status=CompletenessStatus.PARTIAL,
+                    basis="loop, guard, and allocation facts",
+                    limitations=["whole-request and distributed accounting are unresolved"],
+                ),
             },
         )
 
     def _source_files(self) -> Iterator[tuple[Path, str]]:
         for directory, directories, filenames in os.walk(self.root):
-            directories[:] = sorted(
-                item for item in directories if item not in _SKIP_DIRECTORIES
-            )
+            directories[:] = sorted(item for item in directories if item not in _SKIP_DIRECTORIES)
             for filename in sorted(filenames):
                 path = Path(directory) / filename
                 language = LANGUAGE_BY_EXTENSION.get(path.suffix.lower())
@@ -1299,9 +1337,7 @@ def _walk_ast(root: dict[str, Any]) -> Iterator[dict[str, Any]]:
         yield node
         children = node.get("inner")
         if isinstance(children, list):
-            stack.extend(
-                child for child in reversed(children) if isinstance(child, dict)
-            )
+            stack.extend(child for child in reversed(children) if isinstance(child, dict))
 
 
 def _clang_location(
@@ -1310,13 +1346,9 @@ def _clang_location(
     repo_root: Path,
 ) -> SourceLocation | None:
     raw_location = node.get("loc")
-    location: dict[str, Any] = (
-        raw_location if isinstance(raw_location, dict) else {}
-    )
+    location: dict[str, Any] = raw_location if isinstance(raw_location, dict) else {}
     raw_range = node.get("range")
-    range_info: dict[str, Any] = (
-        raw_range if isinstance(raw_range, dict) else {}
-    )
+    range_info: dict[str, Any] = raw_range if isinstance(raw_range, dict) else {}
     raw_begin = range_info.get("begin")
     begin: dict[str, Any] = raw_begin if isinstance(raw_begin, dict) else {}
     file_name = str(location.get("file") or begin.get("file") or fallback_file)

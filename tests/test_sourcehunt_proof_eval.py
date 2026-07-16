@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from clearwing.eval.proof_flow import (
     CounterfactualExpectation,
+    CounterfactualManifest,
     CutoverMetrics,
     GroundTruth,
     ProofEvalObservation,
     ProofFunnel,
+    evaluate_counterfactual_sessions,
     evaluate_cutover,
     inspect_proof_session,
     score_counterfactuals,
@@ -16,6 +18,7 @@ from clearwing.sourcehunt.proof import (
     Candidate,
     Certificate,
     CertificateKind,
+    Evidence,
     Fact,
     Obligation,
     ProofStore,
@@ -60,12 +63,8 @@ def test_stage_funnel_identifies_the_first_missing_mechanism(tmp_path) -> None:
         "vulnerable",
         store.root,
         GroundTruth(
-            expected_mechanisms=frozenset(
-                {"live_identifier_aliases_reserved_sentinel"}
-            ),
-            expected_predicates=frozenset(
-                {"reserved_sentinel_established"}
-            ),
+            expected_mechanisms=frozenset({"live_identifier_aliases_reserved_sentinel"}),
+            expected_predicates=frozenset({"reserved_sentinel_established"}),
             expected_decision="incomplete",
         ),
     )
@@ -145,3 +144,67 @@ def test_cutover_gate_enforces_recall_precision_and_cost_thresholds() -> None:
     assert passing.passed
     assert not expensive.passed
     assert expensive.checks["cost_within_1_25x"] is False
+
+
+def test_manifest_driven_counterfactual_matrix_is_complete_and_operational(
+    tmp_path,
+) -> None:
+    def session(name, kind, *, evidence_kind=None):
+        store = ProofStore(tmp_path / name)
+        candidate = Candidate(
+            snapshot_id=f"snapshot-{name}",
+            title=name,
+            invariant_families=["representation_domain_safety"],
+            suspected_mechanism="live_identifier_aliases_reserved_sentinel",
+            generator="test",
+        )
+        certificate = Certificate(
+            snapshot_id=f"snapshot-{name}",
+            kind=kind,
+            candidate_id=candidate.logical_id,
+            proof_plan_ids=["representation-domain-collision-v1"],
+            decision=(
+                "confirmed"
+                if kind == CertificateKind.FINDING
+                else "disproven"
+                if kind == CertificateKind.REJECTION
+                else "incomplete"
+            ),
+            reason="fixture",
+        )
+        records = [candidate, certificate]
+        if evidence_kind is not None:
+            records.append(
+                Evidence(
+                    snapshot_id=f"snapshot-{name}",
+                    kind=evidence_kind,
+                    provenance=Provenance(producer="test"),
+                )
+            )
+        store.append_many(records)
+        return store.root
+
+    manifest = CounterfactualManifest.load("evaluations/ffmpeg_proof.yaml")
+    report = evaluate_counterfactual_sessions(
+        manifest,
+        {
+            "vulnerable": session("vulnerable", CertificateKind.FINDING),
+            "fixed": session(
+                "fixed",
+                CertificateKind.REJECTION,
+                evidence_kind="dominating_rejecting_guard",
+            ),
+            "renamed": session("renamed", CertificateKind.FINDING),
+            "moved": session("moved", CertificateKind.FINDING),
+            "guarded": session("guarded", CertificateKind.REJECTION),
+            "unreachable": session("unreachable", CertificateKind.INCOMPLETE),
+            "decoy": session("decoy", CertificateKind.FINDING),
+            "widened-domain": session("widened", CertificateKind.INCOMPLETE),
+        },
+    )
+
+    assert report.score.consistency == 1.0
+    assert report.score.total == len(manifest.expectations)
+    target = report.write(tmp_path / "counterfactual-report.json")
+    assert target.is_file()
+    assert report.payload()["manifest"] == "ffmpeg-h264-slice-sentinel"

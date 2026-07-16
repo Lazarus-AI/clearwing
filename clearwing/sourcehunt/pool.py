@@ -22,6 +22,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from clearwing.core.event_payloads import HuntProgressPayload
@@ -34,6 +35,7 @@ from clearwing.runners.parallel.executor import (
     TierBudget as _ExecutorTierBudget,
 )
 
+from .instrumentation import stable_run_id
 from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,21 @@ class WorkItem:
     seed_transcript: str | None = None
     entry_point: Any = None  # EntryPoint | None — spec 004
     seed_context: str | None = None  # spec 004 seed corpus
+
+    def stable_identifier(self, run_id: str) -> str:
+        entry_point = self.entry_point
+        return stable_run_id(
+            "work",
+            {
+                "run_id": run_id,
+                "file": self.file_target.get("path", ""),
+                "band": self.band,
+                "attempt": self.attempt,
+                "entry_point": (
+                    getattr(entry_point, "function_name", "") if entry_point is not None else ""
+                ),
+            },
+        )
 
 
 def _file_rank(file_target: FileTarget) -> int:
@@ -193,6 +210,8 @@ class HuntPoolConfig:
     seed_corpus_by_file: dict = field(default_factory=dict)  # {path: [SeedCorpusEntry]}
     shard_entry_points: bool = False
     findings_pool: Any = None  # FindingsPool | None — spec 005
+    trajectory_root: str | Path | None = None
+    instrumentation: Any = None  # SourceHuntInstrumentation | None
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -201,6 +220,7 @@ def _format_seed_context(entries: list) -> str | None:
         return None
     try:
         from .seed_corpus import format_seed_context
+
         return format_seed_context(entries) or None
     except ImportError:
         return None
@@ -255,22 +275,32 @@ class HunterPool:
             if entry_points:
                 for ep in entry_points:
                     ep_seeds = [
-                        s for s in seed_entries
+                        s
+                        for s in seed_entries
                         if s.function_name is None or s.function_name == ep.function_name
                     ]
                     seed_ctx = _format_seed_context(ep_seeds) if ep_seeds else None
                     for attempt in range(n):
-                        items.append(WorkItem(
-                            file_target=ft, band=band, attempt=attempt,
-                            entry_point=ep, seed_context=seed_ctx,
-                        ))
+                        items.append(
+                            WorkItem(
+                                file_target=ft,
+                                band=band,
+                                attempt=attempt,
+                                entry_point=ep,
+                                seed_context=seed_ctx,
+                            )
+                        )
             else:
                 seed_ctx = _format_seed_context(seed_entries) if seed_entries else None
                 for attempt in range(n):
-                    items.append(WorkItem(
-                        file_target=ft, band=band, attempt=attempt,
-                        seed_context=seed_ctx,
-                    ))
+                    items.append(
+                        WorkItem(
+                            file_target=ft,
+                            band=band,
+                            attempt=attempt,
+                            seed_context=seed_ctx,
+                        )
+                    )
         return items
 
     async def arun(self) -> list[Finding]:
@@ -374,11 +404,7 @@ class HunterPool:
     @property
     def completed_target_count(self) -> int:
         return len(
-            {
-                result.target
-                for result in self._results.values()
-                if result.status == "completed"
-            }
+            {result.target for result in self._results.values() if result.status == "completed"}
         )
 
     async def _run_tier_phase(
@@ -413,6 +439,7 @@ class HunterPool:
             if wi is None:
                 return False
             band_cost = self.config.band_budget.for_band(wi.band)
+            work_item_id = wi.stable_identifier(self.config.session_id_prefix)
             task = asyncio.create_task(
                 self._run_file_task(
                     wi.file_target,
@@ -422,6 +449,7 @@ class HunterPool:
                     seed_transcript=wi.seed_transcript,
                     entry_point=wi.entry_point,
                     seed_context=wi.seed_context,
+                    work_item_id=work_item_id,
                 )
             )
             in_flight[task] = wi
@@ -494,23 +522,33 @@ class HunterPool:
                 async with self._state_lock:
                     self._results[f"{key}{ep_suffix}:{wi.band}:{wi.attempt}"] = result
                     self._spent_per_tier[tier] += result.cost_usd
-                    self._spent_per_band[wi.band] = self._spent_per_band.get(wi.band, 0.0) + result.cost_usd
+                    self._spent_per_band[wi.band] = (
+                        self._spent_per_band.get(wi.band, 0.0) + result.cost_usd
+                    )
                     self._runs_per_band[wi.band] = self._runs_per_band.get(wi.band, 0) + 1
                     spent += result.cost_usd
 
-                completed_count = sum(1 for r in self._results.values() if r.status in ("completed", "error", "timeout"))
+                completed_count = sum(
+                    1
+                    for r in self._results.values()
+                    if r.status in ("completed", "error", "timeout")
+                )
                 total_files = len(self.config.files)
-                findings_count = sum(len(r.findings) for r in self._results.values() if r.status == "completed")
-                EventBus().emit_hunt_progress(HuntProgressPayload(
-                    session_id=self.config.session_id_prefix,
-                    tier=tier,
-                    band=wi.band,
-                    files_completed=completed_count,
-                    files_total=total_files,
-                    findings_this_tier=findings_count,
-                    cost_usd=spent,
-                    budget_remaining=max(0.0, budget - spent),
-                ))
+                findings_count = sum(
+                    len(r.findings) for r in self._results.values() if r.status == "completed"
+                )
+                EventBus().emit_hunt_progress(
+                    HuntProgressPayload(
+                        session_id=self.config.session_id_prefix,
+                        tier=tier,
+                        band=wi.band,
+                        files_completed=completed_count,
+                        files_total=total_files,
+                        findings_this_tier=findings_count,
+                        cost_usd=spent,
+                        budget_remaining=max(0.0, budget - spent),
+                    )
+                )
 
                 if result.status == "completed" and result.findings:
                     for f in cast(list[Finding], result.findings):
@@ -545,17 +583,23 @@ class HunterPool:
                     if next_band:
                         promo_key = f"{wi.band}→{next_band}"
                         async with self._state_lock:
-                            self._promotion_counts[promo_key] = self._promotion_counts.get(promo_key, 0) + 1
+                            self._promotion_counts[promo_key] = (
+                                self._promotion_counts.get(promo_key, 0) + 1
+                            )
                         logger.info(
                             "Promoting %s from %s to %s band",
-                            key, wi.band, next_band,
+                            key,
+                            wi.band,
+                            next_band,
                         )
-                        promotion_queue.append(WorkItem(
-                            file_target=wi.file_target,
-                            band=next_band,
-                            attempt=wi.attempt,
-                            seed_transcript=_extract_transcript(result),
-                        ))
+                        promotion_queue.append(
+                            WorkItem(
+                                file_target=wi.file_target,
+                                band=next_band,
+                                attempt=wi.attempt,
+                                seed_transcript=_extract_transcript(result),
+                            )
+                        )
 
                 _submit_next()
 
@@ -572,18 +616,72 @@ class HunterPool:
         seed_transcript: str | None = None,
         entry_point: Any = None,
         seed_context: str | None = None,
+        work_item_id: str = "",
     ) -> TargetResult:
+        if not work_item_id:
+            work_item_id = stable_run_id(
+                "work",
+                {
+                    "run_id": self.config.session_id_prefix,
+                    "file": file_target.get("path", ""),
+                    "band": band,
+                    "entry_point": (
+                        getattr(entry_point, "function_name", "") if entry_point is not None else ""
+                    ),
+                },
+            )
+        instrumentation = self.config.instrumentation
+        entry_symbol = (
+            str(getattr(entry_point, "function_name", "") or "") if entry_point is not None else ""
+        )
+        if instrumentation is not None:
+            instrumentation.record(
+                "work_item",
+                stage="hunt",
+                status="started",
+                files=[file_target.get("path", "")],
+                symbols=[entry_symbol] if entry_symbol else [],
+                work_item_id=work_item_id,
+                metadata={"tier": tier, "band": band},
+            )
         with spend_metadata(
             tier=tier,
             band=band,
             target=file_target.get("path", ""),
             entry_point=(entry_point.function_name if entry_point else None),
+            work_item_id=work_item_id,
         ):
-            findings, cost, tokens, stop_reason = await self._run_one_hunter(
-                file_target, cost_limit,
-                seed_transcript=seed_transcript,
-                entry_point=entry_point,
-                seed_context=seed_context,
+            try:
+                findings, cost, tokens, stop_reason = await self._run_one_hunter(
+                    file_target,
+                    cost_limit,
+                    seed_transcript=seed_transcript,
+                    entry_point=entry_point,
+                    seed_context=seed_context,
+                    work_item_id=work_item_id,
+                )
+            except Exception as exc:
+                if instrumentation is not None:
+                    instrumentation.record(
+                        "work_item",
+                        stage="hunt",
+                        status="failed",
+                        files=[file_target.get("path", "")],
+                        symbols=[entry_symbol] if entry_symbol else [],
+                        work_item_id=work_item_id,
+                        error={"type": type(exc).__name__, "message": str(exc)},
+                    )
+                raise
+        if instrumentation is not None:
+            instrumentation.record(
+                "work_item",
+                stage="hunt",
+                status=stop_reason,
+                files=[file_target.get("path", "")],
+                symbols=[entry_symbol] if entry_symbol else [],
+                work_item_id=work_item_id,
+                finding_ids=[finding.id for finding in findings],
+                metadata={"tier": tier, "band": band, "cost_usd": cost, "tokens": tokens},
             )
         return TargetResult(
             target=file_target.get("path", ""),
@@ -603,6 +701,7 @@ class HunterPool:
         seed_transcript: str | None = None,
         entry_point: Any = None,
         seed_context: str | None = None,
+        work_item_id: str = "",
     ) -> tuple[list[Finding], float, int, str]:
         """Run a single hunter. Returns (findings, cost_usd, tokens_used, stop_reason)."""
         logger.info(
@@ -621,10 +720,13 @@ class HunterPool:
 
         try:
             hunter, ctx = self._build_hunter_for_file(
-                file_target, sandbox, budget_usd=cost_limit,
+                file_target,
+                sandbox,
+                budget_usd=cost_limit,
                 seed_transcript=seed_transcript,
                 entry_point=entry_point,
                 seed_context=seed_context,
+                work_item_id=work_item_id,
             )
             run_result = await hunter.arun()
 
@@ -661,12 +763,26 @@ class HunterPool:
         seed_transcript: str | None = None,
         entry_point: Any = None,
         seed_context: str | None = None,
+        work_item_id: str = "",
     ) -> Any:
         """Either invoke the user-supplied hunter_factory or import build_hunter_agent."""
+        if not work_item_id:
+            work_item_id = stable_run_id(
+                "work",
+                {
+                    "run_id": self.config.session_id_prefix,
+                    "file": file_target.get("path", ""),
+                    "entry_point": (
+                        getattr(entry_point, "function_name", "") if entry_point is not None else ""
+                    ),
+                },
+            )
         session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
 
         if self.config.hunter_factory is not None:
-            return self.config.hunter_factory(file_target, sandbox, session_id)
+            result = self.config.hunter_factory(file_target, sandbox, session_id)
+            self._configure_hunter_context(result, work_item_id)
+            return result
 
         global _DEFAULT_HUNTER_FACTORY
         if _DEFAULT_HUNTER_FACTORY is None:
@@ -681,7 +797,7 @@ class HunterPool:
         seeded_crash = self.config.seeded_crashes_by_file.get(file_path)
         semgrep_hints = self.config.semgrep_hints_by_file.get(file_path)
 
-        return _DEFAULT_HUNTER_FACTORY(
+        result = _DEFAULT_HUNTER_FACTORY(
             file_target=file_target,
             repo_path=self.config.repo_path,
             sandbox=sandbox,
@@ -700,3 +816,17 @@ class HunterPool:
             seed_context=seed_context,
             findings_pool=self.config.findings_pool,
         )
+        self._configure_hunter_context(result, work_item_id)
+        return result
+
+    def _configure_hunter_context(self, result: Any, work_item_id: str) -> None:
+        """Attach durable evaluation joins without changing factory contracts."""
+
+        try:
+            _hunter, context = result
+        except (TypeError, ValueError):
+            return
+        context.work_item_id = work_item_id
+        context.instrumentation = self.config.instrumentation
+        if self.config.trajectory_root is not None:
+            context.trajectory_dir = Path(self.config.trajectory_root) / work_item_id

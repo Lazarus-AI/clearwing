@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from clearwing.sourcehunt.proof import (
     Action,
@@ -59,6 +63,7 @@ class ProofEvalObservation:
     session_dir: str
     funnel: ProofFunnel
     candidate_mechanisms: set[str] = field(default_factory=set)
+    evidence_kinds: set[str] = field(default_factory=set)
     decisions: set[str] = field(default_factory=set)
     finding_count: int = 0
     rejection_count: int = 0
@@ -89,6 +94,128 @@ class CounterfactualScore:
     @property
     def consistency(self) -> float:
         return self.passed / self.total if self.total else 0.0
+
+
+@dataclass(frozen=True)
+class CounterfactualManifest:
+    schema_version: int
+    name: str
+    ground_truth: GroundTruth
+    expectations: tuple[CounterfactualExpectation, ...]
+
+    @classmethod
+    def load(cls, path: str | Path) -> CounterfactualManifest:
+        source = Path(path).expanduser()
+        payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Counterfactual manifest root must be a mapping")
+        schema_version = int(payload.get("schema_version") or 0)
+        if schema_version != 1:
+            raise ValueError(f"Unsupported counterfactual schema: {schema_version}")
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("Counterfactual manifest requires a name")
+        blind = payload.get("blind")
+        blind = blind if isinstance(blind, dict) else {}
+        mechanisms = blind.get("expected_mechanisms") or blind.get("expected_mechanism") or []
+        if isinstance(mechanisms, str):
+            mechanisms = [mechanisms]
+        predicates = blind.get("expected_predicates") or []
+        raw_variants = payload.get("counterfactuals")
+        if not isinstance(raw_variants, list) or not raw_variants:
+            raise ValueError("Counterfactual manifest requires variant expectations")
+        expectations: list[CounterfactualExpectation] = []
+        names: set[str] = set()
+        for raw in raw_variants:
+            if not isinstance(raw, dict):
+                raise ValueError("Counterfactual entries must be mappings")
+            variant_name = str(raw.get("name") or "").strip()
+            relation = str(raw.get("relation") or "").strip()
+            if not variant_name or not relation:
+                raise ValueError("Counterfactual entries require name and relation")
+            if variant_name in names:
+                raise ValueError(f"Duplicate counterfactual variant: {variant_name}")
+            names.add(variant_name)
+            expectations.append(
+                CounterfactualExpectation(
+                    name=variant_name,
+                    relation=relation,
+                    expected=bool(raw.get("expected", True)),
+                )
+            )
+        fixed = payload.get("fixed")
+        if isinstance(fixed, dict) and fixed:
+            if "fixed" not in names:
+                raise ValueError(
+                    "A manifest with fixed expectations requires a fixed counterfactual"
+                )
+            expected_decision = str(fixed.get("expected_decision") or "").strip()
+            if expected_decision:
+                expectations.append(
+                    CounterfactualExpectation(
+                        name="fixed",
+                        relation=f"decision:{expected_decision}",
+                        expected=True,
+                    )
+                )
+            expected_counterevidence = str(fixed.get("expected_counterevidence") or "").strip()
+            if expected_counterevidence:
+                expectations.append(
+                    CounterfactualExpectation(
+                        name="fixed",
+                        relation=f"evidence:{expected_counterevidence}",
+                        expected=True,
+                    )
+                )
+        return cls(
+            schema_version=schema_version,
+            name=name,
+            ground_truth=GroundTruth(
+                expected_mechanisms=frozenset(str(item) for item in mechanisms),
+                expected_predicates=frozenset(str(item) for item in predicates),
+                expected_decision=str(blind.get("expected_decision") or ""),
+            ),
+            expectations=tuple(expectations),
+        )
+
+
+@dataclass
+class CounterfactualReport:
+    manifest_name: str
+    vulnerable: ProofEvalObservation
+    variants: dict[str, ProofEvalObservation]
+    score: CounterfactualScore
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "manifest": self.manifest_name,
+            "passed": self.score.passed,
+            "total": self.score.total,
+            "consistency": self.score.consistency,
+            "failures": self.score.failures,
+            "vulnerable": _observation_payload(self.vulnerable),
+            "variants": {
+                name: _observation_payload(observation)
+                for name, observation in sorted(self.variants.items())
+            },
+        }
+
+    def write(self, path: str | Path) -> Path:
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(self.payload(), indent=2, sort_keys=True) + "\n"
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return target
 
 
 @dataclass(frozen=True)
@@ -170,6 +297,7 @@ def inspect_proof_session(
             correct_certificate_emitted=correct_decision,
         ),
         candidate_mechanisms=mechanisms,
+        evidence_kinds={item.kind for item in evidence},
         decisions=decisions,
         finding_count=sum(
             certificate.kind == CertificateKind.FINDING for certificate in certificates
@@ -213,6 +341,43 @@ def score_counterfactuals(
     )
 
 
+def evaluate_counterfactual_sessions(
+    manifest: CounterfactualManifest,
+    sessions: dict[str, str | Path],
+) -> CounterfactualReport:
+    expected_names = {expectation.name for expectation in manifest.expectations}
+    missing = sorted({"vulnerable", *expected_names} - set(sessions))
+    unexpected = sorted(set(sessions) - {"vulnerable", *expected_names})
+    if missing or unexpected:
+        raise ValueError(
+            "Counterfactual session matrix mismatch: "
+            f"missing={missing or 'none'}, unexpected={unexpected or 'none'}"
+        )
+    vulnerable = inspect_proof_session(
+        "vulnerable",
+        sessions["vulnerable"],
+        manifest.ground_truth,
+    )
+    variants = {
+        name: inspect_proof_session(
+            name,
+            sessions[name],
+            GroundTruth(),
+        )
+        for name in sorted(expected_names)
+    }
+    return CounterfactualReport(
+        manifest_name=manifest.name,
+        vulnerable=vulnerable,
+        variants=variants,
+        score=score_counterfactuals(
+            vulnerable,
+            variants,
+            list(manifest.expectations),
+        ),
+    )
+
+
 def evaluate_cutover(metrics: CutoverMetrics) -> CutoverDecision:
     checks = {
         "frontier_recall_not_worse": (metrics.frontier_recall >= metrics.legacy_frontier_recall),
@@ -242,6 +407,10 @@ def _relation_holds(
         return variant.finding_count <= vulnerable.finding_count
     if relation == "decision_preserved":
         return vulnerable.decisions == variant.decisions
+    if relation.startswith("decision:"):
+        return relation.removeprefix("decision:") in variant.decisions
+    if relation.startswith("evidence:"):
+        return relation.removeprefix("evidence:") in variant.evidence_kinds
     raise ValueError(f"Unknown counterfactual relation: {relation}")
 
 
@@ -253,3 +422,20 @@ def _load_metrics(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _observation_payload(observation: ProofEvalObservation) -> dict[str, Any]:
+    return {
+        "name": observation.name,
+        "session_dir": observation.session_dir,
+        "candidate_mechanisms": sorted(observation.candidate_mechanisms),
+        "evidence_kinds": sorted(observation.evidence_kinds),
+        "decisions": sorted(observation.decisions),
+        "finding_count": observation.finding_count,
+        "rejection_count": observation.rejection_count,
+        "incomplete_count": observation.incomplete_count,
+        "model_calls": observation.model_calls,
+        "action_count": observation.action_count,
+        "cost_usd": observation.cost_usd,
+        "first_failure": observation.funnel.first_failure(),
+    }

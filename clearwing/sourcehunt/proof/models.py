@@ -182,9 +182,7 @@ class Fact(VersionedRecord):
             "subject": self.subject,
             "predicate": self.predicate,
             "object": self.object,
-            "location": (
-                self.location.model_dump(mode="json") if self.location else None
-            ),
+            "location": (self.location.model_dump(mode="json") if self.location else None),
             "producer": self.provenance.producer,
         }
 
@@ -284,6 +282,7 @@ class Candidate(VersionedRecord):
     suspected_invariants: list[str] = Field(default_factory=list)
     fact_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+    assumption_ids: list[str] = Field(default_factory=list)
     threat_model_id: str | None = None
     proof_plan_ids: list[str] = Field(default_factory=list)
     obligation_ids: list[str] = Field(default_factory=list)
@@ -343,6 +342,9 @@ class Action(VersionedRecord):
     status: ActionStatus = ActionStatus.PENDING
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     estimated_seconds: float = Field(default=0.0, ge=0.0)
+    started_at: str | None = None
+    completed_at: str | None = None
+    observed_seconds: float | None = Field(default=None, ge=0.0)
     expected_information_gain: float = Field(default=0.0, ge=0.0, le=1.0)
     output_evidence_ids: list[str] = Field(default_factory=list)
     output_claim_ids: list[str] = Field(default_factory=list)
@@ -412,8 +414,11 @@ class ContextPacket(VersionedRecord):
     fact_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
+    assumption_ids: list[str] = Field(default_factory=list)
     evidence_summaries: list[dict[str, Any]] = Field(default_factory=list)
     claim_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    assumption_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    evaluation_hints: dict[str, Any] = Field(default_factory=dict)
     threat_model: dict[str, Any] | None = None
     excerpts: list[dict[str, Any]] = Field(default_factory=list)
     permitted_outputs: list[str] = Field(default_factory=list)
@@ -428,6 +433,8 @@ class ContextPacket(VersionedRecord):
             "facts": sorted(self.fact_ids),
             "evidence": sorted(self.evidence_ids),
             "claims": sorted(self.claim_ids),
+            "assumptions": sorted(self.assumption_ids),
+            "evaluation_hints": self.evaluation_hints,
             "threat_model": self.threat_model,
             "completeness": self.completeness.model_dump(mode="json"),
         }
@@ -453,6 +460,9 @@ class Certificate(VersionedRecord):
     severity: Literal["critical", "high", "medium", "low", "info"] | None = None
     cwe: str | None = None
     report_claims: list[dict[str, Any]] = Field(default_factory=list)
+    validity: Literal["current", "stale"] = "current"
+    invalidated_by: list[str] = Field(default_factory=list)
+    stale_reason: str | None = None
 
     def identity_payload(self) -> Any:
         return {

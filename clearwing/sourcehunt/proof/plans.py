@@ -91,10 +91,20 @@ MEMORY_WRITE_PLAN = ProofPlan(
     invariant_families=frozenset({"spatial_safety"}),
     obligations=(
         ObligationTemplate(
+            "attacker_reachability",
+            "attacker_reaches_memory_operation",
+            "An attacker-controlled entry path reaches the candidate memory operation.",
+            available_actions=("reachability_query", "taint_query"),
+            decisive_rejection=True,
+        ),
+        ObligationTemplate(
             "access_reached",
             "incorrect_state_reaches_memory_access",
             "The suspected state or extent reaches a memory access.",
-            dependencies=("representation-domain-collision-v1:semantic_decision",),
+            dependencies=(
+                "attacker_reachability",
+                "representation-domain-collision-v1:semantic_decision",
+            ),
             available_actions=("slice_query", "reachability_query"),
             decisive_rejection=True,
         ),
@@ -147,7 +157,7 @@ MEMORY_WRITE_PLAN = ProofPlan(
 )
 
 PARSER_INTEGER_PLAN = ProofPlan(
-    id="parser-integer-domain-v1",
+    id="parser-integer-domain-v2",
     invariant_families=frozenset({"parser_safety"}),
     obligations=(
         ObligationTemplate(
@@ -170,11 +180,35 @@ PARSER_INTEGER_PLAN = ProofPlan(
             available_actions=("range_analysis", "symbolic_execution"),
             decisive_rejection=True,
         ),
+        ObligationTemplate(
+            "trigger",
+            "concrete_parser_input_satisfies_boundary_violation",
+            "A concrete or symbolic parser input satisfies the violating path.",
+            dependencies=("boundary_violation",),
+            available_actions=("fuzz", "symbolic_execution", "protocol_replay"),
+        ),
+        ObligationTemplate(
+            "runtime",
+            "runtime_confirms_parser_boundary_violation",
+            "A bounded runtime or symbolic backend confirms the parser violation.",
+            dependencies=("trigger",),
+            available_actions=("sanitizer_run", "symbolic_execution", "protocol_replay"),
+        ),
+        ObligationTemplate(
+            "security_boundary",
+            "parser_violation_crosses_security_boundary",
+            "The parser violation breaks a protected property in the threat model.",
+            dependencies=("runtime",),
+            available_actions=("threat_model_query", "bounded_model_judgment"),
+        ),
+    ),
+    decisive_evidence_kinds=frozenset(
+        {"sanitizer_crash", "symbolic_memory_violation", "protocol_transition_violation"}
     ),
 )
 
 AUTHORIZATION_PLAN = ProofPlan(
-    id="authorization-boundary-v1",
+    id="authorization-boundary-v2",
     invariant_families=frozenset({"authority_safety"}),
     obligations=(
         ObligationTemplate(
@@ -203,12 +237,19 @@ AUTHORIZATION_PLAN = ProofPlan(
             available_actions=("differential_test",),
             decisive_rejection=True,
         ),
+        ObligationTemplate(
+            "capability",
+            "unauthorized_capability_is_gained",
+            "The policy bypass grants a capability over a protected asset.",
+            dependencies=("bypass",),
+            available_actions=("differential_test", "threat_model_query"),
+        ),
     ),
     decisive_evidence_kinds=frozenset({"authorization_differential"}),
 )
 
 TEMPORAL_MEMORY_PLAN = ProofPlan(
-    id="temporal-memory-safety-v1",
+    id="temporal-memory-safety-v2",
     invariant_families=frozenset({"temporal_safety"}),
     obligations=(
         ObligationTemplate(
@@ -218,10 +259,17 @@ TEMPORAL_MEMORY_PLAN = ProofPlan(
             available_actions=("lifetime_query",),
         ),
         ObligationTemplate(
+            "attacker_reachability",
+            "attacker_reaches_stale_use",
+            "An attacker-controlled path reaches the suspected stale use.",
+            available_actions=("taint_query", "reachability_query"),
+            decisive_rejection=True,
+        ),
+        ObligationTemplate(
             "stale_use",
             "dereference_occurs_outside_live_interval",
             "A reachable dereference occurs after release or before initialization.",
-            dependencies=("lifetime",),
+            dependencies=("lifetime", "attacker_reachability"),
             available_actions=("race_detector", "symbolic_execution"),
             decisive_rejection=True,
         ),
@@ -232,12 +280,19 @@ TEMPORAL_MEMORY_PLAN = ProofPlan(
             dependencies=("stale_use",),
             available_actions=("sanitizer_run", "race_detector"),
         ),
+        ObligationTemplate(
+            "security_boundary",
+            "temporal_violation_crosses_security_boundary",
+            "The temporal violation breaks a protected property in the threat model.",
+            dependencies=("runtime",),
+            available_actions=("threat_model_query", "bounded_model_judgment"),
+        ),
     ),
     decisive_evidence_kinds=frozenset({"sanitizer_uaf", "race_detector_violation"}),
 )
 
 STATE_MACHINE_PLAN = ProofPlan(
-    id="state-machine-safety-v1",
+    id="state-machine-safety-v2",
     invariant_families=frozenset({"state_machine_safety"}),
     obligations=(
         ObligationTemplate(
@@ -262,10 +317,11 @@ STATE_MACHINE_PLAN = ProofPlan(
             available_actions=("differential_test", "bounded_model_judgment"),
         ),
     ),
+    decisive_evidence_kinds=frozenset({"protocol_transition_violation"}),
 )
 
 CRYPTOGRAPHIC_PLAN = ProofPlan(
-    id="cryptographic-property-v1",
+    id="cryptographic-property-v2",
     invariant_families=frozenset({"cryptographic_safety"}),
     obligations=(
         ObligationTemplate(
@@ -300,7 +356,7 @@ CRYPTOGRAPHIC_PLAN = ProofPlan(
 )
 
 INJECTION_BOUNDARY_PLAN = ProofPlan(
-    id="injection-boundary-v1",
+    id="injection-boundary-v2",
     invariant_families=frozenset({"injection_safety"}),
     obligations=(
         ObligationTemplate(
@@ -324,12 +380,19 @@ INJECTION_BOUNDARY_PLAN = ProofPlan(
             dependencies=("encoding",),
             available_actions=("differential_test",),
         ),
+        ObligationTemplate(
+            "security_boundary",
+            "interpreter_structure_change_crosses_security_boundary",
+            "The interpreted-structure change grants an attacker capability.",
+            dependencies=("differential",),
+            available_actions=("threat_model_query", "bounded_model_judgment"),
+        ),
     ),
     decisive_evidence_kinds=frozenset({"injection_differential"}),
 )
 
 CONCURRENCY_RESOURCE_PLAN = ProofPlan(
-    id="concurrency-resource-v1",
+    id="concurrency-resource-v2",
     invariant_families=frozenset({"concurrency_safety", "resource_safety"}),
     obligations=(
         ObligationTemplate(
@@ -351,6 +414,13 @@ CONCURRENCY_RESOURCE_PLAN = ProofPlan(
             dependencies=("shared_state", "schedule_or_input"),
             available_actions=("race_detector", "schedule_perturbation", "load_test"),
             decisive_rejection=True,
+        ),
+        ObligationTemplate(
+            "security_boundary",
+            "shared_or_resource_violation_crosses_security_boundary",
+            "The race or bounded resource violation breaks a protected property.",
+            dependencies=("violation",),
+            available_actions=("threat_model_query", "bounded_model_judgment"),
         ),
     ),
     decisive_evidence_kinds=frozenset({"race_detector_violation", "bounded_resource_exhaustion"}),
@@ -375,6 +445,11 @@ class ProofPlanRegistry:
 
     def select(self, candidate: Candidate) -> list[ProofPlan]:
         families = set(candidate.invariant_families)
+        if candidate.proof_plan_ids:
+            unknown = sorted(set(candidate.proof_plan_ids) - set(self.plans))
+            if unknown:
+                raise KeyError("Candidate references unknown proof plans: " + ", ".join(unknown))
+            return [self.plans[plan_id] for plan_id in candidate.proof_plan_ids]
         if candidate.suspected_mechanism == "live_identifier_aliases_reserved_sentinel":
             selected_ids = ["representation-domain-collision-v1"]
             if "spatial_safety" in families:
@@ -382,11 +457,7 @@ class ProofPlanRegistry:
             return [self.plans[plan_id] for plan_id in selected_ids]
         if candidate.suspected_mechanism == "allocation_access_extent_contrast":
             return [self.plans["memory-write-v1"]]
-        selected = [
-            plan
-            for plan in self.plans.values()
-            if plan.invariant_families & families
-        ]
+        selected = [plan for plan in self.plans.values() if plan.invariant_families & families]
         return sorted(selected, key=lambda plan: plan.id)
 
     def instantiate(
@@ -415,11 +486,7 @@ class ProofPlanRegistry:
                 qualified = f"{plan.id}:{template.key}"
                 dependencies: list[str] = []
                 for dependency in template.dependencies:
-                    dependency_key = (
-                        dependency
-                        if ":" in dependency
-                        else f"{plan.id}:{dependency}"
-                    )
+                    dependency_key = dependency if ":" in dependency else f"{plan.id}:{dependency}"
                     target = placeholders.get(dependency_key)
                     if target is not None:
                         dependencies.append(target.logical_id)

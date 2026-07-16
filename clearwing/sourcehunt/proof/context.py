@@ -6,6 +6,7 @@ import json
 import re
 
 from .models import (
+    Assumption,
     Candidate,
     Claim,
     CompletenessManifest,
@@ -31,6 +32,8 @@ class ContextPacketBuilder:
         claims: list[Claim],
         completeness: CompletenessManifest,
         threat_model: ThreatModel | None = None,
+        assumptions: list[Assumption] | None = None,
+        evaluation_hints: dict[str, object] | None = None,
     ) -> ContextPacket:
         candidate_fact_ids = set(candidate.fact_ids)
         relevant_facts = [fact for fact in facts if fact.id in candidate_fact_ids]
@@ -42,11 +45,31 @@ class ContextPacketBuilder:
                 fact.id,
             )
         )
-        threat_payload = (
-            threat_model.model_dump(mode="json")
-            if threat_model is not None
-            else None
+        threat_payload = threat_model.model_dump(mode="json") if threat_model is not None else None
+        assumption_aliases = set(candidate.assumption_ids)
+        candidate_aliases = {candidate.id, candidate.logical_id}
+        relevant_assumptions = sorted(
+            (
+                assumption
+                for assumption in assumptions or []
+                if assumption.id in assumption_aliases
+                or assumption.logical_id in assumption_aliases
+                or candidate_aliases.intersection(assumption.required_by)
+            ),
+            key=lambda assumption: assumption.logical_id,
         )
+        assumption_summaries = [
+            {
+                "assumption_id": assumption.id,
+                "logical_id": assumption.logical_id,
+                "kind": assumption.kind,
+                "statement": assumption.statement,
+                "status": assumption.status,
+                "scope": assumption.scope,
+                "evidence_ids": assumption.evidence_ids,
+            }
+            for assumption in relevant_assumptions
+        ]
         excerpts: list[dict[str, object]] = []
         selected_fact_ids: list[str] = []
         token_count = self._estimate_tokens(
@@ -54,6 +77,8 @@ class ContextPacketBuilder:
                 {
                     "question": obligation.description + obligation.predicate,
                     "threat_model": threat_payload,
+                    "assumptions": assumption_summaries,
+                    "evaluation_hints": evaluation_hints or {},
                     "completeness": completeness.model_dump(mode="json"),
                     "permitted_outputs": [
                         "proven",
@@ -72,13 +97,8 @@ class ContextPacketBuilder:
                 "Context packet budget is too small for its mandatory threat "
                 "model and completeness manifest"
             )
-        candidate_aliases = {candidate.id, candidate.logical_id}
         relevant_claims = sorted(
-            (
-                claim
-                for claim in claims
-                if claim.subject in candidate_aliases
-            ),
+            (claim for claim in claims if claim.subject in candidate_aliases),
             key=lambda claim: (
                 -self._text_relevance(
                     f"{claim.predicate} {claim.object}",
@@ -88,9 +108,7 @@ class ContextPacketBuilder:
             ),
         )
         evidence_by_id = {
-            identifier: item
-            for item in evidence
-            for identifier in (item.id, item.logical_id)
+            identifier: item for item in evidence for identifier in (item.id, item.logical_id)
         }
         claim_ids: list[str] = []
         evidence_ids: list[str] = []
@@ -106,9 +124,7 @@ class ContextPacketBuilder:
                 "supporting_evidence_ids": claim.supporting_evidence_ids,
                 "contradicting_evidence_ids": claim.contradicting_evidence_ids,
             }
-            summary_tokens = self._estimate_tokens(
-                json.dumps(summary, sort_keys=True, default=str)
-            )
+            summary_tokens = self._estimate_tokens(json.dumps(summary, sort_keys=True, default=str))
             if token_count + summary_tokens > self.max_tokens:
                 continue
             claim_ids.append(claim.id)
@@ -133,9 +149,7 @@ class ContextPacketBuilder:
                 token_count += evidence_tokens
         for fact in relevant_facts:
             excerpt = self._fact_excerpt(fact)
-            excerpt_tokens = self._estimate_tokens(
-                json.dumps(excerpt, sort_keys=True, default=str)
-            )
+            excerpt_tokens = self._estimate_tokens(json.dumps(excerpt, sort_keys=True, default=str))
             if token_count + excerpt_tokens > self.max_tokens:
                 continue
             excerpts.append(excerpt)
@@ -147,14 +161,16 @@ class ContextPacketBuilder:
             candidate_id=candidate.logical_id,
             obligation_id=obligation.logical_id,
             question=(
-                f"{obligation.description}\n"
-                f"Resolve only this predicate: {obligation.predicate}"
+                f"{obligation.description}\nResolve only this predicate: {obligation.predicate}"
             ),
             fact_ids=selected_fact_ids,
             evidence_ids=evidence_ids,
             claim_ids=claim_ids,
+            assumption_ids=[assumption.id for assumption in relevant_assumptions],
             evidence_summaries=evidence_summaries,
             claim_summaries=claim_summaries,
+            assumption_summaries=assumption_summaries,
+            evaluation_hints=evaluation_hints or {},
             threat_model=threat_payload,
             excerpts=excerpts,
             permitted_outputs=[
@@ -223,9 +239,7 @@ class ContextPacketBuilder:
             "kind": fact.kind,
             "subject": fact.subject,
             "predicate": fact.predicate,
-            "location": (
-                fact.location.model_dump(mode="json") if fact.location else None
-            ),
+            "location": (fact.location.model_dump(mode="json") if fact.location else None),
             "properties": properties,
             "provenance": fact.provenance.producer,
         }
