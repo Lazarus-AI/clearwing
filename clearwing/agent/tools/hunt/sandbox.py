@@ -46,6 +46,8 @@ class HunterContext:
     default_sanitizers: tuple = ("asan", "ubsan")
     findings_pool: object | None = None  # FindingsPool (avoiding circular import)
     trajectory_dir: object | None = None  # Path override for transcript output
+    work_item_id: str | None = None  # Stable run-local join key for evaluation
+    instrumentation: object | None = None  # SourceHuntInstrumentation, kept generic
     exploit_result: object | None = None  # ExploiterResult slot for exploit agent
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
 

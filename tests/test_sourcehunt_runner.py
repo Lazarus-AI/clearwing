@@ -344,6 +344,13 @@ class TestEvidenceLevels:
         assert any(f.get("evidence_level") == "static_corroboration" for f in result.findings), (
             f"no static_corroboration findings: {[f.get('evidence_level') for f in result.findings]}"
         )
+        static_findings = [
+            finding for finding in result.findings if finding.discovered_by == "source_analyzer"
+        ]
+        assert static_findings
+        for finding in static_findings:
+            assert len(finding.id) == len("static-") + 8
+            assert len(finding.extra["stable_finding_id"]) == len("static-") + 16
 
     def test_every_finding_has_evidence_level(self, tmp_path):
         runner = SourceHuntRunner(

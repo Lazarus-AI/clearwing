@@ -120,6 +120,30 @@ DEFAULT_ROUTES = [
         model="claude-opus-4-6",
         reason="Exploit generation is hardest reasoning",
     ),
+    ModelRoute(
+        task="proof_local",
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        reason="Small-model tier for bounded atomic proof obligations",
+    ),
+    ModelRoute(
+        task="proof_frontier",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        reason="Escalation tier for ambiguities that survive bounded local review",
+    ),
+    ModelRoute(
+        task="proof_falsifier",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Independent tier for finite counterexample searches",
+    ),
+    ModelRoute(
+        task="proof_exploration",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Bounded exploratory lane for unmodeled vulnerability hypotheses",
+    ),
 ]
 
 
@@ -172,7 +196,12 @@ class ProviderManager:
     # --- Constructors -----------------------------------------------------
 
     @classmethod
-    def for_endpoint(cls, endpoint: LLMEndpoint) -> ProviderManager:
+    def for_endpoint(
+        cls,
+        endpoint: LLMEndpoint,
+        *,
+        task_model_overrides: dict[str, str] | None = None,
+    ) -> ProviderManager:
         """Build a ProviderManager that routes every task to one endpoint.
 
         The common case: operator sets `--base-url https://openrouter.ai/api/v1
@@ -184,7 +213,10 @@ class ProviderManager:
         """
         return cls(
             endpoint=endpoint,
-            task_model_overrides=_default_task_model_overrides(endpoint),
+            task_model_overrides={
+                **_default_task_model_overrides(endpoint),
+                **(task_model_overrides or {}),
+            },
         )
 
     @classmethod

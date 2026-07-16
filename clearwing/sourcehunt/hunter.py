@@ -26,9 +26,11 @@ from clearwing.agent.tools.hunt import (
 )
 from clearwing.core.events import EventBus, EventType
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
+from clearwing.llm.budget import spend_metadata
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
+from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
@@ -216,6 +218,11 @@ def _memory_safety_heuristic_hints(
 @dataclass
 class HunterTrajectoryLogger:
     path: Path
+    run_id: str = ""
+    work_item_id: str = ""
+    file_path: str = ""
+    instrumentation: Any = None
+    sequence: int = 0
 
     @classmethod
     def for_hunter(
@@ -228,7 +235,13 @@ class HunterTrajectoryLogger:
     ) -> HunterTrajectoryLogger:
         path = _trajectory_path(ctx)
         path.parent.mkdir(parents=True, exist_ok=True)
-        logger_obj = cls(path=path)
+        logger_obj = cls(
+            path=path,
+            run_id=ctx.session_id or "",
+            work_item_id=ctx.work_item_id or "",
+            file_path=ctx.file_path or "",
+            instrumentation=ctx.instrumentation,
+        )
         logger_obj.log(
             "start",
             {
@@ -251,13 +264,80 @@ class HunterTrajectoryLogger:
         return logger_obj
 
     def log(self, event: str, payload: dict[str, Any]) -> None:
+        self.sequence += 1
+        model_call_id: str | None = None
+        tool_action_id: str | None = None
+        message = payload.get("message")
+        if (
+            event == "message"
+            and isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and ("usage" in payload or payload.get("model"))
+        ):
+            model_call_id = stable_run_id(
+                "modelcall",
+                {
+                    "run_id": self.run_id,
+                    "work_item_id": self.work_item_id,
+                    "step": payload.get("step", 0),
+                },
+            )
+        tool_call = payload.get("tool_call")
+        if event in {"tool_call", "tool_result"} and isinstance(tool_call, dict):
+            tool_action_id = stable_run_id(
+                "toolaction",
+                {
+                    "run_id": self.run_id,
+                    "work_item_id": self.work_item_id,
+                    "step": payload.get("step", 0),
+                    "call_id": tool_call.get("call_id", ""),
+                    "name": tool_call.get("fn_name", ""),
+                    "arguments": tool_call.get("fn_arguments_json")
+                    or tool_call.get("fn_arguments"),
+                },
+            )
+        identifier = stable_run_id(
+            "trajectory",
+            {
+                "run_id": self.run_id,
+                "work_item_id": self.work_item_id,
+                "sequence": self.sequence,
+                "event": event,
+            },
+        )
         record = {
+            "schema_version": 1,
+            "id": identifier,
+            "run_id": self.run_id,
+            "work_item_id": self.work_item_id or None,
+            "model_call_id": model_call_id,
+            "tool_action_id": tool_action_id,
+            "sequence": self.sequence,
             "ts": time.time(),
             "event": event,
             **payload,
         }
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        if self.instrumentation is not None and (model_call_id or tool_action_id):
+            try:
+                self.instrumentation.record(
+                    "model_call" if model_call_id else "tool_action",
+                    stage="hunt",
+                    status=("completed" if event in {"message", "tool_result"} else "started"),
+                    files=[self.file_path],
+                    work_item_id=self.work_item_id or None,
+                    model_call_id=model_call_id,
+                    tool_action_id=tool_action_id,
+                    metadata={
+                        "trajectory_event_id": identifier,
+                        "step": payload.get("step", 0),
+                        "model": payload.get("model", ""),
+                        "event": event,
+                    },
+                )
+            except Exception:
+                logger.debug("Sourcehunt trajectory instrumentation failed", exc_info=True)
 
 
 # --- System prompts ---------------------------------------------------------
@@ -791,33 +871,16 @@ Web frameworks have many legitimate idioms that look dangerous. When in doubt, c
 TRACE_BUILDING_INSTRUCTIONS = """
 ## Building a Vulnerability Trace
 
-As you investigate, call `record_trace_step` at each key location in the
-dataflow AFTER reading the code with `read_source_file`. These streamed
-steps are echoed back and shown live for visibility — they are NOT stored
-on the finding.
+Call `record_trace_step` after each relevant `read_source_file` result.
+Each accepted step immediately becomes authoritative investigation state
+and is automatically attached to the next `record_finding` call. Do not
+reconstruct the trace from memory when reporting.
 
-When you submit the finding you MUST pass the complete, authoritative trace
-as the `trace` argument to `record_finding`. That is what gets stored and
-independently re-verified. record_finding does NOT harvest your streamed
-steps — assemble the full trace explicitly.
-
-Workflow:
-1. read_source_file → find attacker-controlled entry point
-2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")   # live only
-3. read_source_file → follow the tainted data through calls/assignments
-4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")      # live only
-5. record_trace_step(..., note="SINK: vulnerable operation on tainted data")   # live only
-6. record_finding(
-     ...,
-     trace={
-       "steps": [
-         {"file": "...", "line": 12, "function": "...", "code_snippet": "...", "note": "ENTRY: ..."},
-         {"file": "...", "line": 40, "function": "...", "code_snippet": "...", "note": "PROPAGATION: ..."},
-         {"file": "...", "line": 88, "function": "...", "code_snippet": "...", "note": "SINK: ..."}
-       ],
-       "summary": "attacker-controlled X flows to Y unchecked"
-     }
-   )
+Record, in order:
+1. The attacker-controlled entry.
+2. Each relevant propagation, transformation, and path condition.
+3. The security-relevant sink.
+4. The finding, after the trace is coherent.
 
 Rules:
 - code_snippet in each step MUST come from a read_source_file result. Do
@@ -827,42 +890,18 @@ Rules:
 - Assumptions must be consistent with your PoC inputs. If your trace says
   "field==2" but your PoC sets "field=1", you have a contradiction —
   resolve it before calling record_finding.
-- The `trace` passed to record_finding must contain at least one ENTRY step
-  and one SINK step.
+- The streamed trace must contain at least one ENTRY step and one SINK step.
 """
 
 
 DEEP_TRACE_INSTRUCTIONS = """
 ## Building a Vulnerability Trace
 
-As you investigate, call `record_trace_step` at each key location in the
-dataflow AFTER reading the code with `read_file`. Each step is echoed back
-into this conversation and shown live, so the growing trace stays part of
-the message sequence you reason over. These streamed steps are for
-visibility only — they are NOT stored on the finding.
-
-When you submit the finding you MUST pass the complete, authoritative trace
-as the `trace` argument to `record_finding`. That is what gets stored and
-independently re-verified. record_finding does NOT harvest your streamed
-steps — assemble the full trace explicitly.
-
-Workflow:
-1. read_file → find attacker-controlled entry point
-2. record_trace_step(file, line, function, code_snippet, note="ENTRY: ...")   # live only
-3. read_file → follow the tainted data through calls/assignments
-4. record_trace_step(..., note="PROPAGATION: tainted var X flows to ...")      # live only
-5. record_trace_step(..., note="SINK: vulnerable operation on tainted data")   # live only
-6. record_finding(
-     ...,
-     trace={
-       "steps": [
-         {"file": "...", "line": 12, "function": "...", "code_snippet": "...", "note": "ENTRY: ..."},
-         {"file": "...", "line": 40, "function": "...", "code_snippet": "...", "note": "PROPAGATION: ..."},
-         {"file": "...", "line": 88, "function": "...", "code_snippet": "...", "note": "SINK: ..."}
-       ],
-       "summary": "attacker-controlled X flows to Y unchecked"
-     }
-   )
+Call `record_trace_step` after each relevant `read_file` result. Each
+accepted step immediately becomes authoritative investigation state and is
+automatically attached to the next `record_finding` call. Record the entry,
+propagation and conditions, then the sink. Do not reconstruct the path from
+memory at reporting time.
 
 Rules:
 - code_snippet in each step MUST come from a read_file result. Do not
@@ -872,8 +911,7 @@ Rules:
 - Assumptions must be consistent with your PoC inputs. If your trace says
   "field==2" but your PoC sets "field=1", resolve the contradiction before
   calling record_finding.
-- The `trace` passed to record_finding must contain at least one ENTRY step
-  and one SINK step.
+- The streamed trace must contain at least one ENTRY step and one SINK step.
 """
 
 
@@ -1126,8 +1164,7 @@ def _build_unconstrained_prompt(
     # tracing on read_source_file (which deep hunters don't have), so route the
     # deep path to the read_file-aware variant.
     prompt += "\n" + (
-        DEEP_TRACE_INSTRUCTIONS if agent_mode == "deep"
-        else TRACE_BUILDING_INSTRUCTIONS
+        DEEP_TRACE_INSTRUCTIONS if agent_mode == "deep" else TRACE_BUILDING_INSTRUCTIONS
     )
 
     return prompt
@@ -1402,11 +1439,20 @@ class NativeHunter:
                     transcript_summary=last_assistant_text[-500:],
                 )
 
-            response = await self.llm.achat(
-                messages=messages,
-                system=self.prompt,
-                tools=self.tools,
+            model_call_id = stable_run_id(
+                "modelcall",
+                {
+                    "run_id": self.ctx.session_id or "",
+                    "work_item_id": self.ctx.work_item_id or "",
+                    "step": step,
+                },
             )
+            with spend_metadata(model_call_id=model_call_id):
+                response = await self.llm.achat(
+                    messages=messages,
+                    system=self.prompt,
+                    tools=self.tools,
+                )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate
@@ -1450,11 +1496,14 @@ class NativeHunter:
 
             last_assistant_text = response.first_text or ""
             if last_assistant_text:
-                EventBus().emit(EventType.HUNTER_STATUS, {
-                    "hunter_target": self.ctx.file_path,
-                    "text": last_assistant_text,
-                    "step": step,
-                })
+                EventBus().emit(
+                    EventType.HUNTER_STATUS,
+                    {
+                        "hunter_target": self.ctx.file_path,
+                        "text": last_assistant_text,
+                        "step": step,
+                    },
+                )
             tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
                 messages.append(
@@ -1598,27 +1647,31 @@ class NativeHunter:
                     "error": f"missing required arguments: {', '.join(sorted(missing))}. "
                     f"Required: {', '.join(sorted(required))}. Please retry with all required params."
                 }
-            sandbox_id = (
-                self.ctx.sandbox.short_id if self.ctx.sandbox else None
-            )
+            sandbox_id = self.ctx.sandbox.short_id if self.ctx.sandbox else None
             if tool_call.fn_name in ("read_source_file", "read_file"):
                 offset = arguments.get("offset", 0)
                 limit = arguments.get("limit", 500)
-                EventBus().emit(EventType.TOOL_START, {
-                    "tool_name": tool_call.fn_name,
-                    "file": arguments.get("path", ""),
-                    "start_line": arguments.get("start_line", offset + 1),
-                    "end_line": arguments.get("end_line", offset + limit),
-                    "hunter_target": self.ctx.file_path,
-                    "sandbox_id": sandbox_id,
-                })
+                EventBus().emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool_name": tool_call.fn_name,
+                        "file": arguments.get("path", ""),
+                        "start_line": arguments.get("start_line", offset + 1),
+                        "end_line": arguments.get("end_line", offset + limit),
+                        "hunter_target": self.ctx.file_path,
+                        "sandbox_id": sandbox_id,
+                    },
+                )
             elif tool_call.fn_name == "execute":
-                EventBus().emit(EventType.TOOL_START, {
-                    "tool_name": "execute",
-                    "command": arguments.get("command", ""),
-                    "hunter_target": self.ctx.file_path,
-                    "sandbox_id": sandbox_id,
-                })
+                EventBus().emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool_name": "execute",
+                        "command": arguments.get("command", ""),
+                        "hunter_target": self.ctx.file_path,
+                        "sandbox_id": sandbox_id,
+                    },
+                )
             return await tool.ainvoke(arguments)
         except Exception as exc:
             logger.warning(

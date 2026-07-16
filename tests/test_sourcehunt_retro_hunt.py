@@ -197,6 +197,22 @@ class TestHuntEndToEnd:
         assert f["file"] == "src/codec.c"
         assert f["line_number"] == 42
 
+        repeated = hunter._hit_to_finding(
+            {
+                "file": "src/codec.c",
+                "line": 42,
+                "check_id": "retro-hunt-memcpy",
+                "code_snippet": "memcpy(buf, input, user_len);",
+                "severity": "ERROR",
+            },
+            "CVE-2024-TEST",
+            {"rule_id": "retro-hunt-memcpy", "description": "unchecked memcpy length"},
+        )
+        assert repeated.id != f.id
+        assert len(f.id) == len("retro-") + 8
+        assert repeated.extra["stable_finding_id"] == f.extra["stable_finding_id"]
+        assert len(f.extra["stable_finding_id"]) == len("retro-") + 16
+
     def test_hunt_with_semgrep_unavailable(self, tmp_path: Path):
         patch_file = tmp_path / "cve.patch"
         patch_file.write_text("--- a/x.c\n+++ b/x.c\n")

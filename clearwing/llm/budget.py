@@ -100,6 +100,7 @@ class SpendLedger:
         input_price_per_million: float | None = None,
         output_price_per_million: float | None = None,
         default_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        manifest_filename: str = "manifest.json",
     ) -> None:
         if not math.isfinite(limit_usd) or limit_usd < 0:
             raise BudgetConfigurationError("LLM budget must be a finite value >= 0")
@@ -115,6 +116,14 @@ class SpendLedger:
                 raise BudgetConfigurationError(f"{name} must be a finite value >= 0")
         if default_max_output_tokens < 1:
             raise BudgetConfigurationError("default_max_output_tokens must be >= 1")
+        if (
+            not manifest_filename
+            or Path(manifest_filename).name != manifest_filename
+            or manifest_filename in {".", ".."}
+        ):
+            raise BudgetConfigurationError(
+                "manifest_filename must be a safe session-local filename"
+            )
 
         self.limit_usd = float(limit_usd)
         self.session_id = session_id
@@ -146,7 +155,7 @@ class SpendLedger:
         session_dir = Path(output_dir) / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = session_dir / "spend-ledger.jsonl"
-        self.manifest_path = session_dir / "manifest.json"
+        self.manifest_path = session_dir / manifest_filename
         with self._lock:
             self._persist_event_locked(
                 {
@@ -553,6 +562,7 @@ class SpendLedger:
             "total_tokens": self._input_tokens + self._output_tokens,
             "call_count": len(self._records),
             "ledger_path": str(self.ledger_path),
+            "spend_summary_path": str(self.manifest_path),
         }
 
     def _persist_snapshot_locked(self) -> None:

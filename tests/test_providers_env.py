@@ -340,6 +340,29 @@ class TestProviderManagerForEndpoint:
         assert got.model_name == "anthropic/claude-opus-4"
         assert got.provider_name == "openai"
 
+    def test_for_endpoint_can_route_proof_tiers_to_distinct_models(self, clean_env):
+        endpoint = LLMEndpoint(
+            provider="openai_compat",
+            model="frontier-model",
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+            source="cli",
+        )
+        manager = ProviderManager.for_endpoint(
+            endpoint,
+            task_model_overrides={
+                "proof_local": "local-35b",
+                "proof_frontier": "frontier-model",
+            },
+        )
+
+        local = manager.get_native_client("proof_local")
+        frontier = manager.get_native_client("proof_frontier")
+
+        assert local.model_name == "local-35b"
+        assert frontier.model_name == "frontier-model"
+        assert local is not frontier
+
     def test_for_endpoint_get_route_info_shows_global(self, clean_env):
         endpoint = LLMEndpoint(
             provider="openai_compat",

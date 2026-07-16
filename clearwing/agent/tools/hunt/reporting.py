@@ -18,6 +18,7 @@ import uuid
 from clearwing.core.events import EventBus, EventType
 from clearwing.findings.types import TraceStep, VulnerabilityTrace
 from clearwing.llm import NativeToolSpec
+from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.state import Finding
 
 from .sandbox import HunterContext
@@ -53,10 +54,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # it would reject every trace step. Skip the guard in deep mode;
         # downstream validators independently re-verify the assembled trace.
         if ctx.agent_mode != "deep" and file not in ctx.files_read:
-            return (
-                f"ERROR: file '{file}' has not been read yet. "
-                "Call read_source_file first."
-            )
+            return f"ERROR: file '{file}' has not been read yet. Call read_source_file first."
         step = TraceStep(
             file=file,
             line=line,
@@ -66,14 +64,17 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         )
         ctx.trace_steps.append(step)
         n = len(ctx.trace_steps)
-        EventBus().emit(EventType.TRACE_STEP, {
-            "hunter_target": ctx.file_path,
-            "file": file,
-            "line": line,
-            "function": function,
-            "note": note,
-            "step_number": n,
-        })
+        EventBus().emit(
+            EventType.TRACE_STEP,
+            {
+                "hunter_target": ctx.file_path,
+                "file": file,
+                "line": line,
+                "function": function,
+                "note": note,
+                "step_number": n,
+            },
+        )
         # Echo the full accumulated trace back into the conversation so the
         # growing dataflow path stays part of the message sequence the model
         # reasons over before calling record_finding.
@@ -109,9 +110,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         The hunter MUST call this tool to report a vulnerability. Findings
         are appended to ctx.findings and surfaced via the hunter's output.
 
-        The `trace` argument is the authoritative vulnerability_trace stored
-        on the finding. Steps streamed via record_trace_step are live-panel
-        telemetry only and are NOT persisted here.
+        Steps emitted by `record_trace_step` are the authoritative trace and
+        are persisted on the finding. The optional `trace` argument remains a
+        compatibility fallback for callers that cannot stream steps.
 
         Args:
             file: Repo-relative file path where the finding lives.
@@ -133,28 +134,25 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             crypto_attack_class: Attack class (e.g. timing_side_channel,
                 parameter_validation, nonce_reuse, padding_oracle).
             key_material_exposed: Description of key material at risk.
-            trace: Authoritative dataflow trace as {"steps": [...],
-                "summary": "..."}, ordered from attacker-controlled entry to
-                the vulnerable sink. Each step is
-                {file, line, function?, code_snippet?, note?}.
+            trace: Optional compatibility trace or summary. Streamed trace
+                steps take precedence when present.
         """
-        # Build the authoritative VulnerabilityTrace from the explicit `trace`
-        # argument. Steps streamed via record_trace_step are live-panel
-        # telemetry only — record_finding does NOT harvest them, so the model
-        # must assemble and pass the full trace here.
-        if not trace or not trace.get("steps"):
-            return (
-                "ERROR: record_finding requires a `trace` argument with at "
-                "least one step — an ordered path from attacker-controlled "
-                "entry to the vulnerable sink. Steps you streamed via "
-                "record_trace_step are shown live but are NOT stored. "
-                'Assemble and pass the full trace: trace={"steps": [{"file": '
-                '..., "line": ..., "note": "ENTRY: ..."}, ...], "summary": "..."}.'
-            )
+        explicit_steps = trace.get("steps", []) if trace else []
         try:
+            authoritative_steps = (
+                list(ctx.trace_steps)
+                if ctx.trace_steps
+                else [TraceStep(**step) for step in explicit_steps]
+            )
+            if not authoritative_steps:
+                return (
+                    "ERROR: record_finding requires at least one trace step. "
+                    "Call record_trace_step while reading the entry-to-sink path, "
+                    "or pass a compatibility trace."
+                )
             vuln_trace = VulnerabilityTrace(
-                steps=[TraceStep(**s) for s in trace["steps"]],
-                summary=trace.get("summary", ""),
+                steps=authoritative_steps,
+                summary=(trace or {}).get("summary", ""),
             )
         except Exception as exc:
             return (
@@ -162,11 +160,29 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "`file` and `line`; optional `function`, `code_snippet`, `note`."
             )
         trace_dict = vuln_trace.model_dump()
-        # Reset the live-panel accumulator so the next finding's streamed trace
-        # starts fresh (these steps were never persisted onto the finding).
+        # Reset only after the authoritative steps are stored on the finding.
         ctx.trace_steps.clear()
 
+        stable_finding_id = stable_run_id(
+            "hunter",
+            {
+                "run_id": ctx.session_id or "",
+                "work_item_id": ctx.work_item_id or "",
+                "file": file,
+                "line": line_number,
+                "type": finding_type,
+                "cwe": cwe,
+                "description": description,
+                "trace": trace_dict,
+            },
+        )
+        finding_metadata = {"stable_finding_id": stable_finding_id}
+        if ctx.work_item_id:
+            finding_metadata["work_item_id"] = ctx.work_item_id
+
         finding = Finding(
+            # Keep the public legacy identifier shape stable. Evaluation and
+            # instrumentation use the deterministic identifier in ``extra``.
             id=f"hunter-{uuid.uuid4().hex[:8]}",
             file=file,
             line_number=line_number,
@@ -187,19 +203,25 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             crypto_attack_class=crypto_attack_class or None,
             key_material_exposed=key_material_exposed or None,
             vulnerability_trace=trace_dict,
+            extra=finding_metadata,
         )
         ctx.findings.append(finding)
-        EventBus().emit(EventType.FINDING_RECORDED, {
-            "file": file,
-            "line_number": line_number,
-            "finding_type": finding_type,
-            "severity": severity,
-            "cwe": cwe,
-            "description": description,
-            "confidence": confidence,
-            "evidence_level": evidence_level,
-            "hunter_target": ctx.file_path,
-        })
+        EventBus().emit(
+            EventType.FINDING_RECORDED,
+            {
+                "finding_id": finding.id,
+                "stable_finding_id": stable_finding_id,
+                "file": file,
+                "line_number": line_number,
+                "finding_type": finding_type,
+                "severity": severity,
+                "cwe": cwe,
+                "description": description,
+                "confidence": confidence,
+                "evidence_level": evidence_level,
+                "hunter_target": ctx.file_path,
+            },
+        )
         trace_msg = f", trace={len(trace_dict['steps'])} steps" if trace_dict else ""
         return (
             f"Finding recorded: {finding_type} at {file}:{line_number} "
@@ -233,9 +255,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     },
                     "code_snippet": {
                         "type": "string",
-                        "description": (
-                            "Exact code from read_source_file (do NOT fabricate)"
-                        ),
+                        "description": ("Exact code from read_source_file (do NOT fabricate)"),
                         "default": "",
                     },
                     "note": {
@@ -276,11 +296,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "trace": {
                         "type": "object",
                         "description": (
-                            "Authoritative dataflow trace: an ordered path from "
-                            "attacker-controlled entry to the vulnerable sink. "
-                            "Stored on the finding and independently re-verified. "
-                            "Steps streamed via record_trace_step are live-only "
-                            "and are NOT persisted."
+                            "Optional compatibility dataflow trace. Steps "
+                            "streamed via record_trace_step are authoritative "
+                            "and automatically persisted on the finding."
                         ),
                         "properties": {
                             "steps": {
@@ -338,7 +356,6 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                     "severity",
                     "cwe",
                     "description",
-                    "trace",
                 ],
                 "additionalProperties": False,
             },
