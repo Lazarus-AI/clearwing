@@ -91,11 +91,8 @@ docs = [
     "mkdocs-material>=9.4.0",
     "mkdocstrings[python]>=0.24.0",
 ]
-inspect-ai = [
-    "inspect-ai>=0.3.0",
-]
 all = [
-    "clearwing[metasploit,browser,vector,dev,docs,inspect-ai,semgrep]",
+    "clearwing[metasploit,browser,vector,dev,docs,semgrep]",
 ]
 
 [project.urls]
@@ -205,10 +202,3 @@ module = [
 ]
 disallow_untyped_defs = true
 warn_unused_ignores = true
-
-[dependency-groups]
-dev = [
-    "ruff>=0.15.10",
-    "inspect-ai>=0.3.246",
-    "openai>=2.45.0",
-]

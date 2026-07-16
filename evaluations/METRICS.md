@@ -7,8 +7,8 @@
 
 ## What exists today
 
-`SourceHuntResult` already has `tokens_used` and `duration_seconds` — they just aren't
-forwarded to `state.metadata` in `evaluate.py`.
+`SourceHuntResult` already has `tokens_used` and `duration_seconds`; the native
+evaluation harness writes both into each result's `metrics` object.
 
 `NativeHunter.arun()` tracks `step` internally and logs it, but doesn't return it in
 `HunterRunResult`. `HunterPool` accumulates `cost_usd` per tier but not steps.
@@ -31,10 +31,5 @@ forwarded to `state.metadata` in `evaluate.py`.
 - Accumulate subsystem hunter steps from `HunterRunResult.steps_taken`
 
 ### `evaluations/evaluate.py`
-In `dynamic_runner_solver`, after `result = await runner.arun()`, add:
-```python
-state.metadata["tokens_used"] = result.tokens_used
-state.metadata["duration_seconds"] = result.duration_seconds
-state.metadata["steps_taken"] = result.total_steps
-```
-Both `solve()` callsites need this.
+- Add `"steps_taken"` to the `METRICS` tuple once it exists on
+  `SourceHuntResult`; the harness serializes every named field automatically.
