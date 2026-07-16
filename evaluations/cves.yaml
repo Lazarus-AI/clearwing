@@ -65,7 +65,7 @@
   files:
     - src/Serializer/Rules.php
   sourcehunt:
-    subsystem: src
+    subsystem: src/Serializer
   vuln_class: >-
     CWE-79 Improper Neutralization of Input During Web Page Generation (namespace attribute
     values written unencoded during HTML serialization bypass XSS sanitizer)
@@ -323,6 +323,8 @@
   fix_pr: https://github.com/go-gitea/gitea/pull/38151
   files:
     - routers/private/hook_pre_receive.go
+  sourcehunt:
+    subsystem: routers/private
   vuln_class: >-
     CWE-863 Incorrect Authorization (per-ref permission check bypassed by
     cross-ref result caching in a single push session)
@@ -381,6 +383,8 @@
   fix_commit: 54c3276d871023da266d4ed3ceaee7e8d71d0b04
   files:
     - src/parser_common.c
+  sourcehunt:
+    subsystem: src
   vuln_class: >-
     CWE-416 Use After Free (stale linked-list head pointer written after node
     freed in lyd_parser_set_data_flags)
@@ -438,6 +442,8 @@
   fix_commit: d7508ebcd82842a691ae4941e5104d14240a89ae
   files:
     - libfreerdp/gdi/gfx.c
+  sourcehunt:
+    subsystem: libfreerdp/gdi
   vuln_class: >-
     CWE-122 Heap-based Buffer Overflow (validated clamped rect dimensions but
     copied using unclamped cache entry dimensions, writing past surface allocation)
@@ -491,6 +497,8 @@
   fix_commit: 0358817ec74aeca654f83e7709c7720b14c5db59
   files:
     - src/pkcs15init/profile.c
+  sourcehunt:
+    subsystem: src/pkcs15init
   vuln_class: >-
     CWE-121 / CWE-122 Stack-based and Heap-based Buffer Overflow (unbounded
     memcpy into a fixed-size 32-byte stack buffer, then a second memcpy into a
@@ -548,6 +556,8 @@
   files:
     - wolfcrypt/src/ecc.c
     - wolfcrypt/src/asn.c
+  sourcehunt:
+    subsystem: wolfcrypt/src
   vuln_class: >-
     CWE-295 Improper Certificate Validation (missing lower-bound hash size and
     signature OID/key-type cross-check before ECDSA verify)
@@ -661,6 +671,8 @@
   fix_commit: 9fd97f8cfdc2c0be214998de3b2b55c8edf6c7ac
   files:
     - crypto/cms/cms_enc.c
+  sourcehunt:
+    subsystem: crypto/cms
   vuln_class: >-
     CWE-354 Improper Validation of Integrity Check Value (AEAD tag length not
     bounded and non-AEAD cipher accepted in AuthEnvelopedData decryption path)
@@ -714,6 +726,8 @@
   files:
     - crypto/cms/cms_env.c
     - crypto/pkcs7/pk7_doit.c
+  sourcehunt:
+    subsystem: crypto/cms
   vuln_class: >-
     CWE-514 Covert Channel (RSA PKCS#1 v1.5 implicit rejection deliberately
     disabled in CMS/PKCS7 decryption paths, creating a Bleichenbacher-style
@@ -777,6 +791,8 @@
   fix_pr: https://github.com/wolfSSL/wolfssl/pull/10116
   files:
     - src/dtls13.c
+  sourcehunt:
+    subsystem: src
   vuln_class: >-
     CWE-197 Numeric Truncation Error / CWE-787 Out-of-bounds Write
     (word16 cast of ACK record-number list length causes undersized allocation leading to heap overflow)
@@ -830,6 +846,8 @@
   fix_release: https://github.com/firecracker-microvm/firecracker/releases/tag/v1.15.1
   files:
     - src/vmm/src/devices/virtio/transport/pci/common_config.rs
+  sourcehunt:
+    subsystem: src/vmm/src/devices/virtio
   vuln_class: >-
     CWE-787 Out-of-bounds Write / CWE-369 Divide By Zero (virtio PCI common
     config allows queue register writes after device activation, bypassing
@@ -892,6 +910,8 @@
   files:
     - pkix/src/main/java/org/bouncycastle/operator/jcajce/JcaContentVerifierProviderBuilder.java
     - pkix/src/test/java/org/bouncycastle/cert/cmp/test/AllTests.java
+  sourcehunt:
+    subsystem: pkix/src/main/java/org/bouncycastle/operator
   vuln_class: >-
     CWE-347 Improper Verification of Cryptographic Signature (composite
     signature verifier returns success when presented with an empty signature
@@ -945,6 +965,8 @@
   fix_commit: 61f428a2fc6671ede184a19f71e6e495f0689621
   files:
     - crypto/aes/asm/aes-cfb-avx512.pl
+  sourcehunt:
+    subsystem: crypto/aes/asm
   vuln_class: >-
     CWE-125 Out-of-bounds Read (unmasked SIMD load reads past input buffer on partial blocks)
   title: >-
