@@ -25,6 +25,7 @@ from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
 
+from .discovery import build_semgrep_tool
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext
@@ -107,6 +108,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
 
     reporting_tools = build_reporting_tools(ctx)
 
+    semgrep_tool = build_semgrep_tool(ctx)
+
     return [
         NativeToolSpec(
             name="execute",
@@ -133,6 +136,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             schema=WriteFileInput.model_json_schema(),
             handler=write_file,
         ),
+        semgrep_tool,
         *reporting_tools,
         *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
     ]

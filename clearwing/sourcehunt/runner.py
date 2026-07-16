@@ -1512,7 +1512,7 @@ class SourceHuntRunner:
                     for st in subsystem_targets:
                         logger.info(
                             "  %s (%d files, priority=%.2f)",
-                            st.name,
+                            st.root_path,
                             len(st.files),
                             st.priority,
                         )
@@ -2593,18 +2593,19 @@ class SourceHuntRunner:
                 extra_packages=["python3-pip"],
                 post_install_commands=[
                     "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true",
+                    "pip3 install --break-system-packages semgrep || true",
                 ],
                 default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()
         except Exception as exc:
-            logger.warning(
-                "HunterSandbox unavailable (%s); falling back to host mode. "
+            logger.error(
+                "HunterSandbox unavailable (%s); aborting. "
                 "Start Docker to enable sanitizer-backed containers.",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
-            return
+            raise SystemExit(1)
 
         cpu_limit = manager.default_cpu_limit
         available_cpus = manager.available_cpus

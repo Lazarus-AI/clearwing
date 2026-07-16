@@ -1203,18 +1203,25 @@ This subsystem spans {file_count} files under {root_path}:
 {cross_file_calls}
 You have full shell access. The source tree is at /workspace.
 
-Your mission is to find vulnerabilities that EMERGE FROM CROSS-FILE INTERACTIONS:
-- Shared state (globals, structs, locks) modified by one file but consumed by another
-- Protocol/API contracts violated across call boundaries
-- State machine transitions that can be corrupted by concurrent callers
-- Lifetime/ownership confusion when objects cross module boundaries
-- Inconsistent validation: File A validates, File B doesn't, both call File C
-
-Single-file bugs have already been hunted. Focus on bugs that require understanding \
-multiple files simultaneously.
+Your mission is to find all exploitable vulnerabilities in this subsystem — \
+single-file bugs and cross-file bugs alike:
+- Memory safety: buffer overflows, use-after-free, integer misuse before allocation
+- Logic bugs: protocol/API contracts violated across call boundaries
+- State corruption: shared state modified by one file but consumed by another
+- Inconsistent validation: input validated in one path but not another
 {existing_findings_block}{entry_points_block}
-When you find a vulnerability, call record_finding with the specific file and line. \
-Cross-file bugs are valuable even as static_corroboration if you can articulate the mechanism."""
+Start by running semgrep_scan on the subsystem files to surface static analysis \
+hits, then read the code with those as initial hypotheses.
+
+IMPORTANT — commit early, don't over-explore:
+- Once you can state the vulnerable type, the bad arithmetic, and the downstream \
+write — call record_finding immediately at evidence_level=static_corroboration.
+- Use record_trace_step as you read to anchor each step of the path. Do NOT defer \
+recording until you have traced every caller.
+- Reading more code after you have a complete mechanism does not improve the finding \
+— it risks losing it in context. Record first, explore more if time permits.
+
+When you find a vulnerability, call record_finding with the specific file and line."""
 
 
 def _build_subsystem_prompt(
@@ -1346,7 +1353,7 @@ def build_subsystem_hunter_agent(
         prompt=prompt,
         tools=tools,
         ctx=ctx,
-        max_steps=2000,
+        max_steps=100,
         agent_mode="deep",
         budget_usd=budget_usd,
         initial_user_message=(
@@ -1504,6 +1511,19 @@ class NativeHunter:
                         "text": last_assistant_text,
                         "step": step,
                     },
+                )
+                logger.info(
+                    "[%s] step=%d: %s",
+                    self.ctx.file_path,
+                    step,
+                    last_assistant_text.split("\n", 1)[0][:200],
+                )
+            if response.reasoning_content:
+                logger.debug(
+                    "[%s] step=%d thinking: %s",
+                    self.ctx.file_path,
+                    step,
+                    response.reasoning_content[:500],
                 )
             tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
@@ -1720,27 +1740,38 @@ class NativeHunter:
             if tool_call.fn_name in ("read_source_file", "read_file"):
                 offset = arguments.get("offset", 0)
                 limit = arguments.get("limit", 500)
+                start = arguments.get("start_line", offset + 1)
+                end = arguments.get("end_line", offset + limit)
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
                         "tool_name": tool_call.fn_name,
                         "file": arguments.get("path", ""),
-                        "start_line": arguments.get("start_line", offset + 1),
-                        "end_line": arguments.get("end_line", offset + limit),
+                        "start_line": start,
+                        "end_line": end,
                         "hunter_target": self.ctx.file_path,
                         "sandbox_id": sandbox_id,
                     },
                 )
+                logger.info(
+                    "[%s] read %s lines %s-%s",
+                    self.ctx.file_path,
+                    arguments.get("path", ""),
+                    start,
+                    end,
+                )
             elif tool_call.fn_name == "execute":
+                cmd = arguments.get("command", "")
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
                         "tool_name": "execute",
-                        "command": arguments.get("command", ""),
+                        "command": cmd,
                         "hunter_target": self.ctx.file_path,
                         "sandbox_id": sandbox_id,
                     },
                 )
+                logger.info("[%s] $ %s", self.ctx.file_path, cmd[:200])
             return await tool.ainvoke(arguments)
         except Exception as exc:
             logger.warning(
