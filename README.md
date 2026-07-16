@@ -123,6 +123,13 @@ clearwing scan 192.168.1.10 -p 22,80,443 --detect-services
 clearwing sourcehunt https://github.com/example/project \
     --depth standard
 
+# Proof-carrying hunt — typed facts, obligations, evidence, falsification,
+# and auditable finding/rejection/incomplete certificates
+clearwing sourcehunt /path/to/project \
+    --flow proof \
+    --compile-commands compile_commands.json \
+    --budget 50
+
 # N-day exploit pipeline — build and exploit known CVEs
 clearwing sourcehunt https://github.com/example/project \
     --nday --cve-list CVE-2024-1234,CVE-2024-5678
@@ -154,67 +161,114 @@ clearwing ci --config .clearwing.ci.yaml --sarif results.sarif
 See [`docs/quickstart.md`](docs/quickstart.md) for a fuller walkthrough
 including credentials, session resume, and mission-mode operation.
 
-## Running sourcehunt on a local repo (FFmpeg example)
+## Proof-carrying sourcehunt (`--flow proof`)
 
-The `clearwing sourcehunt <url>` CLI clones a remote URL. To hunt an
-already-cloned tree (e.g. FFmpeg) with the native-async pipeline and a
-self-hosted OpenAI-compatible backend, drive `SourceHuntRunner` directly:
+`clearwing sourcehunt` has two separate investigation engines. The default,
+`--flow legacy`, uses the file-oriented hunter, verifier, and exploiter
+pipeline. The opt-in `--flow proof` engine moves investigation state out of
+the model context and into typed, inspectable artifacts:
 
-```bash
-# 1. Clone the target once
-git clone https://github.com/FFmpeg/FFmpeg.git
-
-# 2. Run sourcehunt against the local checkout
-uv run python -u - <<'PY'
-import logging
-from clearwing.llm.native import AsyncLLMClient
-from clearwing.sourcehunt.runner import SourceHuntRunner
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
-
-REPO = './FFmpeg'
-RUN_DIR = './results/sourcehunt'
-COMMON = dict(
-    provider_name='openai_resp',            # or 'openai' for /v1/chat/completions
-    api_key='YOUR_KEY',
-    base_url='http://localhost:8183/v1',    # any OpenAI-compatible endpoint
-    max_concurrency=15,
-)
-
-# One client per stage — routes each stage to a different model
-ranker_llm    = AsyncLLMClient(model_name='gpt-5.4-mini',  **COMMON)
-hunter_llm    = AsyncLLMClient(model_name='gpt-5.4',       **COMMON)
-verifier_llm  = AsyncLLMClient(model_name='gpt-5.4-mini',  **COMMON)
-exploiter_llm = AsyncLLMClient(model_name='gpt-5.3-codex', **COMMON)
-
-runner = SourceHuntRunner(
-    repo_url=REPO, local_path=REPO,
-    depth='standard',
-    budget_usd=1000.0,
-    max_parallel=15,
-    output_dir=RUN_DIR,
-    output_formats=['json', 'markdown'],
-    ranker_llm=ranker_llm,
-    hunter_llm=hunter_llm,
-    verifier_llm=verifier_llm,
-    exploiter_llm=exploiter_llm,
-    enable_patch_oracle=True,
-)
-
-print(runner.run())   # sync wrapper; internally drives SourceHuntRunner.arun()
-PY
+```text
+repository snapshot
+  → extracted facts and completeness manifest
+  → invariant-oriented candidates and threat models
+  → proof-plan obligation graphs
+  → bounded mechanical, model, and dynamic actions
+  → independent falsification
+  → finding, rejection, or incomplete certificates
 ```
 
-Findings land in `./results/sourcehunt/sh-<session-id>/` as JSON +
-markdown once the run completes. FFmpeg is ~10k source files, so expect the
-large-repo ranker to preselect candidates and the tier-A hunter pool to run for hours.
-Redirect stdout/stderr to a file if you plan to detach the process — the
-runner's own artifacts are only written at the end.
+The proof engine uses models for bounded judgments rather than asking one
+agent to remember the whole investigation. Its default `local-first` policy
+tries the configured `proof_local` route first and escalates an unresolved
+atomic question to `proof_frontier`. Exploratory work receives a separate,
+bounded share of the action budget and cannot become a reportable finding
+without satisfying the same evidence obligations.
 
-`AsyncLLMClient` accepts `provider_name` values `openai_resp` (the streaming
-`/v1/responses` shape) or `openai` (standard `/v1/chat/completions`); point
-`base_url` at any OpenAI-compatible server. See
-[`docs/providers.md`](docs/providers.md) for the managed-provider paths.
+For a C or C++ repository, generate `compile_commands.json` from the real
+build and run Docker before starting. The path passed to
+`--compile-commands` is resolved relative to the target repository. Proof
+preflight fails closed when the compilation database or analysis sandbox is
+unavailable; it does not silently fall back to lexical extraction or the
+legacy engine.
+
+```bash
+clearwing sourcehunt /path/to/project \
+  --flow proof \
+  --compile-commands compile_commands.json \
+  --model-routing local-first \
+  --structured-budget 90% \
+  --exploration-budget 10% \
+  --proof-max-actions 200 \
+  --proof-max-model-calls 40 \
+  --proof-max-dynamic-actions 20 \
+  --retain-incomplete-certificates \
+  --emit-rejection-certificates \
+  --falsify \
+  --budget 50 \
+  --output-dir ./results/sourcehunt-proof
+```
+
+`--budget` is the run-wide monetary cap; omit it or pass `--budget 0` for
+the unlimited default. The three `--proof-max-*` flags separately bound all
+proof actions, model calls, and dynamic actions. Dynamic validation is
+performed only from a typed `--validation-manifest` inside the sandbox; add
+`--gvisor` when that runtime is installed for an additional isolation layer.
+
+Each session is written under `<output-dir>/sh-<session-id>/`. Start with
+`manifest.json`, which records the engine, snapshot, blind boundary, run
+status, spend, action counts, certificate counts, and output index. The
+session also retains append-only facts, candidates, obligations, actions,
+claims, evidence, derivations, context packets, proof graphs, falsification
+results, and content-addressed runtime artifacts. Human and tool consumers
+can use `report.md`, `findings.json`, and `findings.sarif`; only accepted
+finding certificates appear in JSON and SARIF. Rejected and unresolved work
+remains under `certificates/rejections/` and `certificates/incomplete/`.
+
+An exit status of `3` means the proof is incomplete or the run-wide budget
+was exhausted. It is a preserved partial investigation, not proof that the
+repository is safe and not necessarily a process failure.
+
+See the [FFmpeg proof-flow walkthrough](docs/FFmpeg.md) for an end-to-end
+blind C/C++ example, [the design document](docs/sourcehunt_improvement.md)
+for the evidence model, and [the evaluation and rollout guide](docs/eval_rollout.md)
+before comparing or promoting proof-flow results.
+
+## Running sourcehunt on a local repo (FFmpeg example)
+
+The positional repository argument accepts either a Git URL or a local
+checkout. A local checkout is preferable for a reproducible FFmpeg proof run
+because it can be pinned to an exact commit and built before discovery:
+
+```bash
+git clone https://code.ffmpeg.org/FFmpeg/FFmpeg.git
+cd FFmpeg
+
+./configure \
+  --cc=clang \
+  --cxx=clang++ \
+  --disable-doc \
+  --disable-stripping \
+  --enable-debug=3
+
+bear -- make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+
+clearwing sourcehunt "$PWD" \
+  --flow proof \
+  --compile-commands compile_commands.json \
+  --model-routing local-first \
+  --falsify \
+  --budget 50 \
+  --output-dir ../results/sourcehunt-ffmpeg-proof
+```
+
+This is only the shortest useful invocation. The full walkthrough pins the
+known vulnerable parent, preserves a strict blind boundary, captures an
+ASan/UBSan build, separates local and frontier model routes, validates with a
+typed runtime manifest, and explains every proof artifact. Follow
+[`docs/FFmpeg.md`](docs/FFmpeg.md) when reproducing the case or collecting
+evaluation results. See [`docs/providers.md`](docs/providers.md) for managed
+and self-hosted provider configuration.
 
 ## Architecture at a glance
 

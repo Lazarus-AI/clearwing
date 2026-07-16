@@ -242,55 +242,25 @@ def _check_llm_provider(cli, *, skip_invoke: bool) -> DoctorSection:
 
 
 def _invoke_test(endpoint) -> DoctorCheck:
-    """Fire a 1-token prompt at the endpoint to confirm it actually works."""
-    if endpoint.provider in ("openai_codex", "anthropic_oauth"):
-        return _invoke_test_native(endpoint)
+    """Fire a 1-token prompt at the endpoint to confirm it actually works.
 
-    from clearwing.providers import ProviderManager
-
-    try:
-        llm = ProviderManager.for_endpoint(endpoint).get_llm("default")
-    except Exception as exc:
-        return DoctorCheck(
-            "Test invoke",
-            STATUS_ERR,
-            f"Could not build LLM: {exc}",
-            hint="Check that the provider SDK is installed (pip install clearwing[all]).",
-        )
-
-    start = time.monotonic()
-    try:
-        response = llm.invoke("Reply with exactly the word PONG.")
-    except Exception as exc:
-        return DoctorCheck(
-            "Test invoke",
-            STATUS_ERR,
-            f"Invoke failed: {type(exc).__name__}: {exc}",
-            hint="Check your API key, base URL, and that the model exists on this provider.",
-        )
-
-    elapsed_ms = int((time.monotonic() - start) * 1000)
-    content = getattr(response, "content", str(response))
-    if isinstance(content, list):
-        content = " ".join(str(p) for p in content)
-    snippet = str(content).strip()[:50]
-    return DoctorCheck(
-        "Test invoke",
-        STATUS_OK,
-        f"{elapsed_ms}ms — reply: {snippet!r}",
-    )
+    Routes every provider through the native AsyncLLMClient path — a plain
+    text round-trip needs nothing the ChatModel facade offered.
+    """
+    return _invoke_test_native(endpoint)
 
 
 def _invoke_test_native(endpoint) -> DoctorCheck:
-    """Test invoke via AsyncLLMClient (needed for Codex/Anthropic OAuth)."""
+    """Test invoke via AsyncLLMClient."""
     import asyncio
 
     from clearwing.llm.native import AsyncLLMClient, response_text
+    from clearwing.providers.manager import _adapter_for_endpoint
 
     try:
         client = AsyncLLMClient(
             model_name=endpoint.model,
-            provider_name=endpoint.provider,
+            provider_name=_adapter_for_endpoint(endpoint),
             api_key=endpoint.api_key or "",
             base_url=endpoint.base_url or None,
         )

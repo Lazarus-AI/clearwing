@@ -4,8 +4,9 @@ from typing import Any
 
 from clearwing.agent.runtime import NativeAgentGraph, populate_knowledge_graph
 from clearwing.agent.state import AgentState
+from clearwing.agent.tooling import ensure_agent_tool
 from clearwing.capabilities import capabilities
-from clearwing.llm import ChatModel
+from clearwing.llm.native import AsyncLLMClient
 from clearwing.providers import ProviderManager, resolve_llm_endpoint
 
 from .prompts import build_system_prompt
@@ -41,7 +42,7 @@ _DEFAULT_OUTPUT_GUARDRAIL_TOOLS = frozenset({"kali_execute"})
 
 
 def build_react_graph(
-    llm_with_tools: ChatModel,
+    llm_with_tools: AsyncLLMClient,
     tools: list,
     system_prompt_fn,
     *,
@@ -71,8 +72,15 @@ def build_react_graph(
     if output_guardrail_tool_names is None:
         output_guardrail_tool_names = _DEFAULT_OUTPUT_GUARDRAIL_TOOLS
 
+    # `llm_with_tools` is now a bare AsyncLLMClient (no ChatModel `bind_tools`
+    # facade). The native client threads the tool list through each `achat`
+    # call rather than binding it, so build the NativeToolSpec list here once
+    # and hand both the client and the specs to the runtime.
+    native_tools = [ensure_agent_tool(t) for t in tools]
+
     return NativeAgentGraph(
-        llm_with_tools=llm_with_tools,
+        llm=llm_with_tools,
+        native_tools=native_tools,
         tools=tools,
         system_prompt_fn=system_prompt_fn,
         model_name=model_name,
@@ -96,13 +104,13 @@ def _create_llm(
     model_name: str,
     base_url: str | None = None,
     api_key: str | None = None,
-) -> ChatModel:
+) -> AsyncLLMClient:
     endpoint = resolve_llm_endpoint(
         cli_model=model_name,
         cli_base_url=base_url,
         cli_api_key=api_key,
     )
-    return ProviderManager.for_endpoint(endpoint).get_llm("default")
+    return ProviderManager.for_endpoint(endpoint).get_native_client("default")
 
 
 def create_agent(
@@ -121,11 +129,12 @@ def create_agent(
         if rt not in all_tools:
             all_tools.append(rt)
 
+    # No `bind_tools` step: the native client takes the tool list per-call.
+    # `build_react_graph` builds the NativeToolSpec list from `all_tools`.
     llm = _create_llm(model_name, base_url=base_url, api_key=api_key)
-    llm_with_tools = llm.bind_tools(all_tools)
 
     return build_react_graph(
-        llm_with_tools=llm_with_tools,
+        llm_with_tools=llm,
         tools=all_tools,
         system_prompt_fn=build_system_prompt,
         state_schema=AgentState,

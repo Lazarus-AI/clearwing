@@ -19,9 +19,9 @@ import logging
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
 
 from .state import FileTarget
@@ -104,6 +104,11 @@ class RankerConfig:
     fuzzable_priority_boost: float = 0.5
     fuzzable_boost_min_surface: int = 4
     fuzzable_boost_tags: tuple = ("parser", "fuzzable")
+    # Retries are scoped to malformed/empty structured-output responses from
+    # the ranker LLM. Generic provider failures and timeouts fall back
+    # immediately; AsyncLLMClient already handles provider rate-limit retries.
+    chunk_max_retries: int = 2
+    chunk_retry_backoff_seconds: float = 3.0
 
 
 # --- Ranker ------------------------------------------------------------------
@@ -186,15 +191,22 @@ class Ranker:
                 )
 
         tasks = [asyncio.create_task(run_one(index, chunk)) for index, chunk in enumerate(chunks)]
-        for future in asyncio.as_completed(tasks):
-            index, scores = await future
-            scores_by_chunk[index] = scores
-            completed += 1
-            logger.info(
-                "Ranker progress %d/%d chunks completed",
-                completed,
-                total_chunks,
-            )
+        try:
+            for future in asyncio.as_completed(tasks):
+                index, scores = await future
+                scores_by_chunk[index] = scores
+                completed += 1
+                logger.info(
+                    "Ranker progress %d/%d chunks completed",
+                    completed,
+                    total_chunks,
+                )
+        except BudgetExceeded:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         return scores_by_chunk
 
     def _apply_heuristic_baseline(self, files: list[FileTarget]) -> None:
@@ -270,49 +282,89 @@ class Ranker:
     ) -> dict[str, dict[str, Any]]:
         """Return {path: {surface, influence, surface_rationale, influence_rationale}}."""
         user_msg = self._build_user_message(chunk)
+        max_attempts = 1 + max(0, self.config.chunk_max_retries)
         started_at = asyncio.get_running_loop().time()
-        try:
-            logger.info(
-                "Ranker chunk %d/%d starting (%d files)",
-                idx,
-                total_chunks,
-                len(chunk),
-            )
-            if self.config.llm_timeout_seconds and self.config.llm_timeout_seconds > 0:
-                scores, response = await asyncio.wait_for(
-                    self.llm.aask_json(
+        logger.info(
+            "Ranker chunk %d/%d starting (%d files)",
+            idx,
+            total_chunks,
+            len(chunk),
+        )
+
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                if self.config.llm_timeout_seconds and self.config.llm_timeout_seconds > 0:
+                    scores, response = await asyncio.wait_for(
+                        self.llm.aask_json(
+                            system=RANKER_SYSTEM_PROMPT,
+                            user=user_msg,
+                            schema_model=RankedFileScoreResponse,
+                            schema_name="ranked_file_score_response",
+                        ),
+                        timeout=self.config.llm_timeout_seconds,
+                    )
+                else:
+                    scores, response = await self.llm.aask_json(
                         system=RANKER_SYSTEM_PROMPT,
                         user=user_msg,
                         schema_model=RankedFileScoreResponse,
                         schema_name="ranked_file_score_response",
-                    ),
-                    timeout=self.config.llm_timeout_seconds,
+                    )
+                elapsed = asyncio.get_running_loop().time() - started_at
+                logger.info(
+                    "Ranker chunk %d/%d completed in %.1fs",
+                    idx,
+                    total_chunks,
+                    elapsed,
                 )
-            else:
-                scores, response = await self.llm.aask_json(
-                    system=RANKER_SYSTEM_PROMPT,
-                    user=user_msg,
-                    schema_model=RankedFileScoreResponse,
-                    schema_name="ranked_file_score_response",
+                return self._parse_response(scores)
+            except BudgetExceeded:
+                raise
+            except TimeoutError:
+                logger.warning(
+                    "Ranker LLM call timed out after %ss for %d files; falling back to heuristics",
+                    self.config.llm_timeout_seconds,
+                    len(chunk),
                 )
-        except TimeoutError:
-            logger.warning(
-                "Ranker LLM call timed out after %ss for %d files; falling back to heuristics",
-                self.config.llm_timeout_seconds,
-                len(chunk),
-            )
-            return {}
-        except Exception:
-            logger.warning("Ranker LLM call failed", exc_info=True)
-            return {}
-        elapsed = asyncio.get_running_loop().time() - started_at
-        logger.info(
-            "Ranker chunk %d/%d completed in %.1fs",
+                return {}
+            except Exception as exc:
+                if not self._is_retryable_structured_output_error(exc):
+                    logger.warning(
+                        "Ranker LLM call failed; falling back to heuristics",
+                        exc_info=True,
+                    )
+                    return {}
+                last_exc = exc
+                if attempt < max_attempts - 1:
+                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2 ** attempt)
+                    logger.warning(
+                        "Ranker chunk %d/%d attempt %d failed; retrying in %.1fs",
+                        idx,
+                        total_chunks,
+                        attempt + 1,
+                        delay,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(delay)
+
+        logger.warning(
+            "Ranker chunk %d/%d failed after %d attempts; falling back to heuristics",
             idx,
             total_chunks,
-            elapsed,
+            max_attempts,
+            exc_info=last_exc,
         )
-        return self._parse_response(scores)
+        return {}
+
+    @staticmethod
+    def _is_retryable_structured_output_error(exc: Exception) -> bool:
+        if isinstance(exc, (json.JSONDecodeError, ValidationError)):
+            return True
+        return (
+            isinstance(exc, ValueError)
+            and str(exc).startswith("LLM returned empty response; expected JSON matching")
+        )
 
     def _build_user_message(self, chunk: list[FileTarget]) -> str:
         """Build the user message — a JSON list of files with cheap static hints."""

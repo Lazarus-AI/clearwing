@@ -1,9 +1,14 @@
 from genai_pyo3 import ChatMessage, ChatResponse, ToolCall, Usage
 
-from .chat import (
+from .budget import (
+    BudgetConfigurationError,
+    BudgetExceeded,
+    SpendLedger,
+    spend_metadata,
+)
+from .messages import (
     AIMessage,
     BaseMessage,
-    ChatModel,
     HumanMessage,
     SystemMessage,
     ToolMessage,
@@ -12,13 +17,15 @@ from .chat import (
 from .native import (
     AsyncLLMClient,
     NativeToolSpec,
+    ToolInputModel,
     extract_json_array,
     extract_json_object,
 )
 
 __all__ = [
     "AsyncLLMClient",
-    "ChatModel",
+    "BudgetConfigurationError",
+    "BudgetExceeded",
     "BaseMessage",
     "HumanMessage",
     "SystemMessage",
@@ -28,8 +35,11 @@ __all__ = [
     "ChatResponse",
     "ToolCall",
     "NativeToolSpec",
+    "ToolInputModel",
+    "SpendLedger",
     "Usage",
     "extract_json_array",
     "extract_json_object",
     "extract_text_content",
+    "spend_metadata",
 ]

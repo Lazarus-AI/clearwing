@@ -56,6 +56,12 @@ def test_execute_custom_timeout(tools, mock_sandbox):
     mock_sandbox.exec.assert_called_once_with("make", timeout=600)
 
 
+def test_execute_ignores_unexpected_arguments(tools, mock_sandbox):
+    result = tools["execute"].invoke({"command": "ls -la", "_comment": "list files"})
+    mock_sandbox.exec.assert_called_once_with("ls -la", timeout=300)
+    assert result["exit_code"] == 0
+
+
 def test_execute_caps_large_output(tools, mock_sandbox):
     big_stdout = "x" * (_OUTPUT_CAP + 1000)
     mock_sandbox.exec.return_value = ExecResult(
@@ -102,6 +108,14 @@ def test_read_file_with_offset_limit(tools, mock_sandbox):
     assert "e=60" in cmd
 
 
+def test_read_file_ignores_unexpected_arguments(tools, mock_sandbox):
+    result = tools["read_file"].invoke(
+        {"path": "/workspace/foo.c", "description": "inspect source"}
+    )
+    mock_sandbox.exec.assert_called_once()
+    assert result == "hello\n"
+
+
 def test_read_file_uses_absolute_line_numbers(tools, mock_sandbox):
     """Regression: previously `sed ... | cat -n` numbered output from 1
     regardless of offset, so a hunter asking for lines 101-150 got
@@ -136,6 +150,36 @@ def test_write_file_creates_dirs(tools, mock_sandbox):
     mock_sandbox.write_file.assert_called_once_with("/workspace/new/dir/file.c", b"int main() {}")
     assert "Wrote" in result
     assert "13 bytes" in result
+
+
+def test_write_file_ignores_unexpected_arguments(tools, mock_sandbox):
+    result = tools["write_file"].invoke(
+        {
+            "path": "/workspace/new/file.c",
+            "contents": "source",
+            "_comment": "create fixture",
+        }
+    )
+    mock_sandbox.write_file.assert_called_once_with("/workspace/new/file.c", b"source")
+    assert result == "Wrote 6 bytes to /workspace/new/file.c"
+
+
+@pytest.mark.parametrize("tool_name", ["execute", "read_file", "write_file"])
+def test_deep_agent_tool_schemas_disallow_extra_properties(tools, tool_name):
+    assert tools[tool_name].schema["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("execute", {}),
+        ("read_file", {}),
+        ("write_file", {"path": "/workspace/file.c"}),
+    ],
+)
+def test_deep_agent_tools_still_require_declared_arguments(tools, tool_name, arguments):
+    with pytest.raises(TypeError):
+        tools[tool_name].invoke(arguments)
 
 
 def test_record_finding_present(tools):

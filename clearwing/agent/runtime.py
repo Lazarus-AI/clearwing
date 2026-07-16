@@ -15,7 +15,13 @@ from clearwing.capabilities import capabilities
 from clearwing.core.events import EventBus, EventType
 from clearwing.data.knowledge import KnowledgeGraph
 from clearwing.data.memory import ContextSummarizer, EpisodicMemory
-from clearwing.llm.chat import BaseMessage, SystemMessage, ToolMessage, extract_text_content
+from clearwing.llm.messages import (
+    AIMessage,
+    BaseMessage,
+    ToolMessage,
+    _coerce_chat_messages,
+)
+from clearwing.llm.native import NativeToolSpec, response_text
 from clearwing.observability.telemetry import CostTracker
 from clearwing.safety.audit import AuditLogger
 from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
@@ -54,7 +60,12 @@ def _parse_tool_output(content: str) -> Any:
 
 
 class ToolCallDict(TypedDict, total=False):
-    """Structure of a single tool-call returned by the LLM."""
+    """Legacy LangChain-style tool-call shape.
+
+    Retained only for the ``_default_pentest_state_updater`` docs and any
+    dict-shaped callers. The native runtime now consumes genai ``ToolCall``
+    objects (``.call_id`` / ``.fn_name`` / ``.fn_arguments``) directly.
+    """
 
     id: str
     name: str
@@ -85,7 +96,7 @@ class GraphStateSnapshot:
 
 @dataclass(slots=True)
 class _PendingToolResume:
-    tool_calls: list[ToolCallDict]
+    tool_calls: list[Any]
     prompt: str
 
 
@@ -93,7 +104,8 @@ class NativeAgentGraph:
     def __init__(
         self,
         *,
-        llm_with_tools: LLMInvokable,
+        llm: LLMInvokable,
+        native_tools: list[NativeToolSpec],
         tools: list[AgentTool],
         system_prompt_fn: SystemPromptFactory,
         model_name: str,
@@ -111,7 +123,8 @@ class NativeAgentGraph:
         enable_event_bus: bool,
         enable_context_summarizer: bool,
     ) -> None:
-        self.llm_with_tools = llm_with_tools
+        self.llm = llm
+        self.native_tools = native_tools
         self.tools = {tool.name: tool for tool in tools}
         self.system_prompt_fn = system_prompt_fn
         self.model_name = model_name
@@ -232,21 +245,50 @@ class NativeAgentGraph:
         messages = list(state.get("messages", []))
         if self.context_summarizer and self.context_summarizer.should_summarize(messages):
             try:
-                messages = await self.context_summarizer.summarize(messages, self.llm_with_tools)
+                messages = await self.context_summarizer.summarize(messages, self.llm)
             except Exception:
                 logger.debug("Context summarization failed", exc_info=True)
 
         sys_prompt = self.system_prompt_fn(state)
-        full_messages: list[BaseMessage] = [SystemMessage(content=sys_prompt), *messages]
-        response = await self.llm_with_tools.ainvoke(
-            full_messages, on_text_delta=self.on_text_delta
-        )
-        state.setdefault("messages", []).append(response)
+        # Coerce the runtime's internal message model (AIMessage/ToolMessage/
+        # HumanMessage/dict) into genai ChatMessage objects, pulling the system
+        # prompt out into the `system=` string. Assistant turns carry their
+        # `tool_calls` and tool-result turns carry `tool_response_call_id`, so
+        # the provider can pair function_call/function_call_output correctly.
+        system, chat_messages = _coerce_chat_messages(messages)
+        system = "\n\n".join(part for part in (sys_prompt, system) if part) or sys_prompt
 
-        usage = getattr(response, "response_metadata", {}).get("usage", {})
-        if self.cost_tracker and usage:
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
+        response = await self.llm.achat_stream(
+            messages=chat_messages,
+            system=system,
+            tools=self.native_tools or None,
+            on_text_delta=self.on_text_delta,
+        )
+
+        assistant_text = response_text(response)
+        # tool_calls are raw genai ToolCall objects (.call_id/.fn_name/
+        # .fn_arguments). Store them on the AIMessage so the next turn's
+        # ChatMessage assistant round-trips them, and so the tool loop can
+        # pair each result by call_id.
+        tool_calls = list(response.tool_calls)
+        usage = response.usage
+        ai_message = AIMessage(
+            content=assistant_text,
+            tool_calls=tool_calls,
+            response_metadata={
+                "usage": {
+                    "input_tokens": (usage.prompt_tokens or 0) if usage else 0,
+                    "output_tokens": (usage.completion_tokens or 0) if usage else 0,
+                    "total_tokens": (usage.total_tokens or 0) if usage else 0,
+                },
+                "model": response.provider_model_name or self.model_name,
+            },
+        )
+        state.setdefault("messages", []).append(ai_message)
+
+        input_tokens = (usage.prompt_tokens or 0) if usage else 0
+        output_tokens = (usage.completion_tokens or 0) if usage else 0
+        if self.cost_tracker and (input_tokens or output_tokens):
             self.cost_tracker.record_llm_call(input_tokens, output_tokens, self.model_name)
             state["total_cost_usd"] = self.cost_tracker.total_cost_usd
             state["total_tokens"] = self.cost_tracker.input_tokens + self.cost_tracker.output_tokens
@@ -259,11 +301,10 @@ class NativeAgentGraph:
                 )
 
         if self.event_bus:
-            self.event_bus.emit_message(response.text[:200], "agent")
+            self.event_bus.emit_message(assistant_text[:200], "agent")
 
-        response_text = extract_text_content(response.content)
-        if response_text:
-            found_flags = detect_flags(response_text)
+        if assistant_text:
+            found_flags = detect_flags(assistant_text)
             if found_flags:
                 existing_flags = list(state.get("flags_found", []))
                 state["flags_found"] = existing_flags + found_flags
@@ -276,7 +317,7 @@ class NativeAgentGraph:
     async def _arun_tool_calls(
         self,
         state: dict[str, Any],
-        tool_calls: list[ToolCallDict],
+        tool_calls: list[Any],
         *,
         resume_decision: object,
     ) -> tuple[list[dict[str, Any]], bool]:
@@ -285,8 +326,12 @@ class NativeAgentGraph:
         new_flags: list[dict[str, str]] = []
 
         for index, tool_call in enumerate(tool_calls):
-            tool_name = str(tool_call.get("name", ""))
-            tool_args = tool_call.get("args", {}) or {}
+            # tool_call is a genai ToolCall: .call_id / .fn_name / .fn_arguments
+            tool_name = str(getattr(tool_call, "fn_name", "") or "")
+            tool_call_id = getattr(tool_call, "call_id", None)
+            tool_args = getattr(tool_call, "fn_arguments", None)
+            if not isinstance(tool_args, dict):
+                tool_args = {}
             if self.event_bus:
                 self.event_bus.emit(EventType.TOOL_START, {"tool": tool_name, "args": tool_args})
 
@@ -320,7 +365,7 @@ class NativeAgentGraph:
             message = ToolMessage(
                 content=content,
                 name=tool_name,
-                tool_call_id=tool_call.get("id"),
+                tool_call_id=tool_call_id,
             )
             result_messages.append(message)
 
