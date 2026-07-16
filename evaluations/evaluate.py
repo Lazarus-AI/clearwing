@@ -80,7 +80,7 @@ def cve_dataset(
                 "clone_url": e.get("clone_url", ""),
                 "vulnerable_commit": e.get("vulnerable_commit", ""),
                 "subsystem_paths": (
-                    [e["sourcehunt"]["subsystem"]] + (e.get("files") or [])
+                    [e["sourcehunt"]["subsystem"]]
                     if e.get("sourcehunt", {}).get("subsystem")
                     else e.get("files") or []
                 ),
