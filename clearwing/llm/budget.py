@@ -607,6 +607,7 @@ class SpendLedger:
 
         # Version aliases in provider catalogs often omit a dated suffix or
         # select a nearby point release with the same family pricing.
+        alias_matched = False
         if matched_key is None:
             family_aliases = (
                 ("claude-sonnet-4", "claude-sonnet-4-6"),
@@ -617,10 +618,16 @@ class SpendLedger:
             for family, key in family_aliases:
                 if family in normalized and key in pricing_table:
                     matched_key = key
+                    alias_matched = True
                     break
 
+        # Only enforce the Anthropic-direct requirement when pricing was
+        # inferred via a family alias — a direct table match means the caller
+        # explicitly configured the model name (e.g. routing claude-opus-4-6
+        # through a LiteLLM gateway), so we trust it.
         if (
             strict
+            and alias_matched
             and matched_key is not None
             and matched_key.startswith("claude-")
             and provider not in {"anthropic", "anthropic_oauth"}
