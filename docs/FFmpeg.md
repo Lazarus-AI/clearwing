@@ -9,6 +9,39 @@ that the issue is in H.264.
 The public fix is useful after the run as an oracle for whether the finding
 matches the real bug. Do not use it during the discovery pass.
 
+## The `--flow proof` Engine Used Here
+
+This walkthrough's primary discovery path uses
+`clearwing sourcehunt --flow proof`. The flag selects a separate
+investigation engine; it is not a depth, verbosity, or reporting option.
+`--flow legacy` remains the CLI default during migration, so omitting
+`--flow proof` runs a materially different file-agent pipeline.
+
+For this FFmpeg case, the proof engine performs the following bounded flow:
+
+```text
+pinned repository snapshot
+  → sandboxed Clang facts and extraction-completeness records
+  → invariant-oriented candidates and explicit threat models
+  → bug-class proof plans and obligation graphs
+  → mechanical checks, local-first model judgments, and declared runtime tests
+  → independent finite falsification
+  → finding, rejection, or incomplete certificates
+```
+
+Every conclusion must point back to stored evidence. A finding certificate
+means all mandatory obligations for its proof plan passed the evidence gates.
+A rejection certificate records why a candidate was disproven for the pinned
+snapshot. An incomplete certificate preserves useful progress when evidence,
+context, a tool backend, or budget is missing. Neither a rejection nor an
+incomplete certificate is silently converted into “repository is safe.”
+
+Sections explicitly labeled **Legacy** are comparison controls only. Do not
+pool their findings, costs, trajectories, or success rates with proof-flow
+certificates. Likewise, the public fix, retro-hunt, N-day pipeline, and a
+learned mechanism registry are post-discovery or assisted controls and do not
+belong inside the strict blind proof boundary.
+
 ## Case Metadata
 
 - Upstream repository: `https://code.ffmpeg.org/FFmpeg/FFmpeg.git`
@@ -182,6 +215,12 @@ runtime evidence. That is a useful partial result, not a finding. A finding
 requires every mandatory class obligation, hard memory-safety evidence, a
 security boundary, and a completed falsification plan.
 
+The CLI exits `0` for a completed run without medium-or-higher findings, `1`
+for a medium finding, `2` for a high or critical finding, and `3` when the
+proof remains incomplete or the run-wide budget is exhausted. When automating
+this walkthrough, preserve the session directory before interpreting exit
+`3`; it does not mean the process crashed.
+
 ## Optional Manifest-Driven Runtime Validation
 
 Dynamic checks are never invented as arbitrary shell commands. They are
@@ -326,9 +365,24 @@ SESSION_DIR="$(dirname "$(find "$CASE_DIR/results-proof-blind" \
   -mindepth 2 -maxdepth 2 -name manifest.json -print -quit)")"
 test -n "$SESSION_DIR"
 jq '{engine, status, proof_status, snapshot_id, blind_boundary, budget,
-     spend, candidate_count, certificate_counts, action_counts, metrics}' \
+     spend, complete, candidate_count, certificate_counts, action_counts,
+     metrics, errors, outputs}' \
   "$SESSION_DIR/manifest.json"
 ```
+
+Interpret the manifest and certificates together:
+
+- `engine == "proof"` confirms that the command did not run the legacy
+  engine.
+- `complete == true` means the run finished without residual incomplete
+  certificates; it does not mean FFmpeg has no other vulnerabilities.
+- `status == "budget_exhausted"` or `proof_status == "incomplete"` means
+  unresolved state was deliberately retained for inspection and follow-up.
+- `findings.json` and `findings.sarif` contain only current accepted finding
+  certificates. A zero-length findings list is not a safety claim; check the
+  rejection and incomplete certificate counts and their evidence.
+- `outputs` is the authoritative index for the report, spend ledger,
+  instrumentation, metrics, and other emitted artifacts.
 
 The authoritative state is append-only JSONL plus content-addressed
 artifacts:
