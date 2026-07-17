@@ -226,15 +226,34 @@ def _format_seed_context(entries: list) -> str | None:
         return None
 
 
+MAX_TRANSCRIPT_FINDINGS = 25
+
+
 def _extract_transcript(result: TargetResult) -> str:
-    """Build a brief transcript summary from a TargetResult for seeding promoted runs."""
+    """Build a transcript summary from a TargetResult for seeding promoted runs.
+
+    Must surface every finding from the previous pass, not just the first
+    couple: the promoted hunter's prompt explicitly says "a previous
+    investigation found the following ... do not repeat analysis already
+    done," so any finding silently dropped here just gets rediscovered and
+    re-reported as if it were new.
+    """
+    findings = result.findings
+    if not findings:
+        return f"Run completed with status={result.status}, stop_reason={result.stop_reason}"
+
     parts: list[str] = []
-    for f in result.findings:
+    for f in findings[:MAX_TRANSCRIPT_FINDINGS]:
+        file = f.get("file", "?") if isinstance(f, dict) else "?"
+        line = f.get("line_number", "?") if isinstance(f, dict) else "?"
         desc = f.get("description", "") if isinstance(f, dict) else str(f)
-        parts.append(f"Finding: {desc[:200]}")
-    if not parts:
-        parts.append(f"Run completed with status={result.status}, stop_reason={result.stop_reason}")
-    return "\n".join(parts)[:500]
+        parts.append(f"- {file}:{line} — {desc[:200]}")
+    if len(findings) > MAX_TRANSCRIPT_FINDINGS:
+        parts.append(
+            f"... and {len(findings) - MAX_TRANSCRIPT_FINDINGS} more findings "
+            "from the previous pass."
+        )
+    return "Previously found in this file (do not re-report these):\n" + "\n".join(parts)
 
 
 # --- HunterPool -------------------------------------------------------------
