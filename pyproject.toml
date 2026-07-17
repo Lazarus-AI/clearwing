@@ -72,7 +72,7 @@ dependencies = [
 [project.optional-dependencies]
 metasploit = ["pymetasploit3>=1.0.0"]
 browser = ["playwright>=1.40.0"]
-semgrep = ["semgrep>=1.0.0"]
+sourcehunt = ["semgrep>=1.0.0"]
 vector = [
     "sentence-transformers>=2.2.0",
 ]
@@ -91,11 +91,8 @@ docs = [
     "mkdocs-material>=9.4.0",
     "mkdocstrings[python]>=0.24.0",
 ]
-inspect-ai = [
-    "inspect-ai>=0.3.0",
-]
 all = [
-    "clearwing[metasploit,browser,vector,dev,docs,inspect-ai,semgrep]",
+    "clearwing[metasploit,browser,vector,dev,docs,sourcehunt]",
 ]
 
 [project.urls]
