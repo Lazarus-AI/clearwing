@@ -443,7 +443,7 @@
   files:
     - libfreerdp/gdi/gfx.c
   sourcehunt:
-    subsystem: libfreerdp/gdi
+    subsystem: libfreerdp/gdi/gfx.c
   vuln_class: >-
     CWE-122 Heap-based Buffer Overflow (validated clamped rect dimensions but
     copied using unclamped cache entry dimensions, writing past surface allocation)

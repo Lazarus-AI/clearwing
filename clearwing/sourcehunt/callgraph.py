@@ -123,12 +123,31 @@ class CallGraph:
     - `defined_in[name]` = set of files that define a function of that name
       (multiple files can shadow the same name, especially in C/C++)
     - `function_info[file]` = list of FunctionInfo with line ranges
+    - `func_calls_out[file][func]` = set of function names called by that function
     """
 
     functions: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     calls_out: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     defined_in: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     function_info: dict[str, list[FunctionInfo]] = field(default_factory=lambda: defaultdict(list))
+    func_calls_out: dict[str, dict[str, set[str]]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(set))
+    )
+
+    def callees_of(self, func_name: str) -> dict[str, set[str]]:
+        """Return {file: set[callee_names]} for every definition of func_name."""
+        return {
+            f: self.func_calls_out.get(f, {}).get(func_name, set())
+            for f in self.defined_in.get(func_name, set())
+        }
+
+    def callers_of(self, func_name: str) -> dict[str, set[str]]:
+        """Return {file: set[caller_func_names]} for every function that calls func_name."""
+        return {
+            file: {fn for fn, callees in func_map.items() if func_name in callees}
+            for file, func_map in self.func_calls_out.items()
+            if any(func_name in callees for callees in func_map.values())
+        }
 
     def callers_of_file(self, target_file: str) -> set[str]:
         """Return the set of files that call any function defined in target_file."""
@@ -287,10 +306,11 @@ class CallGraphBuilder:
         def_types = _FUNCTION_DEF_NODE_TYPES.get(lang_name, set())
         call_types = _FUNCTION_CALL_NODE_TYPES.get(lang_name, set())
 
-        # Walk the AST iteratively
-        stack = [tree.root_node]
+        # Walk the AST iteratively; each stack entry carries the enclosing
+        # function name so call expressions can be attributed to their caller.
+        stack: list[tuple[object, str | None]] = [(tree.root_node, None)]
         while stack:
-            node = stack.pop()
+            node, scope = stack.pop()
 
             if node.type in def_types:
                 name = self._extract_definition_name(node, lang_name, source)
@@ -304,14 +324,18 @@ class CallGraphBuilder:
                             end_line=node.end_point[0] + 1,
                         )
                     )
+                    # Children are scoped to this function
+                    stack.extend((child, name) for child in node.children)
+                    continue
 
             elif node.type in call_types:
                 name = self._extract_call_name(node, lang_name, source)
                 if name:
                     graph.calls_out[rel_path].add(name)
+                    if scope:
+                        graph.func_calls_out[rel_path][scope].add(name)
 
-            # DFS
-            stack.extend(node.children)
+            stack.extend((child, scope) for child in node.children)
 
     def _extract_definition_name(self, node: Any, lang_name: str, source: bytes) -> str | None:
         """Find the name identifier for a function-definition node.

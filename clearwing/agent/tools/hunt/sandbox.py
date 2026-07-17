@@ -51,6 +51,7 @@ class HunterContext:
     exploit_result: object | None = None  # ExploiterResult slot for exploit agent
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
     potentials: list[dict] = field(default_factory=list)  # investigation queue for flag_potential tool
+    callgraph: object | None = None  # CallGraph from preprocessor (avoiding circular import)
 
     def get_sandbox_for_variant(
         self,
