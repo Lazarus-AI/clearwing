@@ -1210,19 +1210,33 @@ single-file bugs and cross-file bugs alike:
 - State corruption: shared state modified by one file but consumed by another
 - Inconsistent validation: input validated in one path but not another
 {existing_findings_block}{entry_points_block}
+PHASE 1 — SURVEY (do this before any deep investigation):
 Before calling any tools, reason through: what are the worst security outcomes \
-for this type of subsystem, and what code invariant prevents each? Use those as \
-your investigation hypotheses.
+for this type of subsystem, and what code invariant prevents each? State 3-5 \
+concrete, falsifiable invariants. Example: "IV MUST be applied before the first \
+encrypt call", "tag length MUST be bounded before passing to EVP", "every ref \
+MUST be checked against the caller's permission list." These are your hypotheses.
 
-Then run semgrep_scan on the subsystem. If semgrep returns findings, use those \
-as additional hypotheses. If semgrep returns nothing, proceed with your reasoned \
-hypotheses.
+Then survey the whole subsystem quickly:
+1. Run semgrep_scan on the subsystem once. Note hits as weak signals — do NOT \
+anchor on the first hit. A semgrep result tells you where to look, not what the \
+bug is.
+2. Read the first 50 lines of each file to understand its role. Do not spend \
+more than 20 consecutive steps on any single file during this survey.
+3. After surveying all files, rank them by which invariants they are most likely \
+to violate. Only then begin deep investigation.
 
+PHASE 2 — INVESTIGATE (after surveying all files):
 For each hypothesis, work sink-first:
-1. Identify the dangerous operation (the sink: e.g. encrypt, free, write).
-2. grep for ALL direct callers of that sink in this subsystem.
+1. Identify the dangerous operation (the sink: e.g. encrypt, free, memcpy, image_copy, verify).
+2. Call lookup_callers(sink_func) IMMEDIATELY — do not grep, do not read the sink's \
+definition. lookup_callers is faster and more complete than grep and returns file + \
+line ranges so you can read each caller directly.
 3. Read each caller's body and record what setup or guard calls it makes BEFORE \
 reaching the sink (e.g. state_init, null-check, lock_acquire, bounds_check).
+4. If comparing two sibling paths (streaming vs one-shot, encrypt vs decrypt), call \
+lookup_callees on each to diff their setup calls — any step present in one path but \
+missing in another is a candidate vulnerability.
 4. The set of guards that most callers perform is the INFERRED EXPECTED GUARD SET \
 for this sink — you don't need to know it upfront, the majority pattern tells you.
 5. Any caller that reaches the sink WITHOUT all expected guards is a candidate \
@@ -1369,6 +1383,7 @@ def build_subsystem_hunter_agent(
         session_id=session_id,
         specialist="subsystem",
         findings_pool=findings_pool,
+        callgraph=callgraph,
     )
 
     tools = build_deep_agent_tools(ctx)
@@ -1387,7 +1402,7 @@ def build_subsystem_hunter_agent(
         prompt=prompt,
         tools=tools,
         ctx=ctx,
-        max_steps=200,
+        max_steps=3000,
         agent_mode="deep",
         budget_usd=budget_usd,
         initial_user_message=(
@@ -1448,6 +1463,9 @@ class NativeHunter:
         total_repeated_skips = 0
         tools_by_name = {tool.name: tool for tool in self.tools}
         last_assistant_text = ""
+        files_visited: set[str] = set()
+        flags_raised: int = 0
+
 
         step = 0
         while True:
@@ -1489,6 +1507,22 @@ class NativeHunter:
                     "step": step,
                 },
             )
+            if step > 1 and step % 25 == 0:
+                records = len(self.ctx.findings)
+                visited_list = ", ".join(sorted(files_visited)) or "none"
+                budget_note = (
+                    f"  Cost so far: ${total_cost_usd:.2f}"
+                    + (f" of ${self.budget_usd:.2f}" if self.budget_usd else "")
+                )
+                sitrep = (
+                    f"[SITUATION REPORT — step {step}]\n"
+                    f"  Findings recorded: {records}\n"
+                    f"  Flags raised: {flags_raised}\n"
+                    f"  Files visited: {visited_list}\n"
+                    f"{budget_note}"
+                )
+                messages.append(ChatMessage("user", sitrep))
+
             with spend_metadata(model_call_id=model_call_id):
                 response = await self.llm.achat(
                     messages=messages,
@@ -1573,32 +1607,16 @@ class NativeHunter:
                     if not isinstance(tool_arguments, dict):
                         tool_arguments = {}
 
-                    # Keyed on a normalized prefix rather than the full argument
-                    # string: models stuck in a degenerate loop often reissue the
-                    # same call with a growing/mutating tail (e.g. appending
-                    # another redundant clause each turn), or with a small
-                    # numeric literal that creeps up each turn (e.g. `grep -B10`
-                    # widening to `-B1750` while going nowhere). Either would
-                    # dodge an exact-match dedup key while making no real
-                    # progress, and a mutating number near the start of a short
-                    # argument string would also dodge a raw-prefix key since it
-                    # shifts every character after it. Normalizing digit runs
-                    # before truncating catches both shapes.
-                    # read_file/read_source_file take an (offset,limit) or
-                    # (start_line,end_line) pair as literally the ONLY fields
-                    # that legitimately vary between successive, non-redundant
-                    # paginated reads of the same file. Digit-stripping those
-                    # numbers collapses every call on a given path into one
-                    # identical key after just 3 uses, falsely throttling later
-                    # reads that target genuinely unseen line ranges (observed
-                    # live against crAPI: a 433-line file's read_file calls were
-                    # rejected from the 4th call on even though offset/limit
-                    # differed every time and no range was actually
-                    # re-requested, preventing the hunter from ever reading far
-                    # enough to find a real bug later in the file). Keep those
-                    # two tools' arguments literal — only tools without an
-                    # inherent legitimate-pagination shape benefit from
-                    # normalizing away incrementing digits.
+                    # Track visited files and flags for situation reports
+                    if tool_call.fn_name in ("read_file", "semgrep_scan"):
+                        fpath = tool_arguments.get("path", "")
+                        if fpath:
+                            files_visited.add(str(fpath).lstrip("/workspace/").lstrip("/"))
+                    elif tool_call.fn_name == "flag_potential":
+                        flags_raised += 1
+
+                    # Degenerate loop detection: normalize args to catch
+                    # mutating numeric tails, but exempt read_file pagination.
                     if tool_call.fn_name in ("read_file", "read_source_file"):
                         key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
                     else:
@@ -1641,22 +1659,21 @@ class NativeHunter:
                                 "tool_call": _serialize_tool_call(tool_call),
                             },
                         )
-                        tool_output = await self._run_tool(tools_by_name, tool_call)
-                        tool_summary = _tool_output_text(
-                            tool_call.fn_name,
-                            tool_arguments,
-                            tool_output,
-                        )
-                        trajectory.log(
-                            "tool_result",
-                            {
-                                "step": step,
-                                "tool_call": _serialize_tool_call(tool_call),
-                                "tool_output": tool_output,
-                                "tool_summary": tool_summary,
-                                "repeated_skip": False,
-                            },
-                        )
+                    tool_output = await self._run_tool(tools_by_name, tool_call)
+                    tool_summary = _tool_output_text(
+                        tool_call.fn_name,
+                        tool_arguments,
+                        tool_output,
+                    )
+                    trajectory.log(
+                        "tool_result",
+                        {
+                            "step": step,
+                            "tool_call": _serialize_tool_call(tool_call),
+                            "tool_output": tool_output,
+                            "tool_summary": tool_summary,
+                        },
+                    )
                     messages.append(
                         ChatMessage(
                             "tool",
@@ -1806,6 +1823,27 @@ class NativeHunter:
                     },
                 )
                 logger.info("[%s] $ %s", self.ctx.file_path, cmd[:200])
+            elif tool_call.fn_name in ("lookup_callers", "lookup_callees"):
+                func_name = arguments.get("func_name", "")
+                EventBus().emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool_name": tool_call.fn_name,
+                        "func_name": func_name,
+                        "hunter_target": self.ctx.file_path,
+                        "sandbox_id": sandbox_id,
+                    },
+                )
+                logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, func_name)
+            else:
+                EventBus().emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool_name": tool_call.fn_name,
+                        "hunter_target": self.ctx.file_path,
+                        "sandbox_id": sandbox_id,
+                    },
+                )
             return await tool.ainvoke(arguments)
         except Exception as exc:
             logger.warning(
