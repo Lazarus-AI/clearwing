@@ -1,0 +1,218 @@
+rules:
+  # ── CWE-120/125/787: Buffer operations with unvalidated size sources ─────
+  #
+  #   1. Struct member used directly as copy size — common in protocol parsing
+  #      where a length field from a packet/record is fed to memcpy without
+  #      a bounds check.
+  #
+  #   2. Signed integer used in pointer arithmetic or array subscript — a
+  #      negative value produces an out-of-bounds access behind the base pointer.
+  #
+  #   3. Pointer subtraction used as a copy/operation size — if the minuend is
+  #      less than the subtrahend the result wraps to a huge size_t.
+
+  - id: copy-with-struct-member-size
+    message: >
+      Buffer operation size argument is a struct member access. If the struct
+      originates from untrusted input the size may not have been validated,
+      leading to a heap/stack buffer overflow (CWE-120) or over-read (CWE-125).
+      Confirm that the field is checked against destination capacity before use.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-120"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: memcpy($DST, $SRC, $OBJ->$LEN_FIELD)
+      - pattern: memmove($DST, $SRC, $OBJ->$LEN_FIELD)
+      - pattern: memset($DST, $VAL, $OBJ->$LEN_FIELD)
+      - pattern: bcopy($SRC, $DST, $OBJ->$LEN_FIELD)
+      - pattern: memcpy($DST, $SRC, $OBJ.$LEN_FIELD)
+      - pattern: memmove($DST, $SRC, $OBJ.$LEN_FIELD)
+      - pattern: memset($DST, $VAL, $OBJ.$LEN_FIELD)
+      - pattern: bcopy($SRC, $DST, $OBJ.$LEN_FIELD)
+
+  - id: signed-int-pointer-arithmetic
+    message: >
+      Signed integer used as a pointer offset or array subscript without a
+      visible non-negative guard in scope. A negative value produces an access
+      behind the base pointer (CWE-125/CWE-787). Ensure the value is validated
+      to be >= 0 before this arithmetic.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-125"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          int $IDX = $EXPR;
+          ...
+          $PTR[$IDX]
+      - pattern-not: |
+          int $IDX = $EXPR;
+          if ($IDX < 0) { ... }
+          ...
+          $PTR[$IDX]
+      - pattern-not: |
+          int $IDX = $EXPR;
+          if ($IDX >= 0 ...) { ... $PTR[$IDX] ... }
+      - pattern-not: |
+          int $IDX = $EXPR;
+          if (0 > $IDX) { ... }
+          ...
+          $PTR[$IDX]
+
+  - id: copy-with-pointer-difference
+    message: >
+      Pointer subtraction result used as a buffer operation size. If the
+      minuend pointer is less than the subtrahend, the difference wraps to a
+      large size_t and the subsequent operation reads or writes far beyond the
+      intended region (CWE-120/CWE-193). Confirm that end >= start is guarded.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-193"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: memcpy($DST, $SRC, $END - $START)
+      - pattern: memmove($DST, $SRC, $END - $START)
+      - pattern: memset($DST, $VAL, $END - $START)
+      - pattern: bcopy($SRC, $DST, $END - $START)
+      - pattern: $FUNC($BUF, $END - $START)
+
+  # ── CWE-190: Integer overflow in C/C++ allocation size arithmetic ──────────
+  #
+  # Targets patterns like CVE-2026-32316 (jq jvp_string_append):
+  #   uint32_t result = (a + b) * multiplier;
+  #   alloc(result);      ← undersized if (a+b) wraps first
+
+  - id: c-uint32-mul-used-as-alloc-size
+    message: >
+      Potential CWE-190 integer overflow: uint32_t multiplication result used
+      as an allocation size. If the operands wrap at 2^32, the allocation will
+      be undersized and a subsequent copy may overflow the heap buffer.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-190"
+      confidence: MEDIUM
+    patterns:
+      - pattern: |
+          uint32_t $SIZE = ($A + $B) * $MULT;
+          ...
+          $ALLOC($SIZE, ...);
+      - pattern-not: |
+          uint32_t $SIZE = ($A + $B) * $MULT;
+          if ($SIZE < $A || ...) { ... }
+
+  - id: c-uint32-add-mul-in-alloc-arg
+    message: >
+      Potential CWE-190 integer overflow: (a + b) * c passed directly as an
+      allocation size where a and/or b are uint32_t. The addition may wrap
+      before the multiplication, producing an undersized buffer.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-190"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: malloc(($A + $B) * $MULT)
+      - pattern: realloc($PTR, ($A + $B) * $MULT)
+      - pattern: calloc($N, ($A + $B) * $MULT)
+      - pattern: jv_mem_alloc(($A + $B) * $MULT)
+
+  - id: c-narrow-int-overflow-before-size-extend
+    message: >
+      Potential CWE-190 integer overflow: arithmetic on a uint32_t (or smaller)
+      type that is then widened and used as an allocation size. The overflow
+      happens in the narrow domain before the implicit conversion.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-190"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          uint32_t $TMP = $EXPR;
+          ...
+          $ALLOC((size_t)$TMP, ...);
+
+  # ── Taint flow, unsafe functions, format strings ───────────────────────────
+
+  - id: variant-taint-cpp
+    message: "Potential variant: user input flows to dangerous sink"
+    severity: ERROR
+    languages: [c, cpp]
+    mode: taint
+
+    pattern-sources:
+      - pattern: argv[$IDX]
+      - pattern: gets(...)
+      - pattern: fgets($BUF, $SIZE, stdin)
+      - pattern: scanf(...)
+      - pattern: fscanf(...)
+      - pattern: getenv(...)
+      - pattern: recv($SOCK, $BUF, ...)
+      - pattern: recvfrom(...)
+      - pattern: read($FD, $BUF, ...)
+
+    pattern-sinks:
+      - pattern: system($SINK)
+      - pattern: popen($SINK, ...)
+      - pattern: execl($SINK, ...)
+      - pattern: execlp($SINK, ...)
+      - pattern: execv($SINK, ...)
+      - pattern: execvp($SINK, ...)
+      - pattern: strcpy($DST, $SINK)
+      - pattern: strcat($DST, $SINK)
+      - pattern: sprintf($DST, $FMT, ..., $SINK, ...)
+      - pattern: gets($SINK)
+      - pattern: printf($SINK)
+      - pattern: fprintf($FILE, $SINK)
+      - pattern: sprintf($BUF, $SINK)
+      - pattern: syslog($PRI, $SINK)
+      - pattern: malloc($SINK)
+      - pattern: calloc($SINK, ...)
+      - pattern: realloc($PTR, $SINK)
+      - pattern: alloca($SINK)
+      - pattern: fopen($SINK, ...)
+      - pattern: open($SINK, ...)
+
+    pattern-sanitizers:
+      - pattern: strncpy($DST, $SRC, $N)
+      - pattern: strncat($DST, $SRC, $N)
+      - pattern: snprintf($BUF, $SIZE, ...)
+      - pattern: strlcpy(...)
+      - pattern: strlcat(...)
+
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/*_test.c"
+        - "**/*_test.cpp"
+
+  - id: unsafe-functions-cpp
+    message: "Use of unsafe function - consider bounded alternative"
+    severity: WARNING
+    languages: [c, cpp]
+    pattern-either:
+      - pattern: gets(...)
+      - pattern: strcpy(...)
+      - pattern: strcat(...)
+      - pattern: sprintf(...)
+      - pattern: vsprintf(...)
+
+  - id: format-string-cpp
+    message: "Potential format string vulnerability"
+    severity: ERROR
+    languages: [c, cpp]
+    patterns:
+      - pattern-either:
+          - pattern: printf($VAR)
+          - pattern: fprintf($F, $VAR)
+          - pattern: sprintf($B, $VAR)
+          - pattern: snprintf($B, $S, $VAR)
+      - pattern-not: printf("...")
+      - pattern-not: fprintf($F, "...")
+      - pattern-not: sprintf($B, "...")
+      - pattern-not: snprintf($B, $S, "...")
