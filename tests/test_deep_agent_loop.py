@@ -267,6 +267,83 @@ async def test_throttles_calls_with_growing_numeric_prefix():
 
 
 @pytest.mark.asyncio
+async def test_read_file_pagination_is_not_falsely_throttled():
+    # Real failure mode observed against crAPI: read_file's offset/limit
+    # digits used to get stripped before the dedup check, so any four
+    # legitimately-different paginated reads of the same file collapsed
+    # to one key and the 4th+ was falsely rejected as "already made this
+    # call" even though it targeted genuinely unread lines.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=20, budget_usd=0.0)
+
+    offsets = [0, 100, 200, 300, 400, 500, 600]
+    call_count = [0]
+
+    async def achat_side_effect(**kwargs):
+        i = call_count[0]
+        call_count[0] += 1
+        if i >= len(offsets):
+            return FakeResponse(text="done")
+        return FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": offsets[i], "limit": 100},
+                )
+            ],
+        )
+
+    llm.achat.side_effect = achat_side_effect
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_logger = MagicMock()
+        mock_traj.for_hunter.return_value = mock_logger
+        await hunter.arun()
+
+    logged = mock_logger.log.call_args_list
+    skipped = [
+        c
+        for c in logged
+        if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
+    ]
+    assert len(skipped) == 0
+
+
+@pytest.mark.asyncio
+async def test_read_file_exact_repeat_still_throttled():
+    # The fix must not disable throttling entirely for read_file — a truly
+    # identical (path, offset, limit) repeated verbatim is still a
+    # degenerate loop and must still be caught.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=10, budget_usd=0.0)
+
+    call_count = [0]
+
+    async def achat_side_effect(**kwargs):
+        call_count[0] += 1
+        if call_count[0] >= 8:
+            return FakeResponse(text="done")
+        return FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "views.py", "offset": 0, "limit": 2000})
+            ],
+        )
+
+    llm.achat.side_effect = achat_side_effect
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_logger = MagicMock()
+        mock_traj.for_hunter.return_value = mock_logger
+        await hunter.arun()
+
+    logged = mock_logger.log.call_args_list
+    skipped = [
+        c
+        for c in logged
+        if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
+    ]
+    assert len(skipped) > 0
+
+
+@pytest.mark.asyncio
 async def test_hunter_completes_when_no_tool_calls():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=500, budget_usd=100.0)
 
