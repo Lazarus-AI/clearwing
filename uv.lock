@@ -796,7 +796,6 @@ all = [
     { name = "black" },
     { name = "build" },
     { name = "flake8" },
-    { name = "inspect-ai" },
     { name = "mkdocs" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
@@ -828,13 +827,10 @@ docs = [
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
 ]
-inspect-ai = [
-    { name = "inspect-ai" },
-]
 metasploit = [
     { name = "pymetasploit3" },
 ]
-semgrep = [
+sourcehunt = [
     { name = "semgrep" },
 ]
 vector = [
@@ -855,12 +851,11 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2.0" },
     { name = "chromadb", specifier = ">=1.0.0" },
-    { name = "clearwing", extras = ["metasploit", "browser", "vector", "dev", "docs", "inspect-ai", "semgrep"], marker = "extra == 'all'" },
+    { name = "clearwing", extras = ["metasploit", "browser", "vector", "dev", "docs", "sourcehunt"], marker = "extra == 'all'" },
     { name = "docker", specifier = ">=7.0.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "genai-pyo3", specifier = ">=0.7.0b14.dev3" },
-    { name = "inspect-ai", marker = "extra == 'inspect-ai'", specifier = ">=0.3.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "libpnet-pyo3", specifier = ">=0.1.2" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
@@ -880,7 +875,7 @@ requires-dist = [
     { name = "reportlab", specifier = ">=4.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.0" },
-    { name = "semgrep", marker = "extra == 'semgrep'", specifier = ">=1.0.0" },
+    { name = "semgrep", marker = "extra == 'sourcehunt'", specifier = ">=1.0.0" },
     { name = "sentence-transformers", marker = "extra == 'vector'", specifier = ">=2.2.0" },
     { name = "simple-term-menu", specifier = ">=1.6.0" },
     { name = "textual", specifier = ">=0.47.0" },
@@ -897,7 +892,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.20.0" },
     { name = "websockets", specifier = ">=11.0" },
 ]
-provides-extras = ["metasploit", "browser", "semgrep", "vector", "dev", "docs", "inspect-ai", "all"]
+provides-extras = ["metasploit", "browser", "sourcehunt", "vector", "dev", "docs", "all"]
 
 [package.metadata.requires-dev]
 dev = [
