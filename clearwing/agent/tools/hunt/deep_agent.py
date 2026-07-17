@@ -52,6 +52,14 @@ class WriteFileInput(ToolInputModel):
     contents: str = Field(description="File contents to write.")
 
 
+class LookupCallersInput(ToolInputModel):
+    func_name: str = Field(description="Function name to find callers of.")
+
+
+class LookupCalleesInput(ToolInputModel):
+    func_name: str = Field(description="Function name to find callees of.")
+
+
 def _cap_output(text: str, label: str = "output") -> str:
     if len(text) <= _OUTPUT_CAP:
         return text
@@ -107,9 +115,74 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         ctx.sandbox.write_file(path, contents.encode("utf-8"))
         return f"Wrote {len(contents)} bytes to {path}"
 
+    def lookup_callers(func_name: str, **_: object) -> dict:
+        """Return every function that calls func_name, grouped by file."""
+        cg = ctx.callgraph
+        if cg is None:
+            return {"error": "callgraph not available"}
+        result = cg.callers_of(func_name)
+        if not result:
+            return {"callers": {}, "note": f"no callers of '{func_name}' found in callgraph"}
+        line_index = {
+            f: {fi.name: (fi.start_line, fi.end_line) for fi in cg.function_info.get(f, [])}
+            for f in result
+        }
+        return {
+            "callers": {
+                f: [
+                    {"func": fn, "start_line": line_index[f].get(fn, (None, None))[0],
+                     "end_line": line_index[f].get(fn, (None, None))[1]}
+                    for fn in sorted(callers)
+                ]
+                for f, callers in sorted(result.items())
+            }
+        }
+
+    def lookup_callees(func_name: str, **_: object) -> dict:
+        """Return every function called by func_name, grouped by defining file."""
+        cg = ctx.callgraph
+        if cg is None:
+            return {"error": "callgraph not available"}
+        result = cg.callees_of(func_name)
+        if not result:
+            return {"callees": {}, "note": f"'{func_name}' not found in callgraph or calls nothing"}
+        return {"callees": {f: sorted(callees) for f, callees in sorted(result.items())}}
+
     reporting_tools = build_reporting_tools(ctx)
 
     semgrep_tool = build_semgrep_tool(ctx)
+
+    callgraph_tools = (
+        [
+            NativeToolSpec(
+                name="lookup_callers",
+                description=(
+                    "REACH FOR THIS FIRST when you identify a dangerous function "
+                    "(memcpy, image copy, free, decrypt, verify, write). "
+                    "Returns every function in the codebase that calls func_name, "
+                    "with file path and line range so you can read each caller directly. "
+                    "This is faster and more complete than grep. "
+                    "Use it immediately after spotting a sink — do not read the sink's "
+                    "definition, read its callers to find which one skips a guard."
+                ),
+                schema=LookupCallersInput.model_json_schema(),
+                handler=lookup_callers,
+            ),
+            NativeToolSpec(
+                name="lookup_callees",
+                description=(
+                    "Returns every function called by func_name, with file and line range. "
+                    "Use when you need to understand what a function does without reading "
+                    "it line by line, or to compare what setup calls two sibling functions "
+                    "make before reaching the same sink (e.g. streaming vs one-shot path)."
+                ),
+                schema=LookupCalleesInput.model_json_schema(),
+                handler=lookup_callees,
+            ),
+        ]
+        if ctx.callgraph is not None
+        else []
+    )
 
     return [
         NativeToolSpec(
@@ -141,4 +214,5 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         *reporting_tools,
         *build_potential_tools(ctx),
         *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
+        *callgraph_tools,
     ]

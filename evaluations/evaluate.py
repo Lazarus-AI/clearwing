@@ -254,7 +254,7 @@ def dynamic_runner_solver(
             depth=depth,
             max_parallel=4,
             sandbox_cpus=sandbox_cpus,
-            budget_usd=18.00,
+            budget_usd=36.00,
         )
         result = await runner.arun()
 
