@@ -21,7 +21,7 @@ from clearwing.sourcehunt.pool import (
     _redundancy_for_rank,
     promotion_decision,
 )
-from clearwing.sourcehunt.state import FileTarget
+from clearwing.sourcehunt.state import FileTarget, Finding
 
 
 def _make_file_target(
@@ -412,6 +412,33 @@ class TestExtractTranscript:
         transcript = _extract_transcript(result)
         assert "status=completed" in transcript
         assert "max_steps" in transcript
+
+    def test_handles_real_finding_dataclass_instances(self):
+        # result.findings is annotated list[dict], but in production the
+        # objects that actually flow through here are Finding dataclass
+        # instances (TargetResult is built with cast(list[dict], findings),
+        # which is a no-op at runtime). A dict-only implementation would
+        # silently degrade every entry to "?:?" with no description text.
+        findings = [
+            Finding(
+                file="jwt.py",
+                line_number=61,
+                description="JWT signature verification is disabled.",
+            ),
+            Finding(
+                file="jwt.py",
+                line_number=54,
+                description="SSL certificate verification is disabled.",
+            ),
+        ]
+        result = TargetResult(target="jwt.py", status="completed", findings=findings)
+        transcript = _extract_transcript(result)
+
+        assert "jwt.py:61" in transcript
+        assert "JWT signature verification is disabled." in transcript
+        assert "jwt.py:54" in transcript
+        assert "SSL certificate verification is disabled." in transcript
+        assert "?:?" not in transcript
 
 
 # --- Pool band wiring tests --------------------------------------------------

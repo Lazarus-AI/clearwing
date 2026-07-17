@@ -244,9 +244,16 @@ def _extract_transcript(result: TargetResult) -> str:
 
     parts: list[str] = []
     for f in findings[:MAX_TRANSCRIPT_FINDINGS]:
-        file = f.get("file", "?") if isinstance(f, dict) else "?"
-        line = f.get("line_number", "?") if isinstance(f, dict) else "?"
-        desc = f.get("description", "") if isinstance(f, dict) else str(f)
+        # result.findings is annotated list[dict] but the real runtime objects
+        # flowing through here are Finding dataclass instances (the cast() at
+        # the call site is a no-op) — Finding implements dict-mimicking
+        # __getitem__/.get() specifically so callers don't need to branch on
+        # dict vs. Finding, matching the existing pattern a few dozen lines
+        # above this function. An isinstance(f, dict) guard here would always
+        # be False in production, silently degrading every entry to "?:?".
+        file = f.get("file", "?")
+        line = f.get("line_number", "?")
+        desc = f.get("description", "") or ""
         parts.append(f"- {file}:{line} — {desc[:200]}")
     if len(findings) > MAX_TRANSCRIPT_FINDINGS:
         parts.append(
