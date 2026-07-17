@@ -1504,7 +1504,7 @@ class NativeHunter:
                     "step": step,
                 },
             )
-            if step > 1 and step % 25 == 0:
+            if step % 25 == 1:
                 records = len(self.ctx.findings)
                 visited_list = ", ".join(sorted(files_visited)) or "none"
                 budget_note = (
