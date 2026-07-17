@@ -1528,8 +1528,26 @@ class NativeHunter:
                     # argument string would also dodge a raw-prefix key since it
                     # shifts every character after it. Normalizing digit runs
                     # before truncating catches both shapes.
-                    normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
-                    key = (tool_call.fn_name, normalized_args[:300])
+                    # read_file/read_source_file take an (offset,limit) or
+                    # (start_line,end_line) pair as literally the ONLY fields
+                    # that legitimately vary between successive, non-redundant
+                    # paginated reads of the same file. Digit-stripping those
+                    # numbers collapses every call on a given path into one
+                    # identical key after just 3 uses, falsely throttling later
+                    # reads that target genuinely unseen line ranges (observed
+                    # live against crAPI: a 433-line file's read_file calls were
+                    # rejected from the 4th call on even though offset/limit
+                    # differed every time and no range was actually
+                    # re-requested, preventing the hunter from ever reading far
+                    # enough to find a real bug later in the file). Keep those
+                    # two tools' arguments literal — only tools without an
+                    # inherent legitimate-pagination shape benefit from
+                    # normalizing away incrementing digits.
+                    if tool_call.fn_name in ("read_file", "read_source_file"):
+                        key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
+                    else:
+                        normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
+                        key = (tool_call.fn_name, normalized_args[:300])
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
 
