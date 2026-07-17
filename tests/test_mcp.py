@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from clearwing.mcp.server import MCPServer
+from clearwing.mcp.server import MCPServer, _denied_tools
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -288,3 +288,62 @@ class TestNotificationsInitialized:
         request = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         response = server.handle_request(request)
         assert response is None
+
+
+class TestDenylist:
+    """c17: _register_tools filters against CLEARWING_MCP_DENIED_TOOLS."""
+
+    def _build_real(self, tool_names):
+        tools = [_make_fake_tool(n, f"desc {n}") for n in tool_names]
+        with patch("clearwing.agent.tools.get_all_tools", return_value=tools):
+            return MCPServer()
+
+    def test_default_denylist(self, monkeypatch):
+        monkeypatch.delenv("CLEARWING_MCP_DENIED_TOOLS", raising=False)
+        assert _denied_tools() == {
+            "create_custom_tool",
+            "connect_mcp_server",
+            "kali_cleanup",
+        }
+
+    def test_default_denied_tools_not_registered(self, monkeypatch):
+        monkeypatch.delenv("CLEARWING_MCP_DENIED_TOOLS", raising=False)
+        server = self._build_real(
+            [
+                "validate_target",
+                "create_custom_tool",
+                "connect_mcp_server",
+                "kali_cleanup",
+            ]
+        )
+        assert "validate_target" in server._tools
+        assert "create_custom_tool" not in server._tools
+        assert "connect_mcp_server" not in server._tools
+        assert "kali_cleanup" not in server._tools
+
+    def test_denied_tool_not_in_tools_list(self, monkeypatch):
+        monkeypatch.delenv("CLEARWING_MCP_DENIED_TOOLS", raising=False)
+        server = self._build_real(["validate_target", "create_custom_tool"])
+        response = server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        names = {t["name"] for t in response["result"]["tools"]}
+        assert "create_custom_tool" not in names
+
+    def test_denied_tool_call_rejected(self, monkeypatch):
+        monkeypatch.delenv("CLEARWING_MCP_DENIED_TOOLS", raising=False)
+        server = self._build_real(["create_custom_tool"])
+        response = server.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "create_custom_tool", "arguments": {}},
+            }
+        )
+        assert "error" in response
+        assert response["error"]["code"] == -32602
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("CLEARWING_MCP_DENIED_TOOLS", "validate_target, other")
+        server = self._build_real(["validate_target", "create_custom_tool"])
+        assert "validate_target" not in server._tools
+        assert "create_custom_tool" in server._tools
