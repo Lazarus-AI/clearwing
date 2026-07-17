@@ -1744,7 +1744,40 @@ class NativeHunter:
                     if not isinstance(tool_arguments, dict):
                         tool_arguments = {}
 
-                    # Track visited files and flags for situation reports
+                    # Keyed on a normalized prefix rather than the full argument
+                    # string: models stuck in a degenerate loop often reissue the
+                    # same call with a growing/mutating tail (e.g. appending
+                    # another redundant clause each turn), or with a small
+                    # numeric literal that creeps up each turn (e.g. `grep -B10`
+                    # widening to `-B1750` while going nowhere). Either would
+                    # dodge an exact-match dedup key while making no real
+                    # progress, and a mutating number near the start of a short
+                    # argument string would also dodge a raw-prefix key since it
+                    # shifts every character after it. Normalizing digit runs
+                    # before truncating catches both shapes.
+                    # read_file/read_source_file take an (offset,limit) or
+                    # (start_line,end_line) pair as literally the ONLY fields
+                    # that legitimately vary between successive, non-redundant
+                    # paginated reads of the same file. Digit-stripping those
+                    # numbers collapses every call on a given path into one
+                    # identical key after just 3 uses, falsely throttling later
+                    # reads that target genuinely unseen line ranges (observed
+                    # live against crAPI: a 433-line file's read_file calls were
+                    # rejected from the 4th call on even though offset/limit
+                    # differed every time and no range was actually
+                    # re-requested, preventing the hunter from ever reading far
+                    # enough to find a real bug later in the file). Keep those
+                    # two tools' arguments literal — only tools without an
+                    # inherent legitimate-pagination shape benefit from
+                    # normalizing away incrementing digits.
+                    if tool_call.fn_name in ("read_file", "read_source_file"):
+                        key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
+                    else:
+                        normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
+                        key = (tool_call.fn_name, normalized_args[:300])
+
+                    # Track file visits, line ranges, and flag counts for the
+                    # end-of-run summary. Independent of the dedup key above.
                     if tool_call.fn_name in ("read_file", "semgrep_scan"):
                         fpath = tool_arguments.get("path", "")
                         if fpath:
@@ -1759,13 +1792,6 @@ class NativeHunter:
                     elif tool_call.fn_name == "flag_potential":
                         flags_raised += 1
 
-                    # Degenerate loop detection: normalize args to catch
-                    # mutating numeric tails, but exempt read_file pagination.
-                    if tool_call.fn_name in ("read_file", "read_source_file"):
-                        key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
-                    else:
-                        normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
-                        key = (tool_call.fn_name, normalized_args[:300])
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
 
@@ -1803,21 +1829,21 @@ class NativeHunter:
                                 "tool_call": _serialize_tool_call(tool_call),
                             },
                         )
-                    tool_output = await self._run_tool(tools_by_name, tool_call)
-                    tool_summary = _tool_output_text(
-                        tool_call.fn_name,
-                        tool_arguments,
-                        tool_output,
-                    )
-                    trajectory.log(
-                        "tool_result",
-                        {
-                            "step": step,
-                            "tool_call": _serialize_tool_call(tool_call),
-                            "tool_output": tool_output,
-                            "tool_summary": tool_summary,
-                        },
-                    )
+                        tool_output = await self._run_tool(tools_by_name, tool_call)
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                            },
+                        )
                     messages.append(
                         ChatMessage(
                             "tool",
