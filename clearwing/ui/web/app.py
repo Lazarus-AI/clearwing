@@ -1,14 +1,15 @@
 """FastAPI web UI backend for Clearwing."""
 
 import asyncio
+import hmac
 import json
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import Any
 
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +33,11 @@ def _make_cost_tracker():
     return telemetry.CostTracker()
 
 
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("CLEARWING_WEB_CORS_ORIGINS", "")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 def create_app():
     """Create and configure the FastAPI application."""
     app = FastAPI(
@@ -42,11 +48,31 @@ def create_app():
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_cors_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ---------------------------------------------------------------
+    # Authentication for privileged endpoints
+    # ---------------------------------------------------------------
+
+    _api_key = os.environ.get("CLEARWING_WEB_API_KEY")
+
+    def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+        if not _api_key:
+            # Should be unreachable because routes are not mounted without a key,
+            # but keep a defensive fallback.
+            raise HTTPException(status_code=503, detail="API key not configured")
+        if x_api_key is None or not hmac.compare_digest(x_api_key, _api_key):
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    def _ws_authorized(websocket: WebSocket) -> bool:
+        provided = websocket.headers.get("x-api-key") or websocket.query_params.get("api_key")
+        return bool(
+            _api_key and provided is not None and hmac.compare_digest(provided, _api_key)
+        )
 
     # Serve the single-page frontend
     _static_dir = Path(__file__).parent / "static"
@@ -132,9 +158,38 @@ def create_app():
             media_type="text/plain",
         )
 
-    @app.post("/api/operate")
+    if not _api_key:
+        logger.error(
+            "CLEARWING_WEB_API_KEY is not set; refusing to mount /api/operate* "
+            "and /ws/agent. Set the environment variable and restart to enable "
+            "the operator endpoints."
+        )
+
+        @app.post("/api/operate")
+        async def _operate_disabled_post():
+            raise HTTPException(
+                status_code=503,
+                detail="Operator API disabled: CLEARWING_WEB_API_KEY is not set",
+            )
+
+        @app.get("/api/operate/{session_id}")
+        async def _operate_disabled_get(session_id: str):
+            raise HTTPException(
+                status_code=503,
+                detail="Operator API disabled: CLEARWING_WEB_API_KEY is not set",
+            )
+
+        @app.websocket("/ws/agent")
+        async def _ws_disabled(websocket: WebSocket):
+            await websocket.close(code=1008)
+
+        return app
+
+    @app.post("/api/operate", dependencies=[Depends(require_api_key)])
     async def start_operator(request_body: dict):
         """Start an autonomous Operator agent session.
+
+        Requires the ``X-API-Key`` header to match ``CLEARWING_WEB_API_KEY``.
 
         Request body:
         {
@@ -142,9 +197,11 @@ def create_app():
             "goals": ["Scan ports", "Find vulnerabilities"],
             "model": "claude-sonnet-4-6",
             "max_turns": 50,
-            "timeout_minutes": 30,
-            "auto_approve_exploits": false
+            "timeout_minutes": 30
         }
+
+        ``auto_approve_exploits`` is ignored if supplied; exploit approval is
+        always required.
         """
         target = request_body.get("target")
         goals = request_body.get("goals", [])
@@ -170,7 +227,10 @@ def create_app():
                     api_key=request_body.get("api_key"),
                     max_turns=request_body.get("max_turns", 50),
                     timeout_minutes=request_body.get("timeout_minutes", 30),
-                    auto_approve_exploits=request_body.get("auto_approve_exploits", False),
+                    # auto_approve_exploits is intentionally not accepted from
+                    # the request body; a remote caller must never be able to
+                    # bypass the exploit approval gate.
+                    auto_approve_exploits=False,
                 )
                 operator = OperatorAgent(config)
                 result = await operator.arun()
@@ -264,7 +324,7 @@ def create_app():
         finally:
             db.close()
 
-    @app.get("/api/operate/{session_id}")
+    @app.get("/api/operate/{session_id}", dependencies=[Depends(require_api_key)])
     async def get_operator_status(session_id: str):
         """Get the status of an operator session."""
         if session_id not in _sessions:
@@ -292,6 +352,9 @@ def create_app():
         - Server sends: {"type": "error", "message": "..."}
         - Server sends: {"type": "complete"}
         """
+        if not _ws_authorized(websocket):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
 
         message_queue: asyncio.Queue = asyncio.Queue()
