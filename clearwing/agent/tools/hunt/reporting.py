@@ -222,6 +222,19 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # Reset only after the authoritative steps are stored on the finding.
         ctx.trace_steps.clear()
 
+        duplicate = next(
+            (f for f in ctx.findings if f.file == file and f.line_number == line_number),
+            None,
+        )
+        if duplicate is not None:
+            return (
+                f"Finding at {file}:{line_number} was already recorded earlier "
+                f"in this session (finding_type={duplicate.finding_type!r}, "
+                f"severity={duplicate.severity!r}). Skipping this duplicate "
+                "call — if you have new information about a different issue, "
+                "record it at a different line instead of re-reporting this one."
+            )
+
         stable_finding_id = stable_run_id(
             "hunter",
             {
