@@ -60,6 +60,11 @@ class LookupCalleesInput(ToolInputModel):
     func_name: str = Field(description="Function name to find callees of.")
 
 
+class ListFunctionsInput(ToolInputModel):
+    path: str = Field(description="Relative file path (e.g. src/foo.c).")
+    filter: str | None = Field(default=None, description="Optional substring to filter function names (case-insensitive).")
+
+
 def _cap_output(text: str, label: str = "output") -> str:
     if len(text) <= _OUTPUT_CAP:
         return text
@@ -148,6 +153,25 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             return {"callees": {}, "note": f"'{func_name}' not found in callgraph or calls nothing"}
         return {"callees": {f: sorted(callees) for f, callees in sorted(result.items())}}
 
+    def list_functions(path: str, filter: str | None = None, **_: object) -> dict:
+        """List all functions defined in a file with their line ranges."""
+        cg = ctx.callgraph
+        if cg is None:
+            return {"error": "callgraph not available"}
+        infos = cg.function_info.get(path) or cg.function_info.get(path.lstrip("/workspace/"))
+        if not infos:
+            return {"functions": [], "note": f"no functions found for '{path}' in callgraph"}
+        results = sorted(infos, key=lambda fi: fi.start_line)
+        if filter:
+            results = [fi for fi in results if filter.lower() in fi.name.lower()]
+        return {
+            "functions": [
+                {"name": fi.name, "start_line": fi.start_line, "end_line": fi.end_line}
+                for fi in results
+            ],
+            "total": len(results),
+        }
+
     reporting_tools = build_reporting_tools(ctx)
 
     semgrep_tool = build_semgrep_tool(ctx)
@@ -178,6 +202,19 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 ),
                 schema=LookupCalleesInput.model_json_schema(),
                 handler=lookup_callees,
+            ),
+            NativeToolSpec(
+                name="list_functions",
+                description=(
+                    "CALL THIS FIRST on your target file before reading any code. "
+                    "Returns functions defined in the file with start/end line numbers. "
+                    "Use filter= to search by keyword (e.g. filter='verify', filter='final', "
+                    "filter='check') — large files have hundreds of functions so always filter. "
+                    "High-value targets: verify, final, check, validate, decode, parse, free, copy. "
+                    "Then read those functions directly by line range instead of scanning sequentially."
+                ),
+                schema=ListFunctionsInput.model_json_schema(),
+                handler=list_functions,
             ),
         ]
         if ctx.callgraph is not None

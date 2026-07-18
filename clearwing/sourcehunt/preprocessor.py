@@ -242,6 +242,7 @@ class Preprocessor:
         run_taint: bool = False,  # v0.4: tree-sitter taint analysis
         max_imports_by_files: int = 1000,  # cap the imports_by walk
         respect_gitignore: bool = False,
+        subsystem_paths: list[str] | None = None,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -254,6 +255,7 @@ class Preprocessor:
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
         self.respect_gitignore = respect_gitignore
+        self.subsystem_paths = subsystem_paths or []
         self._analyzer: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
@@ -293,24 +295,56 @@ class Preprocessor:
         build_callgraph = self.build_callgraph
         propagate_reachability = self.propagate_reachability
         run_taint = self.run_taint
+        callgraph_seed_files: list[str] | None = None
         if large_repo:
             if build_callgraph or propagate_reachability:
-                logger.info(
-                    "Large repo detected (%d source files); skipping callgraph/reachability",
-                    len(source_files),
-                )
+                if self.subsystem_paths:
+                    seed = self._expand_subsystem_files(repo_path, self.subsystem_paths)
+                    if seed:
+                        logger.info(
+                            "Large repo (%d files); seeding callgraph from %d subsystem files",
+                            len(source_files),
+                            len(seed),
+                        )
+                        callgraph_seed_files = seed
+                    else:
+                        logger.info(
+                            "Large repo detected (%d source files); skipping callgraph/reachability",
+                            len(source_files),
+                        )
+                        build_callgraph = False
+                        propagate_reachability = False
+                else:
+                    logger.info(
+                        "Large repo detected (%d source files); skipping callgraph/reachability",
+                        len(source_files),
+                    )
+                    build_callgraph = False
+                    propagate_reachability = False
             if run_taint:
-                logger.info(
-                    "Large repo detected (%d source files); skipping taint analysis",
-                    len(source_files),
-                )
-            build_callgraph = False
-            propagate_reachability = False
-            run_taint = False
+                if self.subsystem_paths and callgraph_seed_files:
+                    logger.info(
+                        "Large repo (%d files); seeding taint analysis from %d subsystem files",
+                        len(source_files),
+                        len(callgraph_seed_files),
+                    )
+                else:
+                    logger.info(
+                        "Large repo detected (%d source files); skipping taint analysis",
+                        len(source_files),
+                    )
+                    run_taint = False
 
         # Enumerate source files and build FileTarget entries
         file_targets: list[FileTarget] = []
-        for abs_path in source_files:
+        _total = len(source_files)
+        _update_every = max(1, _total // 10)
+        for _i, abs_path in enumerate(source_files):
+            if (_i + 1) % _update_every == 0 and (_i + 1) < _total:
+                logger.info(
+                    "Preprocessor: enumerating  %d/%d files  found=%d",
+                    _i + 1, _total, len(file_targets),
+                )
             ext = Path(abs_path).suffix.lower()
             language = _SOURCE_EXTS_TO_LANG.get(ext)
             if not language:
@@ -370,7 +404,7 @@ class Preprocessor:
             try:
                 builder = CallGraphBuilder()
                 if builder.available:
-                    callgraph = builder.build(repo_path)
+                    callgraph = builder.build(repo_path, files=callgraph_seed_files)
                     self._populate_callgraph_signals(file_targets, callgraph)
                 else:
                     logger.info("tree-sitter grammars not available; callgraph skipped")
@@ -409,7 +443,7 @@ class Preprocessor:
             try:
                 analyzer = TaintAnalyzer()
                 if analyzer.available:
-                    taint_result = analyzer.analyze_repo(repo_path)
+                    taint_result = analyzer.analyze_repo(repo_path, files=callgraph_seed_files)
                     taint_paths = taint_result.paths
                     self._apply_taint_signals(file_targets, taint_paths)
                 else:
@@ -471,6 +505,22 @@ class Preprocessor:
                 ft["semgrep_hint"] = counts[path]
 
     # --- v0.2 callgraph + reachability helpers -----------------------------
+
+    def _expand_subsystem_files(self, repo_path: str, subsystem_paths: list[str]) -> list[str]:
+        """Return absolute paths to source files under the given subsystem paths."""
+        from clearwing.sourcehunt.callgraph import _LANG_EXT_MAP
+        result: list[str] = []
+        for sp in subsystem_paths:
+            abs_sp = sp if os.path.isabs(sp) else os.path.join(repo_path, sp)
+            if os.path.isfile(abs_sp):
+                if Path(abs_sp).suffix.lower() in _LANG_EXT_MAP:
+                    result.append(abs_sp)
+            elif os.path.isdir(abs_sp):
+                for dirpath, _, filenames in os.walk(abs_sp):
+                    for fname in filenames:
+                        if Path(fname).suffix.lower() in _LANG_EXT_MAP:
+                            result.append(os.path.join(dirpath, fname))
+        return result
 
     @staticmethod
     def _populate_callgraph_signals(

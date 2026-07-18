@@ -180,6 +180,15 @@ def resolve_llm_endpoint(
     env_base_url = os.environ.get(ENV_BASE_URL)
     env_api_key = os.environ.get(ENV_API_KEY)
     env_model = os.environ.get(ENV_MODEL)
+
+    # Model-only override (CLEARWING_MODEL set, CLEARWING_BASE_URL not set):
+    # inherit base_url + api_key from config so we don't accidentally route to
+    # Anthropic direct when a custom endpoint is already configured.
+    if env_model and not env_base_url and config_provider:
+        env_base_url = config_provider.get("base_url") or env_base_url
+        if not env_api_key:
+            env_api_key = _resolve_config_secret(config_provider.get("api_key"))
+
     if env_base_url or env_model:
         if env_base_url:
             if _is_anthropic_compat_base_url(env_base_url):
