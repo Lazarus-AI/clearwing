@@ -20,6 +20,7 @@ from .native import (
     ToolInputModel,
     extract_json_array,
     extract_json_object,
+    last_finish_reason,
 )
 
 __all__ = [
@@ -41,5 +42,6 @@ __all__ = [
     "extract_json_array",
     "extract_json_object",
     "extract_text_content",
+    "last_finish_reason",
     "spend_metadata",
 ]

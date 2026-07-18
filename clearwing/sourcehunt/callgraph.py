@@ -21,6 +21,7 @@ import os
 
 from clearwing.core.events import EventBus
 from collections import defaultdict
+from functools import partial
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,12 +129,12 @@ class CallGraph:
     - `func_calls_out[file][func]` = set of function names called by that function
     """
 
-    functions: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
-    calls_out: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
-    defined_in: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
-    function_info: dict[str, list[FunctionInfo]] = field(default_factory=lambda: defaultdict(list))
+    functions: dict[str, set[str]] = field(default_factory=partial(defaultdict, set))
+    calls_out: dict[str, set[str]] = field(default_factory=partial(defaultdict, set))
+    defined_in: dict[str, set[str]] = field(default_factory=partial(defaultdict, set))
+    function_info: dict[str, list[FunctionInfo]] = field(default_factory=partial(defaultdict, list))
     func_calls_out: dict[str, dict[str, set[str]]] = field(
-        default_factory=lambda: defaultdict(lambda: defaultdict(set))
+        default_factory=partial(defaultdict, partial(defaultdict, set))
     )
     _file_callers: dict[str, set[str]] | None = field(default=None, repr=False)
 

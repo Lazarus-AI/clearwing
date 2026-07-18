@@ -983,7 +983,9 @@ class SourceHuntRunner:
                 detail=f"Enumerated {files_ranked} files",
                 files=stage_files,
             )
+            _t = time.monotonic()
             self._ensure_sandbox_factory(repo_path, files)
+            logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = (
@@ -2560,7 +2562,7 @@ class SourceHuntRunner:
             build_callgraph=(self.depth != "quick" and self._preprocessing),
             propagate_reachability=(self.depth != "quick" and self._preprocessing),
             run_semgrep=(self.depth != "quick" and self._preprocessing),
-            run_taint=(self.depth != "quick" and self._preprocessing),
+            run_taint=(self.depth != "quick" and self._preprocessing and not self._no_rank),
             respect_gitignore=self._respect_gitignore,
             subsystem_paths=self._subsystem_paths,
         )

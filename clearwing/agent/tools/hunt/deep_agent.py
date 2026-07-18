@@ -18,7 +18,9 @@ See docs/spec/001_deep_agent_mode.md for the design rationale.
 
 from __future__ import annotations
 
+import difflib
 import logging
+import re
 import shlex
 
 from pydantic import Field
@@ -43,8 +45,10 @@ class ExecuteInput(ToolInputModel):
 
 class ReadFileInput(ToolInputModel):
     path: str = Field(description="Absolute path in the container.")
-    offset: int = Field(default=0, description="Line offset (0-based, default 0).")
-    limit: int = Field(default=2000, description="Max lines to return (default 2000).")
+    offset: int = Field(default=0, description="Line offset (0-based, default 0). Or use start_line (1-based).")
+    limit: int = Field(default=2000, description="Max lines to return (default 2000). Or use end_line with start_line.")
+    start_line: int | None = Field(default=None, description="Alias — 1-based line number to start at. Overrides offset if set.")
+    end_line: int | None = Field(default=None, description="Alias — 1-based inclusive end line. Requires start_line.")
 
 
 class WriteFileInput(ToolInputModel):
@@ -62,13 +66,50 @@ class LookupCalleesInput(ToolInputModel):
 
 class ListFunctionsInput(ToolInputModel):
     path: str = Field(description="Relative file path (e.g. src/foo.c).")
-    filter: str | None = Field(default=None, description="Optional substring to filter function names (case-insensitive).")
+    filter: str | None = Field(
+        default=None,
+        description=(
+            "Optional filter. Split into tokens on non-alphanumeric AND camelCase "
+            "boundaries; each token must appear (case-insensitive) as a substring "
+            "of the function name. filter='DigestFinal' matches DigestVerifyFinal, "
+            "DigestFinal_ex, wolfSSL_EVP_DigestFinal, etc."
+        ),
+    )
+
+
+class ReadFunctionInput(ToolInputModel):
+    name: str = Field(
+        description="Exact function name to read (e.g. 'wolfSSL_EVP_DigestVerifyFinal')."
+    )
 
 
 def _cap_output(text: str, label: str = "output") -> str:
     if len(text) <= _OUTPUT_CAP:
         return text
     return text[:_OUTPUT_CAP] + f"\n\n[{label} truncated at {_OUTPUT_CAP} bytes]"
+
+
+# Split on non-alphanumeric AND camelCase boundaries so filter="DigestFinal"
+# yields ["digest","final"] and matches DigestVerifyFinal.
+_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _tokenize(s: str) -> list[str]:
+    return [t.lower() for t in _TOKEN_SPLIT.split(s) if t]
+
+
+def _matches(name: str, tokens: list[str]) -> bool:
+    low = name.lower()
+    return all(t in low for t in tokens)
+
+
+# Self-check — asserts run at import; catches regressions in the token match.
+assert _tokenize("DigestFinal") == ["digest", "final"]
+assert _tokenize("digest_final") == ["digest", "final"]
+assert _matches("wolfSSL_EVP_DigestVerifyFinal", _tokenize("DigestFinal"))
+assert _matches("wolfSSL_EVP_DigestFinal_ex", _tokenize("DigestFinal"))
+assert _matches("wolfSSL_EVP_VerifyFinal", _tokenize("verify"))
+assert not _matches("wolfSSL_EVP_CipherFinal", _tokenize("DigestFinal"))
 
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
@@ -93,9 +134,23 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "duration_seconds": round(result.duration_seconds, 2),
         }
 
-    def read_file(path: str, offset: int = 0, limit: int = 2000, **_: object) -> str:
+    def read_file(
+        path: str,
+        offset: int = 0,
+        limit: int = 2000,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        **_: object,
+    ) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
+        # Accept both idioms. Model naturally reaches for start_line/end_line
+        # (the prompt used to advertise them); swallowing them via **_ made the
+        # tool silently return lines 1-2000 and looked like a tool bug.
+        if start_line is not None:
+            offset = start_line - 1
+            if end_line is not None:
+                limit = max(1, end_line - start_line + 1)
         start = offset + 1
         end = offset + limit
         # Previously this was `sed ... | cat -n`, which numbers output
@@ -163,7 +218,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             return {"functions": [], "note": f"no functions found for '{path}' in callgraph"}
         results = sorted(infos, key=lambda fi: fi.start_line)
         if filter:
-            results = [fi for fi in results if filter.lower() in fi.name.lower()]
+            tokens = _tokenize(filter)
+            if tokens:
+                results = [fi for fi in results if _matches(fi.name, tokens)]
         return {
             "functions": [
                 {"name": fi.name, "start_line": fi.start_line, "end_line": fi.end_line}
@@ -171,6 +228,38 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             ],
             "total": len(results),
         }
+
+    def read_function(name: str, **_: object) -> dict:
+        """Read a function body by exact name. One atomic op — replaces the
+        list_functions(filter=...) → pick line range → read_file dance.
+        On miss, returns did_you_mean suggestions.
+        """
+        cg = ctx.callgraph
+        if cg is None:
+            return {"error": "callgraph not available"}
+        hits = [
+            (f, fi)
+            for f, infos in cg.function_info.items()
+            for fi in infos
+            if fi.name == name
+        ]
+        if not hits:
+            all_names = {fi.name for infos in cg.function_info.values() for fi in infos}
+            near = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
+            return {"error": f"no function named '{name}'", "did_you_mean": near}
+        # De-dup identical (file, start, end) — callgraph sometimes double-lists.
+        uniq = list({(f, fi.start_line, fi.end_line): (f, fi) for f, fi in hits}.values())
+        if len(uniq) > 1:
+            return {
+                "error": "ambiguous name; multiple definitions",
+                "candidates": [
+                    {"file": f, "start_line": fi.start_line, "end_line": fi.end_line}
+                    for f, fi in uniq
+                ],
+            }
+        f, fi = uniq[0]
+        body = read_file(f"/workspace/{f}", offset=fi.start_line - 1, limit=fi.end_line - fi.start_line + 1)
+        return {"file": f, "start_line": fi.start_line, "end_line": fi.end_line, "body": body}
 
     reporting_tools = build_reporting_tools(ctx)
 
@@ -208,13 +297,27 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 description=(
                     "CALL THIS FIRST on your target file before reading any code. "
                     "Returns functions defined in the file with start/end line numbers. "
-                    "Use filter= to search by keyword (e.g. filter='verify', filter='final', "
-                    "filter='check') — large files have hundreds of functions so always filter. "
+                    "Use filter= to search by keyword. Filter tokens are split on "
+                    "non-alphanumerics AND camelCase — filter='DigestFinal' matches "
+                    "'DigestVerifyFinal', 'wolfSSL_EVP_DigestFinal_ex', etc. "
                     "High-value targets: verify, final, check, validate, decode, parse, free, copy. "
-                    "Then read those functions directly by line range instead of scanning sequentially."
+                    "If you already know the exact name, prefer read_function(name)."
                 ),
                 schema=ListFunctionsInput.model_json_schema(),
                 handler=list_functions,
+            ),
+            NativeToolSpec(
+                name="read_function",
+                description=(
+                    "Read a function body by exact name — one atomic op. Use whenever "
+                    "you've said 'let me look at wolfSSL_EVP_DigestVerifyFinal' or any "
+                    "specific function you can name. Skips the list_functions→pick-line-"
+                    "range→read_file chain (where wrong picks silently open the wrong "
+                    "function). Returns {file, start_line, end_line, body}. On miss: "
+                    "did_you_mean suggestions. On ambiguity: candidate list."
+                ),
+                schema=ReadFunctionInput.model_json_schema(),
+                handler=read_function,
             ),
         ]
         if ctx.callgraph is not None
