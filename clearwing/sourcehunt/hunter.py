@@ -1612,7 +1612,7 @@ class NativeHunter:
                     messages=messages,
                     system=self.prompt,
                     tools=self.tools,
-                    max_tokens=16000,
+                    max_tokens=24000,
                 )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
