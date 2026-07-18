@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 
 from clearwing.core.events import EventBus
 
@@ -303,6 +304,7 @@ class HunterSandbox:
                 f"  sanitizers={san_str}  tag={tag[:16]}",
                 "info",
             )
+            _t = time.monotonic()
             try:
                 proc = subprocess.Popen(
                     ["docker", "build", "--progress=plain", "--platform", platform_flag, "-t", tag, build_dir],
@@ -425,7 +427,9 @@ class HunterSandbox:
         )
 
         sb = SandboxContainer(cfg)
+        _t = time.monotonic()
         sb.start()
+        logger.debug("Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t)
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir
