@@ -11,6 +11,7 @@ Lifecycle:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -20,9 +21,12 @@ import shutil
 import subprocess
 import tempfile
 
+from clearwing.core.events import EventBus
+
 from .builders import (
     BuildRecipe,
     BuildSystemDetector,
+    UPSTREAM_BASE_IMAGES,
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
@@ -180,6 +184,35 @@ class HunterSandbox:
             self._client = get_docker_client()
         return self._client
 
+    def _maybe_fallback_base(self) -> None:
+        """If the preferred clearwing-sourcehunt-* base image isn't present
+        locally, fall back to the upstream image and restore dynamic installs."""
+        base = self.build_recipe.base_image
+        if not base.startswith("clearwing-sourcehunt-"):
+            return
+        try:
+            self._get_client().images.get(base)
+            EventBus().emit_message(f"sandbox base ready  image={base}", "info")
+            # Packages are already baked into the static image — skip reinstall
+            self.build_recipe = dataclasses.replace(self.build_recipe, apt_packages=[])
+            self.extra_packages = []
+            self.post_install_commands = []
+        except Exception:
+            lang = self.build_recipe.primary_language
+            upstream = UPSTREAM_BASE_IMAGES.get(lang, "debian:11-slim")
+            logger.info("Static image %s not found; falling back to %s", base, upstream)
+            EventBus().emit_message(
+                f"sandbox base missing  image={base}  falling back to {upstream}  "
+                f"(run `make -C docker` to pre-build — first run will be slow)",
+                "warning",
+            )
+            self.build_recipe = dataclasses.replace(self.build_recipe, base_image=upstream)
+            if "python3-pip" not in self.extra_packages:
+                self.extra_packages.append("python3-pip")
+            pip_cmd = "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true"
+            if pip_cmd not in self.post_install_commands:
+                self.post_install_commands.append(pip_cmd)
+
     def build_image(self) -> str:
         """Build the primary sandbox image. Returns its tag.
 
@@ -188,6 +221,7 @@ class HunterSandbox:
         motivating case: it can't coexist with ASan in a single binary, so
         the caller declares it as an extra variant.
         """
+        self._maybe_fallback_base()
         primary_key = self._variant_key(self.sanitizers)
         primary_tag = self._build_variant_image(self.sanitizers)
         self._variant_images[primary_key] = primary_tag
@@ -248,6 +282,7 @@ class HunterSandbox:
         )
         if check.returncode == 0:
             logger.debug("Reusing sourcehunt sandbox image %s", tag)
+            EventBus().emit_message(f"sandbox cached  tag={tag[:16]}", "info")
             return tag
 
         with tempfile.TemporaryDirectory(prefix="clearwing-sandbox-build-") as build_dir:
@@ -256,28 +291,38 @@ class HunterSandbox:
                 f.write(dockerfile)
 
             platform_flag = self._target_platform()
+            san_str = ",".join(sanitizers) if sanitizers else "none"
             logger.info(
                 "Building sourcehunt sandbox image %s (sanitizers=%s, platform=%s)",
                 tag,
-                ",".join(sanitizers),
+                san_str,
                 platform_flag,
             )
+            EventBus().emit_message(
+                f"sandbox building  base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
+                f"  sanitizers={san_str}  tag={tag[:16]}",
+                "info",
+            )
             try:
-                proc = subprocess.run(
-                    [
-                        "docker", "build",
-                        "--progress=plain",
-                        "--platform", platform_flag,
-                        "-t", tag,
-                        build_dir,
-                    ],
-                    capture_output=True, text=True, timeout=300,
+                proc = subprocess.Popen(
+                    ["docker", "build", "--progress=plain", "--platform", platform_flag, "-t", tag, build_dir],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
                     env=docker_env,
                 )
+                output_lines: list[str] = []
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        output_lines.append(line)
+                        EventBus().emit_message(f"docker | {line}", "debug")
+                proc.wait(timeout=300)
                 if proc.returncode != 0:
-                    raise RuntimeError(proc.stderr[-2000:] or proc.stdout[-2000:])
+                    raise RuntimeError("\n".join(output_lines[-40:]))
             except subprocess.TimeoutExpired as e:
-                raise RuntimeError(f"Sandbox image build timed out after 300s") from e
+                proc.kill()
+                raise RuntimeError("Sandbox image build timed out after 300s") from e
             except RuntimeError:
                 raise
             except Exception as e:
@@ -285,6 +330,7 @@ class HunterSandbox:
                 logger.debug("Sandbox image build failed", exc_info=True)
                 raise RuntimeError(f"Failed to build sandbox image: {e}") from e
 
+        EventBus().emit_message(f"sandbox ready  tag={tag[:16]}", "info")
         return tag
 
     def spawn(
@@ -339,8 +385,7 @@ class HunterSandbox:
 
         # Build mounts list
         mounts: list[tuple[str, str, str]] = []
-        if not writable_workspace:
-            mounts.append((self.repo_path, "/workspace", "ro"))
+        mounts.append((self.repo_path, "/workspace", "rw" if writable_workspace else "ro"))
         scratch_host_dir = None
         if scratch_mount:
             scratch_host_dir = tempfile.mkdtemp(prefix="clearwing-scratch-")
@@ -381,16 +426,6 @@ class HunterSandbox:
 
         sb = SandboxContainer(cfg)
         sb.start()
-
-        if writable_workspace:
-            sb.copy_tree_into(self.repo_path, "/workspace")
-            try:
-                sb.exec(
-                    "cd /workspace && git init -q && git add -A && git commit -m initial -q",
-                    timeout=120,
-                )
-            except Exception:
-                logger.warning("git init in writable workspace failed", exc_info=True)
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir

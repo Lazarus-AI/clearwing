@@ -20,6 +20,19 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+_bus_logger = logging.getLogger("clearwing.events")
+
+_MSG_TYPE_TO_LEVEL = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+
+def _log_message_event(data: dict) -> None:
+    level = _MSG_TYPE_TO_LEVEL.get((data.get("type") or "info").lower(), logging.INFO)
+    _bus_logger.log(level, "%s", data.get("content", ""))
 
 
 class EventType(enum.Enum):
@@ -76,6 +89,7 @@ class EventBus:
                     instance = super().__new__(cls)
                     instance._handlers = {et: [] for et in EventType}
                     instance._lock = threading.Lock()
+                    instance._handlers[EventType.MESSAGE].append(_log_message_event)
                     cls._instance = instance
         return cls._instance
 

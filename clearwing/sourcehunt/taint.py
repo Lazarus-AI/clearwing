@@ -485,7 +485,10 @@ class TaintAnalyzer:
             return result
 
         file_iter = files if files is not None else list(self._walk(repo_path))
-        for abs_path in file_iter:
+        total = len(file_iter)
+        logger.info("Taint analysis building  files=%d", total)
+        update_every = max(1, total // 10)
+        for i, abs_path in enumerate(file_iter):
             lang = self._language_for(abs_path)
             if lang is None:
                 continue
@@ -502,6 +505,16 @@ class TaintAnalyzer:
                 result.files_with_paths += 1
                 result.paths.extend(file_paths)
 
+            if (i + 1) % update_every == 0 and (i + 1) < total:
+                logger.info(
+                    "Taint analysis progress  %d/%d files  paths=%d",
+                    i + 1, total, len(result.paths),
+                )
+
+        logger.info(
+            "Taint analysis done  analyzed=%d/%d  paths=%d  duration=%.1fs",
+            result.files_analyzed, total, len(result.paths), time.monotonic() - start,
+        )
         result.duration_seconds = round(time.monotonic() - start, 2)
         return result
 

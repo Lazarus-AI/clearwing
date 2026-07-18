@@ -48,6 +48,19 @@ class BuildRecipe:
 # python doesn't need a build but benefits from gcc for native extensions.
 # unknown uses debian:11-slim.
 DEFAULT_BASE_IMAGES = {
+    "c": "clearwing-sourcehunt-c",
+    "cpp": "clearwing-sourcehunt-cpp",
+    "rust": "clearwing-sourcehunt-rust",
+    "go": "clearwing-sourcehunt-go",
+    "python": "clearwing-sourcehunt-python",
+    "java": "clearwing-sourcehunt-java",
+    "node": "clearwing-sourcehunt-node",
+    "unknown": "clearwing-sourcehunt-unknown",
+}
+
+# Upstream fallbacks used when the pre-built clearwing-sourcehunt-* images
+# are not present locally (i.e. `make -C docker` hasn't been run yet).
+UPSTREAM_BASE_IMAGES = {
     "c": "gcc:12-bullseye",
     "cpp": "gcc:12-bullseye",
     "rust": "rust:1-slim",
