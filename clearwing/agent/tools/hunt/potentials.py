@@ -6,7 +6,10 @@ The queue accumulates across file reads so cross-file asymmetries stay visible.
 
 from __future__ import annotations
 
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from pydantic import Field
 
@@ -73,6 +76,7 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         }
         ctx.potentials.append(entry)
         open_count = sum(1 for p in ctx.potentials if p["status"] == "open")
+        logger.info("FLAGGED %s:%d [%s] %s", file, line, priority, note[:120])
         return f"Flagged {file}:{line} as potential [{entry['id']}]. Queue: {open_count} open."
 
     def get_potentials(**_: object) -> list[dict]:
