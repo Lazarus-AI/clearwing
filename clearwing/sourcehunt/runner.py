@@ -974,6 +974,8 @@ class SourceHuntRunner:
             files = preprocess_result.file_targets
             files_ranked = len(files)
             logger.info("Preprocessor enumerated %d files", files_ranked)
+            if preprocess_result.callgraph is not None and not preprocess_result.callgraph.empty:
+                logger.info("Callgraph ready  functions=%d", sum(len(v) for v in preprocess_result.callgraph.functions.values()))
             stage_files = [str(file_target.get("path") or "") for file_target in files]
             self._emit_stage(
                 "preprocess",
@@ -2560,6 +2562,7 @@ class SourceHuntRunner:
             run_semgrep=(self.depth != "quick" and self._preprocessing),
             run_taint=(self.depth != "quick" and self._preprocessing),
             respect_gitignore=self._respect_gitignore,
+            subsystem_paths=self._subsystem_paths,
         )
         return pp.run()
 
@@ -2590,11 +2593,6 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
-                extra_packages=["python3-pip"],
-                post_install_commands=[
-                    "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true",
-                    "pip3 install --break-system-packages semgrep || true",
-                ],
                 default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()
@@ -2605,8 +2603,9 @@ class SourceHuntRunner:
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
-            raise SystemExit(1)
+            raise RuntimeError(f"HunterSandbox unavailable: {exc}") from exc
 
+        self._sandbox_manager = manager
         cpu_limit = manager.default_cpu_limit
         available_cpus = manager.available_cpus
         logger.info(
@@ -2626,7 +2625,6 @@ class SourceHuntRunner:
                 aggregate_limit,
                 available_cpus,
             )
-        self._sandbox_manager = manager
         gvisor_rt = self._gvisor_runtime
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(
