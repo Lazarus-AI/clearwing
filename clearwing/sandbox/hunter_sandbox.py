@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 
 from clearwing.core.events import EventBus
 
@@ -246,7 +247,7 @@ class HunterSandbox:
 
         try:
             client.images.get(tag)
-            logger.debug("Reusing sourcehunt sandbox image %s", tag)
+            logger.info("Reusing cached sandbox image %s", tag)
             EventBus().emit_message(f"sandbox cached  tag={tag[:16]}", "info")
             return tag
         except Exception:
@@ -258,16 +259,13 @@ class HunterSandbox:
                 f.write(dockerfile)
 
             san_str = ",".join(sanitizers) if sanitizers else "none"
-            logger.info(
-                "Building sourcehunt sandbox image %s (sanitizers=%s)",
-                tag,
-                san_str,
-            )
+            logger.info("Building sandbox image %s (sanitizers=%s)", tag, san_str)
             EventBus().emit_message(
                 f"sandbox building  base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
                 f"  sanitizers={san_str}  tag={tag[:16]}",
                 "info",
             )
+            _t = time.monotonic()
             try:
                 proc = subprocess.Popen(
                     ["docker", "build", "--progress=plain", "--platform", "linux/amd64", "-t", tag, build_dir],
@@ -284,6 +282,7 @@ class HunterSandbox:
                 proc.wait()
                 if proc.returncode != 0:
                     raise RuntimeError("\n".join(output_lines[-40:]))
+                logger.info("Built sandbox image %s in %.1fs", tag, time.monotonic() - _t)
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
@@ -384,7 +383,9 @@ class HunterSandbox:
         )
 
         sb = SandboxContainer(cfg)
+        _t = time.monotonic()
         sb.start()
+        logger.debug("Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t)
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir

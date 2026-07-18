@@ -25,7 +25,13 @@ from clearwing.agent.tools.hunt import (
     build_propagation_auditor_tools,
 )
 from clearwing.core.events import EventBus, EventType
-from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
+from clearwing.llm import (
+    AsyncLLMClient,
+    ChatMessage,
+    NativeToolSpec,
+    ToolCall,
+    last_finish_reason,
+)
 from clearwing.llm.budget import spend_metadata
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
@@ -1209,6 +1215,18 @@ single-file bugs and cross-file bugs alike:
 - Logic bugs: protocol/API contracts violated across call boundaries
 - State corruption: shared state modified by one file but consumed by another
 - Inconsistent validation: input validated in one path but not another
+
+Not a finding — skip these, they will be rejected:
+- Missing NULL check on a trusted-caller pointer (public API args from other
+  library code are not "attacker-controlled" unless the API is exposed to
+  untrusted input; a missing NULL check is a robustness issue, not a CVE).
+- "Could hypothetically" without a specific operator/comparison/arithmetic anchor.
+- Style, naming, or dead-code issues.
+
+If a function name contains verify/sign/hmac/digest/mac, the bug is almost
+never a NULL check — look at return-value semantics, length comparisons
+(siglen vs hashLen, taglen), off-by-one on tag/mac truncation, and whether
+a comparison is skipped or short-circuited on error.
 {existing_findings_block}{entry_points_block}
 PHASE 1 — SURVEY (do this before any deep investigation):
 Before calling any tools, reason through: what are the worst security outcomes \
@@ -1220,8 +1238,9 @@ MUST be checked against the caller's permission list." These are your hypotheses
 Then survey the whole subsystem quickly:
 1. The function list injected above is your first lead source — these are \
 pre-ranked by the callgraph for security relevance. Read each listed function \
-by line range immediately (use read_file with start_line/end_line). Do NOT \
-scan files top-to-bottom; jump directly to those functions.
+by line range immediately (use read_file with start_line/end_line, or \
+read_function(name) if the exact name is known). Do NOT scan files \
+top-to-bottom; jump directly to those functions.
 2. Call list_functions on any file not yet covered to find additional targets: \
 verify, final, check, validate, decode, parse, free, copy. Read those by line \
 range.
@@ -1341,7 +1360,10 @@ def _build_subsystem_prompt(
         existing_findings_block=existing_findings_block,
         entry_points_block=entry_points_block,
     )
-    return prompt + TRACE_BUILDING_INSTRUCTIONS
+    # Subsystem hunt runs in deep-agent mode (read_file/execute), so use the
+    # trace block that references read_file — NOT read_source_file, which the
+    # deep agent doesn't have.
+    return prompt + DEEP_TRACE_INSTRUCTIONS
 
 
 def _terminal_functions_for_file(callgraph: Any, file_path: str) -> list[Any]:
@@ -1395,6 +1417,8 @@ def build_subsystem_hunter_agent(
         f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
         f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
     )
+    kw_lines: list[str] = []
+    term_lines: list[str] = []
     if callgraph is not None:
         def _dedup_infos(infos: list) -> list:
             seen: set[tuple[str, int]] = set()
@@ -1407,7 +1431,6 @@ def build_subsystem_hunter_agent(
             return out
 
         # Security-keyword functions per file — cap at 5 per file so no file dominates
-        kw_lines: list[str] = []
         for ft in subsystem.files:
             fpath = ft["path"]
             infos = _dedup_infos(callgraph.function_info.get(fpath, []))
@@ -1422,7 +1445,6 @@ def build_subsystem_hunter_agent(
             )
 
         # Terminal functions (public API — not called by anything in the repo) — cap at 5 per file
-        term_lines: list[str] = []
         for ft in subsystem.files:
             fpath = ft["path"]
             terminals = _dedup_infos(_terminal_functions_for_file(callgraph, fpath))
@@ -1441,6 +1463,10 @@ def build_subsystem_hunter_agent(
                 "sink. Call list_functions(path, filter=<keyword>) to expand a file, then read by line range."
             )
 
+    logger.info(
+        "Subsystem hunt [%s]: %d files, %d kw hits, %d terminals",
+        subsystem.name, len(subsystem.files), len(kw_lines), len(term_lines),
+    )
     return NativeHunter(
         llm=llm,
         prompt=prompt,
@@ -1754,14 +1780,34 @@ class NativeHunter:
             if not last_assistant_text and not tool_calls_in_response:
                 empty_response_nudges += 1
                 if empty_response_nudges <= 3:
+                    finish_reason = last_finish_reason()
                     logger.warning(
-                        "[%s] step=%d: empty response (nudge %d/3) output_tokens=%d reasoning=%s",
+                        "[%s] step=%d: empty response (nudge %d/3) finish_reason=%s output_tokens=%d reasoning=%s",
                         self.ctx.file_path, step, empty_response_nudges,
+                        finish_reason or "unknown",
                         last_output_tokens,
                         repr(last_reasoning_content[:200]) if last_reasoning_content else "none",
                     )
-                    trajectory.log("nudge", {"step": step, "nudge": empty_response_nudges})
-                    messages.append(ChatMessage("user", "Continue your investigation. Use a tool to proceed."))
+                    trajectory.log(
+                        "nudge",
+                        {
+                            "step": step,
+                            "nudge": empty_response_nudges,
+                            "finish_reason": finish_reason,
+                        },
+                    )
+                    # `length` = ran out of output tokens; tell the model directly so
+                    # it stops running out of budget mid-thought. Anything else gets
+                    # the neutral nudge.
+                    if finish_reason == "length":
+                        nudge_text = (
+                            "Your last response was cut off (finish_reason=length) — "
+                            "you exhausted the output budget before emitting text or a "
+                            "tool call. Be concise and call a tool now."
+                        )
+                    else:
+                        nudge_text = "Continue your investigation. Use a tool to proceed."
+                    messages.append(ChatMessage("user", nudge_text))
                     continue
 
             if last_assistant_text:
