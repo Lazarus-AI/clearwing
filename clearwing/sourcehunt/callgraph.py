@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+from clearwing.core.events import EventBus
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -133,6 +135,17 @@ class CallGraph:
     func_calls_out: dict[str, dict[str, set[str]]] = field(
         default_factory=lambda: defaultdict(lambda: defaultdict(set))
     )
+    _file_callers: dict[str, set[str]] | None = field(default=None, repr=False)
+
+    def _build_file_callers(self) -> None:
+        """Precompute reverse file adjacency: target_file → set of caller files."""
+        index: dict[str, set[str]] = defaultdict(set)
+        for caller_file, called_names in self.calls_out.items():
+            for name in called_names:
+                for callee_file in self.defined_in.get(name, set()):
+                    if callee_file != caller_file:
+                        index[callee_file].add(caller_file)
+        self._file_callers = index
 
     def callees_of(self, func_name: str) -> dict[str, set[str]]:
         """Return {file: set[callee_names]} for every definition of func_name."""
@@ -151,16 +164,9 @@ class CallGraph:
 
     def callers_of_file(self, target_file: str) -> set[str]:
         """Return the set of files that call any function defined in target_file."""
-        target_functions = self.functions.get(target_file, set())
-        if not target_functions:
-            return set()
-        out: set[str] = set()
-        for caller_file, called in self.calls_out.items():
-            if caller_file == target_file:
-                continue
-            if called & target_functions:
-                out.add(caller_file)
-        return out
+        if self._file_callers is None:
+            self._build_file_callers()
+        return set(self._file_callers.get(target_file, set()))
 
     def transitive_callers_of_file(self, target_file: str) -> set[str]:
         """Return every file that can reach target_file through the callgraph.
@@ -242,16 +248,37 @@ class CallGraphBuilder:
         if files is None:
             files = list(self._walk_repo(repo_path))
 
-        for abs_path in files:
+        total = len(files)
+        logger.info("Callgraph building  files=%d", total)
+        EventBus().emit_message(f"callgraph building  files={total}", "info")
+
+        update_every = max(1, total // 10)
+        parsed = 0
+        for i, abs_path in enumerate(files):
             ext = Path(abs_path).suffix.lower()
             lang_name = _LANG_EXT_MAP.get(ext)
             if lang_name is None or lang_name not in self._languages:
                 continue
             try:
                 self._ingest_file(abs_path, lang_name, graph, repo_path)
+                parsed += 1
             except Exception:
                 logger.debug("Failed to parse %s", abs_path, exc_info=True)
+            if (i + 1) % update_every == 0 and (i + 1) < total:
+                n_funcs = sum(len(v) for v in graph.functions.values())
+                logger.info("Callgraph progress  %d/%d files  functions=%d", i + 1, total, n_funcs)
+                EventBus().emit_message(
+                    f"callgraph progress  {i + 1}/{total} files  functions={n_funcs}",
+                    "info",
+                )
 
+        n_funcs = sum(len(v) for v in graph.functions.values())
+        n_edges = sum(len(v) for v in graph.calls_out.values())
+        logger.info("Callgraph done  parsed=%d/%d  functions=%d  edges=%d", parsed, total, n_funcs, n_edges)
+        EventBus().emit_message(
+            f"callgraph done  parsed={parsed}/{total}  functions={n_funcs}  edges={n_edges}",
+            "info",
+        )
         return graph
 
     # --- internals ----------------------------------------------------------
