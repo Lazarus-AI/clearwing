@@ -1412,7 +1412,10 @@ def build_subsystem_hunter_agent(
     if campaign_hint:
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
-    _SECURITY_KEYWORDS = {"verify", "final", "check", "validate", "decode", "parse", "free", "copy"}
+    _SECURITY_KEYWORDS = {
+        "verify", "final", "check", "validate", "decode", "parse", "free", "copy",
+        "sign", "hmac", "mac", "digest", "tag",
+    }
     _initial_msg = (
         f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
         f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
@@ -1430,26 +1433,40 @@ def build_subsystem_hunter_agent(
                     out.append(fi)
             return out
 
-        # Security-keyword functions per file — cap at 5 per file so no file dominates
+        # Per-file cap scales inversely with file count so single-file subsystems
+        # (e.g. one .c targeted eval) don't get artificially clipped at 5.
+        # ponytail: linear scale, floor 5, ceil 20. Revisit if injected context gets fat.
+        per_file_cap = max(5, min(20, 25 // max(1, len(subsystem.files))))
+
+        # Security-keyword functions per file. Sort by verb-hit-count desc so
+        # compound names (DigestVerifyFinal = digest+verify+final) float above
+        # single-verb (EncryptFinal) — the target CVE class lives in the compounds.
+        def _verb_hits(name: str) -> int:
+            low = name.lower()
+            return sum(1 for kw in _SECURITY_KEYWORDS if kw in low)
+
         for ft in subsystem.files:
             fpath = ft["path"]
             infos = _dedup_infos(callgraph.function_info.get(fpath, []))
-            hits = [fi for fi in infos if any(kw in fi.name.lower() for kw in _SECURITY_KEYWORDS)]
+            hits = [fi for fi in infos if _verb_hits(fi.name)]
             if hits:
-                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(hits, key=lambda fi: fi.start_line)[:5])
+                hits.sort(key=lambda fi: (-_verb_hits(fi.name), fi.start_line))
+                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in hits[:per_file_cap])
                 kw_lines.append(f"  {fpath}: {fn_list}")
         if kw_lines:
             _initial_msg += (
-                "\n\nSecurity-relevant functions by file (verify/final/check/validate/decode/parse/free/copy):\n"
+                "\n\nSecurity-relevant functions by file "
+                "(verb/hmac/mac/digest/tag/verify/final/check/validate/decode/parse/free/copy, "
+                "compound names first):\n"
                 + "\n".join(kw_lines)
             )
 
-        # Terminal functions (public API — not called by anything in the repo) — cap at 5 per file
+        # Terminal functions (public API — not called by anything in the repo)
         for ft in subsystem.files:
             fpath = ft["path"]
             terminals = _dedup_infos(_terminal_functions_for_file(callgraph, fpath))
             if terminals:
-                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(terminals, key=lambda fi: fi.start_line)[:5])
+                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(terminals, key=lambda fi: fi.start_line)[:per_file_cap])
                 term_lines.append(f"  {fpath}: {fn_list}")
         if term_lines:
             _initial_msg += (
@@ -1463,9 +1480,13 @@ def build_subsystem_hunter_agent(
                 "sink. Call list_functions(path, filter=<keyword>) to expand a file, then read by line range."
             )
 
+    # Count actual functions injected (comma-separated names per line).
+    _n_kw = sum(line.count(",") + 1 for line in kw_lines)
+    _n_term = sum(line.count(",") + 1 for line in term_lines)
     logger.info(
-        "Subsystem hunt [%s]: %d files, %d kw hits, %d terminals",
-        subsystem.name, len(subsystem.files), len(kw_lines), len(term_lines),
+        "Subsystem hunt [%s]: %d files, %d kw funcs, %d terminal funcs (cap=%d/file)",
+        subsystem.name, len(subsystem.files), _n_kw, _n_term,
+        max(5, min(20, 25 // max(1, len(subsystem.files)))),
     )
     return NativeHunter(
         llm=llm,
