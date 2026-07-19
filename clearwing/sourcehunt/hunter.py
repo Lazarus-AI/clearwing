@@ -1315,6 +1315,7 @@ def build_subsystem_hunter_agent(
     findings_pool: Any = None,
     campaign_hint: str | None = None,
     callgraph: Any = None,
+    max_steps: int = 2000,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a subsystem-level hunter agent (spec 006).
 
@@ -1346,7 +1347,7 @@ def build_subsystem_hunter_agent(
         prompt=prompt,
         tools=tools,
         ctx=ctx,
-        max_steps=2000,
+        max_steps=max_steps,
         agent_mode="deep",
         budget_usd=budget_usd,
         initial_user_message=(
@@ -1830,6 +1831,8 @@ def build_hunter_agent(
     prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
     campaign_hint: str | None = None,
     exploit_mode: bool = False,
+    max_steps_constrained: int = 20,
+    max_steps_deep: int = 500,
     seed_transcript: str | None = None,
     entry_point: Any = None,
     seed_context: str | None = None,
@@ -1894,7 +1897,7 @@ def build_hunter_agent(
     if specialist == "propagation":
         tools = build_propagation_auditor_tools(ctx)
         prompt = _build_propagation_prompt(file_target)
-        max_steps = 20
+        max_steps = max_steps_constrained
     elif prompt_mode == "unconstrained":
         combined_hints = list(semgrep_hints or [])
         prompt = _build_unconstrained_prompt(
@@ -1911,10 +1914,10 @@ def build_hunter_agent(
         )
         if agent_mode == "deep":
             tools = build_deep_agent_tools(ctx)
-            max_steps = 500
+            max_steps = max_steps_deep
         else:
             tools = build_hunter_tools(ctx)
-            max_steps = 20
+            max_steps = max_steps_constrained
     elif agent_mode == "deep":
         tools = build_deep_agent_tools(ctx)
         combined_hints = list(semgrep_hints or [])
@@ -1928,7 +1931,7 @@ def build_hunter_agent(
             seed_context=seed_context,
             findings_pool=findings_pool,
         )
-        max_steps = 500
+        max_steps = max_steps_deep
     else:
         tools = build_hunter_tools(ctx)
         combined_hints = list(semgrep_hints or [])
@@ -1941,7 +1944,7 @@ def build_hunter_agent(
             combined_hints,
             specialist=specialist,
         )
-        max_steps = 20
+        max_steps = max_steps_constrained
 
     if seed_transcript:
         prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)

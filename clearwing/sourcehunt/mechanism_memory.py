@@ -37,6 +37,7 @@ from typing import Any, cast
 
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
+from .config import load_runtime_tuning_policy_from_env
 from .state import Finding
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,9 @@ class MechanismStore:
     ):
         self.path = path or default_store_path()
         self.backend = _detect_best_backend() if backend == "auto" else backend
+        self._default_recall_top_n = (
+            load_runtime_tuning_policy_from_env().verification.mechanism_recall_top_n
+        )
         # chromadb client is constructed lazily in _recall_chromadb
         self._chromadb_client: Any | None = None
         self._chromadb_collection: Any | None = None
@@ -273,7 +277,7 @@ class MechanismStore:
         self,
         language: str,
         tags: list[str],
-        top_n: int = 3,
+        top_n: int | None = None,
         query_text: str | None = None,
     ) -> list[Mechanism]:
         """Retrieve relevant mechanisms from the store.
@@ -290,6 +294,7 @@ class MechanismStore:
             query_text: optional free-form query text to boost relevance.
                 When None, the query is assembled from language + tags.
         """
+        top_n = int(top_n or self._default_recall_top_n)
         mechanisms = self.load_all()
         if not mechanisms:
             return []

@@ -36,6 +36,7 @@ from typing import Any
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
+from .config import load_runtime_tuning_policy_from_env
 from .state import FileTarget
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,17 @@ class HarnessGenerator:
     ) -> None:
         self.llm = llm
         self.sandbox_factory = sandbox_factory
-        self.config = config or HarnessGeneratorConfig()
+        if config is None:
+            runtime_exploit = load_runtime_tuning_policy_from_env().exploit
+            config = HarnessGeneratorConfig(
+                total_time_budget_seconds=runtime_exploit.harness_total_time_budget_seconds,
+                per_harness_duration_seconds=runtime_exploit.harness_per_harness_duration_seconds,
+                max_harnesses=runtime_exploit.harness_max_harnesses,
+                min_surface=runtime_exploit.harness_min_surface,
+                max_parallel=runtime_exploit.harness_max_parallel,
+                compile_timeout_seconds=runtime_exploit.harness_compile_timeout_seconds,
+            )
+        self.config = config
 
     def run(
         self,

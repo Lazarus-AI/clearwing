@@ -7,6 +7,7 @@ Runs the sourcehunt pipeline under different configurations for the same
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -188,7 +189,7 @@ class PreprocessingEval:
                     status="running", cost_usd=0.0,
                 ))
                 run_result = await self._single_run(
-                    eval_config, local_path, run_idx,
+                    eval_config, local_path, run_idx, config_dir,
                 )
                 config_result.runs.append(run_result)
                 bus.emit_eval_progress(EvalProgressPayload(
@@ -228,11 +229,29 @@ class PreprocessingEval:
         eval_config: EvalConfig,
         local_path: str | None,
         run_idx: int,
+        config_dir: Path,
     ) -> ConfigRunResult:
         """Execute a single eval run under a config."""
         from clearwing.sourcehunt.runner import SourceHuntRunner
 
         runner_kwargs = eval_config.to_runner_kwargs()
+        run_output_dir = config_dir / f"sourcehunt_run_{run_idx}"
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+        session_seed = "|".join(
+            [
+                str(self._project or ""),
+                str(self._commit or ""),
+                str(eval_config.name or ""),
+                str(run_idx),
+                str(self._depth or ""),
+                str(self._budget_per_config),
+                str(self._model_name or ""),
+            ]
+        )
+        session_hash = hashlib.sha256(session_seed.encode("utf-8")).hexdigest()[:12]
+        stable_session_id = (
+            f"sh-eval-{eval_config.name}-{run_idx}-{session_hash}".replace("_", "-")
+        )
 
         try:
             runner = SourceHuntRunner(
@@ -240,6 +259,8 @@ class PreprocessingEval:
                 local_path=local_path,
                 depth=self._depth,
                 budget_usd=self._budget_per_config,
+                depth_is_explicit=True,
+                budget_is_explicit=True,
                 provider_manager=self._provider_manager,
                 no_exploit=True,
                 enable_variant_loop=False,
@@ -249,6 +270,9 @@ class PreprocessingEval:
                 enable_elaboration=False,
                 enable_behavior_monitor=False,
                 enable_artifact_store=False,
+                output_dir=str(run_output_dir),
+                parent_session_id=stable_session_id,
+                checkpoint_root=str(run_output_dir / "checkpoints"),
                 **runner_kwargs,
             )
 

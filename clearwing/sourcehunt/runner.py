@@ -10,6 +10,7 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -20,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
@@ -32,7 +33,16 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
-from .config import SourceHuntConfig
+from .config import (
+    ClearWingRuntimeTuningPolicy,
+    SourceHuntConfig,
+    load_runtime_tuning_policy_from_env,
+)
+from .checkpoint import (
+    SourceHuntCheckpointStore,
+    build_checkpoint_fingerprint,
+    checkpoint_stage_key,
+)
 from .disclosure import (
     DisclosureGenerator,
 )
@@ -53,19 +63,22 @@ from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
 from .state import (
+    AxisResult,
     EvidenceLevel,
     FileTarget,
     Finding,
     PipelineStatus,
     StageOutcome,
+    ValidatorVerdict,
     evidence_at_or_above,
     filter_by_evidence,
 )
 from .variant_loop import (
     VariantLoop,
+    VariantLoopConfig,
     VariantPatternGenerator,
 )
-from .verifier import Verifier, apply_verifier_result
+from .verifier import Verifier, VerifierResult, apply_verifier_result
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +247,13 @@ class SourceHuntRunner:
         respect_gitignore: bool = False,
         live: bool = False,
         sandbox_cpus: float | None = None,
+        checkpoint_root: str | None = None,
+        checkpointing_enabled: bool = True,
+        depth_is_explicit: bool = False,
+        budget_is_explicit: bool = False,
+        max_parallel_is_explicit: bool = False,
+        tier_budget_is_explicit: bool = False,
+        adversarial_threshold_is_explicit: bool = False,
         *,
         config: SourceHuntConfig | None = None,
         flow: str = "legacy",
@@ -409,6 +429,34 @@ class SourceHuntRunner:
             )
             falsify = falsify and p.falsify
 
+        runtime_tuning = load_runtime_tuning_policy_from_env()
+        runtime_throughput = runtime_tuning.sourcehunt.throughput_budget
+        runtime_verification = runtime_tuning.verification
+
+        # CLI/request values keep precedence; these substitutions only apply
+        # when the caller left the constructor defaults untouched.
+        if not depth_is_explicit and depth == "standard":
+            depth = runtime_throughput.default_depth
+        if not budget_is_explicit and budget_usd == 0.0:
+            budget_usd = runtime_throughput.total_usd_ceiling
+        if not max_parallel_is_explicit and max_parallel == 8:
+            max_parallel = runtime_throughput.hunt_parallelism
+        if not tier_budget_is_explicit and tier_budget is None:
+            a_frac, b_frac, c_frac = runtime_throughput.normalized_tier_fractions()
+            tier_budget = TierBudget(
+                tier_a_fraction=a_frac,
+                tier_b_fraction=b_frac,
+                tier_c_fraction=c_frac,
+            )
+        if (
+            not adversarial_threshold_is_explicit
+            and adversarial_threshold == "static_corroboration"
+        ):
+            if runtime_verification.adversarial_threshold == "always":
+                adversarial_threshold = None
+            else:
+                adversarial_threshold = runtime_verification.adversarial_threshold
+
         if not repo_url:
             raise ValueError(
                 "repo_url is required — pass it directly or via "
@@ -441,6 +489,7 @@ class SourceHuntRunner:
         self.output_price_per_million = output_price_per_million
         self.max_parallel = max_parallel
         self.tier_budget = tier_budget or TierBudget()
+        self._runtime_tuning: ClearWingRuntimeTuningPolicy = runtime_tuning
         if output_dir is None:
             from clearwing.core.config import default_results_dir
 
@@ -539,6 +588,32 @@ class SourceHuntRunner:
         )
         self._instrumentation_finalized = False
         self._last_reporting_error: dict[str, str] | None = None
+        self._checkpoint_root_override = checkpoint_root
+        self._checkpointing_enabled = checkpointing_enabled
+        self._checkpoint_store: SourceHuntCheckpointStore | None = None
+        runtime_coverage = self._runtime_tuning.sourcehunt.coverage
+        runtime_throughput = self._runtime_tuning.sourcehunt.throughput_budget
+        runtime_verification = self._runtime_tuning.verification
+        self._runtime_band_budget = BandBudget(
+            fast_usd=runtime_throughput.band_fast_usd,
+            standard_usd=runtime_throughput.band_standard_usd,
+            deep_usd=runtime_throughput.band_deep_usd,
+        )
+        self._runtime_cost_limit_per_file_a = runtime_throughput.per_file_cap_a_usd
+        self._runtime_cost_limit_per_file_b = runtime_throughput.per_file_cap_b_usd
+        self._runtime_cost_limit_per_file_c = runtime_throughput.per_file_cap_c_usd
+        self._runtime_ranker_max_inflight_chunks = (
+            runtime_throughput.ranker_max_inflight_chunks
+        )
+        self._runtime_ranker_large_repo_llm_limit = (
+            runtime_coverage.ranker_llm_file_limit
+        )
+        self._runtime_hunter_max_steps_constrained = (
+            runtime_verification.hunter_max_steps_constrained
+        )
+        self._runtime_hunter_max_steps_deep = (
+            runtime_verification.hunter_max_steps_deep
+        )
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -610,6 +685,306 @@ class SourceHuntRunner:
         if self._shard_entry_points_override is not None:
             return self._shard_entry_points_override
         return self.depth == "deep"
+
+    def _checkpoint_root_dir(self) -> Path:
+        if self._checkpoint_root_override:
+            return Path(self._checkpoint_root_override)
+        return self._ensure_output_dir_layout() / "checkpoints"
+
+    def _repo_commit_hint(self, repo_path: str) -> str | None:
+        if not repo_path:
+            return None
+        try:
+            proc = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            return None
+        if proc.returncode != 0:
+            return None
+        commit = str(proc.stdout or "").strip()
+        return commit or None
+
+    def _command_args_snapshot(self) -> dict[str, Any]:
+        return {
+            "depth": self.depth,
+            "budget_usd": self.budget_usd,
+            "max_parallel": self.max_parallel,
+            "tier_budget": {
+                "a": self.tier_budget.tier_a_fraction,
+                "b": self.tier_budget.tier_b_fraction,
+                "c": self.tier_budget.tier_c_fraction,
+            },
+            "starting_band": self._starting_band,
+            "max_band": self._max_band,
+            "agent_mode": self._agent_mode,
+            "prompt_mode": self._prompt_mode,
+            "seed_harness_crashes": self._seed_harness_crashes,
+            "enable_variant_loop": self.enable_variant_loop,
+            "enable_stability_verification": self.enable_stability_verification,
+            "no_verify": self.no_verify,
+            "no_exploit": self.no_exploit,
+            "exploit_budget_band": self._exploit_budget_band,
+            "runtime_hunter_steps": {
+                "constrained": self._runtime_hunter_max_steps_constrained,
+                "deep": self._runtime_hunter_max_steps_deep,
+            },
+        }
+
+    def _model_route_snapshot(self) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
+            "model_override": self.model_override,
+            "provider_manager_injected": self.provider_manager is not None,
+            "ranker_llm_injected": self.ranker_llm is not None,
+            "hunter_llm_injected": self.hunter_llm is not None,
+            "verifier_llm_injected": self.verifier_llm is not None,
+            "exploiter_llm_injected": self.exploiter_llm is not None,
+        }
+        try:
+            endpoint = (
+                resolve_llm_endpoint(cli_model=self.model_override)
+                if self.model_override
+                else resolve_llm_endpoint()
+            )
+            snapshot["endpoint"] = {
+                "provider": getattr(endpoint, "provider", None),
+                "model": getattr(endpoint, "model", None),
+                "base_url": getattr(endpoint, "base_url", None),
+            }
+        except Exception:
+            snapshot["endpoint"] = {"provider": None, "model": None, "base_url": None}
+        return snapshot
+
+    def _stage_inputs_snapshot(self, preprocess_result: PreprocessResult) -> dict[str, Any]:
+        file_paths = sorted(
+            str(file_target.get("path", ""))
+            for file_target in preprocess_result.file_targets
+            if str(file_target.get("path", "")).strip()
+        )
+        return {
+            "file_count": len(file_paths),
+            "files": file_paths,
+            "files_sha256": checkpoint_stage_key(file_paths),
+            "static_findings": len(preprocess_result.static_findings),
+            "semgrep_findings": len(preprocess_result.semgrep_findings),
+            "callgraph_present": preprocess_result.callgraph is not None,
+        }
+
+    def _initialize_checkpoint_store(
+        self,
+        *,
+        repo_path: str,
+        preprocess_result: PreprocessResult,
+    ) -> None:
+        if not self._checkpointing_enabled:
+            self._checkpoint_store = None
+            return
+        fingerprint = build_checkpoint_fingerprint(
+            repo_url=self.repo_url,
+            repo_path=repo_path,
+            branch=self.branch,
+            commit_hint=self._repo_commit_hint(repo_path),
+            command_args=self._command_args_snapshot(),
+            model_route=self._model_route_snapshot(),
+            runtime_tuning={"policy": self._runtime_tuning},
+            stage_inputs=self._stage_inputs_snapshot(preprocess_result),
+        )
+        store = SourceHuntCheckpointStore(self._checkpoint_root_dir())
+        result = store.initialize(
+            session_id=self._session_id,
+            fingerprint=fingerprint,
+            metadata={
+                "repo_url": self.repo_url,
+                "depth": self.depth,
+                "session_id": self._session_id,
+            },
+        )
+        if not result.enabled:
+            logger.warning(
+                "Sourcehunt checkpoints disabled for session %s (%s)",
+                self._session_id,
+                result.reason or "unknown",
+            )
+            self._checkpoint_store = None
+            return
+        self._checkpoint_store = store
+        if result.resumable:
+            logger.info(
+                "Sourcehunt checkpoint replay enabled (generation=%s)",
+                result.generation_id,
+            )
+        else:
+            logger.info(
+                "Sourcehunt checkpoint generation initialized (generation=%s)",
+                result.generation_id,
+            )
+
+    def _finding_checkpoint_key(self, stage: str, finding: Finding) -> str:
+        return checkpoint_stage_key(
+            {
+                "stage": stage,
+                "finding_id": finding.get("id", ""),
+                "file": finding.get("file", ""),
+                "line_number": finding.get("line_number"),
+                "finding_type": finding.get("finding_type", ""),
+                "cwe": finding.get("cwe", ""),
+            }
+        )
+
+    def _checkpoint_get(self, stage: str, key: str) -> dict[str, Any] | None:
+        store = self._checkpoint_store
+        if store is None or not store.enabled:
+            return None
+        payload = store.get(stage, key)
+        if isinstance(payload, dict):
+            return payload
+        return None
+
+    def _checkpoint_append(self, stage: str, key: str, payload: dict[str, Any]) -> None:
+        store = self._checkpoint_store
+        if store is None or not store.enabled:
+            return
+        try:
+            store.append(stage, key, payload)
+        except Exception:
+            logger.debug(
+                "sourcehunt checkpoint append failed (stage=%s)",
+                stage,
+                exc_info=True,
+            )
+
+    def _serialize_verifier_result(self, result: VerifierResult) -> dict[str, Any]:
+        return {
+            "finding_id": result.finding_id,
+            "is_real": bool(result.is_real),
+            "severity_verified": result.severity_verified,
+            "evidence_level": str(result.evidence_level),
+            "pro_argument": result.pro_argument,
+            "counter_argument": result.counter_argument,
+            "tie_breaker": result.tie_breaker,
+            "duplicate_cve": result.duplicate_cve,
+            "raw_response": result.raw_response,
+            "patch_oracle_attempted": bool(result.patch_oracle_attempted),
+            "patch_oracle_passed": result.patch_oracle_passed,
+            "patch_oracle_diff": result.patch_oracle_diff,
+            "patch_oracle_notes": result.patch_oracle_notes,
+        }
+
+    def _deserialize_verifier_result(self, payload: dict[str, Any]) -> VerifierResult:
+        level = str(payload.get("evidence_level", "suspicion")).strip().lower()
+        if level not in {
+            "suspicion",
+            "static_corroboration",
+            "crash_reproduced",
+            "root_cause_explained",
+            "exploit_demonstrated",
+            "patch_validated",
+        }:
+            level = "suspicion"
+        return VerifierResult(
+            finding_id=str(payload.get("finding_id", "")),
+            is_real=bool(payload.get("is_real", False)),
+            severity_verified=(
+                str(payload.get("severity_verified"))
+                if payload.get("severity_verified") is not None
+                else None
+            ),
+            evidence_level=cast(EvidenceLevel, level),
+            pro_argument=str(payload.get("pro_argument", "")),
+            counter_argument=str(payload.get("counter_argument", "")),
+            tie_breaker=str(payload.get("tie_breaker", "")),
+            duplicate_cve=(
+                str(payload.get("duplicate_cve"))
+                if payload.get("duplicate_cve") is not None
+                else None
+            ),
+            raw_response=str(payload.get("raw_response", "")),
+            patch_oracle_attempted=bool(payload.get("patch_oracle_attempted", False)),
+            patch_oracle_passed=payload.get("patch_oracle_passed"),
+            patch_oracle_diff=str(payload.get("patch_oracle_diff", "")),
+            patch_oracle_notes=str(payload.get("patch_oracle_notes", "")),
+        )
+
+    def _serialize_validator_verdict(self, verdict: ValidatorVerdict) -> dict[str, Any]:
+        axes_payload: dict[str, Any] = {}
+        for axis_name, axis_result in verdict.axes.items():
+            axes_payload[str(axis_name)] = {
+                "axis": axis_result.axis,
+                "passed": bool(axis_result.passed),
+                "confidence": axis_result.confidence,
+                "rationale": axis_result.rationale,
+                "boundary_crossed": axis_result.boundary_crossed,
+            }
+        return {
+            "finding_id": verdict.finding_id,
+            "axes": axes_payload,
+            "advance": bool(verdict.advance),
+            "severity_validated": verdict.severity_validated,
+            "evidence_level": str(verdict.evidence_level),
+            "pro_argument": verdict.pro_argument,
+            "counter_argument": verdict.counter_argument,
+            "tie_breaker": verdict.tie_breaker,
+            "duplicate_cve": verdict.duplicate_cve,
+            "raw_response": verdict.raw_response,
+            "patch_oracle_attempted": bool(verdict.patch_oracle_attempted),
+            "patch_oracle_passed": verdict.patch_oracle_passed,
+            "patch_oracle_diff": verdict.patch_oracle_diff,
+            "patch_oracle_notes": verdict.patch_oracle_notes,
+        }
+
+    def _deserialize_validator_verdict(self, payload: dict[str, Any]) -> ValidatorVerdict:
+        axes_payload = payload.get("axes")
+        axes: dict[str, AxisResult] = {}
+        if isinstance(axes_payload, dict):
+            for axis_name, axis_value in axes_payload.items():
+                if not isinstance(axis_value, dict):
+                    continue
+                axis = AxisResult(
+                    axis=str(axis_value.get("axis", axis_name)),
+                    passed=bool(axis_value.get("passed", False)),
+                    confidence=str(axis_value.get("confidence", "low")),
+                    rationale=str(axis_value.get("rationale", "")),
+                    boundary_crossed=str(axis_value.get("boundary_crossed", "")),
+                )
+                axes[str(axis_name)] = axis
+        level = str(payload.get("evidence_level", "suspicion")).strip().lower()
+        if level not in {
+            "suspicion",
+            "static_corroboration",
+            "crash_reproduced",
+            "root_cause_explained",
+            "exploit_demonstrated",
+            "patch_validated",
+        }:
+            level = "suspicion"
+        return ValidatorVerdict(
+            finding_id=str(payload.get("finding_id", "")),
+            axes=axes,
+            advance=bool(payload.get("advance", False)),
+            severity_validated=(
+                str(payload.get("severity_validated"))
+                if payload.get("severity_validated") is not None
+                else None
+            ),
+            evidence_level=cast(EvidenceLevel, level),
+            pro_argument=str(payload.get("pro_argument", "")),
+            counter_argument=str(payload.get("counter_argument", "")),
+            tie_breaker=str(payload.get("tie_breaker", "")),
+            duplicate_cve=(
+                str(payload.get("duplicate_cve"))
+                if payload.get("duplicate_cve") is not None
+                else None
+            ),
+            raw_response=str(payload.get("raw_response", "")),
+            patch_oracle_attempted=bool(payload.get("patch_oracle_attempted", False)),
+            patch_oracle_passed=payload.get("patch_oracle_passed"),
+            patch_oracle_diff=str(payload.get("patch_oracle_diff", "")),
+            patch_oracle_notes=str(payload.get("patch_oracle_notes", "")),
+        )
 
     # --- Public API ---------------------------------------------------------
 
@@ -982,6 +1357,10 @@ class SourceHuntRunner:
                 files=stage_files,
             )
             self._ensure_sandbox_factory(repo_path, files)
+            self._initialize_checkpoint_store(
+                repo_path=repo_path,
+                preprocess_result=preprocess_result,
+            )
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = (
@@ -1022,19 +1401,28 @@ class SourceHuntRunner:
                 logger.info("Ranker starting on %d files", len(files))
                 try:
                     ranker_config = RankerConfig()
+                    ranker_config.max_inflight_chunks = (
+                        self._runtime_ranker_max_inflight_chunks
+                    )
+                    ranker_config.large_repo_llm_file_limit = (
+                        self._runtime_ranker_large_repo_llm_limit
+                    )
                     if not self._preprocessing:
                         ranker_config.include_static_hints = False
                         ranker_config.include_imports_by = False
                     if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
                         ranker_config.chunk_size = 30
-                        ranker_config.max_inflight_chunks = self.max_parallel
                         logger.info(
                             "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
                             ranker_llm.provider_name,
                             ranker_config.chunk_size,
                             ranker_config.max_inflight_chunks,
                         )
-                    await Ranker(ranker_llm, ranker_config).arank(files)
+                    await Ranker(
+                        ranker_llm,
+                        ranker_config,
+                        checkpoint_store=self._checkpoint_store,
+                    ).arank(files)
                     logger.info("Ranker completed")
                     pipeline_status.record_succeeded("ranker")
                     self._emit_stage(
@@ -1123,10 +1511,18 @@ class SourceHuntRunner:
                 harness_sandbox = self._sandbox_manager or self.sandbox_factory
                 if harness_llm is not None and harness_sandbox is not None:
                     try:
+                        runtime_exploit = self._runtime_tuning.exploit
                         hg = HarnessGenerator(
                             llm=harness_llm,
                             sandbox_factory=harness_sandbox,
-                            config=HarnessGeneratorConfig(),
+                            config=HarnessGeneratorConfig(
+                                total_time_budget_seconds=runtime_exploit.harness_total_time_budget_seconds,
+                                per_harness_duration_seconds=runtime_exploit.harness_per_harness_duration_seconds,
+                                max_harnesses=runtime_exploit.harness_max_harnesses,
+                                min_surface=runtime_exploit.harness_min_surface,
+                                max_parallel=runtime_exploit.harness_max_parallel,
+                                compile_timeout_seconds=runtime_exploit.harness_compile_timeout_seconds,
+                            ),
                         )
                         hg_result = hg.run(files, repo_path)
                         seeded_crashes = hg_result.seeded_crashes
@@ -1230,6 +1626,12 @@ class SourceHuntRunner:
                 from .historical_findings_db import HistoricalFindingsDB
 
                 checkpoint_path = Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
+                if self._checkpoint_store is not None and self._checkpoint_store.enabled:
+                    checkpoint_path = (
+                        self._checkpoint_root_dir()
+                        / self._checkpoint_store.generation_id
+                        / "findings_pool.jsonl"
+                    )
                 findings_pool = FindingsPool(checkpoint_path=checkpoint_path)
                 try:
                     historical_db = HistoricalFindingsDB(path=self._historical_db_path)
@@ -1288,9 +1690,15 @@ class SourceHuntRunner:
                         max_parallel=self.max_parallel,
                         budget_usd=self.budget_usd,
                         tier_budget=self.tier_budget,
+                        band_budget=self._runtime_band_budget,
+                        cost_limit_per_file_a=self._runtime_cost_limit_per_file_a,
+                        cost_limit_per_file_b=self._runtime_cost_limit_per_file_b,
+                        cost_limit_per_file_c=self._runtime_cost_limit_per_file_c,
                         session_id_prefix=self._session_id,
                         seeded_crashes_by_file=seeded_by_file,
                         semgrep_hints_by_file=semgrep_hints_by_file,
+                        hunter_max_steps_constrained=self._runtime_hunter_max_steps_constrained,
+                        hunter_max_steps_deep=self._runtime_hunter_max_steps_deep,
                         agent_mode=self._agent_mode,
                         prompt_mode=self._prompt_mode,
                         campaign_hint=self._campaign_hint,
@@ -1304,6 +1712,7 @@ class SourceHuntRunner:
                         findings_pool=findings_pool,
                         trajectory_root=(Path(self.output_dir) / self._session_id / "trajectories"),
                         instrumentation=self._instrumentation,
+                        checkpoint_store=self._checkpoint_store,
                     )
                 )
                 try:
@@ -1549,6 +1958,7 @@ class SourceHuntRunner:
                                 Path(self.output_dir) / self._session_id / "trajectories"
                             ),
                             instrumentation=self._instrumentation,
+                            hunter_max_steps=self._runtime_tuning.verification.hunter_max_steps_subsystem,
                         )
                     )
                     try:
@@ -1698,8 +2108,13 @@ class SourceHuntRunner:
                 )
                 if variant_llm is not None:
                     try:
+                        runtime_verification = self._runtime_tuning.verification
                         loop = VariantLoop(
                             pattern_gen=VariantPatternGenerator(variant_llm),
+                            config=VariantLoopConfig(
+                                max_iterations=runtime_verification.variant_max_iterations,
+                                max_variants_per_finding=runtime_verification.variant_max_variants_per_finding,
+                            ),
                         )
                         # Track locations we've already reported to avoid dupes
                         already_seen = {
@@ -1770,15 +2185,28 @@ class SourceHuntRunner:
                 and self._sandbox_manager is not None
                 and not self._budget_exhausted()
             ):
-                from .stability import StabilityVerifier, apply_stability_result
+                from .stability import (
+                    StabilityConfig,
+                    StabilityVerifier,
+                    apply_stability_result,
+                )
 
                 stability_llm = self._get_native_client(
                     "verifier",
                     self.verifier_llm,
                     budget_stage="stability",
                 )
+                runtime_verification = self._runtime_tuning.verification
                 sv = StabilityVerifier(
                     sandbox_manager=self._sandbox_manager,
+                    config=StabilityConfig(
+                        num_containers=runtime_verification.stability_num_containers,
+                        runs_per_container=runtime_verification.stability_runs_per_container,
+                        race_runs_per_container=runtime_verification.stability_race_runs_per_container,
+                        stable_threshold=runtime_verification.stability_threshold,
+                        race_stable_threshold=runtime_verification.stability_race_threshold,
+                        flaky_threshold=runtime_verification.stability_flaky_threshold,
+                    ),
                     hardening_llm=stability_llm,
                 )
                 stability_eligible = [
@@ -1852,6 +2280,7 @@ class SourceHuntRunner:
                             project_name=(
                                 self.repo_url.split("/")[-1] if self.repo_url else "target"
                             ),
+                            checkpoint_store=self._checkpoint_store,
                         )
                         for finding in eligible:
                             if self._budget_exhausted():
@@ -1861,9 +2290,30 @@ class SourceHuntRunner:
                                     self._run_spent_usd(),
                                 )
                                 break
+                            checkpoint_key = self._finding_checkpoint_key("exploit", finding)
+                            cached = self._checkpoint_get("exploit_outcomes", checkpoint_key)
+                            if cached is not None and isinstance(cached.get("finding"), dict):
+                                finding.update(cast(dict[str, Any], cached.get("finding")))
+                                if bool(
+                                    cached.get(
+                                        "success",
+                                        finding.get("exploit_success", False),
+                                    )
+                                ):
+                                    exploited.append(finding)
+                                continue
                             try:
                                 exploit_result = await agentic.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
+                                self._checkpoint_append(
+                                    "exploit_outcomes",
+                                    checkpoint_key,
+                                    {
+                                        "finding": dict(finding),
+                                        "success": bool(exploit_result.success),
+                                        "partial": bool(exploit_result.partial),
+                                    },
+                                )
                                 if exploit_result.success:
                                     exploited.append(finding)
                                 if exploit_result.partial and findings_pool is not None:
@@ -1884,9 +2334,30 @@ class SourceHuntRunner:
                     elif eligible:
                         e = Exploiter(exploiter_llm)
                         for finding in eligible:
+                            checkpoint_key = self._finding_checkpoint_key("exploit", finding)
+                            cached = self._checkpoint_get("exploit_outcomes", checkpoint_key)
+                            if cached is not None and isinstance(cached.get("finding"), dict):
+                                finding.update(cast(dict[str, Any], cached.get("finding")))
+                                if bool(
+                                    cached.get(
+                                        "success",
+                                        finding.get("exploit_success", False),
+                                    )
+                                ):
+                                    exploited.append(finding)
+                                continue
                             try:
                                 exploit_result = await e.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
+                                self._checkpoint_append(
+                                    "exploit_outcomes",
+                                    checkpoint_key,
+                                    {
+                                        "finding": dict(finding),
+                                        "success": bool(exploit_result.success),
+                                        "partial": bool(exploit_result.partial),
+                                    },
+                                )
                                 if exploit_result.success:
                                     exploited.append(finding)
                             except BudgetExceeded:
@@ -2314,13 +2785,37 @@ class SourceHuntRunner:
             adversarial_threshold=self.adversarial_threshold,
         )
         for finding in all_findings:
+            checkpoint_key = self._finding_checkpoint_key("verify_v1", finding)
+            cached = self._checkpoint_get("verify_outcomes", checkpoint_key)
             try:
-                result = await v.averify(
-                    finding,
-                    file_content=self._load_file_content(repo_path, finding),
-                )
-                if self.enable_patch_oracle and result.is_real:
-                    result = await self._run_patch_oracle_v1(v, finding, repo_path, result)
+                if (
+                    cached is not None
+                    and str(cached.get("mode", "")).strip().lower() == "v1"
+                    and isinstance(cached.get("result"), dict)
+                ):
+                    result = self._deserialize_verifier_result(
+                        cast(dict[str, Any], cached.get("result")),
+                    )
+                else:
+                    result = await v.averify(
+                        finding,
+                        file_content=self._load_file_content(repo_path, finding),
+                    )
+                    if self.enable_patch_oracle and result.is_real:
+                        result = await self._run_patch_oracle_v1(
+                            v,
+                            finding,
+                            repo_path,
+                            result,
+                        )
+                    self._checkpoint_append(
+                        "verify_outcomes",
+                        checkpoint_key,
+                        {
+                            "mode": "v1",
+                            "result": self._serialize_verifier_result(result),
+                        },
+                    )
                 apply_verifier_result(
                     finding,
                     result,
@@ -2355,18 +2850,37 @@ class SourceHuntRunner:
             gate_threshold=self.adversarial_threshold,
         )
         for finding in all_findings:
+            checkpoint_key = self._finding_checkpoint_key("verify_v2", finding)
+            cached = self._checkpoint_get("verify_outcomes", checkpoint_key)
             try:
                 discoverer_sev = finding.get("severity")
-                verdict = await val.avalidate(
-                    finding,
-                    file_content=self._load_file_content(repo_path, finding),
-                )
-                if self.enable_patch_oracle and verdict.advance:
-                    verdict = await self._run_patch_oracle_v2(
-                        val,
+                if (
+                    cached is not None
+                    and str(cached.get("mode", "")).strip().lower() == "v2"
+                    and isinstance(cached.get("verdict"), dict)
+                ):
+                    verdict = self._deserialize_validator_verdict(
+                        cast(dict[str, Any], cached.get("verdict")),
+                    )
+                else:
+                    verdict = await val.avalidate(
                         finding,
-                        repo_path,
-                        verdict,
+                        file_content=self._load_file_content(repo_path, finding),
+                    )
+                    if self.enable_patch_oracle and verdict.advance:
+                        verdict = await self._run_patch_oracle_v2(
+                            val,
+                            finding,
+                            repo_path,
+                            verdict,
+                        )
+                    self._checkpoint_append(
+                        "verify_outcomes",
+                        checkpoint_key,
+                        {
+                            "mode": "v2",
+                            "verdict": self._serialize_validator_verdict(verdict),
+                        },
                     )
                 apply_validator_verdict(
                     finding,
@@ -2530,7 +3044,7 @@ class SourceHuntRunner:
         recalled = self._mechanism_store.recall(
             language=primary_language,
             tags=list(tag_set),
-            top_n=3,
+            top_n=self._runtime_tuning.verification.mechanism_recall_top_n,
         )
         if not recalled:
             return []
@@ -2550,6 +3064,7 @@ class SourceHuntRunner:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
+        runtime_coverage = self._runtime_tuning.sourcehunt.coverage
         pp = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
@@ -2559,6 +3074,10 @@ class SourceHuntRunner:
             propagate_reachability=(self.depth != "quick" and self._preprocessing),
             run_semgrep=(self.depth != "quick" and self._preprocessing),
             run_taint=(self.depth != "quick" and self._preprocessing),
+            max_imports_by_files=runtime_coverage.imports_by_file_cap,
+            max_file_size_bytes=runtime_coverage.max_file_size_bytes,
+            traversal_depth=runtime_coverage.traversal_depth,
+            large_repo_quality_cutoff=runtime_coverage.large_repo_quality_cutoff,
             respect_gitignore=self._respect_gitignore,
         )
         return pp.run()

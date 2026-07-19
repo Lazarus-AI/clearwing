@@ -172,6 +172,7 @@ class SubsystemHuntConfig:
     project_name: str = "target"
     trajectory_root: str | Path | None = None
     instrumentation: Any = None
+    hunter_max_steps: int = 2000
 
 
 class SubsystemHuntRunner:
@@ -311,6 +312,7 @@ class SubsystemHuntRunner:
                 findings_pool=self.config.findings_pool,
                 campaign_hint=self.config.campaign_hint,
                 callgraph=self.config.callgraph,
+                max_steps=self.config.hunter_max_steps,
             )
             ctx.work_item_id = work_item_id
             ctx.instrumentation = instrumentation

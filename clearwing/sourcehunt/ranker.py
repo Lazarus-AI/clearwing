@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
 
+from .checkpoint import SourceHuntCheckpointStore, checkpoint_stage_key
 from .state import FileTarget
 
 logger = logging.getLogger(__name__)
@@ -135,9 +136,11 @@ class Ranker:
         self,
         llm: AsyncLLMClient,
         config: RankerConfig | None = None,
+        checkpoint_store: SourceHuntCheckpointStore | None = None,
     ):
         self.llm = llm
         self.config = config or RankerConfig()
+        self._checkpoint_store = checkpoint_store
 
     def rank(self, files: list[FileTarget]) -> list[FileTarget]:
         return asyncio.run(self.arank(files))
@@ -175,26 +178,44 @@ class Ranker:
         chunks: list[list[FileTarget]],
     ) -> list[dict[str, dict[str, Any]]]:
         total_chunks = len(chunks)
+        if total_chunks == 0:
+            return []
         max_inflight = max(1, min(self.config.max_inflight_chunks, total_chunks))
         semaphore = asyncio.Semaphore(max_inflight)
         scores_by_chunk: list[dict[str, dict[str, Any]]] = [{} for _ in chunks]
         completed = 0
 
         async def run_one(
-            index: int, chunk: list[FileTarget]
-        ) -> tuple[int, dict[str, dict[str, Any]]]:
+            index: int, chunk: list[FileTarget], chunk_key: str
+        ) -> tuple[int, str, dict[str, dict[str, Any]]]:
             async with semaphore:
-                return index, await self._rank_chunk(
+                scores = await self._rank_chunk(
                     chunk,
                     idx=index + 1,
                     total_chunks=total_chunks,
                 )
+                return index, chunk_key, scores
 
-        tasks = [asyncio.create_task(run_one(index, chunk)) for index, chunk in enumerate(chunks)]
+        tasks: list[asyncio.Task[tuple[int, str, dict[str, dict[str, Any]]]]] = []
+        for index, chunk in enumerate(chunks):
+            chunk_key = self._chunk_checkpoint_key(chunk)
+            cached = self._load_chunk_checkpoint(chunk_key)
+            if cached is not None:
+                scores_by_chunk[index] = cached
+                completed += 1
+                logger.info(
+                    "Ranker progress %d/%d chunks completed (checkpoint replay)",
+                    completed,
+                    total_chunks,
+                )
+                continue
+            tasks.append(asyncio.create_task(run_one(index, chunk, chunk_key)))
+
         try:
             for future in asyncio.as_completed(tasks):
-                index, scores = await future
+                index, chunk_key, scores = await future
                 scores_by_chunk[index] = scores
+                self._store_chunk_checkpoint(chunk_key, chunks[index], scores)
                 completed += 1
                 logger.info(
                     "Ranker progress %d/%d chunks completed",
@@ -207,7 +228,74 @@ class Ranker:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        except asyncio.CancelledError:
+            # Flush any already-completed chunks to checkpoints before bubbling
+            # cancellation so pause/cancel cycles can deterministically replay.
+            for task in tasks:
+                if task.done() and not task.cancelled():
+                    try:
+                        index, chunk_key, scores = task.result()
+                    except Exception:
+                        continue
+                    scores_by_chunk[index] = scores
+                    self._store_chunk_checkpoint(chunk_key, chunks[index], scores)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         return scores_by_chunk
+
+    def _chunk_checkpoint_key(self, chunk: list[FileTarget]) -> str:
+        payload = {
+            "paths": [str(item.get("path", "")) for item in chunk],
+            "chunk_size": len(chunk),
+            "include_static_hints": bool(self.config.include_static_hints),
+            "include_imports_by": bool(self.config.include_imports_by),
+        }
+        return checkpoint_stage_key(payload)
+
+    def _load_chunk_checkpoint(
+        self,
+        chunk_key: str,
+    ) -> dict[str, dict[str, Any]] | None:
+        if self._checkpoint_store is None or not self._checkpoint_store.enabled:
+            return None
+        payload = self._checkpoint_store.get("ranker_chunks", chunk_key)
+        if not isinstance(payload, dict):
+            return None
+        scores = payload.get("scores")
+        if not isinstance(scores, dict):
+            return None
+        parsed: dict[str, dict[str, Any]] = {}
+        for path, item in scores.items():
+            if not isinstance(path, str) or not isinstance(item, dict):
+                continue
+            parsed[path] = {
+                "surface": int(item.get("surface", 0)),
+                "influence": int(item.get("influence", 0)),
+                "surface_rationale": str(item.get("surface_rationale", "")),
+                "influence_rationale": str(item.get("influence_rationale", "")),
+            }
+        return parsed
+
+    def _store_chunk_checkpoint(
+        self,
+        chunk_key: str,
+        chunk: list[FileTarget],
+        scores: dict[str, dict[str, Any]],
+    ) -> None:
+        if self._checkpoint_store is None or not self._checkpoint_store.enabled:
+            return
+        payload = {
+            "paths": [str(item.get("path", "")) for item in chunk],
+            "scores": scores,
+            "score_count": len(scores),
+        }
+        try:
+            self._checkpoint_store.append("ranker_chunks", chunk_key, payload)
+        except Exception:
+            logger.debug("ranker chunk checkpoint append failed", exc_info=True)
 
     def _apply_heuristic_baseline(self, files: list[FileTarget]) -> None:
         """Populate cheap baseline scores before any LLM reranking."""

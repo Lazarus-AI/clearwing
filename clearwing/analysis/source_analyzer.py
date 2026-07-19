@@ -37,6 +37,7 @@ class AnalysisResult:
     total_lines: int = 0
     languages: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
+    timed_out: bool = False  # True if analysis was interrupted by timeout
 
     @property
     def critical_count(self) -> int:
@@ -488,15 +489,27 @@ class SourceAnalyzer:
         ".tox",
         ".mypy_cache",
         ".pytest_cache",
+        "external",  # External projects/submodules
+        "projects",  # Project-specific data
+        "data",  # Data files
+        ".hypothesis",  # Test artifacts
+        ".mcp-homes",  # MCP configuration
+        "workspace",  # Workspace directories
+        "logs",  # Log files
+        "tmp",  # Temporary files
+        ".tmp",  # Temporary files
+        ".cache",  # Cache directories
     }
     SKIP_FILES = {".min.js", ".min.css", ".map", ".lock"}
     MAX_FILE_SIZE = 1_000_000  # 1MB — class default; overridable per-instance
+    MAX_DEPTH = 5  # Maximum directory traversal depth to prevent infinite recursion and timeouts
 
     def __init__(
         self,
         repo_path: str | None = None,
         *,
         max_file_size: int | None = None,
+        max_depth: int | None = None,
         respect_gitignore: bool = False,
     ):
         self.repo_path = repo_path
@@ -504,6 +517,8 @@ class SourceAnalyzer:
         self.respect_gitignore = respect_gitignore
         if max_file_size is not None:
             self.MAX_FILE_SIZE = max_file_size
+        if max_depth is not None:
+            self.MAX_DEPTH = max_depth
 
     def clone(self, git_url: str, branch: str = "main") -> str:
         """Clone a git repository to a temporary directory.
@@ -534,17 +549,25 @@ class SourceAnalyzer:
                 timeout=120,
                 check=True,
             )
+        logger.info("SourceAnalyzer.clone: successfully cloned to %s", clone_path)
         self.repo_path = clone_path
         return clone_path
 
-    def analyze(self, path: str | None = None) -> AnalysisResult:
+    def analyze(
+        self,
+        path: str | None = None,
+        *,
+        timeout_seconds: int | None = 600,
+    ) -> AnalysisResult:
         """Analyze a repository or directory for vulnerabilities.
 
         Args:
             path: Path to analyze. Uses self.repo_path if not provided.
+            timeout_seconds: Maximum time for analysis in seconds. Default is 600 (10 minutes).
+                Set to None for no timeout.
 
         Returns:
-            AnalysisResult with all findings.
+            AnalysisResult with all findings. timed_out will be True if timeout was reached.
         """
         start = time.time()
 
@@ -554,14 +577,27 @@ class SourceAnalyzer:
 
         result = AnalysisResult(repo_path=target_path)
         languages_seen: set[str] = set()
+        file_count = 0
 
-        for file_path in self._iter_source_files(target_path):
+        for file_path in self._iter_source_files(target_path, start_time=start, timeout_seconds=timeout_seconds):
+            # Check timeout before processing each file
+            if timeout_seconds is not None:
+                elapsed = time.time() - start
+                if elapsed > timeout_seconds:
+                    logger.warning(
+                        "SourceAnalyzer.analyze: timeout reached after %.1fs, %d files processed",
+                        elapsed, file_count
+                    )
+                    result.timed_out = True
+                    break
+
             ext = Path(file_path).suffix.lower()
             language = self.LANGUAGE_MAP.get(ext)
             if not language:
                 continue
 
             languages_seen.add(language)
+            file_count += 1
 
             try:
                 content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
@@ -589,10 +625,71 @@ class SourceAnalyzer:
 
         return result
 
-    def _iter_source_files(self, root: str):
-        """Yield source file paths, skipping irrelevant directories."""
+    def _iter_source_files(
+        self,
+        root: str,
+        max_depth: int | None = None,
+        start_time: float | None = None,
+        timeout_seconds: float | None = None,
+    ):
+        """Yield source file paths, skipping irrelevant directories.
+
+        Args:
+            root: Root directory to walk.
+            max_depth: Maximum depth to traverse. Uses class default if not provided.
+            start_time: Start time for timeout calculation.
+            timeout_seconds: Timeout in seconds. If elapsed time exceeds this, stop iteration.
+        """
+        if max_depth is None:
+            max_depth = self.MAX_DEPTH
+
+        logger.debug(
+            "SourceAnalyzer._iter_source_files: root=%s respect_gitignore=%s max_depth=%s",
+            root,
+            self.respect_gitignore,
+            max_depth,
+        )
+        logger.info(
+            "SourceAnalyzer._iter_source_files: root exists=%s isdir=%s",
+            os.path.exists(root),
+            os.path.isdir(root),
+        )
         gitignore = _GitignoreMatcher.from_repo(root) if self.respect_gitignore else None
+        if gitignore:
+            logger.debug(
+                "SourceAnalyzer: gitignore loaded with %d patterns",
+                len(gitignore.spec.patterns) if hasattr(gitignore.spec, "patterns") else 0,
+            )
+        root_depth = root.rstrip(os.sep).count(os.sep)
+
         for dirpath, dirnames, filenames in os.walk(root):
+            # Check timeout during directory traversal
+            if start_time is not None and timeout_seconds is not None:
+                elapsed = time.time() - start_time
+                if elapsed > timeout_seconds:
+                    logger.warning(
+                        "SourceAnalyzer._iter_source_files: timeout reached after %.1fs during directory traversal at %s",
+                        elapsed,
+                        dirpath,
+                    )
+                    return
+            current_depth = dirpath.rstrip(os.sep).count(os.sep) - root_depth
+            if current_depth > max_depth:
+                logger.debug(
+                    "SourceAnalyzer._iter_source_files: max depth %d reached at %s",
+                    max_depth,
+                    dirpath,
+                )
+                dirnames.clear()
+                continue
+
+            logger.info(
+                "SourceAnalyzer._iter_source_files: walking dirpath=%s dirnames=%d filenames=%d depth=%d",
+                dirpath,
+                len(dirnames),
+                len(filenames),
+                current_depth,
+            )
             # Prune skip directories
             dirnames[:] = [
                 d

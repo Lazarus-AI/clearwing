@@ -8,6 +8,7 @@ semgrep_findings, fuzz_corpora) are present and default to None/empty.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import tempfile
 
 import pytest
@@ -267,6 +268,155 @@ class TestPreprocessorRun:
         pp = Preprocessor(repo_url="https://example.com/repo.git")
         result = pp.run()
         assert result.file_count >= 1
+
+
+class TestImportsByBatched:
+    """Regression coverage for the batched imports_by fix (run-334 timeout).
+
+    The hot path must walk the repo ONCE and read each file's head at most
+    once, instead of once per source target (O(S*R) -> O(R) file reads),
+    while preserving the exact basename-substring counting semantics of the
+    legacy per-target `_count_imports_by` (including duplicate-basename
+    behavior, the max_imports_by_files cap, and self-exclusion).
+    """
+
+    def test_imports_by_walks_repo_once_and_reads_each_file_once(self, tmp_path, monkeypatch):
+        """Scaling regression: instrument os.walk and open to prove the
+        batched pass does NOT walk/read once per source target.
+
+        With N=8 source files the legacy per-target path did N fresh walks and
+        N*R file reads for imports_by; the batched path does 1 walk and R reads.
+        """
+        import builtins
+
+        n = 8
+        for i in range(n):
+            (tmp_path / f"mod_{i}.py").write_text(
+                f"import mod_{(i + 1) % n}\n", encoding="utf-8"
+            )
+        # A non-source referencer that still mentions a module name; it must be
+        # walked/read exactly once, same as every other repo file.
+        (tmp_path / "README.md").write_text("import mod_0\n", encoding="utf-8")
+
+        walk_count = 0
+        real_walk = os.walk
+
+        def counting_walk(top, *a, **k):
+            nonlocal walk_count
+            walk_count += 1
+            yield from real_walk(top, *a, **k)
+
+        monkeypatch.setattr("os.walk", counting_walk)
+
+        open_count = 0
+        real_open = builtins.open
+        root = str(tmp_path)
+
+        def counting_open(path, *a, **k):
+            nonlocal open_count
+            if str(path).startswith(root):
+                open_count += 1
+            return real_open(path, *a, **k)
+
+        monkeypatch.setattr("builtins.open", counting_open)
+
+        pp = Preprocessor(repo_url=str(tmp_path), local_path=str(tmp_path))
+        result = pp.run()
+
+        # Legacy per-target path: >= n walks just for imports_by (one per
+        # target). Batched path: exactly one imports_by walk. Total walks stay
+        # a small constant and must NOT scale with source-file count.
+        assert walk_count < n, (
+            f"expected imports_by to walk the repo once, not once per target; "
+            f"walk_count={walk_count} >= n={n} (O(S) walk regression)"
+        )
+        # Legacy path opened each repo file once per source target for
+        # imports_by (n*R reads). Batched path reads each repo file once.
+        # Total opens must stay O(R), not O(S*R).
+        assert open_count < n * 4, (
+            f"expected each repo file read at most once for imports_by; "
+            f"open_count={open_count} suggests per-target re-reading "
+            f"(n={n})"
+        )
+        # Sanity: the run still produced targets with imports_by populated.
+        assert result.file_count == n
+        assert any(ft["imports_by"] >= 0 for ft in result.file_targets)
+
+    def test_duplicate_basenames_get_same_imports_by(self, tmp_path):
+        """Two source files sharing a basename must receive the same imports_by
+        count (the number of repo files importing that basename), each
+        excluding only itself."""
+        (tmp_path / "x").mkdir()
+        (tmp_path / "y").mkdir()
+        (tmp_path / "x" / "dup.py").write_text("def f(): pass\n", encoding="utf-8")
+        (tmp_path / "y" / "dup.py").write_text("def g(): pass\n", encoding="utf-8")
+        (tmp_path / "r1.py").write_text("import dup\n", encoding="utf-8")
+        (tmp_path / "r2.py").write_text("from dup import f\n", encoding="utf-8")
+        (tmp_path / "r3.py").write_text("import dup\n", encoding="utf-8")
+
+        pp = Preprocessor(repo_url=str(tmp_path), local_path=str(tmp_path))
+        result = pp.run()
+
+        dups = [ft for ft in result.file_targets if Path(ft["path"]).name == "dup.py"]
+        assert len(dups) == 2
+        counts = {ft["absolute_path"]: ft["imports_by"] for ft in dups}
+        # Neither dup.py self-imports, so both see the same three importers.
+        assert set(counts.values()) == {3}, (
+            f"duplicate basenames should share imports_by=3; got {counts}"
+        )
+
+    def test_max_imports_by_files_zero_disables_imports_by(self, tmp_path):
+        """budget=0 must yield imports_by=0 for every target (cap preserved)."""
+        (tmp_path / "header.h").write_text("#define X 1\n", encoding="utf-8")
+        (tmp_path / "a.c").write_text(
+            '#include "header.h"\nint main(void){return 0;}\n', encoding="utf-8"
+        )
+        (tmp_path / "b.c").write_text(
+            '#include "header.h"\nint main(void){return 0;}\n', encoding="utf-8"
+        )
+
+        pp = Preprocessor(
+            repo_url=str(tmp_path), local_path=str(tmp_path), max_imports_by_files=0
+        )
+        result = pp.run()
+        for ft in result.file_targets:
+            assert ft["imports_by"] == 0
+
+    def test_python_import_resolution(self, tmp_path):
+        """Python `from pkg.util import u` and `import util` both count as
+        importers of util.py (stem match with word boundary)."""
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "util.py").write_text("def u(): pass\n", encoding="utf-8")
+        (tmp_path / "app.py").write_text(
+            "from pkg.util import u\nimport util\n", encoding="utf-8"
+        )
+        (tmp_path / "other.py").write_text("import util\n", encoding="utf-8")
+
+        pp = Preprocessor(repo_url=str(tmp_path), local_path=str(tmp_path))
+        result = pp.run()
+        util = next(ft for ft in result.file_targets if ft["path"].endswith("util.py"))
+        assert util["imports_by"] == 2, (
+            f"util.py should have 2 importers (app.py, other.py); got {util['imports_by']}"
+        )
+
+    def test_cpp_include_resolution(self, tmp_path):
+        """C++ #include "x.hpp" counts as an importer of x.hpp (basename)."""
+        (tmp_path / "limits.hpp").write_text("#pragma once\nstruct X {};\n", encoding="utf-8")
+        (tmp_path / "a.cpp").write_text(
+            '#include "limits.hpp"\nint main(){}\n', encoding="utf-8"
+        )
+        (tmp_path / "b.cpp").write_text(
+            '#include "limits.hpp"\nint main(){}\n', encoding="utf-8"
+        )
+
+        pp = Preprocessor(repo_url=str(tmp_path), local_path=str(tmp_path))
+        result = pp.run()
+        hpp = next(ft for ft in result.file_targets if ft["path"].endswith("limits.hpp"))
+        assert hpp["language"] == "cpp"
+        assert hpp["imports_by"] == 2, (
+            f"limits.hpp should have 2 importers (a.cpp, b.cpp); got {hpp['imports_by']}"
+        )
 
 
 class TestPreprocessorErrorPaths:

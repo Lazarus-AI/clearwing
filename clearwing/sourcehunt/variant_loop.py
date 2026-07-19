@@ -27,6 +27,7 @@ from typing import Any
 
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
+from .config import load_runtime_tuning_policy_from_env
 from .state import Finding
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,12 @@ class VariantSearcher:
         max_file_size: int | None = None,
         max_matches_per_pattern: int | None = None,
     ) -> None:
-        self.MAX_FILE_SIZE = max_file_size or self._DEFAULT_MAX_FILE_SIZE
+        runtime_coverage = load_runtime_tuning_policy_from_env().sourcehunt.coverage
+        self.MAX_FILE_SIZE = (
+            max_file_size
+            or runtime_coverage.max_file_size_bytes
+            or self._DEFAULT_MAX_FILE_SIZE
+        )
         self.MAX_MATCHES_PER_PATTERN = max_matches_per_pattern or self._DEFAULT_MAX_MATCHES
 
     def search(
@@ -291,7 +297,13 @@ class VariantLoop:
     ):
         self.pattern_gen = pattern_gen
         self.searcher = searcher or VariantSearcher()
-        self.config = config or VariantLoopConfig()
+        if config is None:
+            runtime_verification = load_runtime_tuning_policy_from_env().verification
+            config = VariantLoopConfig(
+                max_iterations=runtime_verification.variant_max_iterations,
+                max_variants_per_finding=runtime_verification.variant_max_variants_per_finding,
+            )
+        self.config = config
 
     async def arun(
         self,

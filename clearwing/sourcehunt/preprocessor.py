@@ -156,6 +156,47 @@ def _file_defines_constants(content_sample: str, language: str) -> bool:
     return False
 
 
+# Language -> import/include candidate substrings used as a SOUND pre-filter
+# in the batched imports_by pass (`Preprocessor._compute_imports_by_batch`):
+# if a file's head contains none of a language's candidate substrings, no
+# target of that language can match that language's regex, so the batched pass
+# skips all of that language's target patterns for that file. This never drops
+# a real match — every pattern below requires one of its candidates to be
+# present — it only avoids running language-specific regexes against heads that
+# cannot match. Languages without a cheap sound substring (e.g. go) use an
+# empty tuple and are always run.
+_IMPORT_CANDIDATE_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    "c": ("include",),
+    "cpp": ("include",),
+    "python": ("from", "import"),
+    "javascript": ("import", "require"),
+    "typescript": ("import", "require"),
+    "rust": ("use", "mod"),
+    "java": ("import",),
+}
+
+
+def _imports_by_pattern(language: str, basename: str, stem: str) -> re.Pattern | None:
+    """Build the per-target import/include regex for a language.
+
+    Factored out of `_count_imports_by` so the batched pass can pre-compile one
+    pattern per target. Returns None for unsupported languages (count is 0).
+    """
+    if language in ("c", "cpp"):
+        return re.compile(rf'#\s*include\s*[<"][^>"]*{re.escape(basename)}[>"]')
+    if language == "python":
+        return re.compile(rf"\b(?:from|import)\s+\S*\b{re.escape(stem)}\b")
+    if language in ("javascript", "typescript"):
+        return re.compile(rf"""(?:import|require)\s*\(?[^"']*['"][^"']*{re.escape(stem)}['"]""")
+    if language == "go":
+        return re.compile(rf'"\S*/{re.escape(stem)}"')
+    if language == "rust":
+        return re.compile(rf"\b(?:use|mod)\s+{re.escape(stem)}\b")
+    if language == "java":
+        return re.compile(rf"\bimport\s+\S*\.{re.escape(stem)}\b")
+    return None
+
+
 def _count_imports_by(
     repo_path: str,
     file_path: str,
@@ -165,23 +206,18 @@ def _count_imports_by(
     """Cheap heuristic for `imports_by`: grep the repo for references to this
     file's basename. Used as the v0.1 influence signal until v0.2's tree-sitter
     callgraph lands.
+
+    Legacy single-target path, retained for backward compatibility. The hot
+    path in `Preprocessor.run` now uses `_compute_imports_by_batch`, which
+    reads each repo file at most once per preprocess run instead of once per
+    source target (O(source_files x repo_files) -> O(repo_files) file reads),
+    eliminating the run-334 preprocessing timeout caused by the per-target
+    full-tree walk.
     """
     basename = os.path.basename(file_path)
     stem = os.path.splitext(basename)[0]
-    # Build a regex per language for include/import/require patterns
-    if language in ("c", "cpp"):
-        pattern = re.compile(rf'#\s*include\s*[<"][^>"]*{re.escape(basename)}[>"]')
-    elif language == "python":
-        pattern = re.compile(rf"\b(?:from|import)\s+\S*\b{re.escape(stem)}\b")
-    elif language in ("javascript", "typescript"):
-        pattern = re.compile(rf"""(?:import|require)\s*\(?[^"']*['"][^"']*{re.escape(stem)}['"]""")
-    elif language == "go":
-        pattern = re.compile(rf'"\S*/{re.escape(stem)}"')
-    elif language == "rust":
-        pattern = re.compile(rf"\b(?:use|mod)\s+{re.escape(stem)}\b")
-    elif language == "java":
-        pattern = re.compile(rf"\bimport\s+\S*\.{re.escape(stem)}\b")
-    else:
+    pattern = _imports_by_pattern(language, basename, stem)
+    if pattern is None:
         return 0
 
     count = 0
@@ -239,6 +275,9 @@ class Preprocessor:
         ingest_fuzz_corpora: bool = False,  # v0.2 seam
         run_taint: bool = False,  # v0.4: tree-sitter taint analysis
         max_imports_by_files: int = 1000,  # cap the imports_by walk
+        max_file_size_bytes: int | None = None,
+        traversal_depth: int | None = None,
+        large_repo_quality_cutoff: int | None = None,
         respect_gitignore: bool = False,
     ):
         self.repo_url = repo_url
@@ -252,6 +291,15 @@ class Preprocessor:
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
         self.respect_gitignore = respect_gitignore
+        self._max_file_size_bytes = max_file_size_bytes
+        self._traversal_depth = traversal_depth
+        quality_cutoff = (
+            large_repo_quality_cutoff
+            if large_repo_quality_cutoff is not None
+            else self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD
+        )
+        self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD = quality_cutoff
+        self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD = quality_cutoff
         self._analyzer: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
@@ -306,6 +354,25 @@ class Preprocessor:
             propagate_reachability = False
             run_taint = False
 
+        # v0.1 imports_by — batched: walk the repo ONCE, read each file's head
+        # at most once, then check every target's pre-compiled pattern against
+        # the in-memory head. Replaces the per-target _count_imports_by walk
+        # (O(source_files x repo_files) file reads -> O(repo_files) file reads)
+        # that caused run 334 to spend ~288s in preprocessing and never reach
+        # LLM handoff. Only the first `imports_by_budget` source targets are
+        # computed (preserving the max_imports_by_files cap semantics).
+        budget_target_list: list[tuple[str, str]] = []
+        for abs_path in source_files:
+            if len(budget_target_list) >= imports_by_budget:
+                break
+            ext = Path(abs_path).suffix.lower()
+            language = _SOURCE_EXTS_TO_LANG.get(ext)
+            if language:
+                budget_target_list.append((abs_path, language))
+        imports_by_map = self._compute_imports_by_batch(
+            repo_path, budget_target_list, gitignore
+        )
+
         # Enumerate source files and build FileTarget entries
         file_targets: list[FileTarget] = []
         for abs_path in source_files:
@@ -329,10 +396,8 @@ class Preprocessor:
 
             defines_constants = _file_defines_constants(content_sample, language)
 
-            # v0.1 imports_by — capped to keep large repos snappy
-            imports_by = 0
-            if len(file_targets) < imports_by_budget:
-                imports_by = _count_imports_by(repo_path, abs_path, language, gitignore)
+            # v0.1 imports_by — assigned from the batched index computed above
+            imports_by = imports_by_map.get(abs_path, 0)
 
             target: FileTarget = {
                 "path": rel_path,
@@ -419,6 +484,82 @@ class Preprocessor:
             fuzz_corpora=fuzz_corpora,
             taint_paths=taint_paths,
         )
+
+    # --- v0.1 batched imports_by --------------------------------------------
+
+    @staticmethod
+    def _compute_imports_by_batch(
+        repo_path: str,
+        targets: list[tuple[str, str]],
+        gitignore: _GitignoreMatcher | None,
+    ) -> dict[str, int]:
+        """Batched imports_by: walk the repo ONCE and read each file's head at
+        most once, then check every target's pre-compiled pattern against the
+        in-memory head.
+
+        Replaces the O(source_files x repo_files) per-target walk in
+        `_count_imports_by` (which did a fresh `os.walk` + open/read of every
+        repo file for EACH source target — the run-334 preprocessing timeout).
+        Semantics are identical to `_count_imports_by`: same per-language
+        patterns (via `_imports_by_pattern`), same first-64KB head, same
+        SKIP_DIRS / gitignore / MAX_FILE_SIZE filtering, and the same
+        self-exclusion (a target never counts itself, even when a sibling
+        shares its basename).
+
+        A sound per-language substring pre-filter (`_IMPORT_CANDIDATE_SUBSTRINGS`)
+        skips heads that cannot match a given language's pattern, so the
+        in-memory regex work stays cheap. `targets` is already capped to the
+        first `max_imports_by_files` source targets by the caller.
+        """
+        counts: dict[str, int] = {}
+        compiled: list[tuple[str, re.Pattern]] = []
+        by_language: dict[str, list[int]] = {}
+        for abs_path, language in targets:
+            counts[abs_path] = 0
+            basename = _os.path.basename(abs_path)
+            stem = _os.path.splitext(basename)[0]
+            pattern = _imports_by_pattern(language, basename, stem)
+            if pattern is None:
+                continue
+            idx = len(compiled)
+            compiled.append((abs_path, pattern))
+            by_language.setdefault(language, []).append(idx)
+
+        if not compiled:
+            return counts
+
+        # ONE repo walk; each file's head is read at most once.
+        for dirpath, dirnames, filenames in _os.walk(repo_path):
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in SourceAnalyzer.SKIP_DIRS
+                and not (gitignore and gitignore.matches_dir(_os.path.join(dirpath, d)))
+            ]
+            for fname in filenames:
+                other = _os.path.join(dirpath, fname)
+                if gitignore and gitignore.matches_file(other):
+                    continue
+                try:
+                    if _os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
+                        continue
+                    with open(other, encoding="utf-8", errors="ignore") as f:
+                        head = f.read(64 * 1024)  # only scan the first 64 KB
+                except OSError:
+                    continue
+                # Sound per-language pre-filter: skip languages whose required
+                # candidate substring is absent from this head.
+                for lang, idxs in by_language.items():
+                    candidates = _IMPORT_CANDIDATE_SUBSTRINGS.get(lang, ())
+                    if candidates and not any(c in head for c in candidates):
+                        continue
+                    for idx in idxs:
+                        target_path, pattern = compiled[idx]
+                        if target_path == other:
+                            continue  # self-exclusion (matches _count_imports_by)
+                        if pattern.search(head):
+                            counts[target_path] += 1
+        return counts
 
     # --- v0.4 taint-path signal apply --------------------------------------
 
@@ -551,15 +692,31 @@ class Preprocessor:
         if self.local_path:
             if not os.path.isdir(self.local_path):
                 raise ValueError(f"local_path does not exist: {self.local_path}")
+            self._analyzer = SourceAnalyzer(
+                max_file_size=self._max_file_size_bytes,
+                max_depth=self._traversal_depth,
+            )
+            self._analyzer.respect_gitignore = self.respect_gitignore
+            self._analyzer.repo_path = os.path.abspath(self.local_path)
             return os.path.abspath(self.local_path)
 
         # Heuristic: looks like a git URL?
         if self._is_git_url(self.repo_url):
-            self._analyzer = SourceAnalyzer()
+            self._analyzer = SourceAnalyzer(
+                max_file_size=self._max_file_size_bytes,
+                max_depth=self._traversal_depth,
+            )
+            self._analyzer.respect_gitignore = self.respect_gitignore
             return self._analyzer.clone(self.repo_url, branch=self.branch)
 
         # Otherwise treat repo_url as a local path
         if os.path.isdir(self.repo_url):
+            self._analyzer = SourceAnalyzer(
+                max_file_size=self._max_file_size_bytes,
+                max_depth=self._traversal_depth,
+            )
+            self._analyzer.respect_gitignore = self.respect_gitignore
+            self._analyzer.repo_path = os.path.abspath(self.repo_url)
             return os.path.abspath(self.repo_url)
 
         raise ValueError(

@@ -35,6 +35,7 @@ from clearwing.runners.parallel.executor import (
     TierBudget as _ExecutorTierBudget,
 )
 
+from .checkpoint import SourceHuntCheckpointStore, checkpoint_stage_key
 from .instrumentation import stable_run_id
 from .state import FileTarget, Finding
 
@@ -198,6 +199,8 @@ class HuntPoolConfig:
     seeded_crashes_by_file: dict = field(default_factory=dict)
     # v0.2 Semgrep hints: {repo_relative_file_path: [semgrep_finding_dicts]}
     semgrep_hints_by_file: dict = field(default_factory=dict)
+    hunter_max_steps_constrained: int = 20
+    hunter_max_steps_deep: int = 500
     agent_mode: str = "constrained"  # "constrained" | "deep"
     prompt_mode: str = "unconstrained"  # "unconstrained" | "specialist"
     campaign_hint: str | None = None
@@ -212,6 +215,7 @@ class HuntPoolConfig:
     findings_pool: Any = None  # FindingsPool | None — spec 005
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
+    checkpoint_store: SourceHuntCheckpointStore | None = None
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -254,6 +258,7 @@ class HunterPool:
         self._promotion_counts: dict[str, int] = {"fast→standard": 0, "standard→deep": 0}
         self._state_lock = asyncio.Lock()
         self._cancelled = False
+        self._checkpoint_store = config.checkpoint_store
 
     def run(self) -> list[Finding]:
         return asyncio.run(self.arun())
@@ -426,71 +431,194 @@ class HunterPool:
         item_iter = iter(work_items)
         promotion_queue: list[WorkItem] = []
 
-        def _submit_next() -> bool:
-            nonlocal spent
-            if self._cancelled or spent >= budget:
-                return False
+        def _next_candidate() -> WorkItem | None:
             wi: WorkItem | None = None
             try:
                 wi = next(item_iter)
             except StopIteration:
                 if promotion_queue:
                     wi = promotion_queue.pop(0)
-            if wi is None:
-                return False
-            band_cost = self.config.band_budget.for_band(wi.band)
-            work_item_id = wi.stable_identifier(self.config.session_id_prefix)
-            task = asyncio.create_task(
-                self._run_file_task(
-                    wi.file_target,
-                    cost_limit=band_cost,
+            return wi
+
+        async def _consume_replayed_work_item(wi: WorkItem) -> tuple[bool, float]:
+            cached = self._load_work_item_checkpoint(wi)
+            if cached is None:
+                return False, 0.0
+            result, next_band, replay_seed = cached
+            inserted, spent_delta, computed_next_band = await self._record_work_item_result(
+                tier=tier,
+                wi=wi,
+                result=result,
+            )
+            if inserted:
+                self._emit_hunt_progress(
                     tier=tier,
                     band=wi.band,
-                    seed_transcript=wi.seed_transcript,
-                    entry_point=wi.entry_point,
-                    seed_context=wi.seed_context,
-                    work_item_id=work_item_id,
+                    spent=spent + spent_delta,
+                    budget=budget,
                 )
-            )
-            in_flight[task] = wi
-            return True
+                promoted = next_band or computed_next_band
+                if promoted:
+                    promotion_queue.append(
+                        WorkItem(
+                            file_target=wi.file_target,
+                            band=promoted,
+                            attempt=wi.attempt,
+                            seed_transcript=replay_seed or _extract_transcript(result),
+                            entry_point=wi.entry_point,
+                            seed_context=wi.seed_context,
+                        )
+                    )
+            return True, spent_delta
+
+        async def _submit_next() -> bool:
+            nonlocal spent
+            while True:
+                if self._cancelled or spent >= budget:
+                    return False
+                wi = _next_candidate()
+                if wi is None:
+                    return False
+                replayed, replay_cost = await _consume_replayed_work_item(wi)
+                if replayed:
+                    spent += replay_cost
+                    continue
+
+                band_cost = self.config.band_budget.for_band(wi.band)
+                work_item_id = wi.stable_identifier(self.config.session_id_prefix)
+                task = asyncio.create_task(
+                    self._run_file_task(
+                        wi.file_target,
+                        cost_limit=band_cost,
+                        tier=tier,
+                        band=wi.band,
+                        seed_transcript=wi.seed_transcript,
+                        entry_point=wi.entry_point,
+                        seed_context=wi.seed_context,
+                        work_item_id=work_item_id,
+                    )
+                )
+                in_flight[task] = wi
+                return True
 
         for _ in range(max(1, self.config.max_parallel)):
-            if not _submit_next():
+            if not await _submit_next():
                 break
 
-        while in_flight:
-            done, _pending = await asyncio.wait(
-                list(in_flight.keys()),
-                timeout=timeout,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if timeout is not None and not done:
-                logger.warning(
-                    "tier %s had no completed hunters within %ss; marking %d in-flight items as timeout",
-                    tier,
-                    timeout,
-                    len(in_flight),
+        try:
+            while in_flight:
+                done, _pending = await asyncio.wait(
+                    list(in_flight.keys()),
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                for task, wi in list(in_flight.items()):
-                    task.cancel()
-                    key = wi.file_target.get("path", "")
-                    async with self._state_lock:
-                        self._results[key] = TargetResult(
+                if timeout is not None and not done:
+                    logger.warning(
+                        "tier %s had no completed hunters within %ss; marking %d in-flight items as timeout",
+                        tier,
+                        timeout,
+                        len(in_flight),
+                    )
+                    for task, wi in list(in_flight.items()):
+                        task.cancel()
+                        key = wi.file_target.get("path", "")
+                        result = TargetResult(
                             target=key,
                             status="timeout",
                             error=f"Hunter did not complete within {timeout}s",
                             tier=tier,
                             band=wi.band,
                         )
-                await asyncio.gather(*in_flight, return_exceptions=True)
-                return spent
+                        inserted, spent_delta, next_band = await self._record_work_item_result(
+                            tier=tier,
+                            wi=wi,
+                            result=result,
+                        )
+                        if inserted:
+                            spent += spent_delta
+                            self._save_work_item_checkpoint(
+                                wi=wi,
+                                tier=tier,
+                                result=result,
+                                next_band=next_band,
+                            )
+                    return spent
 
-            for task in done:
-                wi = in_flight.pop(task)
+                for task in done:
+                    wi = in_flight.pop(task)
+                    key = wi.file_target.get("path", "")
+                    try:
+                        result = await task
+                    except asyncio.CancelledError:
+                        result = TargetResult(
+                            target=key,
+                            status="cancelled",
+                            tier=tier,
+                            band=wi.band,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "tier %s hunter for %s failed: %s",
+                            tier,
+                            key,
+                            exc,
+                        )
+                        result = TargetResult(
+                            target=key,
+                            status="error",
+                            error=str(exc),
+                            tier=tier,
+                            band=wi.band,
+                        )
+
+                    inserted, spent_delta, next_band = await self._record_work_item_result(
+                        tier=tier,
+                        wi=wi,
+                        result=result,
+                    )
+                    if inserted:
+                        spent += spent_delta
+                        self._emit_hunt_progress(
+                            tier=tier,
+                            band=wi.band,
+                            spent=spent,
+                            budget=budget,
+                        )
+                        self._save_work_item_checkpoint(
+                            wi=wi,
+                            tier=tier,
+                            result=result,
+                            next_band=next_band,
+                        )
+                        if next_band:
+                            logger.info(
+                                "Promoting %s from %s to %s band",
+                                key,
+                                wi.band,
+                                next_band,
+                            )
+                            promotion_queue.append(
+                                WorkItem(
+                                    file_target=wi.file_target,
+                                    band=next_band,
+                                    attempt=wi.attempt,
+                                    seed_transcript=_extract_transcript(result),
+                                    entry_point=wi.entry_point,
+                                    seed_context=wi.seed_context,
+                                )
+                            )
+
+                    await _submit_next()
+        except asyncio.CancelledError:
+            # Cooperative termination path: flush already-completed units and
+            # cancel the rest so completed work remains replayable.
+            for task, wi in list(in_flight.items()):
+                if not task.done():
+                    task.cancel()
+                    continue
                 key = wi.file_target.get("path", "")
                 try:
-                    result = await task
+                    result = task.result()
                 except asyncio.CancelledError:
                     result = TargetResult(
                         target=key,
@@ -510,7 +638,6 @@ class HunterPool:
                         stop_reason="budget_exhausted",
                     )
                 except Exception as exc:
-                    logger.warning("tier %s hunter for %s failed: %s", tier, key, exc)
                     result = TargetResult(
                         target=key,
                         status="error",
@@ -518,92 +645,200 @@ class HunterPool:
                         tier=tier,
                         band=wi.band,
                     )
-                ep_suffix = f":{wi.entry_point.function_name}" if wi.entry_point else ""
-                async with self._state_lock:
-                    self._results[f"{key}{ep_suffix}:{wi.band}:{wi.attempt}"] = result
-                    self._spent_per_tier[tier] += result.cost_usd
-                    self._spent_per_band[wi.band] = (
-                        self._spent_per_band.get(wi.band, 0.0) + result.cost_usd
-                    )
-                    self._runs_per_band[wi.band] = self._runs_per_band.get(wi.band, 0) + 1
-                    spent += result.cost_usd
-
-                completed_count = sum(
-                    1
-                    for r in self._results.values()
-                    if r.status in ("completed", "error", "timeout")
+                inserted, spent_delta, next_band = await self._record_work_item_result(
+                    tier=tier,
+                    wi=wi,
+                    result=result,
                 )
-                total_files = len(self.config.files)
-                findings_count = sum(
-                    len(r.findings) for r in self._results.values() if r.status == "completed"
-                )
-                EventBus().emit_hunt_progress(
-                    HuntProgressPayload(
-                        session_id=self.config.session_id_prefix,
+                if inserted:
+                    spent += spent_delta
+                    self._save_work_item_checkpoint(
+                        wi=wi,
                         tier=tier,
-                        band=wi.band,
-                        files_completed=completed_count,
-                        files_total=total_files,
-                        findings_this_tier=findings_count,
-                        cost_usd=spent,
-                        budget_remaining=max(0.0, budget - spent),
+                        result=result,
+                        next_band=next_band,
                     )
-                )
-
-                if result.status == "completed" and result.findings:
-                    for f in cast(list[Finding], result.findings):
-                        trace = f.get("vulnerability_trace")
-                        trace_chain = ""
-                        if trace and trace.get("steps"):
-                            trace_chain = " | " + " -> ".join(
-                                f"{s.get('file', '?')}:{s.get('function') or '?'}"
-                                for s in trace["steps"]
-                            )
-                        logger.info(
-                            "Finding: %s:%s [%s] %.40s%s",
-                            f.get("file", "?"),
-                            f.get("line_number", "?"),
-                            f.get("severity", "?"),
-                            f.get("description", "") or "",
-                            trace_chain,
-                        )
-                        if self.config.findings_pool is not None:
-                            try:
-                                await self.config.findings_pool.add(f)
-                            except Exception:
-                                logger.debug("findings_pool.add failed", exc_info=True)
-
-                if result.status == "completed":
-                    next_band = promotion_decision(
-                        cast(list[Finding], result.findings),
-                        result.stop_reason,
-                        wi.band,
-                        self.config.max_band,
-                    )
-                    if next_band:
-                        promo_key = f"{wi.band}→{next_band}"
-                        async with self._state_lock:
-                            self._promotion_counts[promo_key] = (
-                                self._promotion_counts.get(promo_key, 0) + 1
-                            )
-                        logger.info(
-                            "Promoting %s from %s to %s band",
-                            key,
-                            wi.band,
-                            next_band,
-                        )
-                        promotion_queue.append(
-                            WorkItem(
-                                file_target=wi.file_target,
-                                band=next_band,
-                                attempt=wi.attempt,
-                                seed_transcript=_extract_transcript(result),
-                            )
-                        )
-
-                _submit_next()
+            await asyncio.gather(*in_flight.keys(), return_exceptions=True)
+            raise
 
         return spent
+
+    def _result_storage_key(self, wi: WorkItem) -> str:
+        key = wi.file_target.get("path", "")
+        ep_suffix = f":{wi.entry_point.function_name}" if wi.entry_point else ""
+        return f"{key}{ep_suffix}:{wi.band}:{wi.attempt}"
+
+    async def _record_work_item_result(
+        self,
+        *,
+        tier: str,
+        wi: WorkItem,
+        result: TargetResult,
+    ) -> tuple[bool, float, str | None]:
+        storage_key = self._result_storage_key(wi)
+        async with self._state_lock:
+            if storage_key in self._results:
+                return False, 0.0, None
+            self._results[storage_key] = result
+            self._spent_per_tier[tier] += result.cost_usd
+            self._spent_per_band[wi.band] = (
+                self._spent_per_band.get(wi.band, 0.0) + result.cost_usd
+            )
+            self._runs_per_band[wi.band] = self._runs_per_band.get(wi.band, 0) + 1
+
+        if result.status == "completed" and self.config.findings_pool is not None:
+            for finding in cast(list[Finding], result.findings):
+                try:
+                    await self.config.findings_pool.add(finding)
+                except Exception:
+                    logger.debug("findings_pool.add failed", exc_info=True)
+
+        next_band: str | None = None
+        if result.status == "completed":
+            next_band = promotion_decision(
+                cast(list[Finding], result.findings),
+                result.stop_reason,
+                wi.band,
+                self.config.max_band,
+            )
+            if next_band:
+                promo_key = f"{wi.band}→{next_band}"
+                async with self._state_lock:
+                    self._promotion_counts[promo_key] = (
+                        self._promotion_counts.get(promo_key, 0) + 1
+                    )
+
+        return True, result.cost_usd, next_band
+
+    def _emit_hunt_progress(
+        self,
+        *,
+        tier: str,
+        band: str,
+        spent: float,
+        budget: float,
+    ) -> None:
+        completed_count = sum(
+            1
+            for result in self._results.values()
+            if result.status in ("completed", "error", "timeout")
+        )
+        findings_count = sum(
+            len(result.findings)
+            for result in self._results.values()
+            if result.status == "completed"
+        )
+        EventBus().emit_hunt_progress(
+            HuntProgressPayload(
+                session_id=self.config.session_id_prefix,
+                tier=tier,
+                band=band,
+                files_completed=completed_count,
+                files_total=len(self.config.files),
+                findings_this_tier=findings_count,
+                cost_usd=spent,
+                budget_remaining=max(0.0, budget - spent),
+            )
+        )
+
+    def _work_item_checkpoint_key(self, wi: WorkItem) -> str:
+        payload = {
+            "file_path": wi.file_target.get("path", ""),
+            "band": wi.band,
+            "attempt": wi.attempt,
+            "entry_point": (
+                wi.entry_point.function_name if wi.entry_point is not None else None
+            ),
+            "seed_context_present": bool(wi.seed_context),
+        }
+        return checkpoint_stage_key(payload)
+
+    def _serialize_target_result(self, result: TargetResult) -> dict[str, Any]:
+        return {
+            "target": result.target,
+            "status": result.status,
+            "session_id": result.session_id,
+            "findings": list(result.findings or []),
+            "flags_found": list(result.flags_found or []),
+            "duration_seconds": float(result.duration_seconds or 0.0),
+            "cost_usd": float(result.cost_usd or 0.0),
+            "tokens_used": int(result.tokens_used or 0),
+            "error": result.error,
+            "tier": result.tier,
+            "band": result.band,
+            "stop_reason": result.stop_reason,
+        }
+
+    def _deserialize_target_result(self, payload: dict[str, Any]) -> TargetResult:
+        return TargetResult(
+            target=str(payload.get("target", "")),
+            status=str(payload.get("status", "error")),
+            session_id=str(payload.get("session_id", "")),
+            findings=list(payload.get("findings", []) or []),
+            flags_found=list(payload.get("flags_found", []) or []),
+            duration_seconds=float(payload.get("duration_seconds", 0.0) or 0.0),
+            cost_usd=float(payload.get("cost_usd", 0.0) or 0.0),
+            tokens_used=int(payload.get("tokens_used", 0) or 0),
+            error=str(payload.get("error", "")),
+            tier=str(payload.get("tier", "")),
+            band=str(payload.get("band", "")),
+            stop_reason=str(payload.get("stop_reason", "")),
+        )
+
+    def _load_work_item_checkpoint(
+        self,
+        wi: WorkItem,
+    ) -> tuple[TargetResult, str | None, str | None] | None:
+        if self._checkpoint_store is None or not self._checkpoint_store.enabled:
+            return None
+        payload = self._checkpoint_store.get(
+            "hunter_work_items",
+            self._work_item_checkpoint_key(wi),
+        )
+        if not isinstance(payload, dict):
+            return None
+        result_raw = payload.get("result")
+        if not isinstance(result_raw, dict):
+            return None
+        result = self._deserialize_target_result(result_raw)
+        next_band_raw = str(payload.get("next_band") or "").strip().lower()
+        next_band = (
+            next_band_raw if next_band_raw in BAND_ORDER and next_band_raw != wi.band else None
+        )
+        replay_seed = (
+            str(payload.get("seed_transcript") or "").strip() or None
+        )
+        return result, next_band, replay_seed
+
+    def _save_work_item_checkpoint(
+        self,
+        *,
+        wi: WorkItem,
+        tier: str,
+        result: TargetResult,
+        next_band: str | None,
+    ) -> None:
+        if self._checkpoint_store is None or not self._checkpoint_store.enabled:
+            return
+        payload = {
+            "tier": tier,
+            "result": self._serialize_target_result(result),
+            "next_band": next_band,
+            "seed_transcript": _extract_transcript(result)
+            if result.status == "completed"
+            else None,
+            "spent_per_tier": dict(self._spent_per_tier),
+            "spent_per_band": dict(self._spent_per_band),
+            "promotion_counts": dict(self._promotion_counts),
+        }
+        try:
+            self._checkpoint_store.append(
+                "hunter_work_items",
+                self._work_item_checkpoint_key(wi),
+                payload,
+            )
+        except Exception:
+            logger.debug("hunter work-item checkpoint append failed", exc_info=True)
 
     # --- Internals: hunter-specific logic the runner delegates back to ----
 
@@ -811,6 +1046,8 @@ class HunterPool:
             campaign_hint=self.config.campaign_hint,
             exploit_mode=self.config.exploit_mode,
             budget_usd=budget_usd,
+            max_steps_constrained=self.config.hunter_max_steps_constrained,
+            max_steps_deep=self.config.hunter_max_steps_deep,
             seed_transcript=seed_transcript,
             entry_point=entry_point,
             seed_context=seed_context,

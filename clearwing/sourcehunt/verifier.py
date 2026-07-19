@@ -24,11 +24,15 @@ from typing import Any, cast
 
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
+from .config import load_runtime_tuning_policy_from_env
 from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
 
 _LINE_REF_RE = re.compile(r"\blines?\s+(\d+)(?:\s*-\s*(\d+))?")
+_DEFAULT_ADVERSARIAL_THRESHOLD = (
+    load_runtime_tuning_policy_from_env().verification.adversarial_threshold
+)
 
 
 # --- Verifier prompts -------------------------------------------------------
@@ -157,7 +161,7 @@ class Verifier:
         self,
         llm: AsyncLLMClient,
         adversarial: bool = False,
-        adversarial_threshold: EvidenceLevel | None = "static_corroboration",
+        adversarial_threshold: EvidenceLevel | None | str = _DEFAULT_ADVERSARIAL_THRESHOLD,
     ):
         self.llm = llm
         self.adversarial = adversarial
@@ -165,7 +169,13 @@ class Verifier:
         # The default threshold matches the plan: only spend steel-man budget
         # on findings with at least static corroboration (e.g. a Semgrep hit,
         # SourceAnalyzer regex match, or a hunter-recorded static finding).
-        self.adversarial_threshold = adversarial_threshold
+        threshold_value = str(adversarial_threshold or "").strip().lower()
+        if threshold_value == "always":
+            self.adversarial_threshold = None
+        elif threshold_value in EVIDENCE_LEVELS:
+            self.adversarial_threshold = cast(EvidenceLevel, threshold_value)
+        else:
+            self.adversarial_threshold = "static_corroboration"
         # Keep the "base" prompt for backwards compat — the per-call prompt
         # is selected in verify() based on the gate.
         self._system_prompt = (

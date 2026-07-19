@@ -181,8 +181,10 @@ class FindingsPool:
         self._llm = llm
         self._checkpoint_path = checkpoint_path
         self._max_dedup_candidates = max_dedup_candidates
+        self._checkpoint_ids: set[str] = set()
         if checkpoint_path is not None:
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prime_checkpoint_ids()
 
     @property
     def count(self) -> int:
@@ -283,7 +285,10 @@ class FindingsPool:
                     if k in Finding.__dataclass_fields__
                 })
                 fid = finding.get("id", "")
+                if not fid or fid in pool._findings:
+                    continue
                 pool._findings[fid] = finding
+                pool._checkpoint_ids.add(fid)
                 cid = finding.get("cluster_id", "")
                 if cid and cid not in pool._clusters:
                     pool._clusters[cid] = FindingCluster(
@@ -296,7 +301,8 @@ class FindingsPool:
                     )
                 elif cid:
                     cluster = pool._clusters[cid]
-                    cluster.finding_ids.append(fid)
+                    if fid not in cluster.finding_ids:
+                        cluster.finding_ids.append(fid)
                     cluster.file_paths.add(finding.get("file", ""))
             except Exception:
                 logger.debug("Failed to parse checkpoint line", exc_info=True)
@@ -426,6 +432,9 @@ class FindingsPool:
     def _checkpoint(self, finding: Finding) -> None:
         if self._checkpoint_path is None:
             return
+        finding_id = finding.get("id", "")
+        if finding_id and finding_id in self._checkpoint_ids:
+            return
         try:
             data = {
                 k: v for k, v in {
@@ -449,5 +458,22 @@ class FindingsPool:
             }
             with self._checkpoint_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(data, sort_keys=True) + "\n")
+            if finding_id:
+                self._checkpoint_ids.add(finding_id)
         except Exception:
             logger.debug("Checkpoint write failed", exc_info=True)
+
+    def _prime_checkpoint_ids(self) -> None:
+        if self._checkpoint_path is None or not self._checkpoint_path.exists():
+            return
+        for raw in self._checkpoint_path.read_text(encoding="utf-8").splitlines():
+            text = raw.strip()
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+            fid = str(data.get("id") or "").strip()
+            if fid:
+                self._checkpoint_ids.add(fid)

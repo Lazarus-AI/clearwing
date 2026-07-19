@@ -30,6 +30,11 @@ def _parse_fraction(value: str) -> float:
     return parsed
 
 
+def _cli_flag_present(flag: str) -> bool:
+    argv = sys.argv[1:]
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
+
+
 def add_parser(subparsers):
     parser = subparsers.add_parser(
         "sourcehunt",
@@ -728,29 +733,38 @@ def handle(cli, args):
             task_model_overrides=task_model_overrides,
         )
 
-    # Parse tier-split
-    try:
-        a, b, c = (int(x) / 100.0 for x in args.tier_split.split("/"))
-    except ValueError:
-        cli.console.print(
-            f"[red]Error: --tier-split must be three integers like '70/25/5', got '{args.tier_split}'[/red]"
-        )
-        sys.exit(1)
+    depth_is_explicit = _cli_flag_present("--depth")
+    budget_is_explicit = _cli_flag_present("--budget")
+    max_parallel_is_explicit = _cli_flag_present("--max-parallel")
+    tier_budget_is_explicit = _cli_flag_present("--tier-split") or _cli_flag_present(
+        "--skip-tier-c"
+    )
+    adversarial_threshold_is_explicit = _cli_flag_present("--adversarial-threshold")
 
-    if args.skip_tier_c:
-        # Redistribute Tier C allocation into A
-        a += c
-        c = 0.0
+    tier_budget = None
+    if tier_budget_is_explicit:
+        try:
+            a, b, c = (int(x) / 100.0 for x in args.tier_split.split("/"))
+        except ValueError:
+            cli.console.print(
+                f"[red]Error: --tier-split must be three integers like '70/25/5', got '{args.tier_split}'[/red]"
+            )
+            sys.exit(1)
 
-    try:
-        tier_budget = TierBudget(
-            tier_a_fraction=a,
-            tier_b_fraction=b,
-            tier_c_fraction=c,
-        )
-    except ValueError as e:
-        cli.console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
+        if args.skip_tier_c:
+            # Redistribute Tier C allocation into A
+            a += c
+            c = 0.0
+
+        try:
+            tier_budget = TierBudget(
+                tier_a_fraction=a,
+                tier_b_fraction=b,
+                tier_c_fraction=c,
+            )
+        except ValueError as e:
+            cli.console.print(f"[red]Error: {e}[/red]")
+            sys.exit(1)
 
     formats = args.format
     if "all" in formats:
@@ -1187,6 +1201,11 @@ def handle(cli, args):
         retain_incomplete_certificates=args.retain_incomplete_certificates,
         emit_rejection_certificates=args.emit_rejection_certificates,
         falsify=args.falsify,
+        depth_is_explicit=depth_is_explicit,
+        budget_is_explicit=budget_is_explicit,
+        max_parallel_is_explicit=max_parallel_is_explicit,
+        tier_budget_is_explicit=tier_budget_is_explicit,
+        adversarial_threshold_is_explicit=adversarial_threshold_is_explicit,
     )
 
     cli.console.print(
