@@ -14,8 +14,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
-import platform
 import shutil
 import tempfile
 
@@ -40,17 +40,15 @@ class HunterSandbox:
     """
 
     IMAGE_NAME_PREFIX = "clearwing-sourcehunt"
+    AUTO_CPU_CAP = 3.0
+    MIN_CPU_LIMIT = 0.5
 
     # Default "extra" variants to build alongside the primary. These let
     # a single HunterSandbox own both an ASan+UBSan image and an MSan
     # image, and spawn containers from either one by name.
     DEFAULT_EXTRA_VARIANTS: tuple[tuple[str, ...], ...] = ()
 
-    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git"]
-    # Some apt packages are architecture/repo-dependent (for example, ltrace is
-    # unavailable in certain debian slim variants). Keep them best-effort so a
-    # missing optional debug tool doesn't disable the entire sandbox pipeline.
-    DEEP_AGENT_OPTIONAL_PACKAGES = ["ltrace"]
+    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git", "ltrace"]
     EXPLOIT_AGENT_PACKAGES = ["gdb", "python3-pip", "ruby", "binutils"]
     EXPLOIT_POST_INSTALL = [
         "pip3 install --break-system-packages pwntools ROPgadget seccomp-tools 2>/dev/null || true",
@@ -67,7 +65,9 @@ class HunterSandbox:
         build_recipe: BuildRecipe | None = None,
         deep_agent_mode: bool = False,
         post_install_commands: list[str] | None = None,
+        default_cpus: float | None = None,
     ):
+        self._validate_cpu_limit(default_cpus, name="default_cpus")
         self.repo_path = os.path.abspath(repo_path)
         self.languages = languages or []
         self.sanitizers = sanitizers or ["asan", "ubsan"]
@@ -80,22 +80,88 @@ class HunterSandbox:
         for v in self.extra_variants:
             validate_sanitizer_combo(v)
         self.extra_packages = list(extra_packages or [])
-        self.optional_packages: list[str] = []
         self.post_install_commands = list(post_install_commands or [])
         self.deep_agent_mode = deep_agent_mode
         if deep_agent_mode:
             for pkg in self.DEEP_AGENT_PACKAGES:
                 if pkg not in self.extra_packages:
                     self.extra_packages.append(pkg)
-            for pkg in self.DEEP_AGENT_OPTIONAL_PACKAGES:
-                if pkg not in self.optional_packages:
-                    self.optional_packages.append(pkg)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
         self._image_tag: str | None = None  # primary variant tag
         # Variant image map — {variant_key: image_tag}
         self._variant_images: dict[str, str] = {}
         self._spawned: list[SandboxContainer] = []
+        self._default_cpus = None if default_cpus is None else float(default_cpus)
+        self._resolved_default_cpus: float | None = None
+        self._available_cpus: float | None = None
+        self._cpu_count_source = ""
+
+    @staticmethod
+    def _validate_cpu_limit(cpus: float | None, *, name: str = "cpus") -> None:
+        if cpus is None:
+            return
+        if not math.isfinite(cpus) or cpus < 0:
+            raise ValueError(f"{name} must be a finite number greater than or equal to 0")
+
+    @property
+    def available_cpus(self) -> float:
+        """Logical CPUs available to the Docker daemon, with portable fallbacks."""
+        if self._available_cpus is None:
+            self._available_cpus, self._cpu_count_source = self._detect_available_cpus()
+        return self._available_cpus
+
+    @property
+    def default_cpu_limit(self) -> float:
+        """Resolve the configured or automatic per-container CPU limit."""
+        if self._default_cpus is not None:
+            return self._default_cpus
+        if self._resolved_default_cpus is None:
+            available = self.available_cpus
+            if available <= 1.0:
+                limit = self.MIN_CPU_LIMIT
+            else:
+                limit = min(self.AUTO_CPU_CAP, available - 1.0)
+            self._resolved_default_cpus = limit
+            logger.info(
+                "HunterSandbox CPU limit auto-selected: %.2f (%s reports %.2f logical CPUs)",
+                limit,
+                self._cpu_count_source,
+                available,
+            )
+        return self._resolved_default_cpus
+
+    def _detect_available_cpus(self) -> tuple[float, str]:
+        try:
+            daemon_cpus = self._get_client().info().get("NCPU")
+            if (
+                isinstance(daemon_cpus, (int, float))
+                and not isinstance(daemon_cpus, bool)
+                and math.isfinite(daemon_cpus)
+                and daemon_cpus > 0
+            ):
+                return float(daemon_cpus), "Docker daemon"
+        except Exception:
+            logger.debug("Could not query Docker daemon CPU count", exc_info=True)
+
+        try:
+            get_affinity = getattr(os, "sched_getaffinity", None)
+            affinity = get_affinity(0) if get_affinity is not None else None
+            if affinity:
+                return float(len(affinity)), "process affinity"
+        except OSError:
+            pass
+
+        system_cpus = os.cpu_count()
+        if system_cpus is not None and system_cpus > 0:
+            return float(system_cpus), "host"
+        return 1.0, "fallback"
+
+    def _resolve_cpu_limit(self, cpus: float | None) -> float:
+        if cpus is None:
+            return self.default_cpu_limit
+        self._validate_cpu_limit(cpus)
+        return float(cpus)
 
     # --- Lifecycle ----------------------------------------------------------
 
@@ -161,7 +227,7 @@ class HunterSandbox:
                 ",".join(sanitizers),
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64")
+                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64", network_mode="host")
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
@@ -177,7 +243,7 @@ class HunterSandbox:
         scratch_mount: bool = True,
         variant: list[str] | None = None,
         writable_workspace: bool = False,
-        cpus: float = 0.0,
+        cpus: float | None = None,
         runtime: str | None = None,
     ) -> SandboxContainer:
         """Start a fresh container from one of the built variant images.
@@ -198,7 +264,8 @@ class HunterSandbox:
             writable_workspace: If True, copy the source tree into the
                 container instead of bind-mounting it read-only. The agent
                 can then modify source, recompile, and use git diff.
-            cpus: CPU limit (0 = no limit). Passed to SandboxConfig.
+            cpus: CPU limit. ``None`` uses the manager default, while 0
+                explicitly disables the limit. Passed to SandboxConfig.
 
         Returns a SandboxContainer ready for exec/write/read.
         """
@@ -241,13 +308,14 @@ class HunterSandbox:
         # "Decoding seccomp profile failed: invalid character '/'..."
         seccomp_json = json.dumps(get_seccomp_profile("hunter"))
 
+        resolved_cpus = self._resolve_cpu_limit(cpus)
         cfg = SandboxConfig(
             image=image_tag,
             network_mode="none",
             mounts=mounts,
             memory_mb=memory_mb,
             cpu_shares=1024,
-            cpus=cpus,
+            cpus=resolved_cpus,
             timeout_seconds=timeout_seconds,
             env=env,
             working_dir="/workspace",
@@ -330,14 +398,7 @@ class HunterSandbox:
         # Compute the env block for THIS variant (not the recipe's default)
         env_dict = compute_sanitizer_env(recipe, variant)
 
-        required_packages = list(
-            dict.fromkeys([*recipe.apt_packages, *self.extra_packages])
-        )
-        optional_packages = [
-            pkg
-            for pkg in dict.fromkeys(self.optional_packages)
-            if pkg not in required_packages
-        ]
+        apt_packages = " ".join(recipe.apt_packages + self.extra_packages)
         env_lines = []
         for k, v in env_dict.items():
             if " " in v or '"' in v:
@@ -347,19 +408,12 @@ class HunterSandbox:
                 env_lines.append(f"ENV {k}={v}")
         env_block = "\n".join(env_lines)
 
-        if required_packages:
-            apt_lines = [
-                "RUN apt-get update -qq && \\",
-                "    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-                f"{' '.join(required_packages)} && \\",
-            ]
-            for pkg in optional_packages:
-                apt_lines.append(
-                    "    (DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-                    f"{pkg} || echo \"Optional package {pkg} unavailable; skipping\") && \\"
-                )
-            apt_lines.append("    rm -rf /var/lib/apt/lists/*")
-            apt_block = "\n".join(apt_lines)
+        if apt_packages.strip():
+            apt_block = (
+                "RUN apt-get update -qq && "
+                f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {apt_packages} && "
+                "rm -rf /var/lib/apt/lists/*"
+            )
         else:
             apt_block = "# (no apt packages)"
 

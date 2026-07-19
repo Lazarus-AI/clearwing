@@ -1,0 +1,171 @@
+{
+  "sections": [
+    {
+      "title": "Core",
+      "checks": [
+        {
+          "name": "Python",
+          "status": "ok",
+          "message": "3.12.13 on Linux",
+          "hint": ""
+        },
+        {
+          "name": "clearwing",
+          "status": "ok",
+          "message": "1.0.0",
+          "hint": ""
+        }
+      ]
+    },
+    {
+      "title": "LLM provider",
+      "checks": [
+        {
+          "name": "Endpoint",
+          "status": "ok",
+          "message": "claude-sonnet-4-6 @ api.anthropic.com (direct)",
+          "hint": ""
+        },
+        {
+          "name": "Source",
+          "status": "ok",
+          "message": "default",
+          "hint": ""
+        },
+        {
+          "name": "Credentials",
+          "status": "ok",
+          "message": "api_key set",
+          "hint": ""
+        },
+        {
+          "name": "Test invoke",
+          "status": "skip",
+          "message": "skipped (--skip-llm-invoke)",
+          "hint": ""
+        }
+      ]
+    },
+    {
+      "title": "Filesystem",
+      "checks": [
+        {
+          "name": "~/.clearwing/",
+          "status": "ok",
+          "message": "created",
+          "hint": ""
+        },
+        {
+          "name": "config.yaml",
+          "status": "warn",
+          "message": "not present",
+          "hint": "Run `clearwing setup` to create it."
+        }
+      ]
+    },
+    {
+      "title": "Docker (optional — needed for Kali tools + sourcehunt sandbox)",
+      "checks": [
+        {
+          "name": "docker CLI",
+          "status": "warn",
+          "message": "not found on PATH",
+          "hint": "Install Docker Desktop or Colima to enable Kali container tools and source-hunt sandbox features."
+        }
+      ]
+    },
+    {
+      "title": "External tools",
+      "checks": [
+        {
+          "name": "git",
+          "status": "ok",
+          "message": "git version 2.47.3",
+          "hint": ""
+        },
+        {
+          "name": "rg",
+          "status": "ok",
+          "message": "ripgrep 14.1.1",
+          "hint": ""
+        },
+        {
+          "name": "gh",
+          "status": "warn",
+          "message": "not on PATH",
+          "hint": "Optional: needed for `sourcehunt --auto-pr` and `--github-checks` modes."
+        },
+        {
+          "name": "gdb",
+          "status": "warn",
+          "message": "not on PATH",
+          "hint": "Optional: useful inside the hunter sandbox for debugging."
+        },
+        {
+          "name": "strace",
+          "status": "warn",
+          "message": "not on PATH",
+          "hint": "Optional: syscall tracing inside the hunter sandbox."
+        }
+      ]
+    },
+    {
+      "title": "Optional extras",
+      "checks": [
+        {
+          "name": "genai-pyo3",
+          "status": "ok",
+          "message": "Native LLM transport — required runtime dependency",
+          "hint": ""
+        },
+        {
+          "name": "playwright",
+          "status": "warn",
+          "message": "not installed — Browser automation tools (browser_navigate, browser_screenshot, ...)",
+          "hint": "uv pip install 'clearwing[browser]'"
+        },
+        {
+          "name": "sentence-transformers",
+          "status": "warn",
+          "message": "not installed — Vector memory for mechanism store (TF-IDF fallback works without this)",
+          "hint": "uv pip install 'clearwing[vector]'"
+        },
+        {
+          "name": "fastapi",
+          "status": "ok",
+          "message": "0.139.0 — REST + WebSocket server (`clearwing webui`)",
+          "hint": ""
+        },
+        {
+          "name": "pymetasploit3",
+          "status": "warn",
+          "message": "not installed — Metasploit RPC bridge for exploit tools",
+          "hint": "uv pip install 'clearwing[metasploit]'"
+        },
+        {
+          "name": "chromadb",
+          "status": "ok",
+          "message": "1.5.9 — Vector store backend for mechanism memory (TF-IDF remains fallback)",
+          "hint": ""
+        }
+      ]
+    },
+    {
+      "title": "Network",
+      "checks": [
+        {
+          "name": "DNS api.anthropic.com",
+          "status": "ok",
+          "message": "160.79.104.10",
+          "hint": ""
+        },
+        {
+          "name": "TCP api.anthropic.com:443",
+          "status": "ok",
+          "message": "reachable",
+          "hint": ""
+        }
+      ]
+    }
+  ]
+}

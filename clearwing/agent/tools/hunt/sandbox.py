@@ -30,6 +30,9 @@ class HunterContext:
     repo_path: str  # absolute host path
     sandbox: SandboxContainer | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
+    trace_steps: list = field(default_factory=list)  # accumulator for TraceStep dicts
+    files_read: set = field(default_factory=set)  # files accessed via read_source_file
+    agent_mode: str = "constrained"  # "constrained" | "deep"; deep reads via shell so files_read is not authoritative
     file_path: str | None = None  # the file this hunter is scoped to
     session_id: str | None = None
     specialist: str = "general"  # "general" | "memory_safety" | "logic_auth" | "propagation"
@@ -43,6 +46,8 @@ class HunterContext:
     default_sanitizers: tuple = ("asan", "ubsan")
     findings_pool: object | None = None  # FindingsPool (avoiding circular import)
     trajectory_dir: object | None = None  # Path override for transcript output
+    work_item_id: str | None = None  # Stable run-local join key for evaluation
+    instrumentation: object | None = None  # SourceHuntInstrumentation, kept generic
     exploit_result: object | None = None  # ExploiterResult slot for exploit agent
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
 

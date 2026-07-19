@@ -172,8 +172,8 @@ class CrashClassifier:
         if poc:
             user_msg += f"\nProof-of-concept input:\n```\n{poc[:2000]}\n```\n"
 
-        response = await self._llm.aask(
-            user_msg, system=CLASSIFIER_SYSTEM_PROMPT,
+        response = await self._llm.aask_text(
+            system=CLASSIFIER_SYSTEM_PROMPT, user=user_msg,
         )
         text = response.first_text if hasattr(response, "first_text") else str(response)
         cost = getattr(response, "cost_usd", 0.0) or 0.0

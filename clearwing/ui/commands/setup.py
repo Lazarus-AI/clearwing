@@ -549,9 +549,15 @@ def _run_test_invoke(
 
     console.print("\n[dim]Testing endpoint...[/dim]", end=" ")
     try:
-        llm = ProviderManager.for_endpoint(endpoint).get_llm("default")
+        import asyncio
+
+        from clearwing.llm.native import response_text
+
+        client = ProviderManager.for_endpoint(endpoint).get_native_client("default")
         start = time.monotonic()
-        response = llm.invoke("Reply with exactly the word PONG.")
+        resp = asyncio.run(
+            client.aask_text(system="", user="Reply with exactly the word PONG.")
+        )
         elapsed_ms = int((time.monotonic() - start) * 1000)
     except Exception as exc:
         console.print(f"\n[red]Test failed: {exc}[/red]")
@@ -561,8 +567,5 @@ def _run_test_invoke(
         )
         return
 
-    content = getattr(response, "content", str(response))
-    if isinstance(content, list):
-        content = " ".join(str(p) for p in content)
-    snippet = str(content).strip()[:60]
+    snippet = response_text(resp).strip()[:60]
     console.print(f"[green]ok[/green] ({elapsed_ms}ms, reply: {snippet!r})")

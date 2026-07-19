@@ -126,6 +126,67 @@ class TestTierAssignmentOnInit:
         assert files[3]["tier"] == "B"  # critical regression — must be B not C
 
 
+# --- Within-tier priority ordering -----------------------------------------
+
+
+class TestWithinTierPriorityOrder:
+    def test_higher_priority_files_hunted_first(self):
+        """Files within a tier must be dispatched by priority descending.
+
+        The ranker computes priority but returns files in enumeration order.
+        HunterPool must sort each tier so the most suspicious files are hunted
+        first (and are not starved when a tier budget runs out). Here the
+        low-priority file is listed first (as it would be alphabetically), yet
+        the higher-priority file must be hunted before it.
+        """
+        dispatch_order: list[str] = []
+
+        def order_recording_factory(file_target, sandbox, session_id):
+            dispatch_order.append(file_target["path"])
+
+            class _StubHunter:
+                async def arun(self):
+                    return _StubRunResult(
+                        findings=[], cost_usd=0.0, tokens_used=0,
+                        stop_reason="completed",
+                    )
+
+            return _StubHunter(), MagicMock(findings=[], session_id=session_id,
+                                            cleanup_variants=MagicMock())
+
+        # Both are tier A (priority >= 3.0). Low-priority listed first.
+        files = [
+            _ft("aaa_low_priority.c", 4, 4),   # priority 3.7 → A (lower)
+            _ft("zzz_high_priority.c", 5, 5),  # priority 4.4 → A (highest)
+        ]
+        config = HuntPoolConfig(
+            files=files,
+            repo_path="/tmp/repo",
+            sandbox_factory=None,
+            hunter_factory=order_recording_factory,
+            max_parallel=1,  # serialize so dispatch order is deterministic
+            budget_usd=0.0,
+            tier_budget=TierBudget(0.7, 0.25, 0.05),
+            cost_limit_per_file_a=10.0,
+            cost_limit_per_file_b=10.0,
+            cost_limit_per_file_c=10.0,
+            starting_band="deep",
+            max_band="deep",
+            redundancy_override=1,
+        )
+        pool = HunterPool(config)
+        import asyncio
+
+        asyncio.run(pool.arun())
+
+        # Highest-priority file must be hunted before the lower-priority one,
+        # regardless of enumeration (alphabetical) input order.
+        assert dispatch_order.index("zzz_high_priority.c") < dispatch_order.index(
+            "aaa_low_priority.c"
+        )
+
+
+
 # --- Tier A spending --------------------------------------------------------
 
 

@@ -23,6 +23,7 @@ from clearwing.sourcehunt.pool import assign_tier
 from clearwing.sourcehunt.preprocessor import Preprocessor
 from clearwing.sourcehunt.ranker import Ranker
 from clearwing.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
+from clearwing.sourcehunt.state import StageOutcome
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -256,6 +257,75 @@ class TestStandardDepth:
         assert "C" in manifest["spent_per_tier"]
 
 
+# --- verification skipped --------------------------------------------------
+
+
+class TestNoVerify:
+    def test_no_verify_keeps_findings_unverified(self, tmp_path):
+        hunter_llm = AsyncMock()
+        hunter_llm.model_name = "test-model"
+        hunter_llm.achat.return_value = ChatResponse(
+            content=[{"text": "No vulnerabilities found."}]
+        )
+        verifier_llm = AsyncMock()
+        stage_events = []
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_PY_SQLI),
+            local_path=str(FIXTURE_PY_SQLI),
+            depth="standard",
+            budget_usd=1.0,
+            max_parallel=1,
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(["app.py"]),
+            hunter_llm=hunter_llm,
+            verifier_llm=verifier_llm,
+            no_verify=True,
+            no_exploit=True,
+            enable_calibration=False,
+            enable_mechanism_memory=False,
+            enable_patch_oracle=False,
+            enable_stability_verification=False,
+            enable_variant_loop=True,
+            enable_knowledge_graph=False,
+            enable_findings_pool=False,
+            enable_behavior_monitor=False,
+        )
+        runner._emit_stage = lambda stage, status, **data: stage_events.append(
+            (stage, status, data)
+        )
+
+        result = runner.run()
+
+        assert result.findings
+        assert result.verified_findings == []
+        assert all(finding.get("verified") is False for finding in result.findings)
+        assert result.pipeline_status.stages["verifier"].outcome is StageOutcome.SKIPPED
+        verifier_llm.aask_text.assert_not_awaited()
+
+        verify_completed = next(
+            data
+            for stage, status, data in stage_events
+            if stage == "verify" and status == "completed"
+        )
+        assert verify_completed["detail"] == "Verification skipped (--no-verify)"
+
+        manifest = json.loads(Path(result.output_paths["manifest"]).read_text())
+        json_report = json.loads(Path(result.output_paths["json"]).read_text())
+        markdown = Path(result.output_paths["markdown"]).read_text()
+        assert manifest["verified_count"] == 0
+        assert json_report["verified_findings"] == []
+        assert f"- **Findings:** {len(result.findings)} (0 verified)" in markdown
+        assert "verifier: skipped — Verification skipped (--no-verify)" in markdown
+        assert "- **Verified:** yes" not in markdown
+
+        # Skipping trust promotion must not suppress severity signaling.
+        assert any(
+            finding.get("severity") in {"critical", "high"}
+            for finding in result.findings
+        )
+        assert result.exit_code == 2
+
+
 # --- evidence_level on findings ---------------------------------------------
 
 
@@ -274,6 +344,13 @@ class TestEvidenceLevels:
         assert any(f.get("evidence_level") == "static_corroboration" for f in result.findings), (
             f"no static_corroboration findings: {[f.get('evidence_level') for f in result.findings]}"
         )
+        static_findings = [
+            finding for finding in result.findings if finding.discovered_by == "source_analyzer"
+        ]
+        assert static_findings
+        for finding in static_findings:
+            assert len(finding.id) == len("static-") + 8
+            assert len(finding.extra["stable_finding_id"]) == len("static-") + 16
 
     def test_every_finding_has_evidence_level(self, tmp_path):
         runner = SourceHuntRunner(

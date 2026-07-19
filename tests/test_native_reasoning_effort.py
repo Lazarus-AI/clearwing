@@ -8,6 +8,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from genai_pyo3 import ChatResponse
 
 from clearwing.llm.native import (
     _REASONING_EFFORT_OVERRIDE_ALLOW,
@@ -194,7 +195,7 @@ class TestAchatRetryOnUnsupportedReasoning:
             "Status: 400 Bad Request. "
             'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
         )
-        success_response = object()  # Sentinel — we don't assert its shape
+        success_response = ChatResponse(content=[{"text": "ok"}])
 
         # Replace the private call helper. _achat_with_provider_policy is the
         # narrowest seam: raises on first call, returns on second.
@@ -272,7 +273,16 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
             "Status: 400 Bad Request. "
             'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
         )
-        success_end = object()
+        # A minimal stand-in for genai's StreamEnd (captured_* fields);
+        # achat_stream rebuilds a ChatResponse from it via
+        # _chat_response_from_stream_end.
+        class _FakeStreamEnd:
+            captured_content = [{"text": "streamed-ok"}]
+            captured_reasoning_content = None
+            captured_response_id = None
+            captured_usage = None
+
+        success_end = _FakeStreamEnd()
         on_text = lambda chunk: None  # noqa: E731
 
         call_log: list[str] = []
@@ -314,6 +324,8 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
                 )
             )
 
-        assert result is success_end
+        # achat_stream now returns a real ChatResponse rebuilt from the
+        # StreamEnd (not the raw end object), so assert on its content.
+        assert result.first_text == "streamed-ok"
         assert len(call_log) == 2
         assert client.reasoning_effort is None

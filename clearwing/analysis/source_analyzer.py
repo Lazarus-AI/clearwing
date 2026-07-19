@@ -10,10 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pathspec
-import logging
-
-logger = logging.getLogger(__name__)
-
 
 
 @dataclass
@@ -518,13 +514,9 @@ class SourceAnalyzer:
 
         Returns:
             Path to the cloned repository.
-
-        Raises:
-            RuntimeError: If cloning fails after all attempts.
         """
         self._temp_dir = tempfile.TemporaryDirectory(prefix="clearwing-src-")
         clone_path = self._temp_dir.name
-        logger.info("SourceAnalyzer.clone: created temp dir %s for %s", clone_path, git_url)
         try:
             subprocess.run(
                 ["git", "clone", "--depth", "1", "--branch", branch, git_url, clone_path],
@@ -533,28 +525,15 @@ class SourceAnalyzer:
                 timeout=120,
                 check=True,
             )
-        except subprocess.CalledProcessError as e:
-            logger.warning(
-                "SourceAnalyzer.clone: branch '%s' clone failed for %s, trying default branch: %s",
-                branch, git_url, e.stderr
+        except subprocess.CalledProcessError:
+            # Try without --branch (default branch)
+            subprocess.run(
+                ["git", "clone", "--depth", "1", git_url, clone_path],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True,
             )
-            try:
-                subprocess.run(
-                    ["git", "clone", "--depth", "1", git_url, clone_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e2:
-                # Clean up temp dir before re-raising
-                self._temp_dir.cleanup()
-                self._temp_dir = None
-                raise RuntimeError(
-                    f"Failed to clone {git_url}: branch='{branch}' failed ({e.stderr}), "
-                    f"default branch also failed ({e2.stderr})"
-                ) from e2
-        logger.info("SourceAnalyzer.clone: successfully cloned to %s", clone_path)
         self.repo_path = clone_path
         return clone_path
 
@@ -612,16 +591,8 @@ class SourceAnalyzer:
 
     def _iter_source_files(self, root: str):
         """Yield source file paths, skipping irrelevant directories."""
-        logger.debug("SourceAnalyzer._iter_source_files: root=%s respect_gitignore=%s", root, self.respect_gitignore)
-        logger.info("SourceAnalyzer._iter_source_files: root exists=%s isdir=%s", os.path.exists(root), os.path.isdir(root))
         gitignore = _GitignoreMatcher.from_repo(root) if self.respect_gitignore else None
-        if gitignore:
-            logger.debug("SourceAnalyzer: gitignore loaded with %d patterns", len(gitignore.spec.patterns) if hasattr(gitignore.spec, 'patterns') else 0)
-        file_count = 0
-        ext_counts = {}
-        total_files = 0
         for dirpath, dirnames, filenames in os.walk(root):
-            logger.info("SourceAnalyzer._iter_source_files: walking dirpath=%s dirnames=%d filenames=%d", dirpath, len(dirnames), len(filenames))
             # Prune skip directories
             dirnames[:] = [
                 d
@@ -641,14 +612,7 @@ class SourceAnalyzer:
                         continue
                 except OSError:
                     continue
-                file_count += 1
-                total_files += 1
-                ext = Path(full_path).suffix.lower()
-                ext_counts[ext] = ext_counts.get(ext, 0) + 1
                 yield full_path
-        logger.info("SourceAnalyzer._iter_source_files: total_files=%d file_count=%d", total_files, file_count)
-        logger.info("SourceAnalyzer._iter_source_files: extension distribution: %s", dict(sorted(ext_counts.items(), key=lambda x: -x[1])[:20]))
-        logger.debug("SourceAnalyzer._iter_source_files: yielded %d files from root=%s", file_count, root)
 
     def _scan_patterns(self, file_path: str, content: str, language: str) -> list[AnalyzerFinding]:
         """Scan file content against vulnerability patterns for the given language."""

@@ -89,9 +89,9 @@ def test_openai_fallback_parses_reasoning_content_usage_and_tool_calls():
 
 
 @pytest.mark.asyncio
-async def test_achat_falls_back_when_native_openai_streaming_transport_fails(monkeypatch):
+async def test_achat_falls_back_when_native_openai_transport_fails(monkeypatch):
     class FailingClient:
-        async def achat_via_stream(self, *_args, **_kwargs):
+        async def achat(self, *_args, **_kwargs):
             raise RuntimeError("Web stream error for model")
 
     async def fallback(self, request, options, *, on_text_delta=None):

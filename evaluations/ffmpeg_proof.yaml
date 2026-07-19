@@ -1,0 +1,45 @@
+schema_version: 1
+name: ffmpeg-h264-slice-sentinel
+repository: https://github.com/FFmpeg/FFmpeg.git
+vulnerable_commit: 795bccdaf57772b1803914dee2f32d52776518e2
+fixed_commit: 39e1969303a0b9ec5fb5f5eb643bf7a5b69c0a89
+blind:
+  forbidden:
+    - fix commit
+    - fix subject
+    - CVE text
+    - patch-derived rule
+  expected_mechanism: live_identifier_aliases_reserved_sentinel
+  expected_plans:
+    - representation-domain-collision-v1
+    - memory-write-v1
+  expected_predicates:
+    - reserved_sentinel_established
+    - live_domain_overlaps_reserved_value
+    - no_effective_upper_bound_guard
+    - collision_changes_security_relevant_state
+    - attacker_reaches_memory_operation
+    - runtime_confirms_unsafe_memory_access
+fixed:
+  expected_decision: disproven
+  expected_counterevidence: dominating_rejecting_guard
+counterfactuals:
+  - name: fixed
+    relation: finding_removed
+  - name: renamed
+    relation: mechanism_preserved
+  - name: moved
+    relation: mechanism_preserved
+  - name: guarded
+    relation: rejection_added
+  - name: unreachable
+    relation: finding_removed
+  - name: decoy
+    relation: no_extra_finding
+  - name: widened-domain
+    relation: finding_removed
+gates:
+  frontier_recall: not_worse_than_legacy
+  local_recall_improvement_percentage_points: 10
+  precision: not_worse_than_legacy
+  max_cost_ratio: 1.25

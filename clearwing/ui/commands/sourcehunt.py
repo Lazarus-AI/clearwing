@@ -1,5 +1,6 @@
 """Sourcehunt CLI subcommand — runs the Clearwing source-code vulnerability pipeline."""
 
+import argparse
 import logging
 import os
 import sys
@@ -11,21 +12,171 @@ def _format_budget(budget: float) -> str:
     return f"${budget:.2f}"
 
 
+def _parse_fraction(value: str) -> float:
+    text_value = value.strip()
+    percent = text_value.endswith("%")
+    if percent:
+        text_value = text_value[:-1]
+    try:
+        parsed = float(text_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a percentage or fraction, got {value!r}"
+        ) from exc
+    if percent or parsed > 1:
+        parsed /= 100.0
+    if not 0 <= parsed <= 1:
+        raise argparse.ArgumentTypeError("budget fraction must be between 0% and 100%")
+    return parsed
+
+
 def add_parser(subparsers):
     parser = subparsers.add_parser(
         "sourcehunt",
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "--flow",
+        choices=["legacy", "proof"],
+        default="legacy",
+        help="Investigation engine: legacy file agents or proof obligations (default: legacy)",
+    )
     parser.add_argument("--branch", default="main", help="Git branch to clone (default: main)")
     parser.add_argument(
         "--local-path", metavar="PATH", help="Use this local path instead of cloning"
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        dest="log_level",
+        help="Logging verbosity (default: INFO)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Shorthand for --log-level DEBUG",
     )
     parser.add_argument(
         "--depth",
         choices=["quick", "standard", "deep"],
         default="standard",
         help="Hunt depth (default: standard)",
+    )
+    parser.add_argument(
+        "--compile-commands",
+        default=None,
+        metavar="PATH",
+        help="C/C++ compilation database required by --flow proof",
+    )
+    parser.add_argument(
+        "--validation-manifest",
+        default=None,
+        metavar="PATH",
+        help=("JSON manifest of sandboxed commands tied to proof obligations"),
+    )
+    parser.add_argument(
+        "--scheduler-calibration",
+        default=None,
+        metavar="PATH",
+        help="Phase-3 action-utility calibration JSON produced by clearwing eval",
+    )
+    parser.add_argument(
+        "--proof-learning-registry",
+        default=None,
+        metavar="PATH",
+        help="Explicitly promoted Phase-5 mechanism registry (not for strict blind baselines)",
+    )
+    parser.add_argument(
+        "--build-configuration",
+        default="default",
+        metavar="NAME",
+        help="Name recorded for the proof snapshot's selected build configuration",
+    )
+    parser.add_argument(
+        "--clang-binary",
+        default="clang",
+        metavar="NAME",
+        help="Clang executable inside the proof analysis sandbox",
+    )
+    parser.add_argument(
+        "--model-routing",
+        choices=["local-first"],
+        default="local-first",
+        help="Proof obligation model-routing policy (default: local-first)",
+    )
+    parser.add_argument(
+        "--proof-local-model",
+        default=None,
+        metavar="MODEL",
+        help="Model for bounded local judgments when using a single endpoint",
+    )
+    parser.add_argument(
+        "--proof-frontier-model",
+        default=None,
+        metavar="MODEL",
+        help="Stronger model used only after an unresolved local judgment",
+    )
+    parser.add_argument(
+        "--structured-budget",
+        type=_parse_fraction,
+        default=0.90,
+        metavar="PERCENT",
+        help="Proof action budget reserved for structured work (default: 90%%)",
+    )
+    parser.add_argument(
+        "--exploration-budget",
+        type=_parse_fraction,
+        default=0.10,
+        metavar="PERCENT",
+        help="Proof action budget reserved for exploration (default: 10%%)",
+    )
+    parser.add_argument(
+        "--proof-plan",
+        choices=["auto"],
+        default="auto",
+        help="Proof-plan selection policy (currently: auto)",
+    )
+    parser.add_argument(
+        "--proof-max-actions",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Maximum proof actions across the run (default: 200)",
+    )
+    parser.add_argument(
+        "--proof-max-model-calls",
+        type=int,
+        default=40,
+        metavar="N",
+        help="Maximum bounded model judgments (default: 40)",
+    )
+    parser.add_argument(
+        "--proof-max-dynamic-actions",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Maximum harness, fuzz, and runtime actions (default: 20)",
+    )
+    parser.add_argument(
+        "--retain-incomplete-certificates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Retain residual incomplete investigations (default: enabled)",
+    )
+    parser.add_argument(
+        "--emit-rejection-certificates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Emit evidence-backed rejected candidate certificates (default: enabled)",
+    )
+    parser.add_argument(
+        "--falsify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the finite independent falsification plan (default: enabled)",
     )
     parser.add_argument(
         "--agent-mode",
@@ -112,6 +263,13 @@ def add_parser(subparsers):
         help="Skip per-file hunting; only run subsystem hunts.",
     )
     parser.add_argument(
+        "--no-rank",
+        action="store_true",
+        default=False,
+        dest="no_rank",
+        help="Skip the ranker; assign default priority scores to all files.",
+    )
+    parser.add_argument(
         "--seed-corpus",
         default=None,
         dest="seed_corpus",
@@ -139,7 +297,28 @@ def add_parser(subparsers):
         help="Max dollars to spend (default: unlimited; 0 = unlimited)",
     )
     parser.add_argument(
+        "--input-price-per-million",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Explicit input-token price for models without built-in pricing",
+    )
+    parser.add_argument(
+        "--output-price-per-million",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Explicit output-token price for models without built-in pricing",
+    )
+    parser.add_argument(
         "--max-parallel", type=int, default=8, help="Max concurrent hunters (default: 8)"
+    )
+    parser.add_argument(
+        "--sandbox-cpus",
+        type=float,
+        default=None,
+        metavar="N",
+        help="CPU limit per sandbox (default: auto; 0 disables the limit)",
     )
     parser.add_argument(
         "--tier-split",
@@ -194,7 +373,7 @@ def add_parser(subparsers):
         default=None,
         dest="exploit_budget",
         help="Exploit development budget band (default: auto from --depth). "
-             "standard=$25/1hr, deep=$200/4hr, campaign=$2000/12hr.",
+        "standard=$25/1hr, deep=$200/4hr, campaign=$2000/12hr.",
     )
     parser.add_argument(
         "--elaborate",
@@ -260,15 +439,18 @@ def add_parser(subparsers):
         help="Disable the shared findings pool (dedup + cross-agent queries)",
     )
     parser.add_argument(
-        "--gvisor", action="store_true",
+        "--gvisor",
+        action="store_true",
         help="Use gVisor runtime for container isolation",
     )
     parser.add_argument(
-        "--encrypt-artifacts", action="store_true",
+        "--encrypt-artifacts",
+        action="store_true",
         help="Enable encrypted artifact storage",
     )
     parser.add_argument(
-        "--no-behavior-monitor", action="store_true",
+        "--no-behavior-monitor",
+        action="store_true",
         help="Disable behavioral monitoring",
     )
     parser.add_argument(
@@ -378,27 +560,39 @@ def add_parser(subparsers):
         "(defaults to the retro-hunt target repo)",
     )
     parser.add_argument(
-        "--nday", action="store_true", default=False,
+        "--nday",
+        action="store_true",
+        default=False,
         help="N-day exploit pipeline mode",
     )
     parser.add_argument(
-        "--cve-list", metavar="PATH", default=None,
+        "--cve-list",
+        metavar="PATH",
+        default=None,
         help="File with CVE IDs for --nday (one per line: CVE-ID [commit_sha])",
     )
     parser.add_argument(
-        "--cve", metavar="CVE_ID", default=None,
+        "--cve",
+        metavar="CVE_ID",
+        default=None,
         help="Single CVE to exploit in --nday mode",
     )
     parser.add_argument(
-        "--patch-commit", metavar="SHA", default=None,
+        "--patch-commit",
+        metavar="SHA",
+        default=None,
         help="Git SHA of the patch commit for --nday --cve",
     )
     parser.add_argument(
-        "--recent-cves", action="store_true", default=False,
+        "--recent-cves",
+        action="store_true",
+        default=False,
         help="Auto-discover recent CVEs from git history for --nday",
     )
     parser.add_argument(
-        "--nday-days", type=int, default=90,
+        "--nday-days",
+        type=int,
+        default=90,
         help="Days to look back for --recent-cves (default: 90)",
     )
     parser.add_argument(
@@ -408,11 +602,15 @@ def add_parser(subparsers):
         help="Budget band per CVE in --nday mode (default: deep)",
     )
     parser.add_argument(
-        "--reveng", action="store_true", default=False,
+        "--reveng",
+        action="store_true",
+        default=False,
         help="Reverse engineering pipeline: decompile + reconstruct + hunt",
     )
     parser.add_argument(
-        "--arch", default="x86_64", choices=["x86_64"],
+        "--arch",
+        default="x86_64",
+        choices=["x86_64"],
         help="Target architecture for --reveng (default: x86_64; v1.0 supports x86_64 only)",
     )
     parser.add_argument(
@@ -453,6 +651,12 @@ def add_parser(subparsers):
         default=["all"],
         help="Output formats to write (default: all)",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Show a live LLM-activity panel (token counts, cost, latency) while running",
+    )
     return parser
 
 
@@ -466,18 +670,63 @@ def handle(cli, args):
     if args.output_dir is None:
         args.output_dir = default_results_dir("sourcehunt")
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
-
-    # Resolve the LLM endpoint once at the top of the command.
-    # CLI > env > ~/.clearwing/config.yaml > ANTHROPIC_API_KEY default.
-    endpoint = resolve_llm_endpoint(
-        cli_model=args.model,
-        cli_base_url=getattr(args, "base_url", None),
-        cli_api_key=getattr(args, "api_key", None),
-        config_provider=cli.config.get_provider_section() or None,
+    _log_level_name = "DEBUG" if args.verbose else args.log_level
+    logging.basicConfig(
+        level=getattr(logging, _log_level_name),
+        format="%(levelname)s: %(message)s",
+        force=True,
     )
-    cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
-    provider_manager = ProviderManager.for_endpoint(endpoint)
+
+    # Build the provider manager.
+    #   - A multi-endpoint config (`providers:`/`routes:`/`task_models:`) enables
+    #     per-task model routing (e.g. cheap ranker, strong hunter, independent
+    #     verifier) — used when present and no CLI endpoint override is given.
+    #   - Otherwise resolve a single endpoint (CLI > env > singular `provider:`
+    #     block > ANTHROPIC_API_KEY default) that serves every task.
+    providers_cfg = cli.config.get_providers_config()
+    cli_override = bool(
+        args.model or getattr(args, "base_url", None) or getattr(args, "api_key", None)
+    )
+    if providers_cfg.get("providers") and not cli_override:
+        provider_manager = ProviderManager.from_config(providers_cfg)
+        route_models = {
+            "proof_local": args.proof_local_model,
+            "proof_frontier": args.proof_frontier_model,
+        }
+        routes = {route.task: route for route in provider_manager.list_routes()}
+        for task, model in route_models.items():
+            if not model:
+                continue
+            route = routes.get(task)
+            if route is None:
+                raise ValueError(f"No configured provider route for {task}")
+            provider_manager.set_route(
+                task,
+                route.provider,
+                model,
+                reason="CLI proof-tier model override",
+            )
+        cli.console.print("[dim]LLM: multi-endpoint per-task routing[/dim]")
+    else:
+        endpoint = resolve_llm_endpoint(
+            cli_model=args.model,
+            cli_base_url=getattr(args, "base_url", None),
+            cli_api_key=getattr(args, "api_key", None),
+            config_provider=cli.config.get_provider_section() or None,
+        )
+        cli.console.print(f"[dim]LLM endpoint: {endpoint.describe()}[/dim]")
+        task_model_overrides = {
+            task: model
+            for task, model in (
+                ("proof_local", args.proof_local_model),
+                ("proof_frontier", args.proof_frontier_model),
+            )
+            if model
+        }
+        provider_manager = ProviderManager.for_endpoint(
+            endpoint,
+            task_model_overrides=task_model_overrides,
+        )
 
     # Parse tier-split
     try:
@@ -517,7 +766,7 @@ def handle(cli, args):
         # Build an LLM for rule generation via the same resolved
         # endpoint as the rest of the pipeline.
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             cli.console.print(
@@ -556,14 +805,18 @@ def handle(cli, args):
 
         candidates: list[NdayCandidate] = []
         if args.cve:
-            candidates = [NdayCandidate(
-                cve_id=args.cve, patch_source=args.patch_commit or "",
-            )]
+            candidates = [
+                NdayCandidate(
+                    cve_id=args.cve,
+                    patch_source=args.patch_commit or "",
+                )
+            ]
         elif args.cve_list:
             candidates = parse_cve_list(args.cve_list)
         elif args.recent_cves:
             candidates = fetch_recent_cves(
-                args.local_path or args.repo, args.nday_days,
+                args.local_path or args.repo,
+                args.nday_days,
             )
         else:
             cli.console.print(
@@ -576,7 +829,7 @@ def handle(cli, args):
             sys.exit(0)
 
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             sys.exit(1)
@@ -625,13 +878,12 @@ def handle(cli, args):
         binary_path = args.local_path or args.repo
         if not os.path.isfile(binary_path):
             cli.console.print(
-                f"[red]Error: --reveng requires a path to a binary file, "
-                f"got '{binary_path}'[/red]"
+                f"[red]Error: --reveng requires a path to a binary file, got '{binary_path}'[/red]"
             )
             sys.exit(1)
 
         try:
-            llm = provider_manager.get_llm("default")
+            llm = provider_manager.get_native_client("default")
         except Exception as e:
             cli.console.print(f"[red]Could not build LLM: {e}[/red]")
             sys.exit(1)
@@ -655,9 +907,7 @@ def handle(cli, args):
         cli.console.print(f"  Binary: {result.binary_path}")
         cli.console.print(f"  Status: {result.status}")
         if result.decompilation:
-            cli.console.print(
-                f"  Functions decompiled: {result.decompilation.total_functions}"
-            )
+            cli.console.print(f"  Functions decompiled: {result.decompilation.total_functions}")
         if result.reconstruction:
             cli.console.print(
                 f"  Functions reconstructed: {result.reconstruction.reconstructed_count}"
@@ -682,7 +932,6 @@ def handle(cli, args):
     # Elaborate mode: interactive HITL or autonomous agent
     if args.elaborate or args.elaborate_auto:
         from ...sourcehunt.elaboration import (
-            ElaborationAgent,
             find_latest_session,
             load_finding_from_session,
             load_session_findings,
@@ -693,14 +942,14 @@ def handle(cli, args):
             args.output_dir,
         )
         if not session_id:
-            cli.console.print(
-                "[red]No session found. Use --elaborate-session SESSION_ID.[/red]"
-            )
+            cli.console.print("[red]No session found. Use --elaborate-session SESSION_ID.[/red]")
             sys.exit(1)
 
         if args.elaborate:
             finding = load_finding_from_session(
-                args.output_dir, session_id, args.elaborate,
+                args.output_dir,
+                session_id,
+                args.elaborate,
             )
             if finding is None:
                 cli.console.print(
@@ -708,7 +957,12 @@ def handle(cli, args):
                 )
                 sys.exit(1)
             _run_elaborate_interactive(
-                cli, args, finding, session_id, endpoint, provider_manager,
+                cli,
+                args,
+                finding,
+                session_id,
+                endpoint,
+                provider_manager,
             )
         else:
             all_findings = load_session_findings(args.output_dir, session_id)
@@ -719,7 +973,12 @@ def handle(cli, args):
                 cli.console.print("[yellow]No findings eligible for elaboration.[/yellow]")
                 sys.exit(0)
             _run_elaborate_auto(
-                cli, args, targets, session_id, endpoint, provider_manager,
+                cli,
+                args,
+                targets,
+                session_id,
+                endpoint,
+                provider_manager,
             )
         sys.exit(0)
 
@@ -732,9 +991,7 @@ def handle(cli, args):
         all_findings = load_session_findings(args.output_dir, session_id)
         verified = [f for f in all_findings if f.get("verified")]
         if not verified:
-            cli.console.print(
-                f"[yellow]No verified findings in session {session_id}[/yellow]"
-            )
+            cli.console.print(f"[yellow]No verified findings in session {session_id}[/yellow]")
             sys.exit(0)
 
         store = CalibrationStore()
@@ -747,7 +1004,9 @@ def handle(cli, args):
             sev = (f.get("severity_verified") or f.get("severity") or "?").upper()
             desc = f.get("description", "")[:80]
             cli.console.print(f"\n  [{sev}] {fid}: {desc}")
-            human = input("  Human severity (critical/high/medium/low/info, or skip): ").strip().lower()
+            human = (
+                input("  Human severity (critical/high/medium/low/info, or skip): ").strip().lower()
+            )
             if human in ("critical", "high", "medium", "low", "info"):
                 store.record_human_verdict(fid, session_id, human)
                 cli.console.print(f"  Recorded: {human}")
@@ -755,7 +1014,7 @@ def handle(cli, args):
                 cli.console.print("  Skipped")
 
         stats = store.stats()
-        cli.console.print(f"\n[bold]Calibration stats:[/bold]")
+        cli.console.print("\n[bold]Calibration stats:[/bold]")
         cli.console.print(f"  Total records: {stats['total_records']}")
         cli.console.print(f"  Human reviewed: {stats['human_reviewed']}")
         cli.console.print(f"  Exact match rate: {stats['exact_match_rate']:.1%}")
@@ -792,6 +1051,7 @@ def handle(cli, args):
                 branch=args.branch,
                 depth=args.depth,
                 budget_usd=args.budget,
+                sandbox_cpus=args.sandbox_cpus,
                 output_dir=args.output_dir,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
@@ -836,6 +1096,7 @@ def handle(cli, args):
                 output_dir=args.output_dir,
                 depth=args.depth,
                 budget_usd=args.budget,
+                sandbox_cpus=args.sandbox_cpus,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
             )
@@ -864,6 +1125,8 @@ def handle(cli, args):
         local_path=args.local_path,
         depth=args.depth,
         budget_usd=args.budget,
+        input_price_per_million=getattr(args, "input_price_per_million", None),
+        output_price_per_million=getattr(args, "output_price_per_million", None),
         max_parallel=args.max_parallel,
         tier_budget=tier_budget,
         output_dir=args.output_dir,
@@ -897,23 +1160,64 @@ def handle(cli, args):
         redundancy_override=args.redundancy,
         shard_entry_points=True if args.shard_entry_points else None,
         min_shard_rank=args.min_shard_rank,
-        seed_corpus_sources=(
-            (["git_cve"] if args.seed_cves else []) or None
-        ),
+        seed_corpus_sources=((["git_cve"] if args.seed_cves else []) or None),
         enable_findings_pool=not args.no_findings_pool,
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
         no_per_file_hunt=args.no_per_file_hunt,
+        no_rank=args.no_rank,
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
         respect_gitignore=args.respect_gitignore,
+        live=args.live,
+        sandbox_cpus=args.sandbox_cpus,
+        flow=args.flow,
+        proof_compile_commands=args.compile_commands,
+        proof_validation_manifest=args.validation_manifest,
+        proof_scheduler_calibration=args.scheduler_calibration,
+        proof_learning_registry=args.proof_learning_registry,
+        proof_build_configuration=args.build_configuration,
+        proof_clang_binary=args.clang_binary,
+        proof_max_actions=args.proof_max_actions,
+        proof_max_model_calls=args.proof_max_model_calls,
+        proof_max_dynamic_actions=args.proof_max_dynamic_actions,
+        proof_structured_fraction=args.structured_budget,
+        proof_exploration_fraction=args.exploration_budget,
+        retain_incomplete_certificates=args.retain_incomplete_certificates,
+        emit_rejection_certificates=args.emit_rejection_certificates,
+        falsify=args.falsify,
     )
 
     cli.console.print(
-        f"[bold blue]Sourcehunt: {args.repo} depth={args.depth} "
+        f"[bold blue]Sourcehunt: {args.repo} flow={args.flow} depth={args.depth} "
         f"budget={_format_budget(args.budget)}[/bold blue]"
     )
+
+    # Wire EventBus → console/logger for live feedback.
+    # When --live is active, Rich Live owns the terminal — use logging so
+    # messages scroll above the pinned panel. Otherwise print directly.
+    from ...core.events import EventBus, EventType
+
+    bus = EventBus()
+    _live_logger = logging.getLogger("clearwing.sourcehunt.live")
+    _live_logger.setLevel(logging.INFO)
+
+    def _on_finding(data):
+        if not isinstance(data, dict):
+            return
+        sev = (data.get("severity") or "info").upper()
+        file = data.get("file", "?")
+        line = data.get("line_number", "?")
+        desc = (data.get("description") or "")[:120]
+        msg = f"FINDING [{sev}] {file}:{line} — {desc}"
+        _live_logger.info(msg)
+
+    def _on_tool_start(data):
+        pass  # reads are shown in the LLM activity panel only
+
+    bus.subscribe(EventType.FINDING_RECORDED, _on_finding)
+    bus.subscribe(EventType.TOOL_START, _on_tool_start)
 
     try:
         result = runner.run()
@@ -923,9 +1227,16 @@ def handle(cli, args):
     except (ValueError, RuntimeError) as exc:
         cli.console.print(f"[red]Error: {exc}[/red]")
         sys.exit(1)
+    finally:
+        bus.unsubscribe(EventType.FINDING_RECORDED, _on_finding)
+        bus.unsubscribe(EventType.TOOL_START, _on_tool_start)
 
     # Summary
-    cli.console.print("\n[bold]Sourcehunt complete[/bold]")
+    if result.status == "budget_exhausted":
+        cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
+        cli.console.print("  Status: partial (budget exhausted)")
+    else:
+        cli.console.print("\n[bold]Sourcehunt complete[/bold]")
     cli.console.print(f"  Session: {result.session_id}")
     cli.console.print(f"  Duration: {result.duration_seconds:.1f}s")
     cli.console.print(f"  Files ranked: {result.files_ranked}")
@@ -969,7 +1280,6 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     from rich.prompt import Prompt
 
     from ...sourcehunt.elaboration import (
-        ElaborationAgent,
         _build_elaboration_prompt,
         build_elaboration_tools,
     )
@@ -978,8 +1288,7 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     cli.console.print(f"  File: {finding.get('file', '?')}:{finding.get('line_number', '?')}")
     cli.console.print(f"  CWE: {finding.get('cwe', 'N/A')}")
     cli.console.print(
-        f"  Current impact: "
-        f"{finding.get('exploit_impact') or finding.get('impact') or 'unknown'}"
+        f"  Current impact: {finding.get('exploit_impact') or finding.get('impact') or 'unknown'}"
     )
     cli.console.print(
         f"  Primitive: "
@@ -988,18 +1297,25 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
     cli.console.print("\nType your guidance to upgrade the exploit. Type 'quit' to end.\n")
 
     try:
-        llm = provider_manager.get_llm("default")
+        llm = provider_manager.get_native_client("default")
     except Exception as e:
         cli.console.print(f"[red]Could not build LLM: {e}[/red]")
         sys.exit(1)
 
     system_prompt = _build_elaboration_prompt(finding)
-    messages: list[dict] = [
-        {"role": "user", "content": (
-            f"I'm working with you to upgrade the exploit for finding {finding.get('id', '?')}. "
-            f"The current impact is {finding.get('exploit_impact') or 'unknown'}. "
-            f"Let's start by reviewing what we have."
-        )},
+    from clearwing.llm import ChatMessage
+    from clearwing.llm.native import response_text
+
+    messages: list[ChatMessage] = [
+        ChatMessage(
+            "user",
+            (
+                f"I'm working with you to upgrade the exploit for finding "
+                f"{finding.get('id', '?')}. "
+                f"The current impact is {finding.get('exploit_impact') or 'unknown'}. "
+                f"Let's start by reviewing what we have."
+            ),
+        ),
     ]
 
     from ...agent.tools.hunt.sandbox import HunterContext
@@ -1011,45 +1327,46 @@ def _run_elaborate_interactive(cli, args, finding, session_id, endpoint, provide
         specialist="elaboration",
     )
     tools = build_elaboration_tools(ctx, finding)
-    tool_schemas = [{"name": t.name, "description": t.description, "input_schema": t.schema} for t in tools]
     tool_handlers = {t.name: t.handler for t in tools}
 
     total_cost = 0.0
 
     async def _chat_turn(user_input: str) -> str:
         nonlocal total_cost
-        messages.append({"role": "user", "content": user_input})
+        messages.append(ChatMessage("user", user_input))
         try:
+            # Native client takes NativeToolSpec objects directly and threads
+            # them through the call; tool calls come back on
+            # `response.tool_calls` as genai ToolCall objects.
             response = await llm.achat(
                 messages=messages,
                 system=system_prompt,
-                tools=tool_schemas,
+                tools=tools,
             )
         except Exception as e:
             return f"[red]LLM error: {e}[/red]"
 
-        assistant_text = ""
-        content_blocks = response.content if hasattr(response, "content") else []
-        for block in content_blocks:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    assistant_text += block.get("text", "")
-                elif block.get("type") == "tool_use":
-                    tool_name = block.get("name", "")
-                    tool_input = block.get("input", {})
-                    handler = tool_handlers.get(tool_name)
-                    if handler:
-                        try:
-                            tool_result = handler(**tool_input)
-                            cli.console.print(f"  [dim]Tool {tool_name}: {tool_result}[/dim]")
-                        except Exception as e:
-                            cli.console.print(f"  [red]Tool {tool_name} error: {e}[/red]")
+        assistant_text = response_text(response)
+        tool_calls = list(response.tool_calls)
+        for tool_call in tool_calls:
+            tool_name = tool_call.fn_name
+            tool_input = tool_call.fn_arguments
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            handler = tool_handlers.get(tool_name)
+            if handler:
+                try:
+                    tool_result = handler(**tool_input)
+                    cli.console.print(f"  [dim]Tool {tool_name}: {tool_result}[/dim]")
+                except Exception as e:
+                    cli.console.print(f"  [red]Tool {tool_name} error: {e}[/red]")
 
-        messages.append({"role": "assistant", "content": content_blocks})
-        if hasattr(response, "usage"):
-            usage = response.usage
-            if hasattr(usage, "cost_usd"):
-                total_cost += usage.cost_usd
+        # Round-trip the assistant turn (carrying its tool_calls) so the next
+        # turn's history is well-formed for strict providers.
+        messages.append(ChatMessage("assistant", assistant_text, tool_calls=tool_calls or None))
+        usage = getattr(response, "usage", None)
+        if usage is not None and getattr(usage, "cost_usd", None) is not None:
+            total_cost += usage.cost_usd
 
         return assistant_text
 
@@ -1102,12 +1419,10 @@ def _run_elaborate_auto(cli, args, targets, session_id, endpoint, provider_manag
 
     from ...sourcehunt.elaboration import ElaborationAgent
 
-    cli.console.print(
-        f"\n[bold blue]Autonomous elaboration: {len(targets)} findings[/bold blue]"
-    )
+    cli.console.print(f"\n[bold blue]Autonomous elaboration: {len(targets)} findings[/bold blue]")
 
     try:
-        llm = provider_manager.get_llm("default")
+        llm = provider_manager.get_native_client("default")
     except Exception as e:
         cli.console.print(f"[red]Could not build LLM: {e}[/red]")
         sys.exit(1)
@@ -1125,7 +1440,9 @@ def _run_elaborate_auto(cli, args, targets, session_id, endpoint, provider_manag
             cli.console.print(f"\n[bold]({i}/{len(targets)}) Elaborating {fid}...[/bold]")
             result = await agent.aattempt(finding)
             results.append(result)
-            status = "[green]UPGRADED[/green]" if result.elaborated else "[yellow]NOT UPGRADED[/yellow]"
+            status = (
+                "[green]UPGRADED[/green]" if result.elaborated else "[yellow]NOT UPGRADED[/yellow]"
+            )
             cli.console.print(f"  Result: {status}")
             if result.upgraded_impact:
                 cli.console.print(f"  Upgraded impact: {result.upgraded_impact}")

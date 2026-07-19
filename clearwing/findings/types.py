@@ -16,6 +16,8 @@ import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from pydantic import BaseModel, Field
+
 logger = logging.getLogger(__name__)
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -77,6 +79,30 @@ def evidence_compare(a: EvidenceLevel, b: EvidenceLevel) -> int:
 def evidence_at_or_above(level: EvidenceLevel, threshold: EvidenceLevel) -> bool:
     """True if `level` is at least as strong as `threshold`."""
     return _EVIDENCE_RANK[level] >= _EVIDENCE_RANK[threshold]
+
+
+# --- Vulnerability trace types (v0.5) ----------------------------------------
+
+
+class TraceStep(BaseModel):
+    """One step in a hunter-authored vulnerability trace.
+
+    Each step represents a location the hunter READ and reasoned about,
+    forming a chain from attacker input to vulnerable sink.
+    """
+
+    file: str  # repo-relative path
+    line: int  # 1-indexed line number
+    function: str = ""  # enclosing function name
+    code_snippet: str = ""  # MUST be from read_source_file
+    note: str = ""  # free-form: role, taint state, assumptions, reasoning
+
+
+class VulnerabilityTrace(BaseModel):
+    """Ordered sequence of TraceSteps from entry to impact."""
+
+    steps: list[TraceStep] = Field(default_factory=list)
+    summary: str = ""  # one-line dataflow summary
 
 
 # --- The unified Finding ----------------------------------------------------
@@ -181,6 +207,9 @@ class Finding:
 
     # Extensible payload — v0.2/v0.3 seams, retro-hunt fields, etc.
     extra: dict[str, Any] = field(default_factory=dict)
+
+    # Structured vulnerability trace (v0.5)
+    vulnerability_trace: dict | None = None
 
     # --- Post-init validation ------------------------------------------------
 

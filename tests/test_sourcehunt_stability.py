@@ -345,7 +345,7 @@ class TestHardening:
 
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = "hardened PoC payload"
+        mock_response.first_text = "hardened PoC payload"
         mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         config = StabilityConfig(
@@ -365,7 +365,7 @@ class TestHardening:
     async def test_failed_hardening(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = "still bad poc"
+        mock_response.first_text = "still bad poc"
         mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         manager = _FakeSandboxManager(crash_rate=0.0)
