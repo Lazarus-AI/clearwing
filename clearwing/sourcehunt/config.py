@@ -161,7 +161,9 @@ class SourceHuntThroughputBudgetRuntimeTuning:
     hunt_parallelism: int = 8
     ranker_max_inflight_chunks: int = 8
     default_depth: str = "deep"
-    total_usd_ceiling: float = 250.0
+    # 0 = unlimited. Hexis injects CLEARWING_RUNTIME_TUNING_JSON; a non-zero
+    # default here silently capped hunts that omitted --budget.
+    total_usd_ceiling: float = 0.0
     tier_a_fraction: float = 0.70
     tier_b_fraction: float = 0.25
     tier_c_fraction: float = 0.05
@@ -388,8 +390,8 @@ def parse_runtime_tuning_policy(payload: Any) -> ClearWingRuntimeTuningPolicy:
                 ),
                 total_usd_ceiling=_coerce_float(
                     throughput.get("total_usd_ceiling"),
-                    default=250.0,
-                    minimum=1.0,
+                    default=0.0,  # 0 = unlimited (safe-no-op)
+                    minimum=0.0,
                     maximum=10_000.0,
                 ),
                 tier_a_fraction=_coerce_float(

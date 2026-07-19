@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import re
 import subprocess
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pathspec
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
