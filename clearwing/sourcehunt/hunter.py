@@ -1661,6 +1661,15 @@ class NativeHunter:
             # Reject calls missing required params (model emitted empty/partial args).
             # Return an error string so the model can self-correct on next turn.
             required = set(tool.schema.get("required", [])) if tool.schema else set()
+            # Some local models emit explicit `null` for optional params instead
+            # of omitting them. Arguments are passed straight through to the
+            # handler as **kwargs without going through the schema's Pydantic
+            # model, so an explicit None overrides the handler's own default
+            # (e.g. `function: str = ""`) and can reach strict downstream
+            # validation (TraceStep.function is a plain `str`, not Optional).
+            # Drop None for optional params so the handler default applies,
+            # matching the omitted-argument case.
+            arguments = {k: v for k, v in arguments.items() if v is not None or k in required}
             missing = required - set(arguments.keys())
             if missing:
                 logger.info(
