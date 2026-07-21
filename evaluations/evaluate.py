@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -102,7 +103,8 @@ def cve_dataset(
         ids = {cve.upper()} if isinstance(cve, str) else {c.upper() for c in cve}
         entries = [e for e in entries if e["cve"].upper() in ids]
     if difficulty is not None:
-        levels = {difficulty.lower()} if isinstance(difficulty, str) else {d.lower() for d in difficulty}
+        raw = difficulty.split(",") if isinstance(difficulty, str) else difficulty
+        levels = {d.strip().lower() for d in raw}
         entries = [e for e in entries if e.get("difficulty", "").lower() in levels]
     return MemoryDataset(samples=[
         Sample(
@@ -203,15 +205,12 @@ def llm_judge(model: str | None = None) -> Scorer:
 # ---------------------------------------------------------------------------
 
 def git_clone_commit(clone_url: str, commit: str, dest: str) -> None:
-    """Clone repo and checkout a specific commit into dest."""
-    subprocess.run(
-        ["git", "clone", clone_url, dest],
-        check=True, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", dest, "checkout", commit],
-        check=True, capture_output=True,
-    )
+    """Shallow-fetch a single commit into dest. GitHub allows fetch-by-SHA."""
+    run = lambda *a: subprocess.run(["git", "-C", dest, *a], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", dest], check=True, capture_output=True)
+    run("remote", "add", "origin", clone_url)
+    run("fetch", "--depth=1", "--filter=blob:none", "origin", commit)
+    run("checkout", "-q", "FETCH_HEAD")
 
 
 
@@ -245,7 +244,7 @@ def dynamic_runner_solver(
             cw_log.propagate = False
 
         if hunt_base_url:
-            os.environ["CLEARWING_BASE_URL"] = hunt_base_url
+           os.environ["CLEARWING_BASE_URL"] = hunt_base_url
         if hunt_api_key:
             os.environ["CLEARWING_API_KEY"] = hunt_api_key
         if hunt_model:
@@ -279,7 +278,10 @@ def dynamic_runner_solver(
             f"// SCANNING {cve}  depth={depth}  repo={repo_dir}",
             file=sys.stderr, flush=True,
         )
+        _t = time.monotonic()
+        print(f"// CLONING {clone_url}@{vulnerable_commit[:12]}", file=sys.stderr, flush=True)
         await asyncio.to_thread(git_clone_commit, clone_url, vulnerable_commit, repo_dir)
+        print(f"// CLONED  {clone_url}@{vulnerable_commit[:12]} in {time.monotonic()-_t:.1f}s", file=sys.stderr, flush=True)
 
         runner = SourceHuntRunner(
             repo_url=clone_url,

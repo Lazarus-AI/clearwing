@@ -301,6 +301,7 @@ class Ranker:
                             user=user_msg,
                             schema_model=RankedFileScoreResponse,
                             schema_name="ranked_file_score_response",
+                            max_tokens=16000,
                         ),
                         timeout=self.config.llm_timeout_seconds,
                     )
@@ -310,6 +311,7 @@ class Ranker:
                         user=user_msg,
                         schema_model=RankedFileScoreResponse,
                         schema_name="ranked_file_score_response",
+                        max_tokens=16000,
                     )
                 elapsed = asyncio.get_running_loop().time() - started_at
                 logger.info(

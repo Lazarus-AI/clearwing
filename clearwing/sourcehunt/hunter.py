@@ -1216,6 +1216,18 @@ single-file bugs and cross-file bugs alike:
 - State corruption: shared state modified by one file but consumed by another
 - Inconsistent validation: input validated in one path but not another
 
+COMMIT EARLY — this is the #1 failure mode, read it before anything else:
+The moment you can name (a) the vulnerable type/value, (b) the missing or \
+wrong check, and (c) the downstream effect — call record_finding NOW. Not \
+after one more file, not after tracing one more caller. A hedged observation \
+like "what if X is 0?" or "this might be too large" IS a finding — turn it \
+into flag_potential the same step you thought it, and record_finding within \
+3 steps. Do NOT pivot to a plausible-looking sibling function because it is \
+easier to phrase; the bug you already saw is the bug. Reading more code after \
+you have a complete mechanism does not improve the finding — it risks losing \
+it. If you catch yourself moving on from a suspicion without flagging, stop \
+and flag it.
+
 Not a finding — skip these, they will be rejected:
 - Missing NULL check on a trusted-caller pointer (public API args from other
   library code are not "attacker-controlled" unless the API is exposed to
@@ -1284,15 +1296,9 @@ leads across files — cross-file asymmetries often only become visible when you
 compare leads side by side. Use dismiss_potential to rule out false positives \
 with a brief reason.
 
-IMPORTANT — commit early, don't over-explore:
-- Once you can state the vulnerable type, the bad arithmetic, and the downstream \
-write — call record_finding immediately at evidence_level=static_corroboration.
-- Use record_trace_step as you read to anchor each step of the path. Do NOT defer \
-recording until you have traced every caller.
-- Reading more code after you have a complete mechanism does not improve the finding \
-— it risks losing it in context. Record first, explore more if time permits.
-
-When you find a vulnerability, call record_finding with the specific file and line."""
+Use record_trace_step as you read to anchor each step of the path. Record \
+findings at evidence_level=static_corroboration; call record_finding with \
+the specific file and line."""
 
 
 def _build_subsystem_prompt(

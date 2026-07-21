@@ -16,6 +16,8 @@
     nonce reuse and authentication tag forgery
   severity: High (CVSS 7.5 — AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
   difficulty: easy
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In OpenSSL's AES-OCB provider, the one-shot cipher handler aes_ocb_cipher()
     — dispatched via OSSL_FUNC_CIPHER_CIPHER / EVP_Cipher() — called
@@ -73,6 +75,8 @@
     typo3/html-sanitizer: XSS bypass via unencoded namespace attribute values in HTML serialization
   severity: Medium
   difficulty: easy
+  code_volume: small
+  technical_knowledge: senior
   description: >-
     TYPO3's html-sanitizer extends Masterminds\HTML5\Serializer\OutputRules with a custom
     Rules class (src/Serializer/Rules.php) that overrides attribute encoding to properly escape
@@ -120,6 +124,8 @@
   title: Junrar LocalFolderExtractor backslash path traversal.
   severity: Medium
   difficulty: easy
+  code_volume: small
+  technical_knowledge: junior
   description: >
     Junrar's LocalFolderExtractor performed its destination-containment check
     on the raw archive entry name without normalizing backslashes to forward
@@ -161,6 +167,8 @@
     gix-submodule: .gitmodules update=!cmd shell injection via has_value_from_foreign_section bypass
   severity: High
   difficulty: easy
+  code_volume: small
+  technical_knowledge: senior
   description: >-
     gix-submodule before 0.29.0 incorrectly validates the update field in
     .gitmodules. The update() method in gix-submodule/src/access.rs guarded
@@ -217,6 +225,8 @@
     leads to heap buffer overflow
   severity: "High (CVSS 3.1: 8.2 — AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H)"
   difficulty: easy
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In `src/jv.c`, both `jvp_string_append` and `jvp_string_copy_replace_bad`
     compute buffer allocation sizes using `uint32_t` arithmetic without bounds
@@ -278,6 +288,8 @@
     signature forgery
   severity: Critical
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     The `KJUR.crypto.DSA.setPublic()` function in `src/dsa-2.0.js` accepted
     arbitrary DSA domain parameters (ping any
@@ -333,6 +345,8 @@
     enabling privilege escalation to full repository write
   severity: High (CVSS 8.8)
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In Gitea ≤ 1.25.5, the `preReceiveContext` struct in
     `routers/private/hook_pre_receive.go` held two fields — `canWriteCode` and
@@ -393,6 +407,8 @@
     metadata removal
   severity: Medium
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In libyang's XML data parser, `lyd_parser_set_data_flags`
     (src/parser_common.c) walks the `*meta` linked list looking for a
@@ -451,6 +467,8 @@
     FreeRDP gdi_CacheToSurface: heap OOB write via unclamped cache entry dimensions
   severity: High (CVSS:3.1 8.8 / CVSS:4.0 8.7)
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In `gdi_CacheToSurface` (`libfreerdp/gdi/gfx.c`), a destination rectangle
     is built by clamping `destPt->x + cacheEntry->width` and
@@ -508,6 +526,8 @@
     configuration file
   severity: "Low (CVSS 3.1: 3.8 AV:P per CNA; NVD primary 7.8 HIGH AV:L)"
   difficulty: medium
+  code_volume: small
+  technical_knowledge: junior
   description: >-
     In OpenSC before 0.27.0, the `do_key_value()` function in
     `src/pkcs15init/profile.c` parses key-value entries from a pkcs15 profile
@@ -566,6 +586,8 @@
     OIDs via missing WC_MIN_DIGEST_SIZE / SigOidMatchesKeyOid checks
   severity: "Critical (CVSS 4.0: 9.3 / CVSS 3.1: 9.1)"
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     wolfSSL's ECDSA sign and verify entry points (`wc_ecc_sign_hash`,
     `wc_ecc_sign_hash_ex`, `wc_ecc_verify_hash`, `wc_ecc_verify_hash_ex` in
@@ -634,6 +656,8 @@
   title: PraisonAI unauthenticated A2A example reaches LLM-driven eval() code execution
   severity: Critical
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: junior
   description: >-
     PraisonAI's first-party A2A server example (examples/python/a2a/a2a-server.py) registers a
     calculate(expression) tool implemented with Python eval(expression), and the A2A framework's
@@ -681,6 +705,8 @@
     tag-length allow AEAD bypass and integrity bypass
   severity: Critical (CVSS 9.1)
   difficulty: hard
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     In `ossl_cms_EncryptedContent_init_bio()` (`crypto/cms/cms_enc.c`), during
     CMS AuthEnvelopedData decryption the code checked only `ec->taglen > 0`
@@ -737,6 +763,8 @@
     implicit rejection
   severity: Low (CVSS 3.7 — AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N)
   difficulty: hard
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     In OpenSSL's CMS and PKCS7 decryption paths, the functions
     cms_RecipientInfo_ktri_decrypt() (crypto/cms/cms_env.c) and
@@ -800,6 +828,8 @@
     wolfSSL DTLS 1.3 ACK pre-auth heap overflow (int trunc).
   severity: High (CVSS 7.5 / CVSS4 8.8)
   difficulty: hard
+  code_volume: large
+  technical_knowledge: expert
   description: >-
     In wolfSSL's DTLS 1.3 implementation, the function Dtls13WriteAckMessage computes
     the ACK message buffer size as msgSz = (word16)(DTLS13_RN_SIZE * recordsCount),
@@ -857,6 +887,8 @@
     bounds validation, enabling guest-root OOB write and VMM crash
   severity: "High (CVSS 4.0: 8.7 / CVSS 3.1: 7.5 — AV:L/AC:H/PR:H/UI:N/S:C/C:H/I:H/A:H)"
   difficulty: hard
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     In Firecracker's virtio PCI transport (`common_config.rs`), the
     `write_common_config_word` and `write_common_config_dword` handlers passed
@@ -921,6 +953,8 @@
     bypassing all cryptographic verification
   severity: "Medium (CVSS 4.0: 6.3 — primary; CVSS 3.1: 7.5 High — Red Hat secondary)"
   difficulty: medium
+  code_volume: small
+  technical_knowledge: senior
   description: >-
     In Bouncy Castle's PKIX library, the inner CompositeVerifier class inside
     JcaContentVerifierProviderBuilder iterates over an ASN.1 SEQUENCE of
@@ -973,6 +1007,8 @@
     OpenSSL AES-CFB128 OOB read on AVX-512+VAES partial blocks
   severity: High (CVSS 7.5 NVD primary; Critical 9.1 secondary)
   difficulty: hard
+  code_volume: small
+  technical_knowledge: expert
   description: >-
     The AVX-512+VAES optimized AES-CFB128 implementation in aes-cfb-avx512.pl
     uses vmovdqu8 to load 16-byte XMM registers from the IV buffer and input
