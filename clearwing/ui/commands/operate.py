@@ -1,5 +1,7 @@
 """Operate (autonomous operator agent) subcommand."""
 
+import logging
+import os
 import sys
 
 from rich.panel import Panel
@@ -53,6 +55,14 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Run the autonomous Operator agent."""
+    # Wire up logging so DEBUG output from operator.py is visible
+    log_level = os.environ.get("CLEARWING_LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.WARNING),
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
     from ...agent.operator import OperatorAgent, OperatorConfig
 
     goals = args.goals or []
