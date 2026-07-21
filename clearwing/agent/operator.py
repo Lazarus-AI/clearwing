@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from clearwing.agent.attack_chain import AttackChain, AttackTechnique, default_chain, infer_technique
 from clearwing.agent.graph import _create_llm, create_agent
 from clearwing.agent.runtime import Command
 
@@ -96,11 +97,14 @@ class OperatorConfig:
     cost_limit: float = 0.0  # 0 = no limit
     auto_approve_scans: bool = True  # auto-approve non-destructive scan tools
     auto_approve_exploits: bool = False  # require user for exploit approval
+    lhost: str = "host.docker.internal"  # callback listener address reachable from target
+    lport: int = 9999  # callback listener port
 
     # Callbacks
     on_message: Callable[[str, str], None] | None = None  # (role, content)
     on_escalate: Callable[[str], str] | None = None  # question -> user answer
     on_complete: Callable[[OperatorResult], None] | None = None
+    on_technique: Callable[[AttackTechnique], None] | None = None  # ATT&CK chain updates
 
 
 @dataclass
@@ -119,6 +123,7 @@ class OperatorResult:
     escalation_question: str = ""  # non-empty if status == "escalated"
     error: str = ""
     conversation_summary: str = ""
+    attack_chain: list[dict] = field(default_factory=list)  # ATT&CK technique summary
 
 
 # Categories of questions the operator can answer autonomously
@@ -175,6 +180,7 @@ class OperatorAgent:
         self._progress: list[str] = []
         self._escalated = False
         self._consecutive_stalls = 0
+        self.attack_chain = default_chain()
 
     def run(self) -> OperatorResult:
         """Run the operator loop to completion (sync wrapper over :meth:`arun`)."""
@@ -374,6 +380,12 @@ class OperatorAgent:
                 "asking for permission. Do NOT ask for approval — execute immediately. "
                 "All exploit actions are pre-approved by the operator."
             )
+        network_note = (
+            f"\n\nNETWORK: The target can reach the operator at "
+            f"LHOST={self.config.lhost} LPORT={self.config.lport}. "
+            f"Use this address for any callbacks, reverse shells, or exfiltration. "
+            f"Do NOT use 127.0.0.1 — that resolves to the target itself."
+        )
         return (
             f"TARGET: {self.config.target}\n\n"
             f"You are being operated autonomously. Complete the following goals:\n"
@@ -381,6 +393,7 @@ class OperatorAgent:
             f"Work through these goals systematically. Report your findings as you go. "
             f"If you need information you cannot obtain yourself, ask clearly."
             f"{approval_note}"
+            f"{network_note}"
         )
 
     async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> tuple[str, bool]:
@@ -392,6 +405,7 @@ class OperatorAgent:
         last_ai_content = ""
         tool_called = False
         tools_invoked: list[str] = []
+        tool_calls_with_args: list[tuple[str, dict]] = []  # (name, args) for technique inference
         try:
             async for event in graph.astream(input_msg, config, stream_mode="values"):
                 msgs = event.get("messages", [])
@@ -410,8 +424,14 @@ class OperatorAgent:
                         if getattr(last, "tool_calls", None):
                             tool_called = True
                             for tc in last.tool_calls:
-                                tc_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+                                if isinstance(tc, dict):
+                                    tc_name = tc.get("name", "unknown")
+                                    tc_args = tc.get("args", {})
+                                else:
+                                    tc_name = getattr(tc, "name", "unknown")
+                                    tc_args = getattr(tc, "args", {})
                                 tools_invoked.append(tc_name)
+                                tool_calls_with_args.append((tc_name, tc_args if isinstance(tc_args, dict) else {}))
                                 logger.debug("[turn %d] tool call: %s", self._turns, tc_name)
                         content = last.content
                         if isinstance(content, list):
@@ -437,6 +457,18 @@ class OperatorAgent:
 
         if not last_ai_content.startswith("[Agent error:"):
             self._consecutive_errors = 0
+
+        # Infer ATT&CK techniques from tool invocations
+        for tc_name, tc_args in tool_calls_with_args:
+            technique_id = infer_technique(tc_name, tc_args)
+            if technique_id:
+                evidence = f"{tc_name}({', '.join(f'{k}=...' for k in list(tc_args)[:3])})"
+                tech = self.attack_chain.advance(technique_id, "completed", evidence=evidence)
+                if tech and self.config.on_technique:
+                    try:
+                        self.config.on_technique(tech)
+                    except Exception:
+                        logger.debug("on_technique callback failed", exc_info=True)
 
         logger.debug(
             "[turn %d] summary: tools_called=%s, tools=%s, response=%s",
@@ -552,6 +584,7 @@ class OperatorAgent:
             escalation_question=escalation_question,
             error=error,
             conversation_summary="\n".join(self._progress[-30:]),
+            attack_chain=self.attack_chain.summary(),
         )
 
         if self.config.on_complete:
