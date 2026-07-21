@@ -15,8 +15,6 @@
   fix_pr: https://github.com/wolfSSL/wolfssl/pull/10192
   files:
     - wolfcrypt/src/evp.c
-  sourcehunt:
-    subsystem: wolfcrypt/src
   vuln_class: >-
     CWE-347 Improper Verification of Cryptographic Signature (HMAC tag length
     check permits siglen=0 and any truncated length ≤ hashLen, enabling
@@ -26,6 +24,8 @@
     enabling universal MAC forgery
   severity: Low (CVSS 2.1)
   difficulty: easy
+  code_volume: large
+  technical_knowledge: senior
   description: >-
     In wolfSSL's OpenSSL-compatibility EVP layer, `wolfSSL_EVP_DigestVerifyFinal`
     in `wolfcrypt/src/evp.c` validated the supplied signature length with the
@@ -75,6 +75,8 @@
     buffer overflow via crafted PIV History object
   severity: Low (CVSS 1.0 — AV:P per CNA)
   difficulty: easy
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In OpenSC's PIV card driver, `piv_process_history()` in
     `src/libopensc/card-piv.c` parses the History object from a PIV card
@@ -133,6 +135,8 @@
     empty-ciphertext and stale-context paths enabling forgery
   severity: Medium (CVSS 4.8)
   difficulty: easy
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     Two related authentication-bypass flaws in OpenSSL's AES-SIV family.
     (1) AES-GCM-SIV: `aes_gcm_siv_finish()` in
@@ -197,6 +201,8 @@
     enabling heap use-after-free in signed-message verification
   severity: High (CVSS 8.8)
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: senior
   description: >-
     In `PKCS7_verify()` (`crypto/pkcs7/pk7_smime.c`), the cleanup path for
     the BIO chain constructed during signed-message verification was:
@@ -253,6 +259,8 @@
     bypassing RFC 9879 minimum and enabling integrity forgery
   severity: High (CVSS 7.4)
   difficulty: medium
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     In `PBMAC1_PBKDF2_HMAC()` in `crypto/pkcs12/p12_mutl.c`, the PKCS#12
     PBMAC1 integrity path validated the attacker-supplied PBKDF2 key length
@@ -298,8 +306,6 @@
   fix_pr: https://github.com/wolfSSL/wolfssl/pull/10641
   files:
     - wolfcrypt/src/asn.c
-  sourcehunt:
-    subsystem: wolfcrypt/src
   vuln_class: >-
     CWE-125 Out-of-bounds Read (SM2 public key size not validated before
     computing Subject Key Identifier, enabling negative-offset heap OOB read
@@ -309,6 +315,8 @@
     OOB heap read in Subject Key Identifier computation
   severity: Medium (CVSS 6.3)
   difficulty: medium
+  code_volume: large
+  technical_knowledge: senior
   description: >-
     In `ParseCertRelative()` (`wolfcrypt/src/asn.c`), when an SM2 certificate
     does not contain an explicit SubjectKeyIdentifier extension, wolfSSL
@@ -372,6 +380,8 @@
     64 bits, breaking implicit rejection in decapsulation
   severity: Medium (CVSS 6.3)
   difficulty: hard
+  code_volume: medium
+  technical_knowledge: expert
   description: >-
     ML-KEM (CRYSTALS-Kyber) decapsulation requires a constant-time comparison
     of the received ciphertext `ct` against a re-encrypted ciphertext `ct'`
@@ -432,6 +442,8 @@
     TLSX_KeyShare_ProcessPqcHybridClient on error path
   severity: Low (CVSS 2.3)
   difficulty: hard
+  code_volume: large
+  technical_knowledge: expert
   description: >-
     In `TLSX_KeyShare_ProcessPqcHybridClient()` (`src/tls.c`), wolfSSL
     processes hybrid PQC+ECC key shares for TLS 1.3. An ECC `KeyShareEntry`
@@ -493,6 +505,8 @@
     enabling JSON-LD context-confusion forgery on incoming ActivityPub activities
   severity: Medium (CVSS 5.3)
   difficulty: hard
+  code_volume: small
+  technical_knowledge: expert
   description: >-
     Mastodon's `LinkedDataSignature#verify_actor!`
     (`app/lib/activitypub/linked_data_signature.rb`) verifies RsaSignature2017

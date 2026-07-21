@@ -1,0 +1,12 @@
+FROM python:3.12-slim
+
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        ripgrep gcc g++ ca-certificates \
+        python3 valgrind ccache git ltrace && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --break-system-packages pyjwt requests cryptography pycryptodome
+
+WORKDIR /workspace
+RUN mkdir -p /scratch
