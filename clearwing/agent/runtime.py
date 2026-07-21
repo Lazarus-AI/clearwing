@@ -300,8 +300,9 @@ class NativeAgentGraph:
                     cost_usd=self.cost_tracker.total_cost_usd,
                 )
 
-        if self.event_bus:
-            self.event_bus.emit_message(assistant_text[:200], "agent")
+        if self.event_bus and assistant_text:
+            first_line = assistant_text.split("\n", 1)[0][:200]
+            self.event_bus.emit_message(first_line, "agent")
 
         if assistant_text:
             found_flags = detect_flags(assistant_text)
