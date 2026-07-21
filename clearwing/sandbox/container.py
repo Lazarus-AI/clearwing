@@ -87,7 +87,7 @@ class SandboxContainer:
         if self._client is None:
             import docker  # local import — keeps the module importable without docker
 
-            self._client = docker.from_env()
+            self._client = docker.from_env(timeout=300)
         return self._client
 
     def start(self) -> str:

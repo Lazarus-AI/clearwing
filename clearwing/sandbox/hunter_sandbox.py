@@ -175,8 +175,22 @@ class HunterSandbox:
         if self._client is None:
             import docker
 
-            self._client = docker.from_env()
+            self._client = docker.from_env(timeout=300)
         return self._client
+
+    def _target_platform(self) -> str:
+        """Docker platform for both the fallback check and the build command.
+
+        C/C++ toolchains (gcc, valgrind, sanitizers) run painfully slow under
+        qemu on Apple Silicon and occasionally miscompile — use host arch for
+        those. All other languages pin amd64 for cross-host reproducibility.
+        """
+        import platform as _plat
+
+        lang = (self.build_recipe.primary_language or "").lower()
+        if lang in ("c", "cpp", "c++") and _plat.machine() in ("arm64", "aarch64"):
+            return "linux/arm64"
+        return "linux/amd64"
 
     def _maybe_fallback_base(self) -> None:
         """If the preferred clearwing-sourcehunt-* base image isn't present
@@ -184,8 +198,19 @@ class HunterSandbox:
         base = self.build_recipe.base_image
         if not base.startswith("clearwing-sourcehunt-"):
             return
+        want_arch = self._target_platform().split("/", 1)[1]
         try:
-            self._get_client().images.get(base)
+            img = self._get_client().images.get(base)
+            # If the local base image is a different arch than the sandbox
+            # build's --platform, buildx can't satisfy the FROM from the local
+            # store and reaches out to docker.io. Treat as missing so we fall
+            # through to upstream (which buildx can pull cross-arch).
+            arch = img.attrs.get("Architecture", "")
+            if arch and arch != want_arch:
+                raise RuntimeError(
+                    f"local base image is {arch}, sandbox targets {want_arch} — "
+                    "rebuild via `make -C docker`"
+                )
             EventBus().emit_message(f"sandbox base ready  image={base}", "info")
             # Packages are already baked into the static image — skip reinstall
             self.build_recipe = dataclasses.replace(self.build_recipe, apt_packages=[])
@@ -268,7 +293,7 @@ class HunterSandbox:
             _t = time.monotonic()
             try:
                 proc = subprocess.Popen(
-                    ["docker", "build", "--progress=plain", "--platform", "linux/amd64", "-t", tag, build_dir],
+                    ["docker", "build", "--progress=plain", "--platform", self._target_platform(), "-t", tag, build_dir],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
