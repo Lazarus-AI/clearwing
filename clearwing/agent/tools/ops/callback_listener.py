@@ -144,7 +144,10 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
         "callback_url": callback_url,
         "message": (
             f"Listening on 0.0.0.0:{bound_port}. "
-            f"Use check_callback_received(token='{token}') to verify if a request was received."
+            f"Use check_callback_received(token='{token}') to verify if a request was received. "
+            f"Tip: JVM Runtime.exec(String) does not invoke a shell. "
+            f"Use exec(new String[]{{\"bash\",\"-c\",\"command\"}}) with double-quoted "
+            f"array elements for shell features to work."
         ),
     }
 
