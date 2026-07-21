@@ -119,3 +119,10 @@ working-directory/
 
 # uv run inspect eval ...
 logs/
+# AI coding assistants
+.claude
+.codex
+.cursor
+.aider*
+.copilot
+.hermes
