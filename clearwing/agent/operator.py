@@ -102,6 +102,7 @@ class OperatorConfig:
 
     # Callbacks
     on_message: Callable[[str, str], None] | None = None  # (role, content)
+    on_tool_result: Callable[[str, str], None] | None = None  # (tool_name, content)
     on_escalate: Callable[[str], str] | None = None  # question -> user answer
     on_complete: Callable[[OperatorResult], None] | None = None
     on_technique: Callable[[AttackTechnique], None] | None = None  # ATT&CK chain updates
@@ -414,11 +415,17 @@ class OperatorAgent:
                     if hasattr(last, "type") and last.type == "tool":
                         tool_called = True
                         tool_name = getattr(last, "name", None) or "unknown"
+                        tool_content = str(getattr(last, "content", ""))
                         tools_invoked.append(tool_name)
                         logger.debug(
                             "[turn %d] tool result: %s → %s",
-                            self._turns, tool_name, str(getattr(last, "content", ""))[:200],
+                            self._turns, tool_name, tool_content[:200],
                         )
+                        if self.config.on_tool_result:
+                            try:
+                                self.config.on_tool_result(tool_name, tool_content)
+                            except Exception:
+                                pass
                     if hasattr(last, "content") and last.type == "ai":
                         # Check for tool_calls on the AI message itself
                         if getattr(last, "tool_calls", None):
