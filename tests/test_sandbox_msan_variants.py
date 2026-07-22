@@ -193,6 +193,7 @@ class TestHunterSandboxVariantImages:
             mock_proc = MagicMock()
             mock_proc.stdout = iter([])
             mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
             sb.build_image()
             # One image built, one variant registered
@@ -210,6 +211,7 @@ class TestHunterSandboxVariantImages:
             mock_proc = MagicMock()
             mock_proc.stdout = iter([])
             mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
             sb.build_image()
             # Two images built (primary + msan)
@@ -314,6 +316,7 @@ class TestHunterSandboxSpawnVariant:
             mock_proc = MagicMock()
             mock_proc.stdout = iter([])
             mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
             sb.build_image()
 
