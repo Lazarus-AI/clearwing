@@ -49,36 +49,6 @@ class LLMFatalError(RuntimeError):
     """Raised when the LLM backend has a non-recoverable configuration error."""
 
 
-_REFUSAL_PATTERNS = (
-    "i can't help",
-    "i cannot help",
-    "i'm not able to",
-    "i am not able to",
-    "i can't provide",
-    "i cannot provide",
-    "i can't assist with",
-    "i cannot assist with",
-    "i'm unable to",
-    "i won't help",
-    "i will not help",
-    "against my guidelines",
-    "violates my",
-    "not something i can",
-    "i can't write exploit",
-    "i can't generate exploit",
-    "i must decline",
-    "as an ai",
-)
-
-
-def _is_model_refusal(response: str) -> bool:
-    """Detect if the model refused to perform a security task."""
-    if not response:
-        return False
-    first_500 = response[:500].lower()
-    return any(p in first_500 for p in _REFUSAL_PATTERNS)
-
-
 @dataclass
 class OperatorConfig:
     """Configuration for the Operator agent."""
@@ -366,19 +336,6 @@ class OperatorAgent:
                             f"Last response: {agent_response[:200]}",
                         )
 
-                # Detect model refusals (model won't do security tasks)
-                if _is_model_refusal(agent_response):
-                    self._consecutive_refusals = getattr(self, "_consecutive_refusals", 0) + 1
-                    if self._consecutive_refusals >= 2:
-                        return self._build_result(
-                            graph, config, start, "error",
-                            error=f"MODEL REFUSED: The model declined to perform "
-                            f"exploitation tasks ({self._consecutive_refusals} consecutive "
-                            f"refusals). Use a model with security research permissions. "
-                            f"Last response: {agent_response[:200]}",
-                        )
-                else:
-                    self._consecutive_refusals = 0
 
                 # Handle interrupts (approval requests)
                 state = graph.get_state(config)
