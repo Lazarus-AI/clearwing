@@ -258,7 +258,7 @@ class OperatorAgent:
                             graph, config, start, "error",
                             error=f"STALLED: Agent produced {self._consecutive_stalls} "
                             f"consecutive responses without calling any tools. "
-                            f"The model may not support tool-calling or is stuck "
+                            f"The model may not support tool-calling, is refusing, or is stuck "
                             f"planning without executing. "
                             f"Last response: {agent_response[:200]}",
                         )
