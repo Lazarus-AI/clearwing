@@ -226,11 +226,6 @@ class HunterSandbox:
                 "warning",
             )
             self.build_recipe = dataclasses.replace(self.build_recipe, base_image=upstream)
-            if "python3-pip" not in self.extra_packages:
-                self.extra_packages.append("python3-pip")
-            pip_cmd = "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true"
-            if pip_cmd not in self.post_install_commands:
-                self.post_install_commands.append(pip_cmd)
 
     def build_image(self) -> str:
         """Build the primary sandbox image. Returns its tag.

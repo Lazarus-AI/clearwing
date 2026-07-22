@@ -129,6 +129,7 @@ class TestHunterSandboxBuildImage:
             mock_proc = MagicMock()
             mock_proc.stdout = iter([])
             mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
             tag = sb.build_image()
         assert tag.startswith("clearwing-sourcehunt:")

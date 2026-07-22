@@ -1216,89 +1216,36 @@ single-file bugs and cross-file bugs alike:
 - State corruption: shared state modified by one file but consumed by another
 - Inconsistent validation: input validated in one path but not another
 
-COMMIT EARLY — this is the #1 failure mode, read it before anything else:
-The moment you can name (a) the vulnerable type/value, (b) the missing or \
-wrong check, and (c) the downstream effect — call record_finding NOW. Not \
-after one more file, not after tracing one more caller. A hedged observation \
-like "what if X is 0?" or "this might be too large" IS a finding — turn it \
-into flag_potential the same step you thought it, and record_finding within \
-3 steps. Do NOT pivot to a plausible-looking sibling function because it is \
-easier to phrase; the bug you already saw is the bug. Reading more code after \
-you have a complete mechanism does not improve the finding — it risks losing \
-it. If you catch yourself moving on from a suspicion without flagging, stop \
-and flag it.
+Record findings early — once you can name the vulnerable value, the missing/wrong \
+check, and the downstream effect, call record_finding. Use flag_potential to \
+bookmark suspicions as you go; don't wait until you have a full exploit chain.
 
-Not a finding — skip these, they will be rejected:
-- Missing NULL check on a trusted-caller pointer (public API args from other
-  library code are not "attacker-controlled" unless the API is exposed to
-  untrusted input; a missing NULL check is a robustness issue, not a CVE).
-- "Could hypothetically" without a specific operator/comparison/arithmetic anchor.
-- Style, naming, or dead-code issues.
-
-If a function name contains verify/sign/hmac/digest/mac, the bug is almost
-never a NULL check — look at return-value semantics, length comparisons
-(siglen vs hashLen, taglen), off-by-one on tag/mac truncation, and whether
-a comparison is skipped or short-circuited on error.
+Not a finding (skip these):
+- Missing NULL check on trusted-caller pointers (robustness, not security)
+- "Could hypothetically" without a concrete arithmetic/comparison anchor
+- Style, naming, or dead-code issues
 {existing_findings_block}{entry_points_block}
-PHASE 1 — SURVEY (do this before any deep investigation):
-Before calling any tools, reason through: what are the worst security outcomes \
-for this type of subsystem, and what code invariant prevents each? State 3-5 \
-concrete, falsifiable invariants. Example: "IV MUST be applied before the first \
-encrypt call", "tag length MUST be bounded before passing to EVP", "every ref \
-MUST be checked against the caller's permission list." These are your hypotheses.
+METHODOLOGY:
 
-Then survey the whole subsystem quickly:
-1. The function list injected above is your first lead source — these are \
-pre-ranked by the callgraph for security relevance. Read each listed function \
-by line range immediately (use read_file with start_line/end_line, or \
-read_function(name) if the exact name is known). Do NOT scan files \
-top-to-bottom; jump directly to those functions.
-2. Call list_functions on any file not yet covered to find additional targets: \
-verify, final, check, validate, decode, parse, free, copy. Read those by line \
-range.
-3. Read the first 50 lines of each file to understand its role. Do not spend \
-more than 20 consecutive steps on any single file during this survey.
-4. After surveying all files, rank them by which invariants they are most \
-likely to violate. Only then begin deep investigation.
+1. Survey — Before deep investigation, identify 3-5 falsifiable security \
+invariants for this subsystem type. Use the pre-ranked function list above as \
+your starting point; read those functions by line range first, then use \
+list_functions to find additional security-relevant targets (validate, parse, \
+free, copy, verify, decode).
 
-PHASE 2 — INVESTIGATE (after surveying all files):
-For each hypothesis, work sink-first:
-1. Identify the dangerous operation (the sink: e.g. encrypt, free, memcpy, image_copy, verify).
-2. Call lookup_callers(sink_func) IMMEDIATELY — do not grep, do not read the sink's \
-definition. lookup_callers is faster and more complete than grep and returns file + \
-line ranges so you can read each caller directly.
-3. Read each caller's body and record what setup or guard calls it makes BEFORE \
-reaching the sink (e.g. state_init, null-check, lock_acquire, bounds_check).
-4. If comparing two sibling paths (streaming vs one-shot, encrypt vs decrypt), call \
-lookup_callees on each to diff their setup calls — any step present in one path but \
-missing in another is a candidate vulnerability.
-4. The set of guards that most callers perform is the INFERRED EXPECTED GUARD SET \
-for this sink — you don't need to know it upfront, the majority pattern tells you.
-5. Any caller that reaches the sink WITHOUT all expected guards is a candidate \
-finding — flag it immediately with flag_potential.
-This catches omission bugs: the vulnerability is not in what IS called but in \
-what ISN'T. Asymmetry between callers of the same sink is the strongest signal.
+2. Investigate — Work sink-first: identify dangerous operations, use \
+lookup_callers to find all paths reaching them, then check what guards each \
+caller applies. Asymmetry between callers of the same sink (one checks bounds, \
+another doesn't) is the strongest signal. When you find a guard, consider \
+whether it can be bypassed (encoding differences, state changes after check, \
+format mismatches).
 
-When you find a security check or guard, don't just confirm it exists — prove it \
-is sufficient. Enumerate at least three conditions under which it could fail:
-- Input encoding or separator differences (e.g. backslash vs forward slash on \
-non-Windows, unicode normalization, null bytes)
-- State the check didn't observe (e.g. check runs before a transformation that \
-changes the value)
-- Format vs OS contract mismatch (e.g. archive format allows paths the OS \
-interprets differently)
-If any bypass condition is plausible, treat the guard as absent for that input \
-class and flag it.
-
-As you read code, use flag_potential to bookmark suspicious lines without \
-committing to a finding. Call get_potentials periodically to review accumulated \
-leads across files — cross-file asymmetries often only become visible when you \
-compare leads side by side. Use dismiss_potential to rule out false positives \
-with a brief reason.
+3. Cross-file analysis — Use flag_potential and get_potentials to accumulate \
+leads across files. Cross-file bugs often only become visible when comparing \
+leads side by side. Use dismiss_potential to rule out false positives.
 
 Use record_trace_step as you read to anchor each step of the path. Record \
-findings at evidence_level=static_corroboration; call record_finding with \
-the specific file and line."""
+findings at evidence_level=static_corroboration with the specific file and line."""
 
 
 def _build_subsystem_prompt(
@@ -1387,6 +1334,7 @@ def build_subsystem_hunter_agent(
     session_id: str,
     project_name: str = "target",
     budget_usd: float = 100.0,
+    max_steps: int = 2000,
     findings_pool: Any = None,
     campaign_hint: str | None = None,
     callgraph: Any = None,
@@ -1499,7 +1447,7 @@ def build_subsystem_hunter_agent(
         prompt=prompt,
         tools=tools,
         ctx=ctx,
-        max_steps=3000,
+        max_steps=max_steps,
         agent_mode="deep",
         budget_usd=budget_usd,
         initial_user_message=_initial_msg,
