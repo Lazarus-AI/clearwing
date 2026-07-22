@@ -170,9 +170,14 @@ class TestHunterSandboxVariantImages:
     def test_build_image_builds_primary_only_by_default(self, temp_c_repo, mock_docker):
         mock_docker.images.get.side_effect = Exception("not found")
         sb = HunterSandbox(repo_path=str(temp_c_repo))
-        sb.build_image()
-        # One image built, one variant registered
-        assert mock_docker.images.build.call_count == 1
+        with patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = iter([])
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            sb.build_image()
+            # One image built, one variant registered
+            assert mock_popen.call_count == 1
         assert len(sb._variant_images) == 1
         assert "asan+ubsan" in sb._variant_images
 
@@ -183,9 +188,14 @@ class TestHunterSandboxVariantImages:
             sanitizers=["asan", "ubsan"],
             extra_variants=[["msan"]],
         )
-        sb.build_image()
-        # Two images built (primary + msan)
-        assert mock_docker.images.build.call_count == 2
+        with patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = iter([])
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            sb.build_image()
+            # Two images built (primary + msan)
+            assert mock_popen.call_count == 2
         assert "asan+ubsan" in sb._variant_images
         assert "msan" in sb._variant_images
         # They have different tags
@@ -283,12 +293,17 @@ class TestHunterSandboxSpawnVariant:
         mock_docker.containers.run.return_value = mock_container
 
         sb = HunterSandbox(repo_path=str(temp_c_repo))  # no extra_variants
-        sb.build_image()
+        with patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = iter([])
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            sb.build_image()
 
-        # Ask for MSan — should trigger an on-demand build
-        sb.spawn(scratch_mount=False, variant=["msan"])
-        # Two builds total: primary + the on-demand msan
-        assert mock_docker.images.build.call_count == 2
+            # Ask for MSan — should trigger an on-demand build
+            sb.spawn(scratch_mount=False, variant=["msan"])
+            # Two builds total: primary + the on-demand msan
+            assert mock_popen.call_count == 2
 
     def test_spawn_variant_tags_container_with_variant_env(self, temp_c_repo, mock_docker):
         mock_docker.images.get.return_value = MagicMock()
