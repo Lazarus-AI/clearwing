@@ -41,6 +41,15 @@ from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
 
+# Security-relevant function name keywords used to prioritise callgraph entries
+# in sitreps, initial messages, and coverage tracking. General-purpose set that
+# works across C/C++, Go, Rust, Java, etc.
+SECURITY_FUNCTION_KEYWORDS: set[str] = {
+    "verify", "validate", "check", "parse", "decode",
+    "free", "copy", "alloc", "write", "read",
+    "auth", "sign", "exec", "eval", "deserialize",
+}
+
 
 def _trajectory_base_dir() -> Path:
     raw = os.environ.get("CLEARWING_SOURCEHUNT_TRACE_DIR")
@@ -1366,10 +1375,7 @@ def build_subsystem_hunter_agent(
     if campaign_hint:
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
-    _SECURITY_KEYWORDS = {
-        "verify", "final", "check", "validate", "decode", "parse", "free", "copy",
-        "sign", "hmac", "mac", "digest", "tag",
-    }
+    _SECURITY_KEYWORDS = SECURITY_FUNCTION_KEYWORDS
     _initial_msg = (
         f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
         f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
@@ -1409,9 +1415,7 @@ def build_subsystem_hunter_agent(
                 kw_lines.append(f"  {fpath}: {fn_list}")
         if kw_lines:
             _initial_msg += (
-                "\n\nSecurity-relevant functions by file "
-                "(verb/hmac/mac/digest/tag/verify/final/check/validate/decode/parse/free/copy, "
-                "compound names first):\n"
+                "\n\nSecurity-relevant functions by file (compound names first):\n"
                 + "\n".join(kw_lines)
             )
 
@@ -1569,7 +1573,7 @@ class NativeHunter:
                 )
                 # Callgraph coverage: security functions not yet read (partially or fully unread)
                 if self.ctx.callgraph is not None:
-                    _SECURITY_KW = {"verify", "final", "check", "validate", "decode", "parse", "free", "copy"}
+                    _SECURITY_KW = SECURITY_FUNCTION_KEYWORDS
                     unread_by_file: list[str] = []
 
                     # Files opened but with unread security functions
@@ -2263,8 +2267,8 @@ def build_hunter_agent(
             )
             initial_user_message += (
                 f"\n\nFunctions defined in this file ({len(infos)} total):\n{fn_lines}"
-                f"\n\nInvestigate every function above. Pay special attention to any containing: "
-                f"verify, final, check, validate, decode, parse, free, copy."
+                f"\n\nInvestigate every function above — prioritise security-sensitive "
+                f"names (validation, parsing, memory ops, auth)."
             )
         terminals = _terminal_functions_for_file(ctx.callgraph, ctx.file_path)
         if terminals:
