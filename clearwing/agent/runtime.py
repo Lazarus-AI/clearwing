@@ -21,7 +21,7 @@ from clearwing.llm.messages import (
     ToolMessage,
     _coerce_chat_messages,
 )
-from clearwing.llm.native import NativeToolSpec, response_text
+from clearwing.llm.native import NativeToolSpec, last_finish_reason, response_text
 from clearwing.observability.telemetry import CostTracker
 from clearwing.safety.audit import AuditLogger
 from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
@@ -282,6 +282,7 @@ class NativeAgentGraph:
                     "total_tokens": (usage.total_tokens or 0) if usage else 0,
                 },
                 "model": response.provider_model_name or self.model_name,
+                "finish_reason": last_finish_reason(),
             },
         )
         state.setdefault("messages", []).append(ai_message)
