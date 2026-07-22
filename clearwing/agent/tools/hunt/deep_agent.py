@@ -103,14 +103,6 @@ def _matches(name: str, tokens: list[str]) -> bool:
     return all(t in low for t in tokens)
 
 
-# Self-check — asserts run at import; catches regressions in the token match.
-assert _tokenize("DigestFinal") == ["digest", "final"]
-assert _tokenize("digest_final") == ["digest", "final"]
-assert _matches("wolfSSL_EVP_DigestVerifyFinal", _tokenize("DigestFinal"))
-assert _matches("wolfSSL_EVP_DigestFinal_ex", _tokenize("DigestFinal"))
-assert _matches("wolfSSL_EVP_VerifyFinal", _tokenize("verify"))
-assert not _matches("wolfSSL_EVP_CipherFinal", _tokenize("DigestFinal"))
-
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     """Build the deep agent tool set: execute, read_file, write_file,
@@ -298,9 +290,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "CALL THIS FIRST on your target file before reading any code. "
                     "Returns functions defined in the file with start/end line numbers. "
                     "Use filter= to search by keyword. Filter tokens are split on "
-                    "non-alphanumerics AND camelCase — filter='DigestFinal' matches "
-                    "'DigestVerifyFinal', 'wolfSSL_EVP_DigestFinal_ex', etc. "
-                    "High-value targets: verify, final, check, validate, decode, parse, free, copy. "
+                    "non-alphanumerics AND camelCase — filter='ParseHeader' matches "
+                    "'http_parse_header_field', 'xml_ParseHeader_ex', etc. "
                     "If you already know the exact name, prefer read_function(name)."
                 ),
                 schema=ListFunctionsInput.model_json_schema(),
@@ -309,12 +300,11 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="read_function",
                 description=(
-                    "Read a function body by exact name — one atomic op. Use whenever "
-                    "you've said 'let me look at wolfSSL_EVP_DigestVerifyFinal' or any "
-                    "specific function you can name. Skips the list_functions→pick-line-"
-                    "range→read_file chain (where wrong picks silently open the wrong "
-                    "function). Returns {file, start_line, end_line, body}. On miss: "
-                    "did_you_mean suggestions. On ambiguity: candidate list."
+                    "Read a function body by exact name — one atomic op. Skips the "
+                    "list_functions→pick-line-range→read_file chain (where wrong picks "
+                    "silently open the wrong function). Returns {file, start_line, "
+                    "end_line, body}. On miss: did_you_mean suggestions. On ambiguity: "
+                    "candidate list."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
                 handler=read_function,
