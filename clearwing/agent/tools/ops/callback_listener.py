@@ -101,6 +101,21 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
     """
     token = secrets.token_urlsafe(12)
 
+    # Reuse existing listener on the requested port if still alive
+    with _server_lock:
+        if port in _servers:
+            _callbacks[token] = {"received": False}
+            callback_url = f"http://{lhost}:{port}/callback/{token}"
+            logger.info("Reusing callback listener on port %d, new token=%s", port, token)
+            return {
+                "status": "listening",
+                "port": port,
+                "token": token,
+                "callback_url": callback_url,
+                "message": f"Reusing listener on 0.0.0.0:{port}. "
+                f"Use check_callback_received(token='{token}') to verify.",
+            }
+
     # Find an available port
     bound_port = None
     for candidate in range(port, port + 10):
