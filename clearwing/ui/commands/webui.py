@@ -20,14 +20,22 @@ def handle(cli, args):
         )
         return
 
-    from ..web import create_app
-
-    app = create_app()
-
     cli.console.print(
         f"[bold cyan]Clearwing Web UI[/bold cyan]\n"
         f"Starting server at http://{args.host}:{args.port}\n"
         f"API docs at http://{args.host}:{args.port}/docs"
     )
 
-    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
+    if args.reload:
+        # uvicorn reload requires an import string, not an app instance
+        uvicorn.run(
+            "clearwing.ui.web:create_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            reload=True,
+        )
+    else:
+        from ..web import create_app
+        app = create_app()
+        uvicorn.run(app, host=args.host, port=args.port)
