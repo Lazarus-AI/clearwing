@@ -146,33 +146,6 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
     }
 
 
-@tool
-def reset_callback_listeners() -> dict:
-    """Shut down all active callback listeners and clear token state.
-
-    Call this at the start of a new engagement to avoid stale tokens from
-    prior runs causing confusion.
-
-    Returns:
-        Dict with keys: cleared_tokens, stopped_servers.
-    """
-    cleared = len(_callbacks)
-    _callbacks.clear()
-
-    stopped = 0
-    with _server_lock:
-        for port, server in list(_servers.items()):
-            server.shutdown()
-            stopped += 1
-        _servers.clear()
-
-    logger.info("Reset: cleared %d tokens, stopped %d servers", cleared, stopped)
-    return {
-        "cleared_tokens": cleared,
-        "stopped_servers": stopped,
-        "message": "All callback state cleared. Start a fresh listener for the next exploit.",
-    }
-
 
 @tool
 def check_callback_received(token: str, timeout: int = 10) -> dict:
