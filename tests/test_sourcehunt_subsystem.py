@@ -237,7 +237,9 @@ def test_subsystem_prompt_cross_file_calls():
     prompt = _build_subsystem_prompt(subsystem, "linux", callgraph=callgraph)
     assert "tcp.c" in prompt
     assert "udp.c" in prompt
-    assert "send_data" in prompt
+    # Cross-file calls are no longer explicitly listed in the prompt;
+    # the callgraph is used at runtime via lookup_callers instead.
+    assert "cross-file" in prompt.lower()
 
 
 def test_subsystem_prompt_existing_findings():
@@ -326,7 +328,7 @@ def test_build_subsystem_hunter_agent_max_steps():
         llm=mock_llm,
         session_id="test-session",
     )
-    assert hunter.max_steps == 2000
+    assert hunter.max_steps == 3000
     assert hunter.agent_mode == "deep"
 
 
