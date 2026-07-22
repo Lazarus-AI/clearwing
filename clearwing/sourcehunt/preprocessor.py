@@ -13,11 +13,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from diskcache import Cache
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
@@ -30,45 +27,6 @@ from .state import FileTag, FileTarget
 from .taint import TaintAnalyzer, TaintPath
 
 logger = logging.getLogger(__name__)
-
-
-_analysis_cache = Cache(str(Path.home() / ".cache" / "clearwing" / "analysis"))
-
-
-def _repo_rev(repo_path: str) -> str:
-    """Git HEAD sha + dirty marker, or mtime if not a git repo."""
-    try:
-        sha = subprocess.check_output(
-            ["git", "-C", repo_path, "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True).strip()
-        dirty = subprocess.check_output(
-            ["git", "-C", repo_path, "status", "--porcelain"],
-            stderr=subprocess.DEVNULL, text=True).strip()
-        return f"{sha}:{'dirty' if dirty else 'clean'}"
-    except Exception:
-        return f"nogit:{os.path.getmtime(repo_path)}"
-
-
-# ponytail: repo_path excluded from key — every eval run uses a fresh tempdir,
-# so keying on it would guarantee a cache miss. rev captures content identity.
-@_analysis_cache.memoize(tag="callgraph", ignore=(1,))
-def _cached_callgraph(rev: str, repo_path: str, files: tuple[str, ...] | None) -> CallGraph:
-    return CallGraphBuilder().build(repo_path, files=list(files) if files else None)
-
-
-@_analysis_cache.memoize(tag="taint", ignore=(1,))
-def _cached_taint(rev: str, repo_path: str, files: tuple[str, ...] | None):
-    return TaintAnalyzer().analyze_repo(repo_path, files=list(files) if files else None)
-
-
-# ponytail: keyed on target rev only; bundled rule changes need manual cache clear
-# (`rm -rf ~/.cache/clearwing/analysis`).
-@_analysis_cache.memoize(tag="semgrep", ignore=(1,))
-def _cached_semgrep(rev: str, repo_path: str, config: str, respect_gitignore: bool):
-    sidecar = SemgrepSidecar(config=config, respect_gitignore=respect_gitignore)
-    if not sidecar.available:
-        return []
-    return sidecar.run_scan(repo_path)
 
 
 @dataclass
@@ -444,12 +402,9 @@ class Preprocessor:
 
         if build_callgraph:
             try:
-                if CallGraphBuilder().available:
-                    callgraph = _cached_callgraph(
-                        _repo_rev(repo_path),
-                        repo_path,
-                        tuple(callgraph_seed_files) if callgraph_seed_files else None,
-                    )
+                builder = CallGraphBuilder()
+                if builder.available:
+                    callgraph = builder.build(repo_path, files=callgraph_seed_files)
                     self._populate_callgraph_signals(file_targets, callgraph)
                 else:
                     logger.info("tree-sitter grammars not available; callgraph skipped")
@@ -464,13 +419,11 @@ class Preprocessor:
 
         if self.run_semgrep:
             try:
-                from .semgrep_sidecar import DEFAULT_SEMGREP_CONFIG
-                semgrep_findings_objs = _cached_semgrep(
-                    _repo_rev(repo_path),
-                    repo_path,
-                    DEFAULT_SEMGREP_CONFIG,
-                    self.respect_gitignore,
-                )
+                sidecar = SemgrepSidecar(respect_gitignore=self.respect_gitignore)
+                if sidecar.available:
+                    semgrep_findings_objs = sidecar.run_scan(repo_path)
+                else:
+                    semgrep_findings_objs = []
                 if semgrep_findings_objs:
                     semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]
                     self._apply_semgrep_hints(file_targets, semgrep_findings)
@@ -493,11 +446,10 @@ class Preprocessor:
             logger.info("Taint analysis skipped (run_taint=False)")
         if run_taint:
             try:
-                if TaintAnalyzer().available:
-                    taint_result = _cached_taint(
-                        _repo_rev(repo_path),
-                        repo_path,
-                        tuple(callgraph_seed_files) if callgraph_seed_files else None,
+                analyzer = TaintAnalyzer()
+                if analyzer.available:
+                    taint_result = analyzer.analyze_repo(
+                        repo_path, files=callgraph_seed_files
                     )
                     taint_paths = taint_result.paths
                     self._apply_taint_signals(file_targets, taint_paths)
