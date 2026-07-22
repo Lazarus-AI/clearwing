@@ -125,6 +125,27 @@ async def test_deep_mode_safety_cap():
 
 
 @pytest.mark.asyncio
+async def test_deep_mode_stops_on_degenerate_loop():
+    # Real failure mode observed against crAPI with a local devstral model
+    # (both 4-bit and 6-bit quantizations): it keeps reissuing the exact
+    # same already-throttled tool call forever and never recovers. This
+    # must not be allowed to grind through the full max_steps budget.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=500, budget_usd=0.0)
+
+    llm.achat.return_value = FakeResponse(
+        tool_calls_list=[_make_tool_call("think", {"notes": "same notes"})],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "degenerate_loop"
+    # Should bail out well short of the 500-step budget.
+    assert llm.achat.call_count < 25
+
+
+@pytest.mark.asyncio
 async def test_deep_mode_throttles_repeated_calls():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=10, budget_usd=0.0)
 

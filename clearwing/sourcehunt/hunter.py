@@ -1364,7 +1364,7 @@ class HunterRunResult:
     findings: list[Finding]
     cost_usd: float
     tokens_used: int
-    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps"
+    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps" | "degenerate_loop"
     transcript_summary: str = ""
 
 
@@ -1378,6 +1378,7 @@ class NativeHunter:
     agent_mode: str = "constrained"  # "constrained" | "deep"
     budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
     initial_user_message: str = ""  # spec 006: override default first message
+    max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
         """Return a stop reason string, or None to continue."""
@@ -1403,6 +1404,7 @@ class NativeHunter:
         total_output_tokens = 0
         total_cost_usd = 0.0
         repeated_tool_calls: dict[tuple[str, str], int] = {}
+        total_repeated_skips = 0
         tools_by_name = {tool.name: tool for tool in self.tools}
         last_assistant_text = ""
 
@@ -1552,10 +1554,14 @@ class NativeHunter:
                     skipped = repeated_tool_calls[key] > 3
 
                     if skipped:
+                        total_repeated_skips += 1
                         tool_output = {
                             "error": (
-                                "tool call skipped because the assistant repeated the same "
-                                "call too many times"
+                                "tool call skipped: you already made this exact call and it "
+                                "produced no new information. Do not repeat it. Either "
+                                "investigate a different function or code path in this file, "
+                                "or if you have nothing further to add, respond with your "
+                                "final summary and no tool calls to finish this hunt."
                             )
                         }
                         tool_summary = _tool_output_text(
@@ -1611,6 +1617,34 @@ class NativeHunter:
                             "message": _serialize_message(messages[-1]),
                         },
                     )
+                    if skipped and total_repeated_skips > self.max_repeated_skips:
+                        logger.warning(
+                            "Hunter stopped for %s: degenerate_loop (step=%d, cost=$%.4f, "
+                            "findings=%d, skipped=%d)",
+                            self.ctx.file_path,
+                            step,
+                            total_cost_usd,
+                            len(self.ctx.findings),
+                            total_repeated_skips,
+                        )
+                        trajectory.log(
+                            "finish",
+                            {
+                                "step": step,
+                                "status": "degenerate_loop",
+                                "findings": [self._serialize_finding(f) for f in self.ctx.findings],
+                                "total_input_tokens": total_input_tokens,
+                                "total_output_tokens": total_output_tokens,
+                                "total_cost_usd": total_cost_usd,
+                            },
+                        )
+                        return HunterRunResult(
+                            findings=list(self.ctx.findings),
+                            cost_usd=total_cost_usd,
+                            tokens_used=total_input_tokens + total_output_tokens,
+                            stop_reason="degenerate_loop",
+                            transcript_summary=last_assistant_text[-500:],
+                        )
                 continue
 
             if last_assistant_text:
