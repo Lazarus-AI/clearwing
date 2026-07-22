@@ -328,7 +328,7 @@ def test_build_subsystem_hunter_agent_max_steps():
         llm=mock_llm,
         session_id="test-session",
     )
-    assert hunter.max_steps == 3000
+    assert hunter.max_steps == 2000
     assert hunter.agent_mode == "deep"
 
 
