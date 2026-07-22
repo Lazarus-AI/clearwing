@@ -48,9 +48,6 @@ def create_app():
         allow_headers=["*"],
     )
 
-    # OpenAI-compatible /v1/responses endpoint
-    from clearwing.ui.web.responses import router as responses_router
-    app.include_router(responses_router)
 
     # Serve the single-page frontend
     _static_dir = Path(__file__).parent / "static"
