@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -95,11 +96,12 @@ class OperatorConfig:
     # Behaviour
     max_turns: int = 100  # max inner-agent turns before force-stop
     timeout_minutes: int = 60
+    turn_timeout_seconds: int = 300  # per-LLM-call timeout (5 min default); 0 = no limit
     cost_limit: float = 0.0  # 0 = no limit
     auto_approve_scans: bool = True  # auto-approve non-destructive scan tools
     auto_approve_exploits: bool = False  # require user for exploit approval
-    lhost: str = "host.docker.internal"  # callback listener address reachable from target
-    lport: int = 9999  # callback listener port
+    lhost: str = ""  # callback listener address reachable from target (auto-detected if empty)
+    lport: int = 0  # callback listener port (0 = auto: CLEARWING_LPORT env or 8989)
 
     # Callbacks
     on_message: Callable[[str, str], None] | None = None  # (role, content)
@@ -158,6 +160,32 @@ drive the inner agent to accomplish them.
 ## Current progress
 {progress}
 """
+
+
+def _resolve_lhost() -> str:
+    """Auto-detect the best LHOST for callback payloads.
+
+    Priority:
+      1. CLEARWING_LHOST env var
+      2. Default gateway (= Docker host where ports are published)
+      3. host.docker.internal fallback
+    """
+    env_lhost = os.environ.get("CLEARWING_LHOST", "")
+    if env_lhost:
+        return env_lhost
+
+    if os.path.exists("/.dockerenv"):
+        try:
+            with open("/proc/net/route") as f:
+                for line in f:
+                    fields = line.strip().split()
+                    if len(fields) >= 3 and fields[1] == "00000000":
+                        gw_hex = fields[2]
+                        gw_bytes = bytes.fromhex(gw_hex)
+                        return f"{gw_bytes[3]}.{gw_bytes[2]}.{gw_bytes[1]}.{gw_bytes[0]}"
+        except (FileNotFoundError, PermissionError, ValueError):
+            pass
+    return "host.docker.internal"
 
 
 def _extract_tool_call(tc: object) -> tuple[str, dict]:
@@ -298,11 +326,27 @@ class OperatorAgent:
                     self._consecutive_stalls,
                     time.time() - start,
                 )
-                agent_response, tool_called = await self._arun_inner_turn(graph, config, input_msg)
+                agent_response, tool_called, finish_reason = await self._arun_inner_turn(graph, config, input_msg)
 
                 if not agent_response:
                     # Agent produced no output — might be done
                     break
+
+                # Detect output truncation: model hit max_tokens and was cut
+                # off mid-response. Fail fast instead of burning stall turns.
+                if finish_reason == "length" and not tool_called:
+                    logger.warning(
+                        "[turn %d] output truncated (finish_reason=length) — "
+                        "aborting early instead of stalling",
+                        self._turns,
+                    )
+                    return self._build_result(
+                        graph, config, start, "error",
+                        error=f"OUTPUT TRUNCATED: The model's response was cut off "
+                        f"(finish_reason=length) at turn {self._turns}. "
+                        f"This usually means max_tokens is too low for the "
+                        f"conversation size. Last response: {agent_response[:200]}",
+                    )
 
                 self._emit("agent", agent_response)
                 self._progress.append(f"Turn {self._turns}: {agent_response[:200]}")
@@ -411,11 +455,14 @@ class OperatorAgent:
                 "asking for permission. Do NOT ask for approval — execute immediately. "
                 "All exploit actions are pre-approved by the operator."
             )
+        lhost = self.config.lhost or _resolve_lhost()
+        lport = self.config.lport or int(os.environ.get("CLEARWING_LPORT", "8989"))
         network_note = (
             f"\n\nNETWORK: The target can reach the operator at "
-            f"LHOST={self.config.lhost} LPORT={self.config.lport}. "
+            f"LHOST={lhost} LPORT={lport}. "
             f"Use this address for any callbacks, reverse shells, or exfiltration. "
-            f"Do NOT use 127.0.0.1 — that resolves to the target itself."
+            f"Do NOT use 127.0.0.1 — that resolves to the target itself. "
+            f"Do NOT use port 9999 — use the port shown above (published range 8989-8999)."
         )
         return (
             f"TARGET: {self.config.target}\n\n"
@@ -427,18 +474,21 @@ class OperatorAgent:
             f"{network_note}"
         )
 
-    async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> tuple[str, bool]:
+    async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> tuple[str, bool, str | None]:
         """Run one turn of the inner ReAct agent and extract its response text.
 
-        Returns (response_text, tool_called) — tool_called is True if any tool
-        was invoked during this turn.
+        Returns (response_text, tool_called, finish_reason) — tool_called is
+        True if any tool was invoked during this turn. finish_reason is the
+        LLM's stop reason ("stop", "tool_calls", "length", or None).
         """
         last_ai_content = ""
         tool_called = False
+        last_finish_reason: str | None = None
         tools_invoked: list[str] = []
         tool_calls_with_args: list[tuple[str, dict]] = []  # (name, args) for technique inference
         try:
-            async for event in graph.astream(input_msg, config, stream_mode="values"):
+            turn_timeout = self.config.turn_timeout_seconds or None
+            async for event in self._atimeout_stream(graph.astream(input_msg, config, stream_mode="values"), turn_timeout):
                 msgs = event.get("messages", [])
                 if msgs:
                     last = msgs[-1]
@@ -460,6 +510,7 @@ class OperatorAgent:
                         # Log response metadata (finish reason, usage)
                         meta = getattr(last, "response_metadata", {}) or {}
                         finish_reason = meta.get("finish_reason")
+                        last_finish_reason = finish_reason
                         usage = meta.get("usage", {})
                         logger.debug(
                             "[turn %d] response: finish_reason=%s, tokens=%s",
@@ -489,6 +540,14 @@ class OperatorAgent:
                             content = "\n".join(text_parts)
                         if content:
                             last_ai_content = content
+        except asyncio.TimeoutError:
+            timeout_s = self.config.turn_timeout_seconds
+            logger.warning("[turn %d] LLM call timed out after %ds", self._turns, timeout_s)
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= 3:
+                raise LLMFatalError(f"3 consecutive timeouts ({timeout_s}s each)")
+            last_ai_content = f"[Agent error: LLM call timed out after {timeout_s}s]"
+            last_finish_reason = "timeout"
         except Exception as e:
             logger.warning("Inner agent error: %s", e)
             err_str = str(e)
@@ -517,13 +576,31 @@ class OperatorAgent:
                         logger.debug("on_technique callback failed", exc_info=True)
 
         logger.debug(
-            "[turn %d] summary: tools_called=%s, tools=%s, response=%s",
+            "[turn %d] summary: tools_called=%s, tools=%s, finish=%s, response=%s",
             self._turns,
             tool_called,
             tools_invoked or "(none)",
+            last_finish_reason,
             last_ai_content[:150],
         )
-        return last_ai_content, tool_called
+        return last_ai_content, tool_called, last_finish_reason
+
+    @staticmethod
+    async def _atimeout_stream(aiter, timeout: float | None):
+        """Wrap an async iterable with a per-turn timeout.
+
+        Yields items from *aiter*. Raises asyncio.TimeoutError if the entire
+        stream isn't consumed within *timeout* seconds. If timeout is None,
+        no limit is applied.
+        """
+        if timeout is None:
+            async for item in aiter:
+                yield item
+            return
+
+        async with asyncio.timeout(timeout):
+            async for item in aiter:
+                yield item
 
     async def _ahandle_interrupt(self, state, graph, config: dict) -> bool:
         """Handle an interrupt (approval request) from the inner agent.

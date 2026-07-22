@@ -78,8 +78,47 @@ def _auto_shutdown(port: int, ttl: float):
         logger.debug("Callback listener on port %d auto-shutdown after %ds", port, ttl)
 
 
+def _default_lhost() -> str:
+    """Determine the best default lhost for callback URLs.
+
+    When running inside a container with published ports, the target reaches
+    us via the Docker host. The host IP from inside a container is the
+    default gateway. Priority:
+
+      1. CLEARWING_LHOST env var (explicit override)
+      2. Default gateway IP (= Docker host, where published ports live)
+      3. host.docker.internal (macOS Docker Desktop fallback)
+    """
+    import os
+    import subprocess
+
+    env_lhost = os.environ.get("CLEARWING_LHOST", "")
+    if env_lhost:
+        return env_lhost
+
+    # Inside a container: default gateway = Docker host (ports published there)
+    if os.path.exists("/.dockerenv"):
+        try:
+            # Parse default gateway from /proc/net/route (avoids needing `ip` binary)
+            with open("/proc/net/route") as f:
+                for line in f:
+                    fields = line.strip().split()
+                    if len(fields) >= 3 and fields[1] == "00000000":
+                        # Gateway is in hex, little-endian 4 bytes
+                        gw_hex = fields[2]
+                        gw_bytes = bytes.fromhex(gw_hex)
+                        gw_ip = f"{gw_bytes[3]}.{gw_bytes[2]}.{gw_bytes[1]}.{gw_bytes[0]}"
+                        if not gw_ip.startswith("0."):
+                            logger.debug("Resolved LHOST from default gateway: %s", gw_ip)
+                            return gw_ip
+        except (FileNotFoundError, PermissionError, ValueError):
+            pass
+
+    return "host.docker.internal"
+
+
 @tool
-def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal") -> dict:
+def start_callback_listener(port: int = 0, lhost: str = "") -> dict:
     """Start an HTTP callback listener to verify blind RCE.
 
     Binds a lightweight HTTP server on the specified port. Returns a unique
@@ -88,17 +127,24 @@ def start_callback_listener(port: int = 9999, lhost: str = "host.docker.internal
 
     The listener auto-shuts-down after 10 minutes.
 
-    The lhost parameter must be an address the TARGET can reach
-    (e.g. host.docker.internal for Docker targets). Do NOT use 127.0.0.1 —
-    that resolves to the target container itself.
+    The lhost is auto-detected (default gateway / Docker host IP) so the
+    target can reach this listener via published ports. Override with
+    CLEARWING_LHOST env var if needed.
 
     Args:
-        port: Port to bind on (default: 9999). If occupied, tries port+1 up to port+10.
-        lhost: Address the target uses to reach this listener (default: host.docker.internal).
+        port: Port to bind on. Default: CLEARWING_LPORT or 8989 (first in published range).
+              If occupied, tries port+1 up to port+10.
+        lhost: Address the target uses to reach this listener. Auto-detected if empty.
 
     Returns:
         Dict with keys: status, port, token, callback_url, message.
     """
+    import os
+
+    if not lhost:
+        lhost = _default_lhost()
+    if port == 0:
+        port = int(os.environ.get("CLEARWING_LPORT", "8989"))
     token = secrets.token_urlsafe(12)
 
     # Reuse existing listener on the requested port if still alive

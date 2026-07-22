@@ -302,8 +302,7 @@ class NativeAgentGraph:
                 )
 
         if self.event_bus and assistant_text:
-            first_line = assistant_text.split("\n", 1)[0][:200]
-            self.event_bus.emit_message(first_line, "agent")
+            self.event_bus.emit_message(assistant_text, "agent")
 
         if assistant_text:
             found_flags = detect_flags(assistant_text)
