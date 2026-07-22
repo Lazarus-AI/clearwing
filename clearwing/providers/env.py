@@ -144,8 +144,11 @@ def resolve_llm_endpoint(
         config_provider = _load_default_config_provider()
     config_provider = config_provider or {}
 
-    # 1. CLI flags win when any are set
-    if cli_base_url or cli_model or cli_api_key:
+    # 1. CLI flags win when any are set — but only if a base_url or api_key
+    #    is explicitly provided. A model-only override (e.g. model="UnCut")
+    #    should still inherit the base_url from env vars / config rather than
+    #    assuming Anthropic-direct.
+    if cli_base_url or cli_api_key:
         base_url = cli_base_url
         if base_url:
             if _is_anthropic_compat_base_url(base_url):
@@ -166,8 +169,7 @@ def resolve_llm_endpoint(
                 api_key=api_key,
                 source="cli",
             )
-        # CLI passed --model and/or --api-key but no --base-url. That's
-        # Anthropic-direct with a model override.
+        # CLI passed --api-key but no --base-url. That's Anthropic-direct.
         return LLMEndpoint(
             provider="anthropic",
             model=cli_model or DEFAULT_ANTHROPIC_MODEL,
@@ -176,10 +178,10 @@ def resolve_llm_endpoint(
             source="cli",
         )
 
-    # 2. CLEARWING_* env vars
+    # 2. CLEARWING_* env vars (cli_model overrides env model if set)
     env_base_url = os.environ.get(ENV_BASE_URL)
     env_api_key = os.environ.get(ENV_API_KEY)
-    env_model = os.environ.get(ENV_MODEL)
+    env_model = cli_model or os.environ.get(ENV_MODEL)
 
     # Model-only override (CLEARWING_MODEL set, CLEARWING_BASE_URL not set):
     # inherit base_url + api_key from config so we don't accidentally route to
