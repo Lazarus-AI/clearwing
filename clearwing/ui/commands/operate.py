@@ -165,9 +165,11 @@ def _preflight_checks(target: str, lhost: str, lport: int) -> list[str]:
 
     # 3. Does host.docker.internal resolve inside the target container?
     try:
+        import shlex
+
         resolve = subprocess.run(
             ["docker", "exec", target_container, "sh", "-c",
-             f"getent hosts {lhost} 2>/dev/null || grep {lhost} /etc/hosts"],
+             f"getent hosts {shlex.quote(lhost)} 2>/dev/null || grep {shlex.quote(lhost)} /etc/hosts"],
             capture_output=True, text=True, timeout=5,
         )
         if resolve.returncode == 0 and resolve.stdout.strip():
