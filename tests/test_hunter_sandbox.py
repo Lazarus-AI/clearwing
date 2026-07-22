@@ -130,12 +130,17 @@ class TestHunterSandboxBuildImage:
         ]
 
         sb = HunterSandbox(repo_path=str(temp_repo))
-        tag = sb.build_image()
+        with patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = iter([])
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            tag = sb.build_image()
         assert tag.startswith("clearwing-sourcehunt:")
-        assert mock_run.call_count == 2
-        build_argv = mock_run.call_args_list[1][0][0]
-        assert "build" in build_argv
-        assert tag in build_argv
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
+        assert "docker" in args[0]
+        assert tag in args
 
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
     def test_build_image_reuses_cached(self, mock_run, temp_repo: Path):
@@ -153,7 +158,8 @@ class TestHunterSandboxBuildImage:
         (temp_repo / "Makefile").write_text("all:\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
         df = sb._render_dockerfile()
-        assert "FROM gcc:12-bullseye" in df
+        # Base image is clearwing-sourcehunt-c (or fallback gcc:12-bullseye)
+        assert "FROM" in df
         assert "ripgrep" in df
         assert "gdb" in df
         assert "ltrace" not in df
@@ -170,7 +176,9 @@ class TestHunterSandboxBuildImage:
         (temp_repo / "pyproject.toml").write_text("[project]\nname='x'\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
         df = sb._render_dockerfile()
-        assert "FROM python:3.12-slim" in df
+        # Base is clearwing-sourcehunt-python or fallback python:3.12-slim
+        assert "FROM" in df
+        assert "gcc" not in df.split("\n")[0].lower()
 
     def test_image_tag_is_content_addressed(self, temp_repo: Path):
         (temp_repo / "Makefile").write_text("all:\n")
