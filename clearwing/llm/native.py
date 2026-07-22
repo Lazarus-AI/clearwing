@@ -643,13 +643,23 @@ class AsyncLLMClient:
             raise
 
         self._settle_spend_call(reservation, response)
+        # Infer finish reason for native genai-pyo3 responses.
+        n_tool_calls = len(response.tool_calls or [])
+        if n_tool_calls:
+            _LAST_FINISH_REASON.set("tool_calls")
+        else:
+            usage_obj = response.usage
+            completion_tokens = (usage_obj.completion_tokens or 0) if usage_obj else 0
+            if max_tokens and completion_tokens >= max_tokens:
+                _LAST_FINISH_REASON.set("length")
+            else:
+                _LAST_FINISH_REASON.set("stop")
         usage = response.usage
         elapsed_ms = int((time.monotonic() - started) * 1000)
         prompt_tokens = usage.prompt_tokens
         completion_tokens = usage.completion_tokens
         details = usage.prompt_tokens_details
         cached_tokens = details.cached_tokens if details is not None else None
-        n_tool_calls = len(response.tool_calls or [])
         if _LOG_CALLS:
             # The live LLM-activity panel already surfaces this per-call; keep
             # the line at DEBUG so it doesn't scroll over the pinned panel.
@@ -744,7 +754,9 @@ class AsyncLLMClient:
                         if event.content:
                             on_text_delta(event.content)
                         if event.end is not None:
-                            return self._chat_response_from_stream_end(event.end)
+                            return self._chat_response_from_stream_end(
+                                event.end, max_tokens=opts.max_tokens
+                            )
                     return None
 
                 try:
@@ -1372,7 +1384,9 @@ class AsyncLLMClient:
                 return value
         return value
 
-    def _chat_response_from_stream_end(self, end: StreamEnd) -> ChatResponse:
+    def _chat_response_from_stream_end(
+        self, end: StreamEnd, *, max_tokens: int | None = None
+    ) -> ChatResponse:
         """Adapt a genai-pyo3 ``StreamEnd`` into a ``ChatResponse``.
 
         ``astream_chat`` yields a ``StreamEnd`` (whose fields are named
@@ -1381,6 +1395,19 @@ class AsyncLLMClient:
         ``tool_calls``, ``usage`` …), so rebuild a ``ChatResponse`` from the
         captured content rather than leaking the ``StreamEnd`` shape.
         """
+        # Infer finish reason from content (genai-pyo3 doesn't expose it).
+        tool_calls = end.captured_tool_calls
+        if tool_calls:
+            _LAST_FINISH_REASON.set("tool_calls")
+        else:
+            # Detect length truncation: if completion_tokens hit the requested
+            # max_tokens, the model was cut off — not voluntarily stopping.
+            usage = end.captured_usage
+            completion_tokens = (usage.completion_tokens or 0) if usage else 0
+            if max_tokens and completion_tokens >= max_tokens:
+                _LAST_FINISH_REASON.set("length")
+            else:
+                _LAST_FINISH_REASON.set("stop")
         return ChatResponse(
             content=end.captured_content,
             reasoning_content=end.captured_reasoning_content,

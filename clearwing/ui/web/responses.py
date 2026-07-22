@@ -208,6 +208,8 @@ async def _stream_agent(
             max_turns=body.get("max_turns", 50),
             timeout_minutes=body.get("timeout_minutes", 30),
             auto_approve_exploits=body.get("auto_approve_exploits", False),
+            lhost=body.get("lhost", ""),
+            lport=body.get("lport", 0),
             on_tool_result=on_tool_result,
         )
         operator = OperatorAgent(config)
@@ -385,6 +387,8 @@ async def _run_sync(
         max_turns=body.get("max_turns", 50),
         timeout_minutes=body.get("timeout_minutes", 30),
         auto_approve_exploits=body.get("auto_approve_exploits", False),
+        lhost=body.get("lhost", ""),
+        lport=body.get("lport", 0),
     )
     operator = OperatorAgent(config)
     result = await operator.arun()
