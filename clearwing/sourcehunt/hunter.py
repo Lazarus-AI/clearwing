@@ -51,6 +51,24 @@ SECURITY_FUNCTION_KEYWORDS: set[str] = {
 }
 
 
+def _dedup_function_infos(infos: list) -> list:
+    """De-duplicate FunctionInfo entries by (name, start_line)."""
+    seen: set[tuple[str, int]] = set()
+    out = []
+    for fi in infos:
+        key = (fi.name, fi.start_line)
+        if key not in seen:
+            seen.add(key)
+            out.append(fi)
+    return out
+
+
+def _security_verb_hits(name: str) -> int:
+    """Count how many security keywords appear in a function name."""
+    low = name.lower()
+    return sum(1 for kw in SECURITY_FUNCTION_KEYWORDS if kw in low)
+
+
 def _trajectory_base_dir() -> Path:
     raw = os.environ.get("CLEARWING_SOURCEHUNT_TRACE_DIR")
     if raw:
@@ -1375,7 +1393,6 @@ def build_subsystem_hunter_agent(
     if campaign_hint:
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
-    _SECURITY_KEYWORDS = SECURITY_FUNCTION_KEYWORDS
     _initial_msg = (
         f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
         f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
@@ -1383,34 +1400,19 @@ def build_subsystem_hunter_agent(
     kw_lines: list[str] = []
     term_lines: list[str] = []
     if callgraph is not None:
-        def _dedup_infos(infos: list) -> list:
-            seen: set[tuple[str, int]] = set()
-            out = []
-            for fi in infos:
-                key = (fi.name, fi.start_line)
-                if key not in seen:
-                    seen.add(key)
-                    out.append(fi)
-            return out
-
         # Per-file cap scales inversely with file count so single-file subsystems
         # (e.g. one .c targeted eval) don't get artificially clipped at 5.
-        # ponytail: linear scale, floor 5, ceil 20. Revisit if injected context gets fat.
         per_file_cap = max(5, min(20, 25 // max(1, len(subsystem.files))))
 
         # Security-keyword functions per file. Sort by verb-hit-count desc so
         # compound names (DigestVerifyFinal = digest+verify+final) float above
         # single-verb (EncryptFinal) — the target CVE class lives in the compounds.
-        def _verb_hits(name: str) -> int:
-            low = name.lower()
-            return sum(1 for kw in _SECURITY_KEYWORDS if kw in low)
-
         for ft in subsystem.files:
             fpath = ft["path"]
-            infos = _dedup_infos(callgraph.function_info.get(fpath, []))
-            hits = [fi for fi in infos if _verb_hits(fi.name)]
+            infos = _dedup_function_infos(callgraph.function_info.get(fpath, []))
+            hits = [fi for fi in infos if _security_verb_hits(fi.name)]
             if hits:
-                hits.sort(key=lambda fi: (-_verb_hits(fi.name), fi.start_line))
+                hits.sort(key=lambda fi: (-_security_verb_hits(fi.name), fi.start_line))
                 fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in hits[:per_file_cap])
                 kw_lines.append(f"  {fpath}: {fn_list}")
         if kw_lines:
@@ -1422,7 +1424,7 @@ def build_subsystem_hunter_agent(
         # Terminal functions (public API — not called by anything in the repo)
         for ft in subsystem.files:
             fpath = ft["path"]
-            terminals = _dedup_infos(_terminal_functions_for_file(callgraph, fpath))
+            terminals = _dedup_function_infos(_terminal_functions_for_file(callgraph, fpath))
             if terminals:
                 fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(terminals, key=lambda fi: fi.start_line)[:per_file_cap])
                 term_lines.append(f"  {fpath}: {fn_list}")
