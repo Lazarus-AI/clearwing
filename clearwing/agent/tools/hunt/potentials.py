@@ -19,20 +19,20 @@ from .sandbox import HunterContext
 
 
 class FlagPotentialInput(ToolInputModel):
-    file: str = Field(description="Repo-relative file path, e.g. 'src/cipher_aes_ocb.c'.")
+    file: str = Field(description="Repo-relative file path, e.g. 'src/parser/decode.c'.")
     line: int = Field(description="Line number of the suspicious call or expression.")
     note: str = Field(
         description=(
             "What you observed at this line — one concrete sentence. "
-            "Example: 'calls aes_generic_ocb_cipher without calling update_iv first, "
-            "unlike aes_ocb_block_update which calls update_iv at line 233.'"
+            "Example: 'calls memcpy with user-supplied length without bounds check, "
+            "unlike parse_header which validates len < buf_size at line 233.'"
         )
     )
     hypothesis: str = Field(
         description=(
             "The vulnerability class this might indicate. "
-            "Example: 'CWE-325: missing required crypto step — IV never applied on one-shot path, "
-            "enabling nonce reuse.'"
+            "Example: 'CWE-120: stack buffer overflow — attacker-controlled length "
+            "passed directly to memcpy without validation.'"
         )
     )
     priority: str = Field(
