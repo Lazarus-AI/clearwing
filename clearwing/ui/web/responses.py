@@ -361,6 +361,10 @@ async def _stream_agent(
         # Emit response.completed
         final = _response_object(response_id, status=status, output=output_items, model=model, usage=usage)
         yield _sse("response.completed", final)
+        logger.info(
+            "Response %s finished: status=%s, items=%d, tokens=%d",
+            response_id, status, len(output_items), usage.get("total_tokens", 0),
+        )
 
     finally:
         # Unsubscribe from bus
