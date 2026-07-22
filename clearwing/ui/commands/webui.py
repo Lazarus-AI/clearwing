@@ -11,6 +11,17 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Start the FastAPI web UI server."""
+    import logging
+    import os
+
+    log_level = os.environ.get("CLEARWING_LOG_LEVEL", os.environ.get("LOG_LEVEL", "INFO")).upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+
     try:
         import uvicorn
     except ImportError:

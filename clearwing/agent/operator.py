@@ -10,6 +10,7 @@ agent to completion, and only escalates to the real user when:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -157,6 +158,35 @@ drive the inner agent to accomplish them.
 ## Current progress
 {progress}
 """
+
+
+def _extract_tool_call(tc: object) -> tuple[str, dict]:
+    """Extract (name, args) from a tool call in any known format.
+
+    Supports:
+      - genai ToolCall objects (.fn_name / .fn_arguments)
+      - OpenAI dict format ({"function": {"name": ..., "arguments": ...}})
+      - LangChain dict format ({"name": ..., "args": ...})
+    """
+    if isinstance(tc, dict):
+        if "function" in tc:
+            fn = tc["function"]
+            name = fn.get("name", "unknown")
+            raw_args = fn.get("arguments", {})
+        else:
+            name = tc.get("name", "unknown")
+            raw_args = tc.get("args", tc.get("arguments", tc.get("fn_arguments", {})))
+    else:
+        # genai ToolCall: .fn_name / .fn_arguments
+        name = getattr(tc, "fn_name", None) or getattr(tc, "name", None) or "unknown"
+        raw_args = getattr(tc, "fn_arguments", None) or getattr(tc, "args", {})
+
+    if isinstance(raw_args, str):
+        try:
+            return name, json.loads(raw_args)
+        except (ValueError, TypeError):
+            return name, {}
+    return name, raw_args if isinstance(raw_args, dict) else {}
 
 
 class OperatorAgent:
@@ -427,19 +457,28 @@ class OperatorAgent:
                             except Exception:
                                 pass
                     if hasattr(last, "content") and last.type == "ai":
+                        # Log response metadata (finish reason, usage)
+                        meta = getattr(last, "response_metadata", {}) or {}
+                        finish_reason = meta.get("finish_reason")
+                        usage = meta.get("usage", {})
+                        logger.debug(
+                            "[turn %d] response: finish_reason=%s, tokens=%s",
+                            self._turns,
+                            finish_reason or "unknown",
+                            f"{usage.get('input_tokens', 0)}in/{usage.get('output_tokens', 0)}out" if usage else "n/a",
+                        )
                         # Check for tool_calls on the AI message itself
                         if getattr(last, "tool_calls", None):
                             tool_called = True
                             for tc in last.tool_calls:
-                                if isinstance(tc, dict):
-                                    tc_name = tc.get("name", "unknown")
-                                    tc_args = tc.get("args", {})
-                                else:
-                                    tc_name = getattr(tc, "name", "unknown")
-                                    tc_args = getattr(tc, "args", {})
+                                tc_name, tc_args = _extract_tool_call(tc)
                                 tools_invoked.append(tc_name)
-                                tool_calls_with_args.append((tc_name, tc_args if isinstance(tc_args, dict) else {}))
-                                logger.debug("[turn %d] tool call: %s", self._turns, tc_name)
+                                tool_calls_with_args.append((tc_name, tc_args))
+                                logger.debug(
+                                    "[turn %d] tool call: %s(%s)",
+                                    self._turns, tc_name,
+                                    ", ".join(f"{k}={v!r}" for k, v in tc_args.items()),
+                                )
                         content = last.content
                         if isinstance(content, list):
                             text_parts = [
@@ -535,7 +574,7 @@ class OperatorAgent:
         )
 
         user = (
-            f"The inner agent just responded:\n\n{agent_response[:3000]}\n\n"
+            f"The inner agent just responded:\n\n{agent_response}\n\n"
             f"What should I tell the agent to do next? "
             f"Reply with GOALS_COMPLETE if all goals are done, "
             f"ESCALATE: <question> if you need to ask the real user, "
