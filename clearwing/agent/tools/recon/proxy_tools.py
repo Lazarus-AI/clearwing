@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -11,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from clearwing.agent.tooling import tool
 
@@ -146,33 +150,45 @@ def proxy_request(
     start = time.time()
 
     try:
-        req = urllib.request.Request(
-            url,
-            data=body.encode("utf-8") if body else None,
-            headers=req_headers,
-            method=method.upper(),
-        )
+        # Use http.client directly to preserve exact header casing
+        # (urllib normalizes header keys via .capitalize() which breaks
+        # exploits that require specific casing like spring.cloud.function.*)
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        port = parsed.port
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
 
-        # Handle redirects
-        if not follow_redirects:
-
-            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-                def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-                    return None
-
-            opener = urllib.request.build_opener(NoRedirectHandler)
+        if parsed.scheme == "https":
+            port = port or 443
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            conn = http.client.HTTPSConnection(host, port, timeout=30, context=ctx)
         else:
-            opener = urllib.request.build_opener()
+            port = port or 80
+            conn = http.client.HTTPConnection(host, port, timeout=30)
 
-        response = opener.open(req, timeout=30)
+        conn.request(
+            method.upper(),
+            path,
+            body=body.encode("utf-8") if body else None,
+            headers=req_headers,
+        )
+        response = conn.getresponse()
         status_code = response.status
         resp_headers = dict(response.getheaders())
         resp_body = response.read().decode("utf-8", errors="replace")
+        conn.close()
 
-    except urllib.error.HTTPError as e:
-        status_code = e.code
-        resp_headers = dict(e.headers.items()) if e.headers else {}
-        resp_body = e.read().decode("utf-8", errors="replace")
+        # Follow redirects manually if enabled
+        if follow_redirects and status_code in (301, 302, 303, 307, 308):
+            location = resp_headers.get("location") or resp_headers.get("Location", "")
+            if location:
+                redirect_method = "GET" if status_code == 303 else method.upper()
+                return proxy_request(redirect_method, location, headers, body="", follow_redirects=True)
+
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
         entry = _proxy_history.add(

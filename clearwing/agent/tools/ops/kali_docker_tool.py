@@ -65,6 +65,8 @@ def kali_setup() -> dict:
 def kali_execute(container_id: str, command: str) -> dict:
     """Execute a command inside the Kali Docker container. REQUIRES HUMAN APPROVAL.
 
+    Streams output to the event bus in real-time (visible with -v flag).
+
     Args:
         container_id: Docker container ID.
         command: Shell command to execute.
@@ -78,12 +80,29 @@ def kali_execute(container_id: str, command: str) -> dict:
 
     import docker
 
+    from clearwing.core.events import EventBus
+
     client = docker.from_env()
     container = client.containers.get(container_id)
-    exit_code, output = container.exec_run(command, tty=True)
+    bus = EventBus()
+
+    exec_resp = container.client.api.exec_create(container.id, command, tty=True)
+    output_stream = container.client.api.exec_start(exec_resp["Id"], stream=True)
+
+    chunks = []
+    for chunk in output_stream:
+        text = chunk.decode("utf-8", errors="replace")
+        chunks.append(text)
+        for line in text.splitlines():
+            if line.strip():
+                bus.emit_message(f"[kali] {line.rstrip()}", "debug")
+
+    exec_info = container.client.api.exec_inspect(exec_resp["Id"])
+    exit_code = exec_info.get("ExitCode", -1)
+
     return {
         "exit_code": exit_code,
-        "output": output.decode("utf-8", errors="replace"),
+        "output": "".join(chunks),
     }
 
 

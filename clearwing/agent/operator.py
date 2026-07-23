@@ -16,10 +16,36 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from clearwing.agent.attack_chain import AttackChain, AttackTechnique, default_chain, infer_technique
 from clearwing.agent.graph import _create_llm, create_agent
 from clearwing.agent.runtime import Command
 
 logger = logging.getLogger(__name__)
+
+_FATAL_PATTERNS = (
+    "401",
+    "403",
+    "404",
+    "Unauthorized",
+    "authentication_error",
+    "invalid x-api-key",
+    "invalid api key",
+    "model_not_found",
+    "does not exist",
+    "key not allowed to access model",
+    "key_model_access_denied",
+)
+
+
+def _is_fatal_llm_error(err: str) -> bool:
+    """Return True if the error indicates a non-recoverable LLM config issue."""
+    err_lower = err.lower()
+    return any(p.lower() in err_lower for p in _FATAL_PATTERNS)
+
+
+class LLMFatalError(RuntimeError):
+    """Raised when the LLM backend has a non-recoverable configuration error."""
+
 
 
 @dataclass
@@ -42,11 +68,15 @@ class OperatorConfig:
     cost_limit: float = 0.0  # 0 = no limit
     auto_approve_scans: bool = True  # auto-approve non-destructive scan tools
     auto_approve_exploits: bool = False  # require user for exploit approval
+    lhost: str = "host.docker.internal"  # callback listener address reachable from target
+    lport: int = 9999  # callback listener port
 
     # Callbacks
     on_message: Callable[[str, str], None] | None = None  # (role, content)
+    on_tool_result: Callable[[str, str], None] | None = None  # (tool_name, content)
     on_escalate: Callable[[str], str] | None = None  # question -> user answer
     on_complete: Callable[[OperatorResult], None] | None = None
+    on_technique: Callable[[AttackTechnique], None] | None = None  # ATT&CK chain updates
 
 
 @dataclass
@@ -65,6 +95,7 @@ class OperatorResult:
     escalation_question: str = ""  # non-empty if status == "escalated"
     error: str = ""
     conversation_summary: str = ""
+    attack_chain: list[dict] = field(default_factory=list)  # ATT&CK technique summary
 
 
 # Categories of questions the operator can answer autonomously
@@ -112,11 +143,16 @@ class OperatorAgent:
         result = operator.run()
     """
 
+    # Max consecutive turns where the agent produces text but calls no tools
+    _MAX_STALL_TURNS = 3
+
     def __init__(self, config: OperatorConfig):
         self.config = config
         self._turns = 0
         self._progress: list[str] = []
         self._escalated = False
+        self._consecutive_stalls = 0
+        self.attack_chain = default_chain()
 
     def run(self) -> OperatorResult:
         """Run the operator loop to completion (sync wrapper over :meth:`arun`)."""
@@ -166,6 +202,7 @@ class OperatorAgent:
 
         deadline = start + self.config.timeout_minutes * 60
         input_msg = initial_input
+        self._consecutive_errors = 0
 
         try:
             while self._turns < self.config.max_turns:
@@ -194,7 +231,15 @@ class OperatorAgent:
 
                 # Run one turn of the inner agent
                 self._turns += 1
-                agent_response = await self._arun_inner_turn(graph, config, input_msg)
+                logger.debug(
+                    "━━━ Turn %d/%d | cost=$%.4f | stalls=%d | elapsed=%.0fs ━━━",
+                    self._turns, self.config.max_turns,
+                    (graph.get_state(config).values or {}).get("total_cost_usd", 0)
+                    if self.config.cost_limit > 0 else 0,
+                    self._consecutive_stalls,
+                    time.time() - start,
+                )
+                agent_response, tool_called = await self._arun_inner_turn(graph, config, input_msg)
 
                 if not agent_response:
                     # Agent produced no output — might be done
@@ -202,6 +247,22 @@ class OperatorAgent:
 
                 self._emit("agent", agent_response)
                 self._progress.append(f"Turn {self._turns}: {agent_response[:200]}")
+
+                # Detect stall: agent produces text but never calls tools
+                if tool_called:
+                    self._consecutive_stalls = 0
+                else:
+                    self._consecutive_stalls += 1
+                    if self._consecutive_stalls >= self._MAX_STALL_TURNS:
+                        return self._build_result(
+                            graph, config, start, "error",
+                            error=f"STALLED: Agent produced {self._consecutive_stalls} "
+                            f"consecutive responses without calling any tools. "
+                            f"The model may not support tool-calling, is refusing, or is stuck "
+                            f"planning without executing. "
+                            f"Last response: {agent_response[:200]}",
+                        )
+
 
                 # Handle interrupts (approval requests)
                 state = graph.get_state(config)
@@ -222,8 +283,10 @@ class OperatorAgent:
 
                 # Ask the operator LLM what to do next
                 decision = await self._adecide_next(operator_llm, agent_response)
+                logger.debug("[turn %d] operator decision: %s", self._turns, decision[:300])
 
                 if decision.startswith("GOALS_COMPLETE"):
+                    logger.info("Operator declared GOALS_COMPLETE at turn %d", self._turns)
                     return self._build_result(graph, config, start, "completed")
 
                 if decision.startswith("ESCALATE:"):
@@ -258,29 +321,83 @@ class OperatorAgent:
 
         except KeyboardInterrupt:
             return self._build_result(graph, config, start, "error", error="Interrupted by user")
+        except LLMFatalError as e:
+            return self._build_result(
+                graph, config, start, "error",
+                error=f"FATAL LLM error (check model/key config): {e}",
+            )
         except Exception as e:
             return self._build_result(graph, config, start, "error", error=str(e))
 
     def _format_goals(self) -> str:
         """Format goals into the initial instruction for the inner agent."""
         goal_lines = "\n".join(f"  {i + 1}. {g}" for i, g in enumerate(self.config.goals))
+        approval_note = ""
+        if self.config.auto_approve_exploits:
+            approval_note = (
+                "\n\nIMPORTANT: You have FULL AUTHORIZATION to run exploits without "
+                "asking for permission. Do NOT ask for approval — execute immediately. "
+                "All exploit actions are pre-approved by the operator."
+            )
+        network_note = (
+            f"\n\nNETWORK: The target can reach the operator at "
+            f"LHOST={self.config.lhost} LPORT={self.config.lport}. "
+            f"Use this address for any callbacks, reverse shells, or exfiltration. "
+            f"Do NOT use 127.0.0.1 — that resolves to the target itself."
+        )
         return (
             f"TARGET: {self.config.target}\n\n"
             f"You are being operated autonomously. Complete the following goals:\n"
             f"{goal_lines}\n\n"
             f"Work through these goals systematically. Report your findings as you go. "
             f"If you need information you cannot obtain yourself, ask clearly."
+            f"{approval_note}"
+            f"{network_note}"
         )
 
-    async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> str:
-        """Run one turn of the inner ReAct agent and extract its response text."""
+    async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> tuple[str, bool]:
+        """Run one turn of the inner ReAct agent and extract its response text.
+
+        Returns (response_text, tool_called) — tool_called is True if any tool
+        was invoked during this turn.
+        """
         last_ai_content = ""
+        tool_called = False
+        tools_invoked: list[str] = []
+        tool_calls_with_args: list[tuple[str, dict]] = []  # (name, args) for technique inference
         try:
             async for event in graph.astream(input_msg, config, stream_mode="values"):
                 msgs = event.get("messages", [])
                 if msgs:
                     last = msgs[-1]
+                    if hasattr(last, "type") and last.type == "tool":
+                        tool_called = True
+                        tool_name = getattr(last, "name", None) or "unknown"
+                        tool_content = str(getattr(last, "content", ""))
+                        tools_invoked.append(tool_name)
+                        logger.debug(
+                            "[turn %d] tool result: %s → %s",
+                            self._turns, tool_name, tool_content[:200],
+                        )
+                        if self.config.on_tool_result:
+                            try:
+                                self.config.on_tool_result(tool_name, tool_content)
+                            except Exception:
+                                pass
                     if hasattr(last, "content") and last.type == "ai":
+                        # Check for tool_calls on the AI message itself
+                        if getattr(last, "tool_calls", None):
+                            tool_called = True
+                            for tc in last.tool_calls:
+                                if isinstance(tc, dict):
+                                    tc_name = tc.get("name", "unknown")
+                                    tc_args = tc.get("args", {})
+                                else:
+                                    tc_name = getattr(tc, "name", "unknown")
+                                    tc_args = getattr(tc, "args", {})
+                                tools_invoked.append(tc_name)
+                                tool_calls_with_args.append((tc_name, tc_args if isinstance(tc_args, dict) else {}))
+                                logger.debug("[turn %d] tool call: %s", self._turns, tc_name)
                         content = last.content
                         if isinstance(content, list):
                             text_parts = [
@@ -293,9 +410,39 @@ class OperatorAgent:
                             last_ai_content = content
         except Exception as e:
             logger.warning("Inner agent error: %s", e)
+            err_str = str(e)
+            if _is_fatal_llm_error(err_str):
+                raise LLMFatalError(err_str) from e
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= 3:
+                raise LLMFatalError(
+                    f"3 consecutive LLM errors, aborting. Last: {err_str}"
+                ) from e
             last_ai_content = f"[Agent error: {e}]"
 
-        return last_ai_content
+        if not last_ai_content.startswith("[Agent error:"):
+            self._consecutive_errors = 0
+
+        # Infer ATT&CK techniques from tool invocations
+        for tc_name, tc_args in tool_calls_with_args:
+            technique_id = infer_technique(tc_name, tc_args)
+            if technique_id:
+                evidence = f"{tc_name}({', '.join(f'{k}=...' for k in list(tc_args)[:3])})"
+                tech = self.attack_chain.advance(technique_id, "completed", evidence=evidence)
+                if tech and self.config.on_technique:
+                    try:
+                        self.config.on_technique(tech)
+                    except Exception:
+                        logger.debug("on_technique callback failed", exc_info=True)
+
+        logger.debug(
+            "[turn %d] summary: tools_called=%s, tools=%s, response=%s",
+            self._turns,
+            tool_called,
+            tools_invoked or "(none)",
+            last_ai_content[:150],
+        )
+        return last_ai_content, tool_called
 
     async def _ahandle_interrupt(self, state, graph, config: dict) -> bool:
         """Handle an interrupt (approval request) from the inner agent.
@@ -363,6 +510,9 @@ class OperatorAgent:
             return response_text(response).strip()
         except Exception as e:
             logger.error("Operator LLM error: %s", e)
+            err_str = str(e)
+            if _is_fatal_llm_error(err_str):
+                raise LLMFatalError(err_str) from e
             return "Continue with the next goal."
 
     def _build_result(
@@ -399,6 +549,7 @@ class OperatorAgent:
             escalation_question=escalation_question,
             error=error,
             conversation_summary="\n".join(self._progress[-30:]),
+            attack_chain=self.attack_chain.summary(),
         )
 
         if self.config.on_complete:
