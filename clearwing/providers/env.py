@@ -1,8 +1,9 @@
 """Endpoint resolution for the multi-provider LLM layer.
 
-Clearwing picks an LLM from four possible sources, in precedence
+Clearwing picks an LLM from five possible sources, in precedence
 order (highest wins):
 
+    0. Process routing   (installed once by a machine-mode command)
     1. CLI flags         (--base-url / --api-key / --model)
     2. Environment vars  (CLEARWING_BASE_URL / CLEARWING_API_KEY /
                           CLEARWING_MODEL)
@@ -10,7 +11,7 @@ order (highest wins):
     4. Default           (Anthropic claude-sonnet-4-6 via
                           ANTHROPIC_API_KEY)
 
-The `resolve_llm_endpoint()` function threads all four sources into a
+The `resolve_llm_endpoint()` function threads all five sources into a
 single `LLMEndpoint` dataclass that every call site (network agent,
 sourcehunt runner, retro-hunt, operator mode) can consume uniformly.
 This is the one place the precedence rules live — updating it here
@@ -22,8 +23,9 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
+
+from clearwing.providers.runtime import runtime_routing
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,89 @@ class LLMEndpoint:
 # --- Resolution ------------------------------------------------------------
 
 
+def _endpoint_from_fields(
+    model: str | None,
+    base_url: str | None,
+    api_key: str | None,
+    source: str,
+    adapter: str | None = None,
+) -> LLMEndpoint:
+    """Build an `LLMEndpoint` from explicit base_url/model/api_key fields.
+
+    Shared by the CLI and process-routing tiers so both apply
+    identical provider-dialect rules: an Anthropic-compatible base_url (or no
+    base_url at all) is Anthropic; any other base_url is OpenAI-compatible.
+    """
+    if base_url:
+        if _is_anthropic_compat_base_url(base_url):
+            return LLMEndpoint(
+                provider="anthropic",
+                model=model or _default_anthropic_compat_model(base_url),
+                base_url=base_url,
+                api_key=api_key or os.environ.get(ENV_API_KEY),
+                source=source,
+                adapter=adapter,
+            )
+        return LLMEndpoint(
+            provider="openai_compat",
+            model=model or _default_openai_compat_model(base_url),
+            base_url=base_url,
+            api_key=api_key or os.environ.get(ENV_API_KEY) or _placeholder_for(base_url),
+            source=source,
+            adapter=adapter,
+        )
+    # No base_url ⇒ Anthropic-direct with an optional model override.
+    return LLMEndpoint(
+        provider="anthropic",
+        model=model or DEFAULT_ANTHROPIC_MODEL,
+        base_url=None,
+        api_key=api_key or os.environ.get(ENV_ANTHROPIC_KEY),
+        source=source,
+        adapter=adapter,
+    )
+
+
+def _endpoint_from_runtime(cfg: dict[str, Any]) -> LLMEndpoint | None:
+    """Collapse process routing into a single default endpoint.
+
+    Accepts the same shapes `ProviderManager.from_config` does:
+    - single:  ``{"provider": {base_url, model, api_key, adapter}}`` or the
+      flat ``{base_url, model, api_key, adapter}``;
+    - multi:   ``{"providers": {...}, "routes": {...}, "task_models": {...}}``,
+      from which the `default` route + `task_models.default` are used.
+
+    Returns ``None`` if no endpoint fields can be derived, so resolution falls
+    through to the normal CLI/env/config/default tiers. Per-task routing for
+    the multi shape is handled by `ProviderManager.resolve()`, not here.
+    """
+    prov = cfg.get("provider")
+    if prov is None and "providers" not in cfg and ("base_url" in cfg or "model" in cfg):
+        prov = cfg
+    if prov is None:
+        providers = cfg.get("providers") or {}
+        task_models = cfg.get("task_models") or {}
+        target = (cfg.get("routes") or {}).get("default")
+        pcfg = providers.get(target) if target else None
+        if pcfg is None and providers:
+            pcfg = next(iter(providers.values()))
+        pcfg = pcfg or {}
+        prov = {
+            "base_url": pcfg.get("base_url"),
+            "model": task_models.get("default") or pcfg.get("model"),
+            "api_key": pcfg.get("api_key"),
+            "adapter": pcfg.get("adapter"),
+        }
+    if not (prov.get("base_url") or prov.get("model")):
+        return None
+    return _endpoint_from_fields(
+        model=prov.get("model"),
+        base_url=prov.get("base_url"),
+        api_key=_resolve_config_secret(prov.get("api_key")),
+        source="runtime",
+        adapter=prov.get("adapter"),
+    )
+
+
 def resolve_llm_endpoint(
     cli_model: str | None = None,
     cli_base_url: str | None = None,
@@ -144,35 +229,21 @@ def resolve_llm_endpoint(
         config_provider = _load_default_config_provider()
     config_provider = config_provider or {}
 
+    # 0. Machine-mode process routing. Per-task routing for the multi shape
+    #    flows through `ProviderManager.resolve()`; bare callers receive its
+    #    default endpoint.
+    process_config = runtime_routing()
+    if process_config:
+        ep = _endpoint_from_runtime(process_config)
+        if ep is not None:
+            return ep
+
     # 1. CLI flags win when any are set
     if cli_base_url or cli_model or cli_api_key:
-        base_url = cli_base_url
-        if base_url:
-            if _is_anthropic_compat_base_url(base_url):
-                return LLMEndpoint(
-                    provider="anthropic",
-                    model=cli_model or _default_anthropic_compat_model(base_url),
-                    base_url=base_url,
-                    api_key=cli_api_key or os.environ.get(ENV_API_KEY),
-                    source="cli",
-                )
-            provider = "openai_compat"
-            model = cli_model or _default_openai_compat_model(base_url)
-            api_key = cli_api_key or os.environ.get(ENV_API_KEY) or _placeholder_for(base_url)
-            return LLMEndpoint(
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                source="cli",
-            )
-        # CLI passed --model and/or --api-key but no --base-url. That's
-        # Anthropic-direct with a model override.
-        return LLMEndpoint(
-            provider="anthropic",
-            model=cli_model or DEFAULT_ANTHROPIC_MODEL,
-            base_url=None,
-            api_key=cli_api_key or os.environ.get(ENV_ANTHROPIC_KEY),
+        return _endpoint_from_fields(
+            model=cli_model,
+            base_url=cli_base_url,
+            api_key=cli_api_key,
             source="cli",
         )
 

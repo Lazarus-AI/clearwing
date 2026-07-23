@@ -19,6 +19,7 @@ from . import (
     sessions,
     setup,
     sourcehunt,
+    tool,
     webui,
 )
 
@@ -38,6 +39,7 @@ ALL_COMMANDS = [
     operate,
     webui,
     sourcehunt,
+    tool,
     disclose,
     campaign,
     bench,

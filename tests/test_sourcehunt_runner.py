@@ -29,6 +29,12 @@ FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
 
 
+def test_runner_is_available_from_the_public_sourcehunt_package():
+    from clearwing.sourcehunt import SourceHuntRunner as PublicSourceHuntRunner
+
+    assert PublicSourceHuntRunner is SourceHuntRunner
+
+
 def _ranker_response(files: list[str]) -> str:
     """Build a JSON response covering the listed files."""
     entries = []
