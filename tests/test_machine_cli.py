@@ -92,6 +92,24 @@ def test_operate_request_rejects_provider_and_transport_fields():
         )
 
 
+def test_operate_request_accepts_bounded_callback_route():
+    parsed = operate._machine_request(
+        {
+            "target": "host",
+            "goals": ["prove RCE"],
+            "lhost": "host.docker.internal",
+            "lport": 8989,
+        }
+    )
+    assert parsed["lhost"] == "host.docker.internal"
+    assert parsed["lport"] == 8989
+
+    with pytest.raises(ValueError, match="lport"):
+        operate._machine_request(
+            {"target": "host", "goals": ["prove RCE"], "lport": 80}
+        )
+
+
 def test_sourcehunt_request_rejects_paths_credentials_and_provider_fields():
     with pytest.raises(ValueError, match="credentials"):
         sourcehunt._machine_request(

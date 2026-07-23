@@ -23,7 +23,7 @@ from clearwing.agent.tools import get_all_tools
 
 # Locked baseline as of Phase 4 start. Update this only when deliberately
 # adding or removing a tool from the network-agent registry.
-EXPECTED_TOOL_COUNT = 117
+EXPECTED_TOOL_COUNT = 120
 
 
 EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
@@ -45,6 +45,10 @@ EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
         "kali_execute",
         "kali_install_tool",
         "kali_cleanup",
+        # callback_listener
+        "start_callback_listener",
+        "check_callback_received",
+        "reset_callback_listeners",
         # reporting_tools
         "generate_report",
         "save_report",

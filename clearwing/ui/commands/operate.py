@@ -52,6 +52,17 @@ def add_parser(subparsers):
     )
     parser.add_argument("--base-url", metavar="URL", help="OpenAI-compatible API base URL")
     parser.add_argument("--api-key", metavar="KEY", help="API key for the endpoint")
+    parser.add_argument(
+        "--lhost",
+        default="host.docker.internal",
+        help="Callback host name or address reachable from the target",
+    )
+    parser.add_argument(
+        "--lport",
+        type=int,
+        default=9999,
+        help="Preferred callback listener port (default: 9999)",
+    )
     parser.set_defaults(_command_parser=parser)
     return parser
 
@@ -111,6 +122,8 @@ def handle(cli, args):
         timeout_minutes=args.timeout,
         cost_limit=args.cost_limit or 0.0,
         auto_approve_exploits=args.auto_approve_exploits,
+        lhost=args.lhost,
+        lport=args.lport,
         on_message=on_message,
         on_escalate=on_escalate,
     )
@@ -199,6 +212,8 @@ def _handle_machine(descriptor: int) -> int:
                     cost_limit=parsed["cost_limit"],
                     auto_approve_scans=parsed["auto_approve_scans"],
                     auto_approve_exploits=parsed["auto_approve_exploits"],
+                    lhost=parsed["lhost"],
+                    lport=parsed["lport"],
                     on_message=on_message,
                 )
             ).arun()
@@ -221,6 +236,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "cost_limit",
         "auto_approve_scans",
         "auto_approve_exploits",
+        "lhost",
+        "lport",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -247,6 +264,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "auto_approve_exploits": _boolean(
             value.get("auto_approve_exploits", False), "auto_approve_exploits"
         ),
+        "lhost": _bounded_text(value.get("lhost", "host.docker.internal"), "lhost", 255),
+        "lport": _bounded_integer(value.get("lport", 9999), "lport", 1024, 65526),
     }
 
 
