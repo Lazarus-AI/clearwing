@@ -8,6 +8,7 @@ from typing import Any
 from clearwing.llm import AsyncLLMClient
 
 from .env import LLMEndpoint, resolve_llm_endpoint
+from .runtime import runtime_routing
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +299,18 @@ class ProviderManager:
             )
 
         return cls(configs=configs, routes=routes)
+
+    @classmethod
+    def resolve(cls) -> ProviderManager:
+        """Build the provider manager for the current process.
+
+        Machine-mode routing preserves the full per-task configuration.
+        Interactive processes use Clearwing's endpoint resolution.
+        """
+        process_config = runtime_routing()
+        if process_config:
+            return cls.from_config(process_config)
+        return cls.for_endpoint(resolve_llm_endpoint())
 
     # --- Get an LLM for a task --------------------------------------------
 

@@ -18,9 +18,10 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
@@ -110,6 +111,28 @@ class SourceHuntResult:
             for f in self.verified_findings
             if (f.get("severity_verified") or f.get("severity")) == "high"
         )
+
+
+@dataclass(frozen=True)
+class SourceHuntProgress:
+    """One semantic sourcehunt stage transition.
+
+    Transports may persist and sequence these values for polling or streaming.
+    """
+
+    stage: str
+    status: str
+    findings_so_far: int = 0
+    cost_usd: float = 0.0
+    detail: str = ""
+    files: tuple[str, ...] = ()
+    symbols: tuple[str, ...] = ()
+    finding_ids: tuple[str, ...] = ()
+    error: dict[str, Any] | None = None
+    type: Literal["stage"] = "stage"
+
+
+SourceHuntProgressCallback = Callable[[SourceHuntProgress], None]
 
 
 _IMPACT_TO_SEVERITY = {
@@ -251,6 +274,7 @@ class SourceHuntRunner:
         retain_incomplete_certificates: bool = True,
         emit_rejection_certificates: bool = True,
         falsify: bool = True,
+        on_progress: SourceHuntProgressCallback | None = None,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -539,6 +563,7 @@ class SourceHuntRunner:
         )
         self._instrumentation_finalized = False
         self._last_reporting_error: dict[str, str] | None = None
+        self._on_progress = on_progress
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -626,6 +651,17 @@ class SourceHuntRunner:
         finding_ids: list[str] | tuple[str, ...] = (),
         error: dict[str, Any] | None = None,
     ) -> None:
+        progress = SourceHuntProgress(
+            stage=stage,
+            status=status,
+            findings_so_far=findings_so_far,
+            cost_usd=cost_usd,
+            detail=detail,
+            files=tuple(files),
+            symbols=tuple(symbols),
+            finding_ids=tuple(finding_ids),
+            error=error,
+        )
         EventBus().emit_sourcehunt_stage(
             SourcehuntStagePayload(
                 session_id=self._session_id,
@@ -637,6 +673,11 @@ class SourceHuntRunner:
                 detail=detail,
             )
         )
+        if self._on_progress is not None:
+            try:
+                self._on_progress(progress)
+            except Exception:  # pragma: no cover - observer isolation
+                logger.warning("sourcehunt progress observer failed", exc_info=True)
         try:
             self._instrumentation.stage(
                 stage,

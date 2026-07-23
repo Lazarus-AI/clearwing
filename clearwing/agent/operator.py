@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from clearwing.agent.graph import _create_llm, create_agent
 from clearwing.agent.runtime import Command
+from clearwing.providers import ProviderManager
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class OperatorConfig:
     operator_model: str = ""  # model for the operator LLM; defaults to self.model
     base_url: str | None = None
     api_key: str | None = None
+    provider_manager: ProviderManager | None = None
 
     # Behaviour
     max_turns: int = 100  # max inner-agent turns before force-stop
@@ -133,6 +135,7 @@ class OperatorAgent:
             session_id=session_id,
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            provider_manager=self.config.provider_manager,
         )
         config = {"configurable": {"thread_id": f"operator-{session_id}"}}
 
@@ -142,6 +145,8 @@ class OperatorAgent:
             op_model,
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            provider_manager=self.config.provider_manager,
+            task="operator",
         )
 
         # Build initial goal message

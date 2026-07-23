@@ -1,6 +1,9 @@
 """Operate (autonomous operator agent) subcommand."""
 
+import argparse
+import asyncio
 import sys
+from typing import Any
 
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -10,7 +13,8 @@ def add_parser(subparsers):
     parser = subparsers.add_parser(
         "operate", help="Run autonomous Operator agent with a set of goals or a mission plan"
     )
-    parser.add_argument("--target", required=True, help="Target IP address or hostname")
+    parser.add_argument("--target", help="Target IP address or hostname")
+    parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--goal", action="append", dest="goals", help="Goal for the operator (can be repeated)"
     )
@@ -48,11 +52,17 @@ def add_parser(subparsers):
     )
     parser.add_argument("--base-url", metavar="URL", help="OpenAI-compatible API base URL")
     parser.add_argument("--api-key", metavar="KEY", help="API key for the endpoint")
+    parser.set_defaults(_command_parser=parser)
     return parser
 
 
 def handle(cli, args):
     """Run the autonomous Operator agent."""
+    if args.machine_fd is not None:
+        raise SystemExit(_handle_machine(args.machine_fd))
+    if not args.target:
+        args._command_parser.error("the following arguments are required: --target")
+
     from ...agent.operator import OperatorAgent, OperatorConfig
 
     goals = args.goals or []
@@ -161,3 +171,110 @@ def handle(cli, args):
 
     has_critical = any(f.get("severity") in ("critical", "high") for f in result.findings)
     sys.exit(2 if has_critical else (1 if result.status != "completed" else 0))
+
+
+def _handle_machine(descriptor: int) -> int:
+    from ...agent.operator import OperatorAgent, OperatorConfig
+    from ...providers import ProviderManager, install_runtime_routing
+    from ..machine import MachineChannel
+
+    channel = MachineChannel(descriptor, "operate")
+    try:
+        request, routing = channel.read_start()
+        parsed = _machine_request(request)
+        install_runtime_routing(routing)
+        provider_manager = ProviderManager.from_config(routing)
+
+        def on_message(role: str, content: str) -> None:
+            channel.emit("progress", {"role": str(role), "content": str(content)})
+
+        result = asyncio.run(
+            OperatorAgent(
+                OperatorConfig(
+                    goals=parsed["goals"],
+                    target=parsed["target"],
+                    provider_manager=provider_manager,
+                    max_turns=parsed["max_turns"],
+                    timeout_minutes=parsed["timeout_minutes"],
+                    cost_limit=parsed["cost_limit"],
+                    auto_approve_scans=parsed["auto_approve_scans"],
+                    auto_approve_exploits=parsed["auto_approve_exploits"],
+                    on_message=on_message,
+                )
+            ).arun()
+        )
+        channel.result(result)
+        return 0 if result.status == "completed" else 1
+    except BaseException as exc:  # noqa: BLE001
+        channel.error(exc)
+        return 130 if isinstance(exc, KeyboardInterrupt) else 1
+    finally:
+        channel.close()
+
+
+def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "target",
+        "goals",
+        "max_turns",
+        "timeout_minutes",
+        "cost_limit",
+        "auto_approve_scans",
+        "auto_approve_exploits",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"unknown request field(s): {', '.join(unknown)}")
+    target = _bounded_text(value.get("target"), "target", 2048)
+    goals_value = value.get("goals")
+    if not isinstance(goals_value, list) or not 1 <= len(goals_value) <= 64:
+        raise ValueError("goals must contain between 1 and 64 strings")
+    goals = [
+        _bounded_text(goal, f"goals[{index}]", 4096)
+        for index, goal in enumerate(goals_value)
+    ]
+    return {
+        "target": target,
+        "goals": goals,
+        "max_turns": _bounded_integer(value.get("max_turns", 100), "max_turns", 1, 1000),
+        "timeout_minutes": _bounded_integer(
+            value.get("timeout_minutes", 60), "timeout_minutes", 1, 1440
+        ),
+        "cost_limit": _bounded_number(value.get("cost_limit", 0.0), "cost_limit", 0, 10000),
+        "auto_approve_scans": _boolean(
+            value.get("auto_approve_scans", True), "auto_approve_scans"
+        ),
+        "auto_approve_exploits": _boolean(
+            value.get("auto_approve_exploits", False), "auto_approve_exploits"
+        ),
+    }
+
+
+def _bounded_text(value: Any, name: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise ValueError(f"{name} must be at most {maximum} characters")
+    return normalized
+
+
+def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    result = float(value)
+    if not minimum <= result <= maximum:
+        raise ValueError(f"{name} must be between {minimum:g} and {maximum:g}")
+    return result
+
+
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
