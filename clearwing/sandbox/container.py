@@ -87,7 +87,7 @@ class SandboxContainer:
         if self._client is None:
             import docker  # local import — keeps the module importable without docker
 
-            self._client = docker.from_env()
+            self._client = docker.from_env(timeout=300)
         return self._client
 
     def start(self) -> str:
@@ -313,6 +313,7 @@ class SandboxContainer:
         start_time = time.monotonic()
         cid = self._container.id
 
+        logger.debug("copy_tree_into %s → %s starting", host_path, container_path)
         self.exec(["mkdir", "-p", container_path], timeout=10)
 
         tar_proc = subprocess.Popen(

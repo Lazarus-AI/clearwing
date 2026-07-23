@@ -11,17 +11,23 @@ Lifecycle:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
 import math
 import os
 import shutil
+import subprocess
 import tempfile
+import time
+
+from clearwing.core.events import EventBus
 
 from .builders import (
     BuildRecipe,
     BuildSystemDetector,
+    UPSTREAM_BASE_IMAGES,
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
@@ -169,8 +175,57 @@ class HunterSandbox:
         if self._client is None:
             import docker
 
-            self._client = docker.from_env()
+            self._client = docker.from_env(timeout=300)
         return self._client
+
+    def _target_platform(self) -> str:
+        """Docker platform for both the fallback check and the build command.
+
+        C/C++ toolchains (gcc, valgrind, sanitizers) run painfully slow under
+        qemu on Apple Silicon and occasionally miscompile — use host arch for
+        those. All other languages pin amd64 for cross-host reproducibility.
+        """
+        import platform as _plat
+
+        lang = (self.build_recipe.primary_language or "").lower()
+        if lang in ("c", "cpp", "c++") and _plat.machine() in ("arm64", "aarch64"):
+            return "linux/arm64"
+        return "linux/amd64"
+
+    def _maybe_fallback_base(self) -> None:
+        """If the preferred clearwing-sourcehunt-* base image isn't present
+        locally, fall back to the upstream image and restore dynamic installs."""
+        base = self.build_recipe.base_image
+        if not base.startswith("clearwing-sourcehunt-"):
+            return
+        want_arch = self._target_platform().split("/", 1)[1]
+        try:
+            img = self._get_client().images.get(base)
+            # If the local base image is a different arch than the sandbox
+            # build's --platform, buildx can't satisfy the FROM from the local
+            # store and reaches out to docker.io. Treat as missing so we fall
+            # through to upstream (which buildx can pull cross-arch).
+            arch = img.attrs.get("Architecture", "")
+            if arch and arch != want_arch:
+                raise RuntimeError(
+                    f"local base image is {arch}, sandbox targets {want_arch} — "
+                    "rebuild via `make -C docker`"
+                )
+            EventBus().emit_message(f"sandbox base ready  image={base}", "info")
+            # Packages are already baked into the static image — skip reinstall
+            self.build_recipe = dataclasses.replace(self.build_recipe, apt_packages=[])
+            self.extra_packages = []
+            self.post_install_commands = []
+        except Exception:
+            lang = self.build_recipe.primary_language
+            upstream = UPSTREAM_BASE_IMAGES.get(lang, "debian:11-slim")
+            logger.info("Static image %s not found; falling back to %s", base, upstream)
+            EventBus().emit_message(
+                f"sandbox base missing  image={base}  falling back to {upstream}  "
+                f"(run `make -C docker` to pre-build — first run will be slow)",
+                "warning",
+            )
+            self.build_recipe = dataclasses.replace(self.build_recipe, base_image=upstream)
 
     def build_image(self) -> str:
         """Build the primary sandbox image. Returns its tag.
@@ -180,6 +235,7 @@ class HunterSandbox:
         motivating case: it can't coexist with ASan in a single binary, so
         the caller declares it as an extra variant.
         """
+        self._maybe_fallback_base()
         primary_key = self._variant_key(self.sanitizers)
         primary_tag = self._build_variant_image(self.sanitizers)
         self._variant_images[primary_key] = primary_tag
@@ -211,7 +267,8 @@ class HunterSandbox:
 
         try:
             client.images.get(tag)
-            logger.debug("Reusing sourcehunt sandbox image %s", tag)
+            logger.info("Reusing cached sandbox image %s", tag)
+            EventBus().emit_message(f"sandbox cached  tag={tag[:16]}", "info")
             return tag
         except Exception:
             pass
@@ -221,18 +278,37 @@ class HunterSandbox:
             with open(dockerfile_path, "w", encoding="utf-8") as f:
                 f.write(dockerfile)
 
-            logger.info(
-                "Building sourcehunt sandbox image %s (sanitizers=%s)",
-                tag,
-                ",".join(sanitizers),
+            san_str = ",".join(sanitizers) if sanitizers else "none"
+            logger.info("Building sandbox image %s (sanitizers=%s)", tag, san_str)
+            EventBus().emit_message(
+                f"sandbox building  base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
+                f"  sanitizers={san_str}  tag={tag[:16]}",
+                "info",
             )
+            _t = time.monotonic()
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64", network_mode="host")
+                proc = subprocess.Popen(
+                    ["docker", "build", "--progress=plain", "--platform", self._target_platform(), "-t", tag, build_dir],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                output_lines: list[str] = []
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        output_lines.append(line)
+                        EventBus().emit_message(f"docker | {line}", "debug")
+                proc.wait()
+                if proc.returncode != 0:
+                    raise RuntimeError("\n".join(output_lines[-40:]))
+                logger.info("Built sandbox image %s in %.1fs", tag, time.monotonic() - _t)
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
                 raise RuntimeError(f"Failed to build sandbox image: {e}") from e
 
+        EventBus().emit_message(f"sandbox ready  tag={tag[:16]}", "info")
         return tag
 
     def spawn(
@@ -287,8 +363,7 @@ class HunterSandbox:
 
         # Build mounts list
         mounts: list[tuple[str, str, str]] = []
-        if not writable_workspace:
-            mounts.append((self.repo_path, "/workspace", "ro"))
+        mounts.append((self.repo_path, "/workspace", "rw" if writable_workspace else "ro"))
         scratch_host_dir = None
         if scratch_mount:
             scratch_host_dir = tempfile.mkdtemp(prefix="clearwing-scratch-")
@@ -328,17 +403,9 @@ class HunterSandbox:
         )
 
         sb = SandboxContainer(cfg)
+        _t = time.monotonic()
         sb.start()
-
-        if writable_workspace:
-            sb.copy_tree_into(self.repo_path, "/workspace")
-            try:
-                sb.exec(
-                    "cd /workspace && git init -q && git add -A && git commit -m initial -q",
-                    timeout=120,
-                )
-            except Exception:
-                logger.warning("git init in writable workspace failed", exc_info=True)
+        logger.debug("Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t)
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir

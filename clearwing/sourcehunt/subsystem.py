@@ -273,11 +273,12 @@ class SubsystemHuntRunner:
             try:
                 sandbox = await asyncio.to_thread(self.config.sandbox_factory)
             except Exception as e:
-                logger.warning(
+                logger.error(
                     "sandbox_factory failed for subsystem %s: %s",
                     subsystem.name,
                     e,
                 )
+                raise SystemExit(1) from e
 
         session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
         files = [str(item.get("path") or "") for item in subsystem.files]

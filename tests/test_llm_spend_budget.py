@@ -83,9 +83,11 @@ def test_gateway_requires_gateway_specific_pricing_override(tmp_path):
         output_dir=tmp_path,
     )
 
+    # Use a model name that triggers alias matching (not a direct table key)
+    # to exercise the gateway pricing guard.
     with pytest.raises(BudgetConfigurationError, match="through a gateway"):
         ledger.validate_model(
-            model="anthropic/claude-sonnet-4-6",
+            model="openrouter/claude-sonnet-4",
             provider="openai",
             supports_output_limit=True,
         )

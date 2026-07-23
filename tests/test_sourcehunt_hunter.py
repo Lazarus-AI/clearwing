@@ -362,6 +362,10 @@ class TestBuildHunterAgent:
             "fuzz_harness",
             "record_trace_step",
             "record_finding",
+            "semgrep_scan",
+            "flag_potential",
+            "get_potentials",
+            "dismiss_potential",
         }
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
@@ -410,6 +414,10 @@ class TestBuildHunterAgent:
             "find_callers",
             "record_trace_step",
             "record_finding",
+            "semgrep_scan",
+            "flag_potential",
+            "get_potentials",
+            "dismiss_potential",
         }
         assert "compile_file" not in tool_names
         assert "run_with_sanitizer" not in tool_names
@@ -454,9 +462,10 @@ class TestHunterTrajectoryLogging:
         class _StubLLM:
             model_name = "stub-model"
 
-            async def achat(self, *, messages, system, tools):
+            async def achat(self, *, messages, system, tools, **kwargs):
                 assert system == "system prompt"
-                assert len(messages) == 1
+                # messages includes the initial user message + sitrep at step 1
+                assert len(messages) >= 1
                 return ChatResponse(
                     content=[{"text": "No findings."}],
                     usage=Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18),

@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -37,6 +38,18 @@ from .budget import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Set by every ChatResponse builder to the provider's finish/stop reason for
+# the most recent completion in this async Task. Read via last_finish_reason()
+# — hunter uses it to explain why a response arrived empty (length vs stop vs
+# content_filter). ContextVar so concurrent hunter tasks don't overwrite each
+# other's value; genai_pyo3's ChatResponse is frozen so we can't attach it there.
+_LAST_FINISH_REASON: ContextVar[str | None] = ContextVar("last_finish_reason", default=None)
+
+
+def last_finish_reason() -> str | None:
+    """Provider finish/stop reason for the last completion in this Task."""
+    return _LAST_FINISH_REASON.get()
 
 # Per-file hunter runs can legitimately take up to ~a day against a slow local
 # model (large tier-A budgets, big files), so the socket-level read timeout
@@ -1166,6 +1179,9 @@ class AsyncLLMClient:
         provider_model = self.model_name
         is_responses_api = False
         final_response: dict[str, Any] | None = None
+        # Chat/Completions SSE emits finish_reason on the terminating chunk only;
+        # capture the last non-null value so we can surface it after the loop.
+        stream_finish_reason: str | None = None
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1224,6 +1240,8 @@ class AsyncLLMClient:
                 if reasoning:
                     reasoning_parts.append(reasoning)
                 self._merge_openai_tool_call_deltas(tool_call_parts, delta.get("tool_calls"))
+                if choice.get("finish_reason"):
+                    stream_finish_reason = choice["finish_reason"]
 
         if is_responses_api:
             if final_response:
@@ -1236,6 +1254,8 @@ class AsyncLLMClient:
                 }
                 for part in (v for _, v in sorted(resp_tool_parts.items()))
             ]
+            # Responses SSE without a final response.done event: no reason to report.
+            _LAST_FINISH_REASON.set(None)
             return self._chat_response_from_parts(
                 text="".join(content_parts),
                 reasoning_content=None,
@@ -1244,6 +1264,7 @@ class AsyncLLMClient:
                 provider_model=provider_model,
             )
 
+        _LAST_FINISH_REASON.set(stream_finish_reason)
         return self._chat_response_from_parts(
             text="".join(content_parts),
             reasoning_content="".join(reasoning_parts) or None,
@@ -1256,6 +1277,7 @@ class AsyncLLMClient:
         if "output" in payload or payload.get("object") == "response":
             return self._chat_response_from_responses_payload(payload)
         choice = (payload.get("choices") or [{}])[0]
+        _LAST_FINISH_REASON.set(choice.get("finish_reason"))
         message = choice.get("message") or {}
         text = self._extract_openai_message_text(message.get("content"))
         reasoning_content = message.get("reasoning_content") or message.get("reasoning")
@@ -1270,6 +1292,11 @@ class AsyncLLMClient:
 
     def _chat_response_from_responses_payload(self, payload: dict[str, Any]) -> ChatResponse:
         """Parse an OpenAI Responses API (non-streaming) payload into ChatResponse."""
+        # Responses API: `status` is "completed"/"incomplete"/"failed"/"cancelled";
+        # on "incomplete" the reason (length/content_filter/etc.) lives under
+        # `incomplete_details.reason`. Prefer the specific reason when present.
+        incomplete_reason = (payload.get("incomplete_details") or {}).get("reason")
+        _LAST_FINISH_REASON.set(incomplete_reason or payload.get("status"))
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []

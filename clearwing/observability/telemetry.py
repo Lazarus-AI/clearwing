@@ -57,6 +57,9 @@ class CostTracker:
         # Fireworks "Standard" serving path. cached_input applies to the subset
         # of input tokens served from the provider's prompt cache.
         "glm-5.2": {"input": 1.40, "cached_input": 0.14, "output": 4.40},
+        "UnCut": {"input": 1.40, "cached_input": 0.14, "output": 4.40},
+        "gpt-5.4": {"input": 2.50, "output": 15.0},
+        "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
     }
 
     _DEFAULT_MODEL = "claude-sonnet-4-6"

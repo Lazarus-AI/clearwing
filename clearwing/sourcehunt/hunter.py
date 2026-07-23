@@ -25,7 +25,13 @@ from clearwing.agent.tools.hunt import (
     build_propagation_auditor_tools,
 )
 from clearwing.core.events import EventBus, EventType
-from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
+from clearwing.llm import (
+    AsyncLLMClient,
+    ChatMessage,
+    NativeToolSpec,
+    ToolCall,
+    last_finish_reason,
+)
 from clearwing.llm.budget import spend_metadata
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
@@ -34,6 +40,33 @@ from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
+
+# Security-relevant function name keywords used to prioritise callgraph entries
+# in sitreps, initial messages, and coverage tracking. General-purpose set that
+# works across C/C++, Go, Rust, Java, etc.
+SECURITY_FUNCTION_KEYWORDS: set[str] = {
+    "verify", "validate", "check", "parse", "decode",
+    "free", "copy", "alloc", "write", "read",
+    "auth", "sign", "exec", "eval", "deserialize",
+}
+
+
+def _dedup_function_infos(infos: list) -> list:
+    """De-duplicate FunctionInfo entries by (name, start_line)."""
+    seen: set[tuple[str, int]] = set()
+    out = []
+    for fi in infos:
+        key = (fi.name, fi.start_line)
+        if key not in seen:
+            seen.add(key)
+            out.append(fi)
+    return out
+
+
+def _security_verb_hits(name: str) -> int:
+    """Count how many security keywords appear in a function name."""
+    low = name.lower()
+    return sum(1 for kw in SECURITY_FUNCTION_KEYWORDS if kw in low)
 
 
 def _trajectory_base_dir() -> Path:
@@ -1203,18 +1236,43 @@ This subsystem spans {file_count} files under {root_path}:
 {cross_file_calls}
 You have full shell access. The source tree is at /workspace.
 
-Your mission is to find vulnerabilities that EMERGE FROM CROSS-FILE INTERACTIONS:
-- Shared state (globals, structs, locks) modified by one file but consumed by another
-- Protocol/API contracts violated across call boundaries
-- State machine transitions that can be corrupted by concurrent callers
-- Lifetime/ownership confusion when objects cross module boundaries
-- Inconsistent validation: File A validates, File B doesn't, both call File C
+Your mission is to find all exploitable vulnerabilities in this subsystem — \
+single-file bugs and cross-file bugs alike:
+- Memory safety: buffer overflows, use-after-free, integer misuse before allocation
+- Logic bugs: protocol/API contracts violated across call boundaries
+- State corruption: shared state modified by one file but consumed by another
+- Inconsistent validation: input validated in one path but not another
 
-Single-file bugs have already been hunted. Focus on bugs that require understanding \
-multiple files simultaneously.
+Record findings early — once you can name the vulnerable value, the missing/wrong \
+check, and the downstream effect, call record_finding. Use flag_potential to \
+bookmark suspicions as you go; don't wait until you have a full exploit chain.
+
+Not a finding (skip these):
+- Missing NULL check on trusted-caller pointers (robustness, not security)
+- "Could hypothetically" without a concrete arithmetic/comparison anchor
+- Style, naming, or dead-code issues
 {existing_findings_block}{entry_points_block}
-When you find a vulnerability, call record_finding with the specific file and line. \
-Cross-file bugs are valuable even as static_corroboration if you can articulate the mechanism."""
+METHODOLOGY:
+
+1. Survey — Before deep investigation, identify 3-5 falsifiable security \
+invariants for this subsystem type. Use the pre-ranked function list above as \
+your starting point; read those functions by line range first, then use \
+list_functions to find additional security-relevant targets (validate, parse, \
+free, copy, verify, decode).
+
+2. Investigate — Work sink-first: identify dangerous operations, use \
+lookup_callers to find all paths reaching them, then check what guards each \
+caller applies. Asymmetry between callers of the same sink (one checks bounds, \
+another doesn't) is the strongest signal. When you find a guard, consider \
+whether it can be bypassed (encoding differences, state changes after check, \
+format mismatches).
+
+3. Cross-file analysis — Use flag_potential and get_potentials to accumulate \
+leads across files. Cross-file bugs often only become visible when comparing \
+leads side by side. Use dismiss_potential to rule out false positives.
+
+Use record_trace_step as you read to anchor each step of the path. Record \
+findings at evidence_level=static_corroboration with the specific file and line."""
 
 
 def _build_subsystem_prompt(
@@ -1235,25 +1293,6 @@ def _build_subsystem_prompt(
     file_listing = "\n".join(file_lines)
 
     cross_file_calls = ""
-    if callgraph is not None:
-        edges: list[str] = []
-        for ft in subsystem.files[:50]:
-            src = ft.get("path", "")
-            called = callgraph.calls_out.get(src, set())
-            for func_name in called:
-                for def_file in callgraph.defined_in.get(func_name, set()):
-                    if def_file != src and def_file in subsystem_files:
-                        edges.append(f"  {src} -> {def_file} (via {func_name})")
-                        if len(edges) >= 30:
-                            break
-                if len(edges) >= 30:
-                    break
-            if len(edges) >= 30:
-                break
-        if edges:
-            cross_file_calls = (
-                "\nCross-file call edges within this subsystem:\n" + "\n".join(edges) + "\n"
-            )
 
     existing_findings_block = ""
     if findings_pool is not None:
@@ -1301,7 +1340,17 @@ def _build_subsystem_prompt(
         existing_findings_block=existing_findings_block,
         entry_points_block=entry_points_block,
     )
-    return prompt + TRACE_BUILDING_INSTRUCTIONS
+    # Subsystem hunt runs in deep-agent mode (read_file/execute), so use the
+    # trace block that references read_file — NOT read_source_file, which the
+    # deep agent doesn't have.
+    return prompt + DEEP_TRACE_INSTRUCTIONS
+
+
+def _terminal_functions_for_file(callgraph: Any, file_path: str) -> list[Any]:
+    """Return FunctionInfo entries for functions in file_path not called by anyone in the repo."""
+    all_called: set[str] = {name for names in callgraph.calls_out.values() for name in names}
+    infos = callgraph.function_info.get(file_path, [])
+    return [fi for fi in infos if fi.name not in all_called]
 
 
 def build_subsystem_hunter_agent(
@@ -1312,6 +1361,7 @@ def build_subsystem_hunter_agent(
     session_id: str,
     project_name: str = "target",
     budget_usd: float = 100.0,
+    max_steps: int = 2000,
     findings_pool: Any = None,
     campaign_hint: str | None = None,
     callgraph: Any = None,
@@ -1328,6 +1378,8 @@ def build_subsystem_hunter_agent(
         session_id=session_id,
         specialist="subsystem",
         findings_pool=findings_pool,
+        callgraph=callgraph,
+        subsystem=subsystem,
     )
 
     tools = build_deep_agent_tools(ctx)
@@ -1341,18 +1393,70 @@ def build_subsystem_hunter_agent(
     if campaign_hint:
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
+    _initial_msg = (
+        f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
+        f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
+    )
+    kw_lines: list[str] = []
+    term_lines: list[str] = []
+    if callgraph is not None:
+        # Per-file cap scales inversely with file count so single-file subsystems
+        # (e.g. one .c targeted eval) don't get artificially clipped at 5.
+        per_file_cap = max(5, min(20, 25 // max(1, len(subsystem.files))))
+
+        # Security-keyword functions per file. Sort by verb-hit-count desc so
+        # compound names (DigestVerifyFinal = digest+verify+final) float above
+        # single-verb (EncryptFinal) — the target CVE class lives in the compounds.
+        for ft in subsystem.files:
+            fpath = ft["path"]
+            infos = _dedup_function_infos(callgraph.function_info.get(fpath, []))
+            hits = [fi for fi in infos if _security_verb_hits(fi.name)]
+            if hits:
+                hits.sort(key=lambda fi: (-_security_verb_hits(fi.name), fi.start_line))
+                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in hits[:per_file_cap])
+                kw_lines.append(f"  {fpath}: {fn_list}")
+        if kw_lines:
+            _initial_msg += (
+                "\n\nSecurity-relevant functions by file (compound names first):\n"
+                + "\n".join(kw_lines)
+            )
+
+        # Terminal functions (public API — not called by anything in the repo)
+        for ft in subsystem.files:
+            fpath = ft["path"]
+            terminals = _dedup_function_infos(_terminal_functions_for_file(callgraph, fpath))
+            if terminals:
+                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(terminals, key=lambda fi: fi.start_line)[:per_file_cap])
+                term_lines.append(f"  {fpath}: {fn_list}")
+        if term_lines:
+            _initial_msg += (
+                "\n\nPublic API / terminal nodes (not called by anything in the repo — attacker entry points):\n"
+                + "\n".join(term_lines)
+            )
+
+        if kw_lines or term_lines:
+            _initial_msg += (
+                "\n\nPrioritise these functions. Use lookup_callers to walk backwards from any "
+                "sink. Call list_functions(path, filter=<keyword>) to expand a file, then read by line range."
+            )
+
+    # Count actual functions injected (comma-separated names per line).
+    _n_kw = sum(line.count(",") + 1 for line in kw_lines)
+    _n_term = sum(line.count(",") + 1 for line in term_lines)
+    logger.info(
+        "Subsystem hunt [%s]: %d files, %d kw funcs, %d terminal funcs (cap=%d/file)",
+        subsystem.name, len(subsystem.files), _n_kw, _n_term,
+        max(5, min(20, 25 // max(1, len(subsystem.files)))),
+    )
     return NativeHunter(
         llm=llm,
         prompt=prompt,
         tools=tools,
         ctx=ctx,
-        max_steps=2000,
+        max_steps=max_steps,
         agent_mode="deep",
         budget_usd=budget_usd,
-        initial_user_message=(
-            f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
-            f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
-        ),
+        initial_user_message=_initial_msg,
     ), ctx
 
 
@@ -1407,6 +1511,14 @@ class NativeHunter:
         total_repeated_skips = 0
         tools_by_name = {tool.name: tool for tool in self.tools}
         last_assistant_text = ""
+        last_reasoning_content = ""
+        last_output_tokens = 0
+        files_visited: set[str] = set()
+        # {rel_path: set of (start_line, end_line) tuples from read_file calls}
+        lines_read: dict[str, list[tuple[int, int]]] = {}
+        flags_raised: int = 0
+        empty_response_nudges: int = 0
+
 
         step = 0
         while True:
@@ -1448,11 +1560,69 @@ class NativeHunter:
                     "step": step,
                 },
             )
+            if step % 25 == 1:
+                records = len(self.ctx.findings)
+                visited_list = ", ".join(sorted(files_visited)) or "none"
+                budget_note = (
+                    f"  Cost so far: ${total_cost_usd:.2f}"
+                    + (f" of ${self.budget_usd:.2f}" if self.budget_usd else "")
+                )
+                sitrep = (
+                    f"[SITUATION REPORT — step {step}]\n"
+                    f"  Findings recorded: {records}  Flags raised: {flags_raised}\n"
+                    f"  Files visited: {visited_list}\n"
+                    f"{budget_note}"
+                )
+                # Callgraph coverage: security functions not yet read (partially or fully unread)
+                if self.ctx.callgraph is not None:
+                    _SECURITY_KW = SECURITY_FUNCTION_KEYWORDS
+                    unread_by_file: list[str] = []
+
+                    # Files opened but with unread security functions
+                    for fpath, ranges in lines_read.items():
+                        infos = self.ctx.callgraph.function_info.get(fpath, [])
+                        seen_names: set[str] = set()
+                        sec_funcs = []
+                        for fi in infos:
+                            if fi.name not in seen_names and any(kw in fi.name.lower() for kw in _SECURITY_KW):
+                                seen_names.add(fi.name)
+                                sec_funcs.append(fi)
+                        unread = [
+                            fi for fi in sec_funcs
+                            if not any(r[0] <= fi.start_line <= r[1] for r in ranges)
+                        ]
+                        if unread:
+                            names = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(unread, key=lambda fi: fi.start_line))
+                            unread_by_file.append(f"    {fpath} (opened, unread functions): {names}")
+
+                    # Files not opened at all that have security functions
+                    subsystem_files = [ft["path"] for ft in self.ctx.subsystem.files] if self.ctx.subsystem else []
+                    for fpath in subsystem_files:
+                        if fpath in lines_read:
+                            continue
+                        infos = self.ctx.callgraph.function_info.get(fpath, [])
+                        seen_names2: set[str] = set()
+                        sec_funcs2 = []
+                        for fi in infos:
+                            if fi.name not in seen_names2 and any(kw in fi.name.lower() for kw in _SECURITY_KW):
+                                seen_names2.add(fi.name)
+                                sec_funcs2.append(fi)
+                        if sec_funcs2:
+                            names = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(sec_funcs2, key=lambda fi: fi.start_line)[:5])
+                            unread_by_file.append(f"    {fpath} (NOT OPENED): {names}")
+
+                    if unread_by_file:
+                        sitrep += "\n  Security functions not yet read — consider investigating these before recording findings:\n" + "\n".join(unread_by_file)
+                messages.append(ChatMessage("user", sitrep))
+                trajectory.log("sitrep", {"step": step, "content": sitrep})
+
+            logger.debug("[%s] step=%d: calling model", self.ctx.file_path, step)
             with spend_metadata(model_call_id=model_call_id):
                 response = await self.llm.achat(
                     messages=messages,
                     system=self.prompt,
                     tools=self.tools,
+                    max_tokens=24000,
                 )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
@@ -1496,6 +1666,8 @@ class NativeHunter:
             )
 
             last_assistant_text = response.first_text or ""
+            last_reasoning_content = response.reasoning_content or ""
+            last_output_tokens = response.usage.completion_tokens or 0
             if last_assistant_text:
                 EventBus().emit(
                     EventType.HUNTER_STATUS,
@@ -1504,6 +1676,19 @@ class NativeHunter:
                         "text": last_assistant_text,
                         "step": step,
                     },
+                )
+                logger.info(
+                    "[%s] step=%d: %s",
+                    self.ctx.file_path,
+                    step,
+                    last_assistant_text.split("\n", 1)[0][:200],
+                )
+            if response.reasoning_content:
+                logger.debug(
+                    "[%s] step=%d thinking: %s",
+                    self.ctx.file_path,
+                    step,
+                    response.reasoning_content[:500],
                 )
             tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
@@ -1550,6 +1735,23 @@ class NativeHunter:
                     else:
                         normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
                         key = (tool_call.fn_name, normalized_args[:300])
+
+                    # Track file visits, line ranges, and flag counts for the
+                    # end-of-run summary. Independent of the dedup key above.
+                    if tool_call.fn_name in ("read_file", "semgrep_scan"):
+                        fpath = tool_arguments.get("path", "")
+                        if fpath:
+                            rel = str(fpath).removeprefix("/workspace/").removeprefix("/")
+                            files_visited.add(rel)
+                            if tool_call.fn_name == "read_file":
+                                offset = int(tool_arguments.get("offset", 0))
+                                limit = int(tool_arguments.get("limit", 2000))
+                                lines_read.setdefault(rel, []).append(
+                                    (offset + 1, offset + limit)
+                                )
+                    elif tool_call.fn_name == "flag_potential":
+                        flags_raised += 1
+
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
 
@@ -1600,7 +1802,6 @@ class NativeHunter:
                                 "tool_call": _serialize_tool_call(tool_call),
                                 "tool_output": tool_output,
                                 "tool_summary": tool_summary,
-                                "repeated_skip": False,
                             },
                         )
                     messages.append(
@@ -1646,6 +1847,43 @@ class NativeHunter:
                             transcript_summary=last_assistant_text[-500:],
                         )
                 continue
+
+            # Empty response: model sent no text and no tool calls.
+            # This happens mid-reasoning on some providers (reasoning content
+            # present but visible response empty). Nudge it to continue rather
+            # than treating it as a clean finish. Cap at 3 nudges.
+            if not last_assistant_text and not tool_calls_in_response:
+                empty_response_nudges += 1
+                if empty_response_nudges <= 3:
+                    finish_reason = last_finish_reason()
+                    logger.warning(
+                        "[%s] step=%d: empty response (nudge %d/3) finish_reason=%s output_tokens=%d reasoning=%s",
+                        self.ctx.file_path, step, empty_response_nudges,
+                        finish_reason or "unknown",
+                        last_output_tokens,
+                        repr(last_reasoning_content[:200]) if last_reasoning_content else "none",
+                    )
+                    trajectory.log(
+                        "nudge",
+                        {
+                            "step": step,
+                            "nudge": empty_response_nudges,
+                            "finish_reason": finish_reason,
+                        },
+                    )
+                    # `length` = ran out of output tokens; tell the model directly so
+                    # it stops running out of budget mid-thought. Anything else gets
+                    # the neutral nudge.
+                    if finish_reason == "length":
+                        nudge_text = (
+                            "Your last response was cut off (finish_reason=length) — "
+                            "you exhausted the output budget before emitting text or a "
+                            "tool call. Be concise and call a tool now."
+                        )
+                    else:
+                        nudge_text = "Continue your investigation. Use a tool to proceed."
+                    messages.append(ChatMessage("user", nudge_text))
+                    continue
 
             if last_assistant_text:
                 messages.append(ChatMessage("assistant", last_assistant_text))
@@ -1720,23 +1958,55 @@ class NativeHunter:
             if tool_call.fn_name in ("read_source_file", "read_file"):
                 offset = arguments.get("offset", 0)
                 limit = arguments.get("limit", 500)
+                start = arguments.get("start_line", offset + 1)
+                end = arguments.get("end_line", offset + limit)
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
                         "tool_name": tool_call.fn_name,
                         "file": arguments.get("path", ""),
-                        "start_line": arguments.get("start_line", offset + 1),
-                        "end_line": arguments.get("end_line", offset + limit),
+                        "start_line": start,
+                        "end_line": end,
                         "hunter_target": self.ctx.file_path,
                         "sandbox_id": sandbox_id,
                     },
                 )
+                logger.info(
+                    "[%s] read %s lines %s-%s",
+                    self.ctx.file_path,
+                    arguments.get("path", ""),
+                    start,
+                    end,
+                )
             elif tool_call.fn_name == "execute":
+                cmd = arguments.get("command", "")
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
                         "tool_name": "execute",
-                        "command": arguments.get("command", ""),
+                        "command": cmd,
+                        "hunter_target": self.ctx.file_path,
+                        "sandbox_id": sandbox_id,
+                    },
+                )
+                logger.info("[%s] $ %s", self.ctx.file_path, cmd[:200])
+            elif tool_call.fn_name in ("lookup_callers", "lookup_callees"):
+                func_name = arguments.get("func_name", "")
+                EventBus().emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool_name": tool_call.fn_name,
+                        "func_name": func_name,
+                        "hunter_target": self.ctx.file_path,
+                        "sandbox_id": sandbox_id,
+                    },
+                )
+                logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, func_name)
+            else:
+                EventBus().emit(
+                    EventType.TOOL_START,
+                    {
+                        "tool_name": tool_call.fn_name,
                         "hunter_target": self.ctx.file_path,
                         "sandbox_id": sandbox_id,
                     },
@@ -1989,6 +2259,31 @@ def build_hunter_agent(
     if seed_transcript:
         prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)
 
+    initial_user_message = f"Hunt for vulnerabilities in {ctx.file_path or 'unknown'}."
+    if ctx.callgraph is not None and ctx.file_path:
+        infos = ctx.callgraph.function_info.get(ctx.file_path, [])
+        if infos:
+            fn_lines = "\n".join(
+                f"  {fi.name} (lines {fi.start_line}-{fi.end_line})"
+                for fi in sorted(infos, key=lambda fi: fi.start_line)
+            )
+            initial_user_message += (
+                f"\n\nFunctions defined in this file ({len(infos)} total):\n{fn_lines}"
+                f"\n\nInvestigate every function above — prioritise security-sensitive "
+                f"names (validation, parsing, memory ops, auth)."
+            )
+        terminals = _terminal_functions_for_file(ctx.callgraph, ctx.file_path)
+        if terminals:
+            term_list = ", ".join(
+                f"{fi.name}:{fi.start_line}"
+                for fi in sorted(terminals, key=lambda fi: fi.start_line)
+            )
+            initial_user_message += (
+                f"\n\nPublic API / terminal nodes (not called by anything in the repo):\n  {term_list}"
+                f"\n\nThese are attacker entry points. Use lookup_callers on what they call "
+                f"to walk the full path inward."
+            )
+
     return NativeHunter(
         llm=llm,
         prompt=prompt,
@@ -1997,4 +2292,5 @@ def build_hunter_agent(
         max_steps=max_steps,
         agent_mode=agent_mode,
         budget_usd=budget_usd,
+        initial_user_message=initial_user_message,
     ), ctx
