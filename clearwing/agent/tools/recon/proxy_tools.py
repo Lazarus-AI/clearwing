@@ -149,9 +149,12 @@ def proxy_request(
         req = urllib.request.Request(
             url,
             data=body.encode("utf-8") if body else None,
-            headers=req_headers,
             method=method.upper(),
         )
+        # Request(headers=...) routes through add_header(), which title-cases
+        # names. Preserve the caller's exact spelling for application-layer
+        # header maps that are (incorrectly, but commonly) case-sensitive.
+        req.headers.update({str(name): str(value) for name, value in req_headers.items()})
 
         # Handle redirects
         if not follow_redirects:

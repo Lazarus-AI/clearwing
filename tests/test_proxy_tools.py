@@ -12,6 +12,7 @@ from clearwing.agent.tools.recon.proxy_tools import (
     proxy_clear_history,
     proxy_get_history,
     proxy_get_request,
+    proxy_request,
 )
 
 
@@ -131,6 +132,45 @@ class TestProxyHistory:
 
 
 class TestProxyTools:
+    def test_proxy_request_preserves_exact_header_case(self, monkeypatch):
+        captured = {}
+
+        class Response:
+            status = 200
+
+            @staticmethod
+            def getheaders():
+                return []
+
+            @staticmethod
+            def read():
+                return b"OK"
+
+        class Opener:
+            @staticmethod
+            def open(request, timeout):
+                captured["request"] = request
+                captured["timeout"] = timeout
+                return Response()
+
+        monkeypatch.setattr(
+            "clearwing.agent.tools.recon.proxy_tools.urllib.request.build_opener",
+            lambda *args: Opener(),
+        )
+
+        result = proxy_request(
+            method="POST",
+            url="http://target.example/functionRouter",
+            headers={
+                "spring.cloud.function.routing-expression": "proof",
+            },
+        )
+
+        assert result["status_code"] == 200
+        assert captured["timeout"] == 30
+        assert captured["request"].headers["spring.cloud.function.routing-expression"] == "proof"
+        assert "Spring.cloud.function.routing-expression" not in captured["request"].headers
+
     def test_get_proxy_tools_count(self):
         tools = get_proxy_tools()
         assert len(tools) == 6
