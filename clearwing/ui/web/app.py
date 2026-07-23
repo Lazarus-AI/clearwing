@@ -231,6 +231,8 @@ def create_app():
                     # the request body; a remote caller must never be able to
                     # bypass the exploit approval gate.
                     auto_approve_exploits=False,
+                    lhost=request_body.get("lhost", "host.docker.internal"),
+                    lport=request_body.get("lport", 9999),
                 )
                 operator = OperatorAgent(config)
                 result = await operator.arun()
