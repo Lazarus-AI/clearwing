@@ -91,9 +91,9 @@ class TestCrashClassifier:
     async def test_llm_tier_3_controlled(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '{"tier": 3, "rationale": "user input in crash address"}'
+        mock_response.first_text = '{"tier": 3, "rationale": "user input in crash address"}'
         mock_response.cost_usd = 0.01
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         classifier = CrashClassifier(llm=mock_llm)
         stderr = (
@@ -109,7 +109,7 @@ class TestCrashClassifier:
     @pytest.mark.asyncio
     async def test_llm_failure_stays_tier_2(self):
         mock_llm = AsyncMock()
-        mock_llm.aask = AsyncMock(side_effect=RuntimeError("LLM down"))
+        mock_llm.aask_text = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         classifier = CrashClassifier(llm=mock_llm)
         stderr = "==1== ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4"

@@ -125,8 +125,8 @@ class RevengReconstructor:
         user_msg = "\n".join(prompt_parts)
 
         try:
-            response = await self._llm.aask(
-                user_msg, system=RECONSTRUCTION_SYSTEM_PROMPT,
+            response = await self._llm.aask_text(
+                system=RECONSTRUCTION_SYSTEM_PROMPT, user=user_msg,
             )
             text = response.first_text if hasattr(response, "first_text") else str(response)
             return self._parse_response(text, batch)

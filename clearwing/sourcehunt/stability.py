@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
 from .poc_runner import PocRunner
 from .state import Finding, StabilityResult
@@ -260,6 +259,8 @@ class StabilityVerifier:
                 system=HARDEN_SYSTEM_PROMPT, user=prompt,
             )
             hardened_poc = (response.first_text or "").strip()
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.warning("Hardening LLM call failed", exc_info=True)
             return replace(result, hardened=True, hardening_improved=False)

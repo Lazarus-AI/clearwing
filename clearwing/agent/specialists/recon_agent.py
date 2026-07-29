@@ -45,7 +45,7 @@ class ReconAgent:
             return RECON_PROMPT.format(target=state.get("target", "unknown"))
 
         return build_react_graph(
-            llm_with_tools=llm.bind_tools(tools),
+            llm_with_tools=llm,
             tools=tools,
             system_prompt_fn=system_prompt,
             state_schema=AgentState,

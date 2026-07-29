@@ -193,8 +193,8 @@ class TestRevengReconstructor:
     async def test_reconstruct_single_function(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '[{"original_name": "FUN_00401234", "reconstructed_name": "parse_input", "source_code": "void parse_input(char *buf) {}", "confidence": 0.8, "notes": "parses user input"}]'
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = '[{"original_name": "FUN_00401234", "reconstructed_name": "parse_input", "source_code": "void parse_input(char *buf) {}", "confidence": 0.8, "notes": "parses user input"}]'
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         reconstructor = RevengReconstructor(mock_llm)
         decompilation = DecompilationResult(
@@ -227,7 +227,7 @@ class TestRevengReconstructor:
     @pytest.mark.asyncio
     async def test_reconstruct_llm_failure_degrades(self):
         mock_llm = AsyncMock()
-        mock_llm.aask = AsyncMock(side_effect=RuntimeError("LLM down"))
+        mock_llm.aask_text = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         reconstructor = RevengReconstructor(mock_llm)
         decompilation = DecompilationResult(
@@ -250,8 +250,8 @@ class TestRevengReconstructor:
     async def test_batch_size_respected(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = "[]"
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = "[]"
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         reconstructor = RevengReconstructor(mock_llm)
         functions = [
@@ -264,7 +264,7 @@ class TestRevengReconstructor:
 
         await reconstructor.areconstruct(decompilation, StaticAnalysisResult())
         # 20 functions / batch_size 8 = 3 LLM calls
-        assert mock_llm.aask.call_count == 3
+        assert mock_llm.aask_text.call_count == 3
 
 
 # --- RevengPipeline tests ----------------------------------------------------

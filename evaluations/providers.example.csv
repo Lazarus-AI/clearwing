@@ -1,0 +1,8 @@
+# Multi-provider configuration for run_pool.sh
+# Format: base_url,api_key,model_name
+# Copy to providers.csv and fill in real credentials — do NOT commit providers.csv
+#
+https://api.openai.com/v1,sk-proj-REPLACE_ME,gpt-4o
+https://api.openai.com/v1,sk-proj-REPLACE_ME,gpt-4o-mini
+https://api.anthropic.com/v1,ant-REPLACE_ME,claude-3-5-sonnet-20241022
+https://gpu-node2.internal:8080/v1,REPLACE_ME,llama-3.3-70b-instruct

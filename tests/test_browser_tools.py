@@ -1,11 +1,20 @@
 """Tests for browser tools module (unit tests, no real browser)."""
 
+import pytest
+
 from clearwing.agent.tools.recon.browser_tools import (
     _browser_state,
     browser_close,
     browser_list_tabs,
     get_browser_tools,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_browser_state():
+    browser_close.invoke({})
+    yield
+    browser_close.invoke({})
 
 
 class TestGetBrowserTools:

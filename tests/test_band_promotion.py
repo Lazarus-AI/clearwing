@@ -8,17 +8,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from clearwing.runners.parallel.executor import TargetResult
 from clearwing.sourcehunt.pool import (
     BAND_ORDER,
+    MAX_TRANSCRIPT_FINDINGS,
     BandBudget,
     HunterPool,
     HuntPoolConfig,
     WorkItem,
+    _extract_transcript,
     _file_rank,
     _redundancy_for_rank,
     promotion_decision,
 )
-from clearwing.sourcehunt.state import FileTarget
+from clearwing.sourcehunt.state import FileTarget, Finding
 
 
 def _make_file_target(
@@ -371,6 +374,71 @@ class TestSeedTranscript:
             session_id="s1",
         )
         assert "previous investigation" not in hunter.prompt
+
+
+class TestExtractTranscript:
+    def test_includes_every_finding_not_just_the_first_few(self):
+        findings = [
+            {
+                "file": "jwt.py",
+                "line_number": 10 + i,
+                "description": f"Issue number {i} with enough padding text to matter",
+            }
+            for i in range(5)
+        ]
+        result = TargetResult(target="jwt.py", status="completed", findings=findings)
+        transcript = _extract_transcript(result)
+
+        for i in range(5):
+            assert f"jwt.py:{10 + i}" in transcript
+            assert f"Issue number {i}" in transcript
+
+    def test_caps_with_explicit_overflow_note_instead_of_silent_drop(self):
+        findings = [
+            {"file": "big.py", "line_number": i, "description": f"finding {i}"}
+            for i in range(MAX_TRANSCRIPT_FINDINGS + 5)
+        ]
+        result = TargetResult(target="big.py", status="completed", findings=findings)
+        transcript = _extract_transcript(result)
+
+        assert "and 5 more findings" in transcript
+        assert "big.py:0" in transcript
+        assert f"big.py:{MAX_TRANSCRIPT_FINDINGS - 1}" in transcript
+
+    def test_no_findings_falls_back_to_status_summary(self):
+        result = TargetResult(
+            target="x.py", status="completed", stop_reason="max_steps", findings=[]
+        )
+        transcript = _extract_transcript(result)
+        assert "status=completed" in transcript
+        assert "max_steps" in transcript
+
+    def test_handles_real_finding_dataclass_instances(self):
+        # result.findings is annotated list[dict], but in production the
+        # objects that actually flow through here are Finding dataclass
+        # instances (TargetResult is built with cast(list[dict], findings),
+        # which is a no-op at runtime). A dict-only implementation would
+        # silently degrade every entry to "?:?" with no description text.
+        findings = [
+            Finding(
+                file="jwt.py",
+                line_number=61,
+                description="JWT signature verification is disabled.",
+            ),
+            Finding(
+                file="jwt.py",
+                line_number=54,
+                description="SSL certificate verification is disabled.",
+            ),
+        ]
+        result = TargetResult(target="jwt.py", status="completed", findings=findings)
+        transcript = _extract_transcript(result)
+
+        assert "jwt.py:61" in transcript
+        assert "JWT signature verification is disabled." in transcript
+        assert "jwt.py:54" in transcript
+        assert "SSL certificate verification is disabled." in transcript
+        assert "?:?" not in transcript
 
 
 # --- Pool band wiring tests --------------------------------------------------

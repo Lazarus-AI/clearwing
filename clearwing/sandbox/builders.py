@@ -44,7 +44,8 @@ class BuildRecipe:
 
 # Per-language base images. gcc:13 ships libasan/libubsan; rust uses the
 # nightly image for sanitizer support; python doesn't need a build but does
-# benefit from gcc for native extensions.
+# benefit from gcc for native extensions. unknown uses debian:11-slim (bullseye)
+# which has ltrace; debian:12 (bookworm) dropped it.
 DEFAULT_BASE_IMAGES = {
     "c": "gcc:13",
     "cpp": "gcc:13",
@@ -53,7 +54,7 @@ DEFAULT_BASE_IMAGES = {
     "python": "python:3.12-slim",
     "java": "eclipse-temurin:21",
     "node": "node:20-slim",
-    "unknown": "debian:12-slim",
+    "unknown": "debian:11-slim",
 }
 
 

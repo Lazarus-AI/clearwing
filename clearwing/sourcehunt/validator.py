@@ -14,14 +14,18 @@ import json
 import logging
 import re
 from itertools import islice
-from typing import Any, cast
+from typing import Any, Literal, cast
+
+from pydantic import BaseModel, Field
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
+from clearwing.llm.native import response_text
 
 from .state import (
     EVIDENCE_LEVELS,
+    Axes,
     AxisResult,
     EvidenceLevel,
     Finding,
@@ -34,14 +38,6 @@ logger = logging.getLogger(__name__)
 _LINE_REF_RE = re.compile(r"\blines?\s+(\d+)(?:\s*-\s*(\d+))?")
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
-
-_VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
-
-_VALID_CONFIDENCES = {"high", "medium", "low"}
-
-_VALID_BOUNDARIES = {
-    "privilege", "tenant", "origin", "user", "kernel", "sandbox", "none",
-}
 
 
 # --- Prompts -----------------------------------------------------------------
@@ -83,14 +79,14 @@ If a PoC is provided, you MUST attempt to reproduce it. Report the exact result.
 ## OUTPUT — return ONLY this JSON:
 {
   "axes": {
-    "REAL": {"passed": true|false, "confidence": "high|medium|low", \
+    "real": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."},
-    "TRIGGERABLE": {"passed": true|false, "confidence": "high|medium|low", \
+    "triggerable": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."},
-    "IMPACTFUL": {"passed": true|false, "confidence": "high|medium|low", \
+    "impactful": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "...", \
 "boundary_crossed": "privilege|tenant|origin|user|kernel|sandbox|none"},
-    "GENERAL": {"passed": true|false, "confidence": "high|medium|low", \
+    "general": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."}
   },
   "advance": true|false,
@@ -119,9 +115,9 @@ If BOTH pass, the finding advances to full validation. If either fails, reject.
 Return ONLY this JSON:
 {
   "axes": {
-    "REAL": {"passed": true|false, "confidence": "high|medium|low", \
+    "real": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."},
-    "TRIGGERABLE": {"passed": true|false, "confidence": "high|medium|low", \
+    "triggerable": {"passed": true|false, "confidence": "high|medium|low", \
 "rationale": "..."}
   },
   "advance": true|false,
@@ -132,6 +128,116 @@ Return ONLY this JSON:
   "tie_breaker": "what evidence resolved it",
   "duplicate_cve": null
 }"""
+
+
+# --- Enforced structured output schema ---------------------------------------
+# The prompts already ask for exactly this JSON; passing it as a schema_model to
+# aask_json turns it into a genai-pyo3 response_json_spec so the gateway emits it
+# via constrained decoding. That eliminates the "empty first_text / no JSON"
+# failure mode reasoning models hit with free-form aask_text. The per-axis value
+# is the shared AxisResult (state.py) — used verbatim by the domain verdict too,
+# so there is no wire-to-domain axis mapper. This wire container only makes real
+# + triggerable required and impactful/general optional (the quick pass omits
+# them); the domain Axes container is all-optional to also cover the error case.
+
+
+class _AxesSchema(BaseModel):
+    """The four validation axes.
+
+    real and triggerable are always required. impactful and general are omitted
+    on the two-axis quick pass, so they are optional here.
+    """
+
+    real: AxisResult = Field(
+        description=(
+            "Does the bug exist in the code as described? Reproduce the crash "
+            "or behavior if a PoC is provided."
+        )
+    )
+    triggerable: AxisResult = Field(
+        description=(
+            "Can attacker-controlled input reach this code path in a production "
+            "deployment, or do callers/entry points prevent it?"
+        )
+    )
+    impactful: AxisResult | None = Field(
+        default=None,
+        description=(
+            "Does the bug cross a meaningful security boundary? Omit on the "
+            "quick pass."
+        ),
+    )
+    general: AxisResult | None = Field(
+        default=None,
+        description=(
+            "Is it exploitable in realistic default configurations rather than "
+            "exotic setups? Omit on the quick pass."
+        ),
+    )
+
+
+class _VerdictSchema(BaseModel):
+    """Independent validator verdict for a single reported finding.
+
+    The model produces only the judgment fields below. Domain-owned fields
+    (finding_id, the derived severity, raw_response, and the patch-oracle
+    results) are supplied by to_verdict, not by the model.
+    """
+
+    axes: _AxesSchema = Field(description="Per-axis judgments.")
+    advance: bool = Field(
+        description=(
+            "True only if all provided axes pass, or real + impactful pass and "
+            "triggerable + general have confidence >= medium."
+        )
+    )
+    severity: Literal["critical", "high", "medium", "low", "info"] = Field(
+        description="Validated severity of the finding."
+    )
+    evidence_level: Literal[
+        "static_corroboration", "crash_reproduced", "root_cause_explained"
+    ] = Field(description="Strength of the evidence gathered during validation.")
+    pro_argument: str = Field(
+        default="", description="Strongest case FOR the vulnerability."
+    )
+    counter_argument: str = Field(
+        default="", description="Strongest case AGAINST the vulnerability."
+    )
+    tie_breaker: str = Field(
+        default="", description="The single piece of evidence that resolved it."
+    )
+    duplicate_cve: str | None = Field(
+        default=None,
+        description="CVE id if this duplicates a known issue, else null.",
+    )
+
+    def to_verdict(self, finding_id: str) -> ValidatorVerdict:
+        """Map this validated wire object to the domain ValidatorVerdict.
+
+        The LLM only produces judgment fields; the domain fields it must not
+        own — finding_id, severity_validated (derived), raw_response, and the
+        patch-oracle results (a later stage) — are supplied here, not by the
+        model. The axes are the shared AxisResult objects, passed straight into
+        the domain container; only the container shape differs (this wire schema
+        requires real+triggerable, the domain Axes is all-optional).
+        """
+        axes = Axes(
+            real=self.axes.real,
+            triggerable=self.axes.triggerable,
+            impactful=self.axes.impactful,
+            general=self.axes.general,
+        )
+        return ValidatorVerdict(
+            finding_id=finding_id,
+            axes=axes,
+            advance=self.advance,
+            severity_validated=self.severity if self.advance else None,
+            evidence_level=self.evidence_level,
+            pro_argument=self.pro_argument,
+            counter_argument=self.counter_argument,
+            tie_breaker=self.tie_breaker,
+            duplicate_cve=self.duplicate_cve,
+        )
 
 
 # --- Validator class ---------------------------------------------------------
@@ -175,16 +281,27 @@ class Validator:
     ) -> ValidatorVerdict:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
+
+        # Enforced structured output. response_schema becomes a genai-pyo3
+        # response_json_spec (constrained decoding), so the model emits a JSON
+        # object matching _VerdictSchema — even reasoning models that would
+        # otherwise return empty text under free-form prompting. We validate to
+        # the typed wire object and map it to the domain verdict directly (no
+        # dict round-trip). Requires a model/gateway with constrained decoding.
         try:
             response = await self.llm.aask_text(
-                system=system_prompt, user=user_msg,
+                system=system_prompt,
+                user=user_msg,
+                response_schema=_VerdictSchema,
+                response_schema_name="ValidatorVerdict",
             )
-            content = response.first_text or ""
+            schema = _VerdictSchema.model_validate_json(response_text(response))
+            verdict = schema.to_verdict(finding.get("id", "unknown"))
+        except BudgetExceeded:
+            raise
         except Exception as e:
             logger.warning("Validator LLM call failed", exc_info=True)
-            return self._error_verdict(finding, f"validator error: {e}")
-
-        verdict = self._parse_response(finding, content)
+            verdict = self._error_verdict(finding, f"validator error: {e}")
 
         EventBus().emit_validation_result(ValidationResultPayload(
             finding_id=verdict.finding_id,
@@ -290,70 +407,12 @@ class Validator:
             merged[-1] = (prev_start, max(prev_end, end))
         return merged
 
-    def _parse_response(
-        self, finding: Finding, content: str,
-    ) -> ValidatorVerdict:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            logger.warning(
-                "Validator response had no JSON; got: %s", content[:300],
-            )
-            return self._error_verdict(finding, "no JSON in response")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return self._error_verdict(finding, "JSON parse failed")
-
-        axes = self._parse_axes(parsed.get("axes", {}))
-        advance = bool(parsed.get("advance", False))
-
-        severity = parsed.get("severity")
-        if severity not in _VALID_SEVERITIES:
-            severity = None
-
-        evidence_level = parsed.get("evidence_level", "suspicion")
-        if evidence_level not in EVIDENCE_LEVELS:
-            evidence_level = "suspicion"
-
-        return ValidatorVerdict(
-            finding_id=finding.get("id", "unknown"),
-            axes=axes,
-            advance=advance,
-            severity_validated=severity if advance else None,
-            evidence_level=evidence_level,
-            pro_argument=str(parsed.get("pro_argument", "")),
-            counter_argument=str(parsed.get("counter_argument", "")),
-            tie_breaker=str(parsed.get("tie_breaker", "")),
-            duplicate_cve=parsed.get("duplicate_cve"),
-            raw_response=content,
-        )
-
-    def _parse_axes(self, axes_raw: dict) -> dict[str, AxisResult]:
-        axes: dict[str, AxisResult] = {}
-        for name in ("REAL", "TRIGGERABLE", "IMPACTFUL", "GENERAL"):
-            data = axes_raw.get(name)
-            if data and isinstance(data, dict):
-                conf = data.get("confidence", "low")
-                if conf not in _VALID_CONFIDENCES:
-                    conf = "low"
-                boundary = data.get("boundary_crossed", "")
-                if boundary and boundary not in _VALID_BOUNDARIES:
-                    boundary = ""
-                axes[name] = AxisResult(
-                    axis=name,
-                    passed=bool(data.get("passed", False)),
-                    confidence=conf,
-                    rationale=str(data.get("rationale", ""))[:500],
-                    boundary_crossed=boundary,
-                )
-        return axes
-
     def _error_verdict(
         self, finding: Finding, reason: str,
     ) -> ValidatorVerdict:
         return ValidatorVerdict(
             finding_id=finding.get("id", "unknown"),
-            axes={},
+            axes=Axes(),
             advance=False,
             severity_validated=None,
             evidence_level="suspicion",

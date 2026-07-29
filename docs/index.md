@@ -28,6 +28,7 @@ Clearwing is a dual-mode offensive-security tool:
 |---|---|
 | [**Quickstart**](quickstart.md) | Install, run a network scan, run a sourcehunt pass, read the results |
 | [**LLM providers**](providers.md) | OpenRouter / Ollama / LM Studio / vLLM / Together / Groq / DeepSeek / OpenAI — CLI + env + config.yaml recipes for each |
+| [**Sourcehunt evaluation and rollout**](eval_rollout.md) | Run the paired proof/legacy empirical campaign, evaluate cutover gates, and roll out proof flow safely |
 | [**Architecture**](architecture.md) | How the ReAct loops, sandboxes, capabilities layer, Finding dataclass, and knowledge graph fit together |
 | [**CLI reference**](cli.md) | Every `clearwing <subcommand>` flag, with examples |
 | [**API reference**](api.md) | `clearwing.findings.Finding`, the sourcehunt runner, auto-generated from docstrings |

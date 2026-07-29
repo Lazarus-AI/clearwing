@@ -16,11 +16,14 @@ intentionally NOT counted here.
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
+from clearwing.agent.tooling import tool
 from clearwing.agent.tools import get_all_tools
 
 # Locked baseline as of Phase 4 start. Update this only when deliberately
 # adding or removing a tool from the network-agent registry.
-EXPECTED_TOOL_COUNT = 117
+EXPECTED_TOOL_COUNT = 120
 
 
 EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
@@ -42,6 +45,10 @@ EXPECTED_TOOL_NAMES: frozenset[str] = frozenset(
         "kali_execute",
         "kali_install_tool",
         "kali_cleanup",
+        # callback_listener
+        "start_callback_listener",
+        "check_callback_received",
+        "reset_callback_listeners",
         # reporting_tools
         "generate_report",
         "save_report",
@@ -90,3 +97,30 @@ class TestToolRegistry:
         names = [t.name for t in tools]
         dupes = {n for n in names if names.count(n) > 1}
         assert not dupes, f"duplicate tool names in registry: {dupes}"
+
+    def test_all_tools_expose_real_pydantic_input_models(self):
+        tools = get_all_tools()
+        for registered_tool in tools:
+            args_schema = registered_tool.args_schema
+            assert isinstance(args_schema, type)
+            assert issubclass(args_schema, BaseModel)
+            assert registered_tool.input_schema == args_schema.model_json_schema()
+
+    def test_decorator_preserves_generated_schema_semantics(self):
+        @tool
+        def generated_schema_example(
+            path: str,
+            limit: int = 5,
+            tags: list[str] | None = None,
+        ) -> None:
+            """Exercise required, defaulted, and nullable generated fields."""
+
+        schema = generated_schema_example.input_schema
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == ["path"]
+        assert schema["properties"]["limit"]["default"] == 5
+        assert schema["properties"]["tags"]["default"] is None
+        assert {branch["type"] for branch in schema["properties"]["tags"]["anyOf"]} == {
+            "array",
+            "null",
+        }

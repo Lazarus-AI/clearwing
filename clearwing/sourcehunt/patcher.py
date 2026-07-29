@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
 from .state import EvidenceLevel, Finding, evidence_at_or_above
 
@@ -131,6 +131,8 @@ class AutoPatcher:
         try:
             response = await self.llm.aask_text(system=PATCHER_SYSTEM_PROMPT, user=user_msg)
             content = response.first_text or ""
+        except BudgetExceeded:
+            raise
         except Exception as e:
             logger.warning("Patcher LLM call failed", exc_info=True)
             return PatchAttempt(

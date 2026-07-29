@@ -18,6 +18,7 @@ from pathlib import Path
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
+from clearwing.analysis.source_analyzer import _GitignoreMatcher
 
 from .callgraph import CallGraph, CallGraphBuilder
 from .semgrep_sidecar import SemgrepSidecar
@@ -155,7 +156,12 @@ def _file_defines_constants(content_sample: str, language: str) -> bool:
     return False
 
 
-def _count_imports_by(repo_path: str, file_path: str, language: str) -> int:
+def _count_imports_by(
+    repo_path: str,
+    file_path: str,
+    language: str,
+    gitignore: _GitignoreMatcher | None = None,
+) -> int:
     """Cheap heuristic for `imports_by`: grep the repo for references to this
     file's basename. Used as the v0.1 influence signal until v0.2's tree-sitter
     callgraph lands.
@@ -180,10 +186,17 @@ def _count_imports_by(repo_path: str, file_path: str, language: str) -> int:
 
     count = 0
     for dirpath, dirnames, filenames in os.walk(repo_path):
-        dirnames[:] = [d for d in dirnames if d not in SourceAnalyzer.SKIP_DIRS]
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in SourceAnalyzer.SKIP_DIRS
+            and not (gitignore and gitignore.matches_dir(os.path.join(dirpath, d)))
+        ]
         for fname in filenames:
             other = os.path.join(dirpath, fname)
             if other == file_path:
+                continue
+            if gitignore and gitignore.matches_file(other):
                 continue
             try:
                 if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
@@ -226,6 +239,7 @@ class Preprocessor:
         ingest_fuzz_corpora: bool = False,  # v0.2 seam
         run_taint: bool = False,  # v0.4: tree-sitter taint analysis
         max_imports_by_files: int = 1000,  # cap the imports_by walk
+        respect_gitignore: bool = False,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -237,6 +251,7 @@ class Preprocessor:
         self.ingest_fuzz_corpora = ingest_fuzz_corpora
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
+        self.respect_gitignore = respect_gitignore
         self._analyzer: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
@@ -245,7 +260,11 @@ class Preprocessor:
 
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")
-        self._analyzer = SourceAnalyzer(repo_path=repo_path)
+        self._analyzer = SourceAnalyzer(
+            repo_path=repo_path,
+            respect_gitignore=self.respect_gitignore,
+        )
+        gitignore = _GitignoreMatcher.from_repo(repo_path) if self.respect_gitignore else None
         analysis_result = self._analyzer.analyze()
         static_findings = analysis_result.findings
         logger.info(
@@ -313,7 +332,7 @@ class Preprocessor:
             # v0.1 imports_by — capped to keep large repos snappy
             imports_by = 0
             if len(file_targets) < imports_by_budget:
-                imports_by = _count_imports_by(repo_path, abs_path, language)
+                imports_by = _count_imports_by(repo_path, abs_path, language, gitignore)
 
             target: FileTarget = {
                 "path": rel_path,
@@ -364,7 +383,7 @@ class Preprocessor:
 
         if self.run_semgrep:
             try:
-                sidecar = SemgrepSidecar()
+                sidecar = SemgrepSidecar(respect_gitignore=self.respect_gitignore)
                 if sidecar.available:
                     semgrep_findings_objs = sidecar.run_scan(repo_path)
                     semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]

@@ -70,12 +70,17 @@ class ContextSummarizer:
             f"[{type(m).__name__}]: {m.content}" for m in to_summarize if hasattr(m, "content")
         )
 
-        summary_input = [
-            {"role": "user", "content": f"{_SUMMARIZE_PROMPT}\n\n---\n\n{text_block}"},
-        ]
+        # Native LLM surface: `aask_text` returns a genai ``ChatResponse``.
+        # This works against both today's ``ChatModel`` (which delegates
+        # ``aask_text`` to its underlying client) and a bare ``AsyncLLMClient``
+        # once the runtime is repointed off the ChatModel facade.
+        from clearwing.llm.native import response_text
 
-        summary_response = await llm.ainvoke(summary_input)
-        summary_text = getattr(summary_response, "content", str(summary_response))
+        summary_response = await llm.aask_text(
+            system=_SUMMARIZE_PROMPT,
+            user=text_block,
+        )
+        summary_text = response_text(summary_response)
 
         # Reconstruct the message list.
         result: list = [

@@ -44,6 +44,8 @@ class TestOperatorConfig:
         assert cfg.auto_approve_scans is True
         assert cfg.auto_approve_exploits is False
         assert cfg.cost_limit == 0.0
+        assert cfg.lhost == "host.docker.internal"
+        assert cfg.lport == 9999
 
     def test_custom_values(self):
         cfg = OperatorConfig(
@@ -110,6 +112,8 @@ class TestFormatGoals:
         assert "10.0.0.1" in text
         assert "Scan for open ports" in text
         assert "1." in text
+        assert "start_callback_listener" in text
+        assert "records the request body" in text
 
     def test_multiple_goals(self):
         cfg = OperatorConfig(
@@ -189,8 +193,8 @@ class TestDecideNext:
 
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.content = "GOALS_COMPLETE"
-        mock_llm.ainvoke.return_value = mock_response
+        mock_response.first_text = "GOALS_COMPLETE"
+        mock_llm.aask_text.return_value = mock_response
 
         decision = _run(op._adecide_next(mock_llm, "All ports scanned, report generated."))
         assert decision.startswith("GOALS_COMPLETE")
@@ -201,8 +205,8 @@ class TestDecideNext:
 
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.content = "ESCALATE: What are the login credentials?"
-        mock_llm.ainvoke.return_value = mock_response
+        mock_response.first_text = "ESCALATE: What are the login credentials?"
+        mock_llm.aask_text.return_value = mock_response
 
         decision = _run(op._adecide_next(mock_llm, "I need credentials to log in."))
         assert decision.startswith("ESCALATE:")
@@ -214,8 +218,8 @@ class TestDecideNext:
 
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.content = "Now scan for vulnerabilities on the open ports."
-        mock_llm.ainvoke.return_value = mock_response
+        mock_response.first_text = "Now scan for vulnerabilities on the open ports."
+        mock_llm.aask_text.return_value = mock_response
 
         decision = _run(op._adecide_next(mock_llm, "Found ports 22, 80, 443 open."))
         assert "scan" in decision.lower() or "vulnerabilities" in decision.lower()
@@ -225,7 +229,7 @@ class TestDecideNext:
         op = OperatorAgent(cfg)
 
         mock_llm = AsyncMock()
-        mock_llm.ainvoke.side_effect = RuntimeError("API error")
+        mock_llm.aask_text.side_effect = RuntimeError("API error")
 
         decision = _run(op._adecide_next(mock_llm, "Agent output"))
         assert "Continue" in decision
@@ -541,6 +545,7 @@ class TestOperatorRun:
         result = op.run()
 
         assert result.turns == 3
+        assert result.status == "max_turns"
         assert "max turns" in result.error.lower()
 
     @patch(

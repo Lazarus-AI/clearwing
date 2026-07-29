@@ -51,11 +51,13 @@ class SemgrepSidecar:
         extra_args: list[str] | None = None,
         binary: str = "semgrep",
         timeout_seconds: int | None = None,
+        respect_gitignore: bool = False,
     ):
         self.config = config
         self.extra_args = extra_args or []
         self.binary = binary
         self.timeout_seconds = timeout_seconds or SEMGREP_TIMEOUT_SECONDS
+        self.respect_gitignore = respect_gitignore
 
     @property
     def available(self) -> bool:
@@ -72,20 +74,18 @@ class SemgrepSidecar:
             logger.debug("Semgrep binary not found; skipping")
             return []
 
-        cmd = (
-            [
-                self.binary,
-                "scan",
-                "--json",
-                "--config",
-                self.config,
-                "--quiet",
-                "--no-git-ignore",  # also scan ignored files — v0.1 choice
-                "--skip-unknown-extensions",
-            ]
-            + self.extra_args
-            + [repo_path]
-        )
+        cmd = [
+            self.binary,
+            "scan",
+            "--json",
+            "--config",
+            self.config,
+            "--quiet",
+            "--skip-unknown-extensions",
+        ]
+        if not self.respect_gitignore:
+            cmd.append("--no-git-ignore")  # also scan ignored files — v0.1 choice
+        cmd = cmd + self.extra_args + [repo_path]
 
         try:
             proc = subprocess.run(

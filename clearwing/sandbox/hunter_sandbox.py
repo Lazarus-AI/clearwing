@@ -14,8 +14,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
-import platform
 import shutil
 import tempfile
 
@@ -40,6 +40,8 @@ class HunterSandbox:
     """
 
     IMAGE_NAME_PREFIX = "clearwing-sourcehunt"
+    AUTO_CPU_CAP = 3.0
+    MIN_CPU_LIMIT = 0.5
 
     # Default "extra" variants to build alongside the primary. These let
     # a single HunterSandbox own both an ASan+UBSan image and an MSan
@@ -63,7 +65,9 @@ class HunterSandbox:
         build_recipe: BuildRecipe | None = None,
         deep_agent_mode: bool = False,
         post_install_commands: list[str] | None = None,
+        default_cpus: float | None = None,
     ):
+        self._validate_cpu_limit(default_cpus, name="default_cpus")
         self.repo_path = os.path.abspath(repo_path)
         self.languages = languages or []
         self.sanitizers = sanitizers or ["asan", "ubsan"]
@@ -88,6 +92,76 @@ class HunterSandbox:
         # Variant image map — {variant_key: image_tag}
         self._variant_images: dict[str, str] = {}
         self._spawned: list[SandboxContainer] = []
+        self._default_cpus = None if default_cpus is None else float(default_cpus)
+        self._resolved_default_cpus: float | None = None
+        self._available_cpus: float | None = None
+        self._cpu_count_source = ""
+
+    @staticmethod
+    def _validate_cpu_limit(cpus: float | None, *, name: str = "cpus") -> None:
+        if cpus is None:
+            return
+        if not math.isfinite(cpus) or cpus < 0:
+            raise ValueError(f"{name} must be a finite number greater than or equal to 0")
+
+    @property
+    def available_cpus(self) -> float:
+        """Logical CPUs available to the Docker daemon, with portable fallbacks."""
+        if self._available_cpus is None:
+            self._available_cpus, self._cpu_count_source = self._detect_available_cpus()
+        return self._available_cpus
+
+    @property
+    def default_cpu_limit(self) -> float:
+        """Resolve the configured or automatic per-container CPU limit."""
+        if self._default_cpus is not None:
+            return self._default_cpus
+        if self._resolved_default_cpus is None:
+            available = self.available_cpus
+            if available <= 1.0:
+                limit = self.MIN_CPU_LIMIT
+            else:
+                limit = min(self.AUTO_CPU_CAP, available - 1.0)
+            self._resolved_default_cpus = limit
+            logger.info(
+                "HunterSandbox CPU limit auto-selected: %.2f (%s reports %.2f logical CPUs)",
+                limit,
+                self._cpu_count_source,
+                available,
+            )
+        return self._resolved_default_cpus
+
+    def _detect_available_cpus(self) -> tuple[float, str]:
+        try:
+            daemon_cpus = self._get_client().info().get("NCPU")
+            if (
+                isinstance(daemon_cpus, (int, float))
+                and not isinstance(daemon_cpus, bool)
+                and math.isfinite(daemon_cpus)
+                and daemon_cpus > 0
+            ):
+                return float(daemon_cpus), "Docker daemon"
+        except Exception:
+            logger.debug("Could not query Docker daemon CPU count", exc_info=True)
+
+        try:
+            get_affinity = getattr(os, "sched_getaffinity", None)
+            affinity = get_affinity(0) if get_affinity is not None else None
+            if affinity:
+                return float(len(affinity)), "process affinity"
+        except OSError:
+            pass
+
+        system_cpus = os.cpu_count()
+        if system_cpus is not None and system_cpus > 0:
+            return float(system_cpus), "host"
+        return 1.0, "fallback"
+
+    def _resolve_cpu_limit(self, cpus: float | None) -> float:
+        if cpus is None:
+            return self.default_cpu_limit
+        self._validate_cpu_limit(cpus)
+        return float(cpus)
 
     # --- Lifecycle ----------------------------------------------------------
 
@@ -153,7 +227,7 @@ class HunterSandbox:
                 ",".join(sanitizers),
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64")
+                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64", network_mode="host")
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
@@ -169,7 +243,7 @@ class HunterSandbox:
         scratch_mount: bool = True,
         variant: list[str] | None = None,
         writable_workspace: bool = False,
-        cpus: float = 0.0,
+        cpus: float | None = None,
         runtime: str | None = None,
     ) -> SandboxContainer:
         """Start a fresh container from one of the built variant images.
@@ -190,7 +264,8 @@ class HunterSandbox:
             writable_workspace: If True, copy the source tree into the
                 container instead of bind-mounting it read-only. The agent
                 can then modify source, recompile, and use git diff.
-            cpus: CPU limit (0 = no limit). Passed to SandboxConfig.
+            cpus: CPU limit. ``None`` uses the manager default, while 0
+                explicitly disables the limit. Passed to SandboxConfig.
 
         Returns a SandboxContainer ready for exec/write/read.
         """
@@ -233,13 +308,14 @@ class HunterSandbox:
         # "Decoding seccomp profile failed: invalid character '/'..."
         seccomp_json = json.dumps(get_seccomp_profile("hunter"))
 
+        resolved_cpus = self._resolve_cpu_limit(cpus)
         cfg = SandboxConfig(
             image=image_tag,
             network_mode="none",
             mounts=mounts,
             memory_mb=memory_mb,
             cpu_shares=1024,
-            cpus=cpus,
+            cpus=resolved_cpus,
             timeout_seconds=timeout_seconds,
             env=env,
             working_dir="/workspace",

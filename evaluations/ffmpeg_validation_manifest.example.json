@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "commands": [
+    {
+      "name": "ffmpeg-h264-trigger",
+      "action_template": "harness",
+      "obligation_predicate": "concrete_trigger_satisfies_path",
+      "candidate_mechanism": "live_identifier_aliases_reserved_sentinel",
+      "command": [
+        "./ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        "proof-input.h264",
+        "-f",
+        "null",
+        "-"
+      ],
+      "repeats": 3,
+      "timeout_seconds": 120,
+      "success_condition": "sanitizer",
+      "evidence_kind": "sanitizer_crash",
+      "metadata": {
+        "input_origin": "operator-supplied retained trigger",
+        "build": "production FFmpeg CLI with ASan and UBSan"
+      }
+    },
+    {
+      "name": "ffmpeg-h264-realistic-config",
+      "action_template": "integration_test",
+      "obligation_predicate": "behavior_occurs_in_realistic_configuration",
+      "candidate_mechanism": "live_identifier_aliases_reserved_sentinel",
+      "command": [
+        "./ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        "proof-input.h264",
+        "-f",
+        "null",
+        "-"
+      ],
+      "repeats": 3,
+      "timeout_seconds": 120,
+      "success_condition": "sanitizer",
+      "evidence_kind": "sanitizer_crash",
+      "metadata": {
+        "configuration": "h264 decoder enabled in the normal FFmpeg CLI"
+      }
+    },
+    {
+      "name": "ffmpeg-h264-asan",
+      "action_template": "sanitizer_run",
+      "obligation_predicate": "runtime_confirms_unsafe_memory_access",
+      "candidate_mechanism": "live_identifier_aliases_reserved_sentinel",
+      "command": [
+        "./ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        "proof-input.h264",
+        "-f",
+        "null",
+        "-"
+      ],
+      "repeats": 3,
+      "timeout_seconds": 120,
+      "success_condition": "sanitizer",
+      "metadata": {
+        "scope": "runtime memory behavior only"
+      }
+    }
+  ]
+}

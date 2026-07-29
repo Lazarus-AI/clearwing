@@ -31,10 +31,10 @@ class MCPServer:
         schema = getattr(tool, "input_schema", None)
         if not isinstance(schema, dict):
             args_schema = getattr(tool, "args_schema", None)
-            if args_schema is not None and hasattr(args_schema, "schema"):
-                schema = args_schema.schema()
-            elif args_schema is not None and hasattr(args_schema, "model_json_schema"):
+            if args_schema is not None and hasattr(args_schema, "model_json_schema"):
                 schema = args_schema.model_json_schema()
+            elif args_schema is not None and hasattr(args_schema, "schema"):
+                schema = args_schema.schema()
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
         return name, description, schema

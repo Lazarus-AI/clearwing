@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 from .state import FileTarget
@@ -166,6 +166,10 @@ class HarnessGenerator:
                         + self.config.per_harness_duration_seconds
                         + 10
                     )
+                except BudgetExceeded:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
                 except Exception as e:
                     logger.debug("Harness for %s failed: %s", ft.get("path"), e)
                     continue
@@ -297,6 +301,8 @@ class HarnessGenerator:
             return self.sandbox_factory.spawn()
         try:
             return self.sandbox_factory()
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.debug("sandbox_factory failed", exc_info=True)
             return None

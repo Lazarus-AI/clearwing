@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
 from .state import Finding
 
@@ -155,6 +155,8 @@ class MechanismExtractor:
                 user=user_msg,
             )
             content = response.first_text or ""
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.debug("Mechanism extraction LLM call failed", exc_info=True)
             return None

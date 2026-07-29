@@ -151,8 +151,8 @@ class NdayFilter:
         user_msg = "\n---\n".join(prompt_parts)
 
         try:
-            response = await self._llm.aask(
-                user_msg, system=FILTER_SYSTEM_PROMPT,
+            response = await self._llm.aask_text(
+                system=FILTER_SYSTEM_PROMPT, user=user_msg,
             )
             text = response.first_text if hasattr(response, "first_text") else str(response)
             results = self._parse_response(text)

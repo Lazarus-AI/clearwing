@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from clearwing.findings.types import Finding
+from clearwing.llm import BudgetExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +317,8 @@ class FindingsPool:
         if self._llm is not None:
             try:
                 return await self._llm_classify(finding)
+            except BudgetExceeded:
+                raise
             except Exception:
                 logger.debug("LLM primitive classification failed", exc_info=True)
 
@@ -357,6 +360,8 @@ class FindingsPool:
                     cluster.finding_ids.append(fid)
                     cluster.file_paths.add(file_path)
                     return dup_cluster
+            except BudgetExceeded:
+                raise
             except Exception:
                 logger.debug("LLM dedup check failed", exc_info=True)
 

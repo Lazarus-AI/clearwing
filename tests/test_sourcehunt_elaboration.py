@@ -22,8 +22,6 @@ from unittest.mock import MagicMock
 
 from clearwing.sourcehunt.elaboration import (
     ElaborationAgent,
-    EXPLOIT_BUDGET_BANDS,
-    PRIMITIVE_RANK,
     _build_elaboration_prompt,
     build_elaboration_tools,
     find_latest_session,
@@ -169,12 +167,14 @@ class TestPrioritization:
     def test_target_value_tiebreak(self):
         findings = [
             _make_finding(
-                id="userspace", severity="critical",
+                id="userspace",
+                severity="critical",
                 exploit_primitive_type="arbitrary_write",
                 file="src/main.c",
             ),
             _make_finding(
-                id="kernel", severity="critical",
+                id="kernel",
+                severity="critical",
                 exploit_primitive_type="arbitrary_write",
                 file="kernel/mm/slub.c",
             ),
@@ -189,8 +189,11 @@ class TestPrioritization:
 class TestElaborationAgentNoSandbox:
     def test_no_sandbox_returns_not_attempted(self):
         import asyncio
+
         ae = ElaborationAgent(
-            MagicMock(), sandbox_manager=None, sandbox_factory=None,
+            MagicMock(),
+            sandbox_manager=None,
+            sandbox_factory=None,
         )
         result = asyncio.run(ae.aattempt(_make_finding()))
         assert result.elaborated is False
@@ -198,6 +201,7 @@ class TestElaborationAgentNoSandbox:
 
     def test_ineligible_returns_not_attempted(self):
         import asyncio
+
         ae = ElaborationAgent(MagicMock())
         f = _make_finding(verified=False)
         result = asyncio.run(ae.aattempt(f))
@@ -234,12 +238,14 @@ class TestElaborationTools:
         tools = build_elaboration_tools(ctx, finding)
         record_tool = next(t for t in tools if t.name == "record_elaboration_result")
 
-        result_str = record_tool.invoke({
-            "elaborated": True,
-            "upgraded_impact": "code_execution",
-            "upgraded_exploit_code": "python3 exploit.py",
-            "upgrade_path": "heap spray -> ROP",
-        })
+        result_str = record_tool.invoke(
+            {
+                "elaborated": True,
+                "upgraded_impact": "code_execution",
+                "upgraded_exploit_code": "python3 exploit.py",
+                "upgrade_path": "heap spray -> ROP",
+            }
+        )
         assert "UPGRADED" in result_str
         assert ctx.elaboration_result is not None
         assert ctx.elaboration_result.elaborated is True
@@ -253,11 +259,13 @@ class TestElaborationTools:
         tools = build_elaboration_tools(ctx, finding)
         record_tool = next(t for t in tools if t.name == "record_elaboration_result")
 
-        result_str = record_tool.invoke({
-            "elaborated": False,
-            "blocking_mitigations": ["CFI", "KASLR"],
-            "upgrade_path": "tried arbitrary write -> code exec",
-        })
+        result_str = record_tool.invoke(
+            {
+                "elaborated": False,
+                "blocking_mitigations": ["CFI", "KASLR"],
+                "upgrade_path": "tried arbitrary write -> code exec",
+            }
+        )
         assert "NOT_UPGRADED" in result_str
         assert ctx.elaboration_result.elaborated is False
         assert ctx.elaboration_result.blocking_mitigations == ["CFI", "KASLR"]
@@ -270,11 +278,13 @@ class TestElaborationTools:
         tools = build_elaboration_tools(ctx, finding)
         record_tool = next(t for t in tools if t.name == "record_elaboration_result")
 
-        record_tool.invoke({
-            "elaborated": True,
-            "upgraded_impact": "sandbox_escape",
-            "chained_findings": ["f-info-leak"],
-        })
+        record_tool.invoke(
+            {
+                "elaborated": True,
+                "upgraded_impact": "sandbox_escape",
+                "chained_findings": ["f-info-leak"],
+            }
+        )
         assert ctx.elaboration_result.elaborated is True
         assert ctx.elaboration_result.upgraded_impact == "sandbox_escape"
         assert ctx.elaboration_result.chained_findings == ["f-info-leak"]
@@ -385,13 +395,17 @@ class TestElaborationPrompt:
 class TestRunnerElaboration:
     def test_elaboration_disabled_by_default(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         r = SourceHuntRunner(repo_url="test", depth="standard")
         assert r.enable_elaboration is False
 
     def test_elaboration_enabled_with_flag(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         r = SourceHuntRunner(
-            repo_url="test", depth="standard", enable_elaboration=True,
+            repo_url="test",
+            depth="standard",
+            enable_elaboration=True,
         )
         assert r.enable_elaboration is True
 
@@ -408,7 +422,12 @@ class TestRunnerElaboration:
             upgrade_path="heap spray -> ROP chain",
         )
         new_finding = _apply_elaboration(finding, elab_result)
+        repeated = _apply_elaboration(finding, elab_result)
         assert new_finding["id"].startswith("elab-")
+        assert len(new_finding["id"]) == len("elab-") + 8
+        assert repeated["id"] != new_finding["id"]
+        assert repeated["stable_finding_id"] == new_finding["stable_finding_id"]
+        assert len(new_finding["stable_finding_id"]) == len("elab-") + 16
         assert new_finding["related_finding_id"] == "original-123"
         assert new_finding["severity"] == "critical"
         assert new_finding["severity_verified"] == "critical"

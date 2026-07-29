@@ -113,3 +113,9 @@ results/
 # Individual operators can still clone external projects into
 # .reference/ for local research — they just stay local.
 .reference/
+
+# Casual place to put working files
+working-directory/
+
+# uv run inspect eval ...
+logs/

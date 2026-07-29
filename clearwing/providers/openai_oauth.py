@@ -5,9 +5,10 @@ Codex CLI — browser PKCE login on localhost, refresh-token persistence
 under ``~/.clearwing/auth/``, and authenticated calls to the ChatGPT
 backend API.
 
-Anthropic Claude Code: PKCE browser login against ``claude.ai``, with
-token exchange and refresh via ``console.anthropic.com``. Credentials
-are stored alongside the OpenAI ones and auto-refreshed on demand.
+Anthropic Claude Code: prefers the user's Claude Code credential store and
+otherwise uses the Claude Pro/Max subscription OAuth paste flow. Credentials
+are stored alongside the OpenAI ones only when Clearwing performs the flow
+itself.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ from pathlib import Path
 from socketserver import TCPServer
 from typing import Any
 
+from clearwing.core.config import clearwing_home
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-Unix fallback
@@ -58,13 +61,14 @@ OPENAI_AUTH_JWT_CLAIM_PATH = "https://api.openai.com/auth"
 
 ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 ANTHROPIC_OAUTH_AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
-ANTHROPIC_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"  # noqa: S105
+ANTHROPIC_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"  # noqa: S105
 ANTHROPIC_OAUTH_REFRESH_TOKEN_URLS = (
     "https://platform.claude.com/v1/oauth/token",
     "https://console.anthropic.com/v1/oauth/token",
 )
 ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
 ANTHROPIC_OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
+ANTHROPIC_OAUTH_TOKEN_USER_AGENT = "axios/1.7.9"  # noqa: S105
 ANTHROPIC_SETUP_TOKEN_PREFIX = "sk-ant-oat01-"  # noqa: S105
 ANTHROPIC_SETUP_TOKEN_MIN_LENGTH = 80
 ANTHROPIC_SETUP_TOKEN_CONFIG_KEY = "token.anthropic_setup_token"  # noqa: S105
@@ -84,8 +88,6 @@ ANTHROPIC_CLAUDE_CODE_VERSION_FALLBACK = "2.1.74"
 _anthropic_claude_code_version_cache: str | None = None
 
 # --- Common infrastructure --------------------------------------------------
-
-from clearwing.core.config import clearwing_home
 
 AUTH_DIR = clearwing_home() / "auth"
 
@@ -731,7 +733,7 @@ def exchange_anthropic_authorization_code(
             "state": state,
         },
         error_label="Anthropic OAuth token exchange",
-        headers={"User-Agent": anthropic_claude_code_user_agent()},
+        headers={"User-Agent": ANTHROPIC_OAUTH_TOKEN_USER_AGENT},
     )
     access = data.get("access_token")
     if not isinstance(access, str) or not access:
@@ -768,7 +770,7 @@ def refresh_anthropic_token(refresh_token: str) -> AnthropicOAuthCredentials:
                     "client_id": ANTHROPIC_OAUTH_CLIENT_ID,
                 },
                 error_label=f"Anthropic OAuth token refresh at {endpoint}",
-                headers={"User-Agent": anthropic_claude_code_user_agent()},
+                headers={"User-Agent": ANTHROPIC_OAUTH_TOKEN_USER_AGENT},
                 timeout_seconds=10,
             )
         except RuntimeError as exc:
@@ -847,26 +849,103 @@ def anthropic_credentials_from_value(value: Any) -> AnthropicOAuthCredentials | 
 
 
 _CLAUDE_CLI_CREDENTIAL_PATH = Path.home() / ".claude" / ".credentials.json"
+_CLAUDE_CLI_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def _anthropic_oauth_credentials_are_fresh(
+    creds: AnthropicOAuthCredentials,
+    *,
+    skew_seconds: int = 60,
+) -> bool:
+    if not creds.expires_ms:
+        return bool(creds.token)
+    return creds.expires_ms > int(time.time() * 1000) + skew_seconds * 1000
+
+
+def _read_claude_code_credentials_from_file() -> AnthropicOAuthCredentials | None:
+    if not _CLAUDE_CLI_CREDENTIAL_PATH.exists():
+        return None
+    try:
+        data = json.loads(_CLAUDE_CLI_CREDENTIAL_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict):
+        return None
+    return anthropic_credentials_from_value(oauth)
+
+
+def _read_claude_code_credentials_from_keychain() -> AnthropicOAuthCredentials | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", _CLAUDE_CLI_KEYCHAIN_SERVICE, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout.strip())
+    except Exception:
+        return None
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict):
+        return None
+    return anthropic_credentials_from_value(oauth)
+
+
+def load_claude_code_oauth_credentials() -> AnthropicOAuthCredentials | None:
+    """Read Claude Code's subscription OAuth credentials.
+
+    Claude Code 2.1.x can store credentials in the macOS Keychain and/or
+    ``~/.claude/.credentials.json``. Prefer whichever source has a fresh token;
+    otherwise prefer the one with the later expiry so refresh uses the newest
+    refresh token.
+    """
+    keychain_creds = _read_claude_code_credentials_from_keychain()
+    file_creds = _read_claude_code_credentials_from_file()
+
+    if keychain_creds and file_creds:
+        keychain_fresh = _anthropic_oauth_credentials_are_fresh(keychain_creds)
+        file_fresh = _anthropic_oauth_credentials_are_fresh(file_creds)
+        if keychain_fresh and not file_fresh:
+            return keychain_creds
+        if file_fresh and not keychain_fresh:
+            return file_creds
+        return keychain_creds if keychain_creds.expires_ms >= file_creds.expires_ms else file_creds
+
+    return keychain_creds or file_creds
 
 
 def load_anthropic_oauth_credentials() -> AnthropicOAuthCredentials | None:
+    claude_code_creds = load_claude_code_oauth_credentials()
+    if claude_code_creds and _anthropic_oauth_credentials_are_fresh(claude_code_creds):
+        return claude_code_creds
+
+    clearwing_creds: AnthropicOAuthCredentials | None = None
     path = _auth_file(ANTHROPIC_SETUP_TOKEN_CONFIG_KEY)
     try:
-        creds = anthropic_credentials_from_value(
+        clearwing_creds = anthropic_credentials_from_value(
             json.loads(path.read_text(encoding="utf-8"))
         )
-        if creds:
-            return creds
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    if _CLAUDE_CLI_CREDENTIAL_PATH.exists():
-        try:
-            data = json.loads(_CLAUDE_CLI_CREDENTIAL_PATH.read_text(encoding="utf-8"))
-            oauth = data.get("claudeAiOauth")
-            if isinstance(oauth, dict):
-                return anthropic_credentials_from_value(oauth)
-        except Exception:
-            pass
+
+    if clearwing_creds and _anthropic_oauth_credentials_are_fresh(clearwing_creds):
+        return clearwing_creds
+    if claude_code_creds:
+        return claude_code_creds
+    if clearwing_creds:
+        return clearwing_creds
     return None
 
 
@@ -912,6 +991,37 @@ def ensure_fresh_anthropic_oauth_credentials(
         return refreshed
 
 
+def run_anthropic_claude_setup_token(
+    *,
+    print_fn=print,
+) -> AnthropicOAuthCredentials | None:
+    """Run Claude Code's subscription OAuth helper and read its credentials."""
+    import shutil
+    import subprocess
+
+    claude_path = shutil.which("claude")
+    if not claude_path:
+        return None
+
+    print_fn("Running `claude setup-token` for Claude Pro/Max OAuth...")
+    print_fn("")
+    try:
+        subprocess.run([claude_path, "setup-token"], check=False)
+    except (KeyboardInterrupt, EOFError):
+        return None
+    print_fn("")
+
+    creds = load_claude_code_oauth_credentials()
+    if creds:
+        return creds
+
+    for env_var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_TOKEN"):
+        token = os.environ.get(env_var, "").strip()
+        if token and not validate_anthropic_setup_token(token):
+            return AnthropicOAuthCredentials(token=token)
+    return None
+
+
 def anthropic_oauth_headers(token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
@@ -932,10 +1042,18 @@ def login_anthropic_oauth(
 ) -> AnthropicOAuthCredentials:
     """Anthropic OAuth via the hosted callback page (paste flow).
 
-    Unlike OpenAI, Anthropic's OAuth redirects to a hosted page at
-    console.anthropic.com that displays the authorization code for the
+    Unlike OpenAI, Anthropic's OAuth redirects to a hosted page that displays
+    the authorization code for the
     user to copy-paste.  No localhost callback server is needed.
     """
+    if not no_open:
+        setup_creds = run_anthropic_claude_setup_token(print_fn=print_fn)
+        if setup_creds:
+            save_anthropic_oauth_credentials(setup_creds)
+            return setup_creds
+        print_fn("Claude Code did not expose credentials; falling back to browser paste flow.")
+        print_fn("")
+
     verifier, challenge = generate_pkce()
     state = verifier
     auth_url = build_anthropic_authorize_url(
@@ -979,6 +1097,7 @@ def login_anthropic_oauth(
 
 __all__ = [
     "ANTHROPIC_CLAUDE_CODE_BETA",
+    "ANTHROPIC_OAUTH_TOKEN_USER_AGENT",
     "ANTHROPIC_SETUP_TOKEN_CONFIG_KEY",
     "AnthropicOAuthCredentials",
     "OPENAI_AUTH_JWT_CLAIM_PATH",
@@ -1002,12 +1121,14 @@ __all__ = [
     "extract_account_id",
     "generate_pkce",
     "load_anthropic_oauth_credentials",
+    "load_claude_code_oauth_credentials",
     "load_openai_oauth_credentials",
     "login_anthropic_oauth",
     "login_openai_oauth",
     "parse_authorization_input",
     "refresh_anthropic_token",
     "refresh_openai_oauth_token",
+    "run_anthropic_claude_setup_token",
     "save_anthropic_oauth_credentials",
     "save_openai_oauth_credentials",
     "validate_anthropic_setup_token",

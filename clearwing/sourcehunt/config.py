@@ -27,6 +27,8 @@ class BudgetConfig:
     """Cost and parallelism knobs."""
 
     budget_usd: float = 0.0
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
     max_parallel: int = 8
     tier_budget: Any = None  # TierBudget | None
     exploit_budget: str | None = None  # "standard" | "deep" | "campaign" | None (auto)
@@ -67,6 +69,7 @@ class FeatureFlags:
     enable_calibration: bool = True
     enable_artifact_store: bool = False
     no_per_file_hunt: bool = False
+    no_rank: bool = False
     seed_harness_crashes: bool = False
     preprocessing: bool = True
     adversarial_verifier: bool = True
@@ -90,6 +93,28 @@ class HuntTuning:
     subsystem_paths: list[str] | None = None
     campaign_hint: str | None = None
     gvisor_runtime: str | None = None
+    sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
+
+
+@dataclass(frozen=True)
+class ProofConfig:
+    """Proof-carrying investigation controls used during migration."""
+
+    flow: str = "legacy"  # legacy | proof
+    compile_commands: str | None = None
+    validation_manifest: str | None = None
+    scheduler_calibration: str | None = None
+    learning_registry: str | None = None
+    build_configuration: str = "default"
+    clang_binary: str = "clang"
+    max_actions: int = 200
+    max_model_calls: int = 40
+    max_dynamic_actions: int = 20
+    structured_fraction: float = 0.90
+    exploration_fraction: float = 0.10
+    retain_incomplete_certificates: bool = True
+    emit_rejection_certificates: bool = True
+    falsify: bool = True
 
 
 @dataclass(frozen=True)
@@ -111,3 +136,4 @@ class SourceHuntConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     features: FeatureFlags = field(default_factory=FeatureFlags)
     tuning: HuntTuning = field(default_factory=HuntTuning)
+    proof: ProofConfig = field(default_factory=ProofConfig)

@@ -67,8 +67,8 @@ class TestNdayFilter:
     async def test_filter_likely_exploitable(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '[{"cve_id": "CVE-2024-1111", "exploitability": "LIKELY_EXPLOITABLE", "reasoning": "heap overflow"}]'
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = '[{"cve_id": "CVE-2024-1111", "exploitability": "LIKELY_EXPLOITABLE", "reasoning": "heap overflow"}]'
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         nf = NdayFilter(mock_llm)
         candidates = [NdayCandidate(cve_id="CVE-2024-1111", diff_text="diff")]
@@ -80,8 +80,8 @@ class TestNdayFilter:
     async def test_filter_unlikely_excluded(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '[{"cve_id": "CVE-2024-1111", "exploitability": "UNLIKELY_EXPLOITABLE", "reasoning": "doc fix"}]'
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = '[{"cve_id": "CVE-2024-1111", "exploitability": "UNLIKELY_EXPLOITABLE", "reasoning": "doc fix"}]'
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         nf = NdayFilter(mock_llm)
         candidates = [NdayCandidate(cve_id="CVE-2024-1111", diff_text="diff")]
@@ -99,8 +99,8 @@ class TestNdayFilter:
     async def test_filter_possibly_passes(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '[{"cve_id": "CVE-2024-1111", "exploitability": "POSSIBLY_EXPLOITABLE", "reasoning": "race condition"}]'
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = '[{"cve_id": "CVE-2024-1111", "exploitability": "POSSIBLY_EXPLOITABLE", "reasoning": "race condition"}]'
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         nf = NdayFilter(mock_llm)
         candidates = [NdayCandidate(cve_id="CVE-2024-1111")]
@@ -110,7 +110,7 @@ class TestNdayFilter:
     @pytest.mark.asyncio
     async def test_filter_llm_failure_defaults_possibly(self):
         mock_llm = AsyncMock()
-        mock_llm.aask = AsyncMock(side_effect=RuntimeError("LLM down"))
+        mock_llm.aask_text = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         nf = NdayFilter(mock_llm)
         candidates = [NdayCandidate(cve_id="CVE-2024-1111")]
@@ -191,8 +191,8 @@ class TestNdayPipeline:
     async def test_pipeline_skips_filtered(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '[{"cve_id": "CVE-2024-1111", "exploitability": "UNLIKELY_EXPLOITABLE", "reasoning": "doc"}]'
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = '[{"cve_id": "CVE-2024-1111", "exploitability": "UNLIKELY_EXPLOITABLE", "reasoning": "doc"}]'
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         pipeline = NdayPipeline(llm=mock_llm)
         candidates = [NdayCandidate(cve_id="CVE-2024-1111")]
@@ -207,8 +207,8 @@ class TestNdayPipeline:
     async def test_pipeline_single_cve_mocked(self):
         mock_llm = AsyncMock()
         mock_response = MagicMock()
-        mock_response.first_text.return_value = '[{"cve_id": "CVE-2024-1111", "exploitability": "LIKELY_EXPLOITABLE", "reasoning": "heap"}]'
-        mock_llm.aask = AsyncMock(return_value=mock_response)
+        mock_response.first_text = '[{"cve_id": "CVE-2024-1111", "exploitability": "LIKELY_EXPLOITABLE", "reasoning": "heap"}]'
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
 
         mock_exploit_result = MagicMock()
         mock_exploit_result.success = False

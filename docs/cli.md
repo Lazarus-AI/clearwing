@@ -99,6 +99,7 @@ runs, else 1.
   [--min-shard-rank N]          # minimum file rank for sharding (default: 4)
   [--seed-corpus PATH]          # local seed corpus directory
   [--seed-cves]                 # extract CVE history from git log as seed context
+  [--respect-gitignore]         # exclude files matched by the repo root .gitignore
 ```
 
 For high-ranked files in large projects, shards agents by function-level

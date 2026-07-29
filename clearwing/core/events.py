@@ -42,6 +42,9 @@ class EventType(enum.Enum):
     DISCLOSURE_UPDATE = "disclosure_update"
     BENCHMARK_PROGRESS = "benchmark_progress"
     EVAL_PROGRESS = "eval_progress"
+    FINDING_RECORDED = "finding_recorded"
+    HUNTER_STATUS = "hunter_status"
+    TRACE_STEP = "trace_step"
 
 
 class EventBus:

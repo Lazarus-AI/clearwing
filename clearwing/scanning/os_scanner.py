@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from scapy.all import IP, TCP, sr1
+import libpnet_pyo3
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +48,18 @@ class OSScanner:
     async def _passive_detect(self, target: str) -> str:
         """Passive OS detection based on TTL and window size."""
         try:
-            ip = IP(dst=target)
-            tcp = TCP(dport=80, flags="S")
-            pkt = ip / tcp
-
             resp = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: sr1(pkt, timeout=self.timeout, verbose=0)
+                None,
+                lambda: libpnet_pyo3.tcp_sr1(
+                    dst=target, dport=80, flags="S", timeout=self.timeout
+                ),
             )
 
             if resp is None:
                 return "Unknown"
 
-            ttl = resp[IP].ttl
-            window = resp[TCP].window if resp.haslayer(TCP) else 0
+            ttl = resp.ttl
+            window = resp.window
 
             # Determine OS based on TTL
             os_name = self._guess_os_by_ttl(ttl)
@@ -87,17 +86,16 @@ class OSScanner:
         results = []
         for port, flags in probes:
             try:
-                ip = IP(dst=target)
-                tcp = TCP(dport=port, flags=flags)
-                pkt = ip / tcp
-
                 resp = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda p=pkt: sr1(p, timeout=self.timeout, verbose=0)
+                    None,
+                    lambda p=port, f=flags: libpnet_pyo3.tcp_sr1(
+                        dst=target, dport=p, flags=f, timeout=self.timeout
+                    ),
                 )
 
-                if resp and resp.haslayer(IP) and resp.haslayer(TCP):
+                if resp is not None:
                     results.append(
-                        {"ttl": resp[IP].ttl, "window": resp[TCP].window, "flags": resp[TCP].flags}
+                        {"ttl": resp.ttl, "window": resp.window, "flags": resp.flags}
                     )
             except Exception:
                 logger.debug("OS probe failed for %s:%d", target, port, exc_info=True)

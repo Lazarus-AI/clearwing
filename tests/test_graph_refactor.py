@@ -150,7 +150,6 @@ class TestCreateAgentDelegatesToBuildReactGraph:
         # Patch the LLM creation to avoid network/auth
         with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
-            mock_llm.bind_tools = MagicMock(return_value=MagicMock())
             mock_create_llm.return_value = mock_llm
             graph = create_agent(model_name="claude-sonnet-4-6")
             assert graph is not None
@@ -164,11 +163,9 @@ class TestCreateAgentDelegatesToBuildReactGraph:
 
         with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
-            bound = MagicMock()
-            mock_llm.bind_tools = MagicMock(return_value=bound)
             mock_create_llm.return_value = mock_llm
-            create_agent(custom_tools=[my_extra_tool])
-            # bind_tools was called with a list including my_extra_tool
-            call_args = mock_llm.bind_tools.call_args
-            tool_list = call_args[0][0] if call_args[0] else call_args[1].get("tools", [])
-            assert my_extra_tool in tool_list
+            graph = create_agent(custom_tools=[my_extra_tool])
+            # The custom tool is registered on the runtime and a NativeToolSpec
+            # is built for it (no bind_tools facade anymore).
+            assert "my_extra_tool" in graph.tools
+            assert any(spec.name == "my_extra_tool" for spec in graph.native_tools)

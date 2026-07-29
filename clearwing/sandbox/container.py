@@ -395,6 +395,17 @@ class SandboxContainer:
 
         self._container = None
 
+        # Release the docker SDK's urllib3 connection pool. Without this,
+        # each SandboxContainer keeps its keep-alive unix-socket connections
+        # open for the rest of the process lifetime, leaking ~15 fd per
+        # Hunter session and eventually hitting `ulimit -n` on long scans.
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Sandbox docker client close failed", exc_info=True)
+            self._client = None
+
     # --- Context manager ----------------------------------------------------
 
     def __enter__(self):

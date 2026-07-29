@@ -152,6 +152,22 @@ class TestPreprocessorRun:
             assert ft["transitive_callers"] == 0
             assert ft["fuzz_harness_path"] is None
 
+    def test_respect_gitignore_filters_file_targets_and_static_findings(self, tmp_path):
+        (tmp_path / ".gitignore").write_text(".next/\n")
+        (tmp_path / ".next" / "server").mkdir(parents=True)
+        (tmp_path / ".next" / "server" / "webpack.js").write_text("eval(userCode);\n")
+        (tmp_path / "src.js").write_text("eval(userCode);\n")
+
+        pp = Preprocessor(
+            repo_url=str(tmp_path),
+            local_path=str(tmp_path),
+            respect_gitignore=True,
+        )
+        result = pp.run()
+
+        assert [ft["path"] for ft in result.file_targets] == ["src.js"]
+        assert [Path(f.file_path).name for f in result.static_findings] == ["src.js"]
+
     def test_codec_limits_h_tagged_memory_unsafe(self):
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),

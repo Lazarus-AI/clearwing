@@ -14,10 +14,12 @@ Findings reaching patch_validated are the gold standard in reports.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
+from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from clearwing.findings.types import (
@@ -144,15 +146,64 @@ class ElaborationResult:
 # --- Validation types (spec 009) ---------------------------------------------
 
 
-@dataclass
-class AxisResult:
-    """Result of a single validation axis."""
+class AxisResult(BaseModel):
+    """One validation axis: pass/fail with a confidence and short rationale.
 
-    axis: str  # "REAL" | "TRIGGERABLE" | "IMPACTFUL" | "GENERAL"
-    passed: bool
-    confidence: str  # "high" | "medium" | "low"
-    rationale: str
-    boundary_crossed: str = ""  # only for IMPACTFUL axis
+    A single struct shared by the validator's wire schema (constrained decoding)
+    and the domain verdict — the fields are identical, so there is no DTO plus a
+    near-duplicate dataclass and no field-by-field mapper between them. The
+    docstring and Field descriptions are emitted into the JSON schema, so the
+    guidance reaches the model inline, not only via the prose prompt.
+    """
+
+    passed: bool = Field(
+        description="True if this axis is satisfied, false if it fails."
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence in this axis's pass/fail judgment."
+    )
+    rationale: str = Field(
+        default="",
+        description=(
+            "One to three sentences justifying the decision; keep it under 500 "
+            "characters."
+        ),
+    )
+    boundary_crossed: Literal[
+        "privilege", "tenant", "origin", "user", "kernel", "sandbox", "none"
+    ] = Field(
+        default="none",
+        description=(
+            "Security boundary the bug crosses. Set only for the impactful axis; "
+            "leave as 'none' for the others."
+        ),
+    )
+
+
+@dataclass
+class Axes:
+    """The validator's per-axis results, as typed fields rather than a dict.
+
+    All four are optional because the set evaluated varies: the full pass fills
+    all four, the two-axis quick pass fills only ``real``/``triggerable``, and an
+    error verdict fills none. Typed fields give callers static checking and make
+    the axis identity the field name — no stringly-typed keys.
+    """
+
+    real: AxisResult | None = None
+    triggerable: AxisResult | None = None
+    impactful: AxisResult | None = None
+    general: AxisResult | None = None
+
+    def items(self) -> Iterator[tuple[str, AxisResult]]:
+        """Yield ``(name, result)`` for each evaluated axis, in canonical order.
+
+        Absent axes (``None``) are skipped, so callers that build per-axis maps
+        or lists see only what was actually judged.
+        """
+        for name, result in vars(self).items():
+            if result is not None:
+                yield name, result
 
 
 @dataclass
@@ -160,7 +211,7 @@ class ValidatorVerdict:
     """Output of the unified 4-axis validator (spec 009)."""
 
     finding_id: str
-    axes: dict[str, AxisResult]
+    axes: Axes
     advance: bool
     severity_validated: str | None
     evidence_level: EvidenceLevel

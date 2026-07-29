@@ -44,6 +44,7 @@ class CommitMonitorConfig:
     output_dir: str = ""
     depth: str = "standard"
     budget_usd: float = 0.0
+    sandbox_cpus: float | None = None
     on_finding: Callable | None = None
     runner_factory: Callable | None = None  # test injection point
     # v0.4 GitHub Checks integration
@@ -274,6 +275,7 @@ class CommitMonitor:
                 ),
                 output_dir=self.config.output_dir,
                 provider_manager=provider_manager,
+                sandbox_cpus=self.config.sandbox_cpus,
             )
         try:
             result = runner.run()

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from clearwing.llm import ChatModel
+from clearwing.llm import AsyncLLMClient
 from clearwing.providers import (
     DEFAULT_ANTHROPIC_MODEL,
     ENV_ANTHROPIC_KEY,
@@ -304,7 +304,7 @@ class TestLLMEndpointHelpers:
 
 class TestProviderManagerForEndpoint:
     def test_for_endpoint_routes_all_tasks_to_one_llm(self, clean_env, monkeypatch):
-        """When constructed via for_endpoint, every get_llm() call
+        """When constructed via for_endpoint, every get_native_client() call
         returns the same cached LLM regardless of task."""
         monkeypatch.setenv(ENV_ANTHROPIC_KEY, "sk-ant-test")
         endpoint = LLMEndpoint(
@@ -314,11 +314,11 @@ class TestProviderManagerForEndpoint:
             source="cli",
         )
         pm = ProviderManager.for_endpoint(endpoint)
-        ranker = pm.get_llm("ranker")
-        hunter = pm.get_llm("hunter")
-        verifier = pm.get_llm("verifier")
+        ranker = pm.get_native_client("ranker")
+        hunter = pm.get_native_client("hunter")
+        verifier = pm.get_native_client("verifier")
 
-        assert isinstance(ranker, ChatModel)
+        assert isinstance(ranker, AsyncLLMClient)
         assert ranker is hunter
         assert hunter is verifier
         assert ranker.provider_name == "anthropic"
@@ -333,12 +333,35 @@ class TestProviderManagerForEndpoint:
             source="cli",
         )
         pm = ProviderManager.for_endpoint(endpoint)
-        got = pm.get_llm("hunter")
-        assert isinstance(got, ChatModel)
+        got = pm.get_native_client("hunter")
+        assert isinstance(got, AsyncLLMClient)
         assert got.base_url == "https://openrouter.ai/api/v1"
         assert got.api_key == "sk-or-test"
         assert got.model_name == "anthropic/claude-opus-4"
         assert got.provider_name == "openai"
+
+    def test_for_endpoint_can_route_proof_tiers_to_distinct_models(self, clean_env):
+        endpoint = LLMEndpoint(
+            provider="openai_compat",
+            model="frontier-model",
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+            source="cli",
+        )
+        manager = ProviderManager.for_endpoint(
+            endpoint,
+            task_model_overrides={
+                "proof_local": "local-35b",
+                "proof_frontier": "frontier-model",
+            },
+        )
+
+        local = manager.get_native_client("proof_local")
+        frontier = manager.get_native_client("proof_frontier")
+
+        assert local.model_name == "local-35b"
+        assert frontier.model_name == "frontier-model"
+        assert local is not frontier
 
     def test_for_endpoint_get_route_info_shows_global(self, clean_env):
         endpoint = LLMEndpoint(

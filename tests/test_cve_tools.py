@@ -210,53 +210,63 @@ class TestExtractRecord:
 class TestCveSearch:
     def test_basic_search(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="SRP")
+            result = cve_search.invoke({"query": "SRP"})
         assert result["count"] >= 1
         assert result["results"][0]["cve_id"] == "CVE-2024-0001"
 
     def test_search_multiple_terms(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="nonce reuse")
+            result = cve_search.invoke({"query": "nonce reuse"})
         assert result["count"] >= 1
         cve_ids = {r["cve_id"] for r in result["results"]}
         assert "CVE-2024-0002" in cve_ids
 
     def test_min_cvss_filter(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="SRP OR nonce OR PBKDF2 OR XSS", min_cvss=7.0)
+            result = cve_search.invoke(
+                {"query": "SRP OR nonce OR PBKDF2 OR XSS", "min_cvss": 7.0}
+            )
         for r in result["results"]:
             assert r["cvss_score"] >= 7.0
 
     def test_date_filter(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="SRP OR nonce OR PBKDF2 OR XSS", date_after="2024-02-01")
+            result = cve_search.invoke(
+                {"query": "SRP OR nonce OR PBKDF2 OR XSS", "date_after": "2024-02-01"}
+            )
         for r in result["results"]:
             assert r["date_published"] >= "2024-02-01"
 
     def test_cwe_filter(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="SRP OR nonce OR PBKDF2 OR XSS", cwe="CWE-287")
+            result = cve_search.invoke(
+                {"query": "SRP OR nonce OR PBKDF2 OR XSS", "cwe": "CWE-287"}
+            )
         for r in result["results"]:
             assert r["cwe_id"] == "CWE-287"
 
     def test_max_results(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="SRP OR nonce OR PBKDF2 OR XSS", max_results=2)
+            result = cve_search.invoke(
+                {"query": "SRP OR nonce OR PBKDF2 OR XSS", "max_results": 2}
+            )
         assert result["count"] <= 2
 
     def test_no_results(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="nonexistent_term_xyz123")
+            result = cve_search.invoke({"query": "nonexistent_term_xyz123"})
         assert result["count"] == 0
 
     def test_missing_database(self, tmp_path):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=tmp_path / "noexist.db"):
-            result = cve_search.fn(query="test")
+            result = cve_search.invoke({"query": "test"})
         assert "error" in result
 
     def test_results_sorted_by_cvss(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_search.fn(query="SRP OR nonce OR PBKDF2", max_results=10)
+            result = cve_search.invoke(
+                {"query": "SRP OR nonce OR PBKDF2", "max_results": 10}
+            )
         scores = [r["cvss_score"] for r in result["results"] if r["cvss_score"] is not None]
         assert scores == sorted(scores, reverse=True)
 
@@ -264,7 +274,7 @@ class TestCveSearch:
 class TestCveLookup:
     def test_existing_cve(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_lookup.fn(cve_id="CVE-2024-0001")
+            result = cve_lookup.invoke({"cve_id": "CVE-2024-0001"})
         assert result["cve_id"] == "CVE-2024-0001"
         assert result["cvss_score"] == 9.8
         assert "SRP authentication bypass" in result["description"]
@@ -272,22 +282,22 @@ class TestCveLookup:
 
     def test_case_insensitive(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_lookup.fn(cve_id="cve-2024-0001")
+            result = cve_lookup.invoke({"cve_id": "cve-2024-0001"})
         assert result["cve_id"] == "CVE-2024-0001"
 
     def test_not_found(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_lookup.fn(cve_id="CVE-9999-0001")
+            result = cve_lookup.invoke({"cve_id": "CVE-9999-0001"})
         assert "error" in result
 
     def test_missing_database(self, tmp_path):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=tmp_path / "noexist.db"):
-            result = cve_lookup.fn(cve_id="CVE-2024-0001")
+            result = cve_lookup.invoke({"cve_id": "CVE-2024-0001"})
         assert "error" in result
 
     def test_cve_with_no_affected(self, cve_db):
         with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=cve_db):
-            result = cve_lookup.fn(cve_id="CVE-2024-0005")
+            result = cve_lookup.invoke({"cve_id": "CVE-2024-0005"})
         assert result["cve_id"] == "CVE-2024-0005"
         assert "affected" not in result
 
@@ -310,19 +320,19 @@ class TestCveDbUpdate:
         db_dir = tmp_path / "cve_db"
         with patch("clearwing.agent.tools.data.cve_tools._db_dir", return_value=db_dir):
             with patch("clearwing.agent.tools.data.cve_tools._db_path", return_value=db_dir / "cve.db"):
-                result = cve_db_update.fn(zip_path=str(zip_path))
+                result = cve_db_update.invoke({"zip_path": str(zip_path)})
 
         assert result["status"] == "success"
         assert result["records"] == 3
         assert Path(result["db_path"]).exists()
 
     def test_missing_zip(self):
-        result = cve_db_update.fn(zip_path="/nonexistent/path.zip")
+        result = cve_db_update.invoke({"zip_path": "/nonexistent/path.zip"})
         assert "error" in result
 
     def test_download_declined(self):
         with patch("clearwing.agent.tools.data.cve_tools.interrupt", return_value=False):
-            result = cve_db_update.fn()
+            result = cve_db_update.invoke({})
         assert "error" in result
         assert "declined" in result["error"]
 

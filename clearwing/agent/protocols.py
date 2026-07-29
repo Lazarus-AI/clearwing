@@ -10,14 +10,37 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from clearwing.llm.chat import AIMessage, BaseMessage
+from genai_pyo3 import ChatMessage, ChatResponse
+
+from clearwing.llm.native import NativeToolSpec
 
 
 @runtime_checkable
 class LLMInvokable(Protocol):
-    """Anything that can be ``await``-ed with a list of messages."""
+    """The native LLM surface the runtime drives.
 
-    async def ainvoke(self, messages: list[BaseMessage]) -> AIMessage: ...
+    The runtime holds an :class:`~clearwing.llm.native.AsyncLLMClient` and
+    threads a pre-built tool list through each call. This protocol captures the
+    two methods it uses — ``achat`` and its streaming sibling ``achat_stream`` —
+    without coupling the runtime to the concrete client class.
+    """
+
+    async def achat(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system: str | None = ...,
+        tools: list[NativeToolSpec] | None = ...,
+    ) -> ChatResponse: ...
+
+    async def achat_stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system: str | None = ...,
+        tools: list[NativeToolSpec] | None = ...,
+        on_text_delta: Any | None = ...,
+    ) -> ChatResponse: ...
 
 
 class SystemPromptFactory(Protocol):

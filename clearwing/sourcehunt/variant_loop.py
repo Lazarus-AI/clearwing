@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient
+from clearwing.llm import AsyncLLMClient, BudgetExceeded
 
 from .state import Finding
 
@@ -115,6 +115,8 @@ class VariantPatternGenerator:
                 user=user_msg,
             )
             content = response.first_text or ""
+        except BudgetExceeded:
+            raise
         except Exception:
             logger.debug("Variant pattern LLM call failed", exc_info=True)
             return None

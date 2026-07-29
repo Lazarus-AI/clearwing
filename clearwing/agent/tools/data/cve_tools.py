@@ -43,7 +43,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cve_date ON cve(date_published);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS cve_fts USING fts5(
-            cve_id, description, affected_json, content=''
+            cve_id, description, affected_json
         );
     """)
 

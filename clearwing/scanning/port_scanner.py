@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Any
 
-from scapy.all import IP, TCP, sr1
+import libpnet_pyo3
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ def _has_raw_socket_privilege() -> bool:
     but we don't try to probe capabilities — a false negative just means
     the user gets a warning that's actually wrong, which is recoverable.
     On Windows / platforms without ``os.geteuid`` we return True and let
-    scapy decide; we don't want to false-positive a warning there.
+    libpnet_pyo3 surface the privilege error itself.
     """
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None:
@@ -114,10 +114,11 @@ class PortScanner:
         open_ports = []
 
         # Surface the most common silent-failure mode: scan_type='syn'
-        # uses scapy raw sockets, which on macOS/Linux require root
-        # (or CAP_NET_RAW). Without privilege scapy drops every probe
-        # silently and the report looks like "0 open ports". Warn once
-        # per scan so the user can re-run with sudo or scan_type='connect'.
+        # uses libpnet_pyo3 raw sockets, which on macOS/Linux require root
+        # (or CAP_NET_RAW). Without privilege every probe raises
+        # PermissionError and the report looks like "0 open ports". Warn
+        # once per scan so the user can re-run with sudo or switch to
+        # scan_type='connect'.
         if scan_type in ("syn", "fin", "ack", "xmas", "null") and not _has_raw_socket_privilege():
             logger.warning(
                 "scan_type=%r needs raw-socket privileges; this process is "
@@ -162,17 +163,18 @@ class PortScanner:
     async def _syn_scan(self, target: str, port: int) -> bool:
         """Perform SYN scan on a single port."""
         try:
-            ip = IP(dst=target)
-            tcp = TCP(dport=port, flags="S")
-            pkt = ip / tcp
-            resp = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: sr1(pkt, timeout=self.timeout, verbose=0)
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
+                None,
+                lambda: libpnet_pyo3.tcp_sr1(
+                    dst=target, dport=port, flags="S", timeout=self.timeout
+                ),
             )
-            if resp is not None and resp.haslayer(TCP) and resp.getlayer(TCP).flags == 0x12:
-                # Send RST to close the connection
-                rst_pkt = ip / TCP(dport=port, flags="R")
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: sr1(rst_pkt, timeout=1, verbose=0)
+            if resp is not None and resp.is_synack():
+                # Send RST to close the connection (fire-and-forget).
+                await loop.run_in_executor(
+                    None,
+                    lambda: libpnet_pyo3.tcp_send(dst=target, dport=port, flags="R"),
                 )
                 return True
         except Exception:

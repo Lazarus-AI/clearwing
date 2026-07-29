@@ -102,8 +102,6 @@ class TestGraphConstruction:
     def test_create_agent(self):
         with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
-            mock_bound = MagicMock()
-            mock_llm.bind_tools.return_value = mock_bound
             mock_create_llm.return_value = mock_llm
             graph = create_agent(model_name="claude-sonnet-4-6")
             assert graph is not None
@@ -112,7 +110,9 @@ class TestGraphConstruction:
                 base_url=None,
                 api_key=None,
             )
-            mock_llm.bind_tools.assert_called_once()
+            # The native client is threaded straight through — no bind_tools.
+            assert graph.llm is mock_llm
+            assert graph.native_tools
 
     def test_create_agent_with_custom_tools(self):
         @tool
@@ -122,19 +122,17 @@ class TestGraphConstruction:
 
         with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
-            mock_bound = MagicMock()
-            mock_llm.bind_tools.return_value = mock_bound
             mock_create_llm.return_value = mock_llm
             graph = create_agent(model_name="claude-sonnet-4-6", custom_tools=[dummy_tool])
             assert graph is not None
-            bound_tools = mock_llm.bind_tools.call_args[0][0]
-            assert dummy_tool in bound_tools
+            # The custom tool is registered in the runtime's tool map and its
+            # NativeToolSpec is built for the LLM call.
+            assert "dummy_tool" in graph.tools
+            assert any(spec.name == "dummy_tool" for spec in graph.native_tools)
 
     def test_create_agent_with_custom_endpoint(self):
         with patch("clearwing.agent.graph._create_llm") as mock_create_llm:
             mock_llm = MagicMock()
-            mock_bound = MagicMock()
-            mock_llm.bind_tools.return_value = mock_bound
             mock_create_llm.return_value = mock_llm
             graph = create_agent(
                 model_name="my-model",
@@ -236,3 +234,122 @@ class TestReportingTools:
         result = generate_report.invoke({"format": "text", "scan_data": scan_data})
         assert "192.168.1.1" in result
         assert "CLEARWING SCAN REPORT" in result
+
+
+class _FakeUsage:
+    def __init__(self, prompt=0, completion=0, total=0):
+        self.prompt_tokens = prompt
+        self.completion_tokens = completion
+        self.total_tokens = total
+
+
+class _FakeResponse:
+    """Minimal stand-in for a genai ChatResponse."""
+
+    def __init__(self, text="", tool_calls=None, usage=None):
+        self.first_text = text
+        self.texts = [text] if text else []
+        self.tool_calls = tool_calls or []
+        self.usage = usage or _FakeUsage()
+        self.provider_model_name = "fake-model"
+        self.reasoning_content = None
+
+
+class _FakeNativeClient:
+    """Records the ChatMessage history it is handed and replays scripted responses."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []  # each entry: (messages, system, tools)
+
+    async def achat_stream(self, *, messages, system=None, tools=None, on_text_delta=None):
+        self.calls.append((list(messages), system, tools))
+        resp = self._responses.pop(0)
+        if on_text_delta and resp.first_text:
+            on_text_delta(resp.first_text)
+        return resp
+
+    async def achat(self, *, messages, system=None, tools=None, **kwargs):
+        return await self.achat_stream(messages=messages, system=system, tools=tools)
+
+
+class TestNativeToolLoopRoundTrip:
+    """The riskiest path: a multi-turn tool call over the native client.
+
+    Asserts that genai ``ToolCall`` objects are consumed by ``.fn_name`` /
+    ``.fn_arguments`` / ``.call_id``, that the assistant + tool result turns
+    round-trip into well-formed ChatMessages (assistant carries ``tool_calls``,
+    tool result carries ``tool_response_call_id``), and that usage is tracked.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_call_executes_and_round_trips(self):
+        import json
+
+        from genai_pyo3 import ToolCall
+
+        from clearwing.agent.graph import build_react_graph
+
+        seen_args = {}
+
+        @tool
+        def echo_tool(value: str) -> str:
+            """Echo the value."""
+            seen_args["value"] = value
+            return f"echoed:{value}"
+
+        # Turn 1: model asks to call echo_tool. Turn 2: model responds with text.
+        tc = ToolCall("call-1", "echo_tool", json.dumps({"value": "hello"}))
+        client = _FakeNativeClient(
+            [
+                _FakeResponse(text="", tool_calls=[tc], usage=_FakeUsage(10, 5, 15)),
+                _FakeResponse(text="all done", usage=_FakeUsage(3, 2, 5)),
+            ]
+        )
+
+        graph = build_react_graph(
+            llm_with_tools=client,
+            tools=[echo_tool],
+            system_prompt_fn=lambda state: "sys",
+            model_name="fake-model",
+            session_id=None,
+            enable_knowledge_graph=False,
+            enable_audit=False,
+            enable_episodic_memory=False,
+            enable_context_summarizer=False,
+        )
+
+        config = {"configurable": {"thread_id": "t1"}}
+        events = []
+        async for event in graph.astream(
+            {"messages": [{"role": "user", "content": "please echo hello"}]}, config
+        ):
+            events.append(event)
+
+        # The tool actually ran with the decoded arguments.
+        assert seen_args == {"value": "hello"}
+
+        # Two LLM turns were made.
+        assert len(client.calls) == 2
+
+        # On the SECOND call, the history sent to the model must contain the
+        # assistant tool-call turn and the paired tool-result turn.
+        second_messages = client.calls[1][0]
+        roles = [m.role for m in second_messages]
+        assert "assistant" in roles
+        assert "tool" in roles
+
+        assistant_msg = next(m for m in second_messages if m.role == "assistant")
+        assert assistant_msg.tool_calls  # carries the tool_calls
+        assert assistant_msg.tool_calls[0].call_id == "call-1"
+
+        tool_msg = next(m for m in second_messages if m.role == "tool")
+        assert tool_msg.tool_response_call_id == "call-1"
+        assert "echoed:hello" in tool_msg.content
+
+        # Final state carries the assistant's closing text and usage.
+        final = graph.get_state(config).values
+        last = final["messages"][-1]
+        assert last.type == "ai"
+        assert last.text == "all done"
+        assert final.get("total_tokens", 0) > 0

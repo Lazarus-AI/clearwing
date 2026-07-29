@@ -171,6 +171,8 @@ def create_app():
                     max_turns=request_body.get("max_turns", 50),
                     timeout_minutes=request_body.get("timeout_minutes", 30),
                     auto_approve_exploits=request_body.get("auto_approve_exploits", False),
+                    lhost=request_body.get("lhost", "host.docker.internal"),
+                    lport=request_body.get("lport", 9999),
                 )
                 operator = OperatorAgent(config)
                 result = await operator.arun()
