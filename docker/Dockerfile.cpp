@@ -1,4 +1,4 @@
-FROM gcc:12-bullseye
+FROM gcc:11-bullseye
 
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
