@@ -3,7 +3,7 @@ FROM golang:1.22
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         ripgrep gdb strace coreutils ca-certificates build-essential \
-        python3 python3-pip valgrind ccache git ltrace && \
+        python3 python3-pip valgrind ccache git && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages pyjwt requests cryptography pycryptodome
