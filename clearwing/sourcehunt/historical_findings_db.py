@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from clearwing.findings.types import Finding
+from clearwing.reporting.safety import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +110,10 @@ class HistoricalFindingsDB:
                         f.get("cluster_id", ""),
                         f.get("cwe", ""),
                         f.get("severity", "info"),
-                        f.get("description", "")[:2000],
-                        f.get("code_snippet", "")[:1000],
+                        redact_text(f.get("description", "")[:2000]),
+                        redact_text(f.get("code_snippet", "")[:1000]),
                         f.get("evidence_level", "suspicion"),
-                        repo_url,
+                        redact_text(repo_url),
                         session_id,
                         now,
                         1 if f.get("verified") else 0,
@@ -136,7 +137,7 @@ class HistoricalFindingsDB:
     ) -> list[dict]:
         """Return historical findings for this repo."""
         query = "SELECT * FROM findings WHERE repo_url = ?"
-        params: list[Any] = [repo_url]
+        params: list[Any] = [redact_text(repo_url)]
         if cwe:
             query += " AND cwe = ?"
             params.append(cwe)
@@ -161,7 +162,7 @@ class HistoricalFindingsDB:
         try:
             row = self._conn.execute(
                 "SELECT 1 FROM findings WHERE repo_url = ? AND file = ? AND line_number = ? AND cwe = ? LIMIT 1",
-                (repo_url, file_path, line, cwe),
+                (redact_text(repo_url), file_path, line, cwe),
             ).fetchone()
             return row is not None
         except sqlite3.Error:

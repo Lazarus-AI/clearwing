@@ -21,6 +21,7 @@ from typing import Any
 
 from clearwing.findings.types import Finding
 from clearwing.llm import BudgetExceeded
+from clearwing.reporting.safety import redact_text, redact_tree
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +331,7 @@ class FindingsPool:
         prompt = CLASSIFY_PROMPT.format(
             cwe=finding.get("cwe", ""),
             finding_type=finding.get("finding_type", ""),
-            description=finding.get("description", "")[:500],
+            description=redact_text(finding.get("description", "")[:500]),
             primitive_types=", ".join(PRIMITIVE_TYPES),
         )
         response = await self._llm.achat(
@@ -402,13 +403,13 @@ class FindingsPool:
             )
 
         prompt = DEDUP_PROMPT.format(
-            file=finding.get("file", "?"),
+            file=redact_text(finding.get("file", "?")),
             line_number=finding.get("line_number", "?"),
-            cwe=finding.get("cwe", "?"),
-            finding_type=finding.get("finding_type", "?"),
-            description=finding.get("description", "")[:500],
-            code_snippet=finding.get("code_snippet", "")[:300],
-            candidate_summaries="\n".join(summaries),
+            cwe=redact_text(finding.get("cwe", "?")),
+            finding_type=redact_text(finding.get("finding_type", "?")),
+            description=redact_text(finding.get("description", "")[:500]),
+            code_snippet=redact_text(finding.get("code_snippet", "")[:300]),
+            candidate_summaries=redact_text("\n".join(summaries)),
         )
         response = await self._llm.achat(
             messages=[ChatMessage("user", prompt)],
@@ -448,6 +449,6 @@ class FindingsPool:
                 }.items() if v is not None
             }
             with self._checkpoint_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(data, sort_keys=True) + "\n")
+                f.write(json.dumps(redact_tree(data), sort_keys=True) + "\n")
         except Exception:
             logger.debug("Checkpoint write failed", exc_info=True)

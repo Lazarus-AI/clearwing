@@ -1,8 +1,11 @@
 import json
+from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader
+
+from .safety import markdown_inline, markdown_table_cell, redact_text, redact_tree
 
 
 class ReportGenerator:
@@ -29,7 +32,7 @@ class ReportGenerator:
             HTML string
         """
         template = self.jinja_env.get_template("attack_graph.html")
-        return template.render(graph_data=json.dumps(graph_data))
+        return template.render(graph_data=json.dumps(redact_tree(graph_data)))
 
     def generate(self, scan_result: Any, format: str = "text") -> str:
         """
@@ -43,7 +46,7 @@ class ReportGenerator:
             Formatted report string
         """
         generator = self.templates.get(format, self._generate_text)
-        return generator(scan_result)
+        return redact_text(generator(scan_result))
 
     def save(self, scan_result: Any, filepath: str, format: str = None) -> None:
         """
@@ -162,15 +165,19 @@ class ReportGenerator:
             "exploits": scan_result.exploits,
             "errors": scan_result.errors,
         }
-        return json.dumps(data, indent=2)
+        return json.dumps(redact_tree(data), indent=2)
 
     def _generate_html(self, scan_result: Any) -> str:
         """Generate HTML report."""
+        target = html_escape(str(scan_result.target))
+        start_time = html_escape(str(scan_result.start_time))
+        end_time = html_escape(str(scan_result.end_time or "In Progress"))
+        os_info = html_escape(str(scan_result.os_info or "Unknown"))
         html = f"""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Clearwing Report - {scan_result.target}</title>
+    <title>Clearwing Report - {target}</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 20px; }}
         h1 {{ color: #333; }}
@@ -184,16 +191,23 @@ class ReportGenerator:
 </head>
 <body>
     <h1>Clearwing Scan Report</h1>
-    <p><strong>Target:</strong> {scan_result.target}</p>
-    <p><strong>Scan Time:</strong> {scan_result.start_time} - {scan_result.end_time or "In Progress"}</p>
-    <p><strong>OS Detected:</strong> {scan_result.os_info or "Unknown"}</p>
+    <p><strong>Target:</strong> {target}</p>
+    <p><strong>Scan Time:</strong> {start_time} - {end_time}</p>
+    <p><strong>OS Detected:</strong> {os_info}</p>
     
     <h2>Open Ports</h2>
     <table>
         <tr><th>Port</th><th>Protocol</th><th>Service</th><th>State</th></tr>
 """
         for port in scan_result.open_ports:
-            html += f"        <tr><td>{port['port']}</td><td>{port['protocol']}</td><td>{port['service']}</td><td>{port['state']}</td></tr>\n"
+            html += (
+                "        <tr>"
+                f"<td>{html_escape(str(port['port']))}</td>"
+                f"<td>{html_escape(str(port['protocol']))}</td>"
+                f"<td>{html_escape(str(port['service']))}</td>"
+                f"<td>{html_escape(str(port['state']))}</td>"
+                "</tr>\n"
+            )
 
         html += """
     </table>
@@ -203,7 +217,14 @@ class ReportGenerator:
         <tr><th>CVE</th><th>Description</th><th>Service</th><th>CVSS</th></tr>
 """
         for vuln in scan_result.vulnerabilities:
-            html += f"        <tr><td>{vuln.get('cve', 'N/A')}</td><td>{vuln.get('description', 'N/A')}</td><td>{vuln.get('service', 'N/A')}</td><td>{vuln.get('cvss', 'N/A')}</td></tr>\n"
+            html += (
+                "        <tr>"
+                f"<td>{html_escape(str(vuln.get('cve', 'N/A')))}</td>"
+                f"<td>{html_escape(str(vuln.get('description', 'N/A')))}</td>"
+                f"<td>{html_escape(str(vuln.get('service', 'N/A')))}</td>"
+                f"<td>{html_escape(str(vuln.get('cvss', 'N/A')))}</td>"
+                "</tr>\n"
+            )
 
         html += """
     </table>
@@ -214,7 +235,14 @@ class ReportGenerator:
 """
         for exploit in scan_result.exploits:
             status_class = "success" if exploit.get("success") else "error"
-            html += f"        <tr><td>{exploit.get('exploit_name', 'N/A')}</td><td>{exploit.get('cve', 'N/A')}</td><td class='{status_class}'>{exploit.get('success', False)}</td><td>{exploit.get('message', exploit.get('error', 'N/A'))}</td></tr>\n"
+            html += (
+                "        <tr>"
+                f"<td>{html_escape(str(exploit.get('exploit_name', 'N/A')))}</td>"
+                f"<td>{html_escape(str(exploit.get('cve', 'N/A')))}</td>"
+                f"<td class='{status_class}'>{html_escape(str(exploit.get('success', False)))}</td>"
+                f"<td>{html_escape(str(exploit.get('message', exploit.get('error', 'N/A'))))}</td>"
+                "</tr>\n"
+            )
 
         html += """
     </table>
@@ -227,9 +255,9 @@ class ReportGenerator:
         """Generate Markdown report."""
         md = f"""# Clearwing Scan Report
 
-**Target:** {scan_result.target}
-**Scan Time:** {scan_result.start_time} - {scan_result.end_time or "In Progress"}
-**OS Detected:** {scan_result.os_info or "Unknown"}
+**Target:** {markdown_inline(scan_result.target)}
+**Scan Time:** {markdown_inline(scan_result.start_time)} - {markdown_inline(scan_result.end_time or "In Progress")}
+**OS Detected:** {markdown_inline(scan_result.os_info or "Unknown")}
 
 ## Open Ports
 
@@ -237,21 +265,36 @@ class ReportGenerator:
 |------|----------|---------|-------|
 """
         for port in scan_result.open_ports:
-            md += f"| {port['port']} | {port['protocol']} | {port['service']} | {port['state']} |\n"
+            md += (
+                f"| {markdown_table_cell(port['port'])} "
+                f"| {markdown_table_cell(port['protocol'])} "
+                f"| {markdown_table_cell(port['service'])} "
+                f"| {markdown_table_cell(port['state'])} |\n"
+            )
 
         md += "\n## Vulnerabilities\n\n"
         md += "| CVE | Description | Service | CVSS |\n"
         md += "|-----|-------------|---------|------|\n"
 
         for vuln in scan_result.vulnerabilities:
-            md += f"| {vuln.get('cve', 'N/A')} | {vuln.get('description', 'N/A')} | {vuln.get('service', 'N/A')} | {vuln.get('cvss', 'N/A')} |\n"
+            md += (
+                f"| {markdown_table_cell(vuln.get('cve', 'N/A'))} "
+                f"| {markdown_table_cell(vuln.get('description', 'N/A'))} "
+                f"| {markdown_table_cell(vuln.get('service', 'N/A'))} "
+                f"| {markdown_table_cell(vuln.get('cvss', 'N/A'))} |\n"
+            )
 
         md += "\n## Exploits\n\n"
         md += "| Exploit | CVE | Success | Message |\n"
         md += "|---------|-----|---------|----------|\n"
 
         for exploit in scan_result.exploits:
-            md += f"| {exploit.get('exploit_name', 'N/A')} | {exploit.get('cve', 'N/A')} | {exploit.get('success', False)} | {exploit.get('message', exploit.get('error', 'N/A'))} |\n"
+            md += (
+                f"| {markdown_table_cell(exploit.get('exploit_name', 'N/A'))} "
+                f"| {markdown_table_cell(exploit.get('cve', 'N/A'))} "
+                f"| {markdown_table_cell(exploit.get('success', False))} "
+                f"| {markdown_table_cell(exploit.get('message', exploit.get('error', 'N/A')))} |\n"
+            )
 
         return md
 

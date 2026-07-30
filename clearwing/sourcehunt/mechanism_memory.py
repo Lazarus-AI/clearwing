@@ -35,7 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient, BudgetExceeded
+from clearwing.llm import AsyncLLMClient, BudgetExceeded, extract_json_object
+from clearwing.reporting.safety import redact_tree
 
 from .state import Finding
 
@@ -187,17 +188,14 @@ class MechanismExtractor:
             "code_snippet": finding.get("code_snippet"),
             "crash_evidence": (finding.get("crash_evidence") or "")[:1500],
         }
-        return f"Finding:\n{json.dumps(view, indent=2)}\n"
+        return f"Finding:\n{json.dumps(redact_tree(view), indent=2)}\n"
 
     def _parse_response(self, content: str) -> dict | None:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            return None
         try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
+            parsed = extract_json_object(content)
+        except ValueError:
             return None
-        return parsed if isinstance(parsed, dict) else None
+        return parsed
 
 
 # --- Store ------------------------------------------------------------------
@@ -249,7 +247,7 @@ class MechanismStore:
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(mechanism.to_dict()) + "\n")
+            f.write(json.dumps(redact_tree(mechanism.to_dict())) + "\n")
         # Drop chromadb cache so the next recall rebuilds it
         self._chromadb_collection = None
 
