@@ -25,6 +25,7 @@ from typing import Any, cast
 from clearwing.llm import AsyncLLMClient, BudgetExceeded, extract_json_object
 from clearwing.reporting.safety import redact_text, redact_tree
 
+from .patcher import _invoke_rerun_poc
 from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
@@ -382,9 +383,10 @@ class Verifier:
             file_content: Current source of the file (will be used in prompt).
             sandbox: Optional SandboxContainer. If provided, the fix is
                 written into the sandbox and rerun_poc is invoked.
-            rerun_poc: Optional callable. If provided, called after the fix
-                is applied: `rerun_poc(sandbox, finding) -> bool` returning
-                True if the original PoC still crashes. If None, the oracle
+            rerun_poc: Optional callable. If provided, called with the exact
+                candidate diff as `rerun_poc(sandbox, finding, diff) -> bool`,
+                returning True if the original PoC still crashes. Legacy
+                two-argument callbacks remain supported. If None, the oracle
                 is "LLM-only": we take the LLM's confidence score at face value.
 
         Returns:
@@ -422,7 +424,7 @@ class Verifier:
                 return False, diff, "no file path in finding"
             sandbox.write_file("/scratch/patch.diff", diff.encode("utf-8"))
             try:
-                still_crashes = bool(rerun_poc(sandbox, finding))
+                still_crashes = bool(_invoke_rerun_poc(rerun_poc, sandbox, finding, diff))
             except Exception as e:
                 return False, diff, f"rerun_poc failed: {e}"
             if still_crashes:
@@ -445,10 +447,7 @@ class Verifier:
         msg = "Verified finding:\n\n"
         msg += json.dumps(redact_tree(view), indent=2)
         if file_content:
-            msg += (
-                "\n\nCurrent file content (capped to 8 KB):\n"
-                f"{redact_text(file_content)[:8000]}"
-            )
+            msg += f"\n\nCurrent file content (capped to 8 KB):\n{redact_text(file_content)[:8000]}"
         return msg
 
     def _parse_patch_oracle_response(self, content: str) -> dict | None:

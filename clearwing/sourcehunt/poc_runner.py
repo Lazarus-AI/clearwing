@@ -167,8 +167,7 @@ class PocRunner:
         mkdir_cmd = [
             "sh",
             "-c",
-            f"mkdir -p {shlex.quote(scratch_dir)} && "
-            f"cp -- {shlex.quote(src)} {shlex.quote(dst)}",
+            f"mkdir -p {shlex.quote(scratch_dir)} && cp -- {shlex.quote(src)} {shlex.quote(dst)}",
         ]
         result = self.sandbox.exec(mkdir_cmd, timeout=self.config.apply_timeout_seconds)
         if result.exit_code != 0:
@@ -330,14 +329,13 @@ def build_rerun_poc_callback(
     repo_path_in_sandbox: str = "/workspace",
     config: PocRunnerConfig | None = None,
 ) -> Callable[[Any, Finding, str], bool]:
-    """Return a callable `(sandbox, finding) -> still_crashes: bool` suitable
+    """Return a callable `(sandbox, finding, diff) -> still_crashes: bool` suitable
     for passing to Verifier.run_patch_oracle / AutoPatcher.attempt.
 
     The closure captures the PocRunner — each call is a fresh replay.
     """
-    # Note: sandbox argument is ignored here since we captured one at
-    # construction time, but the signature matches what the verifier/patcher
-    # expects.
+    # The sandbox argument is ignored because construction captured one;
+    # candidate_diff is the exact proposed patch to replay.
     runner = PocRunner(sandbox, repo_path_in_sandbox, config)
 
     def rerun(_sandbox: Any, finding: Finding, candidate_diff: str = "") -> bool:

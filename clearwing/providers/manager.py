@@ -122,6 +122,30 @@ DEFAULT_ROUTES = [
         reason="Exploit generation is hardest reasoning",
     ),
     ModelRoute(
+        task="remediator",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        reason="Production security patch generation",
+    ),
+    ModelRoute(
+        task="remediation_architect",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Independent root-cause and design review",
+    ),
+    ModelRoute(
+        task="remediation_adversary",
+        provider="anthropic",
+        model="claude-opus-4-6",
+        reason="Adversarial bypass review",
+    ),
+    ModelRoute(
+        task="remediation_regression",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        reason="Independent regression and minimality review",
+    ),
+    ModelRoute(
         task="proof_local",
         provider="anthropic",
         model="claude-haiku-4-5-20251001",
