@@ -1679,23 +1679,15 @@ class AsyncLLMClient:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        raise ValueError("response did not contain a JSON object")
-    parsed = json.loads(match.group(0))
-    if not isinstance(parsed, dict):
-        raise ValueError("response JSON was not an object")
-    return parsed
+    from .json_extract import extract_json_object as extract
+
+    return extract(text)
 
 
 def extract_json_array(text: str) -> list[Any]:
-    match = re.search(r"\[[\s\S]*\]", text)
-    if not match:
-        raise ValueError("response did not contain a JSON array")
-    parsed = json.loads(match.group(0))
-    if not isinstance(parsed, list):
-        raise ValueError("response JSON was not an array")
-    return parsed
+    from .json_extract import extract_json_array as extract
+
+    return extract(text)
 
 
 def _json_spec_from_model(

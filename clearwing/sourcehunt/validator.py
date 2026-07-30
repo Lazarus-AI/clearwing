@@ -22,6 +22,7 @@ from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import response_text
+from clearwing.reporting.safety import redact_text, redact_tree
 
 from .state import (
     EVIDENCE_LEVELS,
@@ -329,7 +330,7 @@ class Validator:
             "discovered_by": finding.get("discovered_by"),
         }
         msg = "Validate the following bug report:\n\n"
-        msg += json.dumps(finding_view, indent=2)
+        msg += json.dumps(redact_tree(finding_view), indent=2)
         if file_content:
             excerpts = self._build_file_context(finding, file_content)
             if excerpts:
@@ -337,6 +338,7 @@ class Validator:
         return msg
 
     def _build_file_context(self, finding: Finding, file_content: str) -> str:
+        file_content = redact_text(file_content)
         lines = file_content.splitlines()
         if not lines:
             return ""

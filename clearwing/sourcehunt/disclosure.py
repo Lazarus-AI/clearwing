@@ -24,6 +24,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
+from clearwing.reporting.safety import (
+    markdown_code_span,
+    markdown_fenced_code,
+    markdown_inline,
+    redact_text,
+    redact_tree,
+)
+
 from .state import EvidenceLevel, Finding, evidence_at_or_above
 
 logger = logging.getLogger(__name__)
@@ -104,16 +112,17 @@ class DisclosureGenerator:
         bundle = DisclosureBundle(repo_url=self.repo_url)
 
         for f in findings:
-            skip_reason = self._should_skip(f)
+            safe_finding = cast(Finding, redact_tree(f))
+            skip_reason = self._should_skip(safe_finding)
             if skip_reason:
                 bundle.skipped += 1
                 bundle.skipped_reasons[skip_reason] = bundle.skipped_reasons.get(skip_reason, 0) + 1
                 continue
             for fmt in formats:
                 if fmt == "mitre":
-                    bundle.templates.append(self._mitre_template(f))
+                    bundle.templates.append(self._mitre_template(safe_finding))
                 elif fmt == "hackerone":
-                    bundle.templates.append(self._hackerone_template(f))
+                    bundle.templates.append(self._hackerone_template(safe_finding))
         return bundle
 
     # --- Eligibility ---------------------------------------------------------
@@ -175,45 +184,43 @@ class DisclosureGenerator:
             "# Review every field before submitting. DO NOT submit without a",
             "# human sign-off and coordinated disclosure plan with the vendor.",
             "",
-            f"[Vulnerability type]: {self._mitre_vuln_type(finding)}",
-            f"[Vendor of product]: {self.project_name}",
-            f"[Affected product(s)/code base]: {self.project_name}",
-            f"[Affected component]: {file}",
-            f"[Attack vector]: {self._attack_vector(finding)}",
-            f"[Suggested description of the vulnerability]: {description}",
-            f"[Discoverer]: {self.reporter_name} ({self.reporter_affiliation})",
-            f"[Reference]: {self.repo_url}",
+            f"[Vulnerability type]: {markdown_inline(self._mitre_vuln_type(finding))}",
+            f"[Vendor of product]: {markdown_inline(self.project_name)}",
+            f"[Affected product(s)/code base]: {markdown_inline(self.project_name)}",
+            f"[Affected component]: {markdown_inline(file)}",
+            f"[Attack vector]: {markdown_inline(self._attack_vector(finding))}",
+            f"[Suggested description of the vulnerability]: {markdown_inline(description)}",
+            f"[Discoverer]: {markdown_inline(self.reporter_name)} "
+            f"({markdown_inline(self.reporter_affiliation)})",
+            f"[Reference]: {markdown_inline(self.repo_url)}",
             "[Additional information]:",
-            f"  - File: {file}:{line}",
-            f"  - CWE: {cwe or 'N/A'}",
-            f"  - Severity (CVSS-ish): {severity}",
-            f"  - Evidence level: {finding.get('evidence_level', '')}",
-            f"  - Discovered by: {finding.get('discovered_by', '')}",
+            f"  - File: {markdown_inline(f'{file}:{line}')}",
+            f"  - CWE: {markdown_inline(cwe or 'N/A')}",
+            f"  - Severity (CVSS-ish): {markdown_inline(severity)}",
+            f"  - Evidence level: {markdown_inline(finding.get('evidence_level', ''))}",
+            f"  - Discovered by: {markdown_inline(finding.get('discovered_by', ''))}",
         ]
         if finding.get("stability_classification"):
             rate = (finding.get("stability_success_rate") or 0) * 100
             lines.append(
-                f"  - Reproduction stability: {finding['stability_classification']} "
+                f"  - Reproduction stability: "
+                f"{markdown_inline(finding['stability_classification'])} "
                 f"({rate:.0f}%)"
             )
         if finding.get("severity_disagreement"):
             lines.append(
-                f"  - Severity note: {finding['severity_disagreement']}"
+                f"  - Severity note: {markdown_inline(finding['severity_disagreement'])}"
             )
         lines += [
             "",
             "## Code snippet",
-            "```",
-            (snippet[:800] if snippet else "(not captured)"),
-            "```",
+            markdown_fenced_code(snippet[:800] if snippet else "(not captured)"),
             "",
         ]
         if crash:
             lines += [
                 "## Crash evidence (sanitizer report)",
-                "```",
-                crash,
-                "```",
+                markdown_fenced_code(crash),
                 "",
             ]
         if patch:
@@ -224,13 +231,11 @@ class DisclosureGenerator:
                     if validated
                     else " — UNVALIDATED (review carefully)"
                 ),
-                "```diff",
-                patch[:3000],
-                "```",
+                markdown_fenced_code(patch[:3000], "diff"),
                 "",
             ]
         lines += [
-            "[Contact email]: " + self.reporter_email,
+            "[Contact email]: " + markdown_inline(self.reporter_email),
             "",
             "---",
             "Generated by clearwing sourcehunt — review before submitting.",
@@ -276,29 +281,26 @@ class DisclosureGenerator:
         validated = self._is_validated(finding)
 
         lines = [
-            f"# {title}",
+            f"# {markdown_inline(title)}",
             "",
-            f"**Severity:** {severity.upper()}  ",
-            f"**CWE:** {cwe or 'N/A'}  ",
-            f"**Affected file:** `{file}:{line}`  ",
-            f"**Evidence level:** {finding.get('evidence_level', '')}",
+            f"**Severity:** {markdown_inline(severity.upper())}  ",
+            f"**CWE:** {markdown_inline(cwe or 'N/A')}  ",
+            f"**Affected file:** {markdown_code_span(f'{file}:{line}')}  ",
+            f"**Evidence level:** {markdown_inline(finding.get('evidence_level', ''))}",
             "",
             "## Summary",
-            description or "(describe the vulnerability in one paragraph)",
+            markdown_inline(description or "(describe the vulnerability in one paragraph)"),
             "",
             "## Steps to Reproduce",
             "1. Check out the target repository at the vulnerable commit:",
-            "   ```",
-            f"   git clone {self.repo_url}",
-            "   ```",
-            f"2. Open `{file}` and inspect the code around line {line}.",
+            markdown_fenced_code(f"git clone {self.repo_url}"),
+            f"2. Open {markdown_code_span(file)} and inspect the code around "
+            f"line {markdown_inline(line)}.",
         ]
         if poc:
             lines += [
                 "3. Build with AddressSanitizer and run the following PoC input:",
-                "   ```",
-                (poc[:400]),
-                "   ```",
+                markdown_fenced_code(poc[:400]),
             ]
         else:
             lines += [
@@ -308,58 +310,53 @@ class DisclosureGenerator:
         lines += [
             "",
             "## Code Snippet",
-            "```",
-            (snippet[:800] if snippet else "(not captured)"),
-            "```",
+            markdown_fenced_code(snippet[:800] if snippet else "(not captured)"),
             "",
         ]
         if crash:
             lines += [
                 "## Sanitizer Report",
-                "```",
-                crash,
-                "```",
+                markdown_fenced_code(crash),
                 "",
             ]
         if finding.get("stability_classification"):
             rate = (finding.get("stability_success_rate") or 0) * 100
             lines += [
                 "## Reproduction Reliability",
-                f"**Stability:** {finding['stability_classification']} "
+                f"**Stability:** {markdown_inline(finding['stability_classification'])} "
                 f"({rate:.0f}% reproduction rate across fresh containers)",
                 "",
             ]
         lines += [
             "## Impact",
-            self._impact_statement(finding),
+                markdown_inline(self._impact_statement(finding)),
             "",
         ]
         if pro_arg or counter_arg:
             lines += [
                 "## Verifier Analysis",
                 "**Pro-vulnerability argument:**",
-                pro_arg or "(not recorded)",
+                markdown_inline(pro_arg or "(not recorded)"),
                 "",
             ]
             if counter_arg:
                 lines += [
                     "**Steel-manned counter-argument (addressed):**",
-                    counter_arg,
+                    markdown_inline(counter_arg),
                     "",
                 ]
         if patch:
             status = "VALIDATED" if validated else "UNVALIDATED — review before applying"
             lines += [
-                f"## Suggested Fix ({status})",
-                "```diff",
-                patch[:3000],
-                "```",
+                f"## Suggested Fix ({markdown_inline(status)})",
+                markdown_fenced_code(patch[:3000], "diff"),
                 "",
             ]
         lines += [
             "## Reporter",
-            f"{self.reporter_name} — {self.reporter_affiliation}",
-            f"Contact: {self.reporter_email}",
+            f"{markdown_inline(self.reporter_name)} — "
+            f"{markdown_inline(self.reporter_affiliation)}",
+            f"Contact: {markdown_inline(self.reporter_email)}",
             "",
             "---",
             "_Generated by clearwing sourcehunt. Human review required before submission._",
@@ -462,20 +459,20 @@ def write_bundle(
         subdir = base / tmpl.format
         subdir.mkdir(parents=True, exist_ok=True)
         out_path = subdir / f"{_safe_id(tmpl.finding_id)}.md"
-        out_path.write_text(tmpl.body, encoding="utf-8")
+        out_path.write_text(redact_text(tmpl.body), encoding="utf-8")
         paths[tmpl.format].append(str(out_path))
 
     # Also write a manifest summarising skipped/included findings
     manifest_path = base / "manifest.json"
     manifest_path.write_text(
         json.dumps(
-            {
+            redact_tree({
                 "repo_url": bundle.repo_url,
                 "templates_generated": len(bundle.templates),
                 "skipped": bundle.skipped,
                 "skipped_reasons": bundle.skipped_reasons,
                 "files": paths,
-            },
+            }),
             indent=2,
         ),
         encoding="utf-8",

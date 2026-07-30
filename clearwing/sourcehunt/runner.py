@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,6 +32,7 @@ from clearwing.providers import (
     ProviderManager,
     resolve_llm_endpoint,
 )
+from clearwing.reporting.safety import redact_tree
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .config import SourceHuntConfig
@@ -43,12 +45,14 @@ from .disclosure import (
 from .exploiter import AgenticExploiter, Exploiter, apply_exploiter_result
 from .harness_generator import HarnessGenerator, HarnessGeneratorConfig, SeededCrash
 from .instrumentation import SourceHuntInstrumentation, stable_run_id
+from .manifest import build_run_metadata
 from .mechanism_memory import (
     MechanismExtractor,
     MechanismStore,
     format_mechanisms_for_prompt,
 )
 from .patcher import AutoPatcher, apply_patch_attempt
+from .paths import resolve_repo_file
 from .poc_runner import build_rerun_poc_callback
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
@@ -565,6 +569,9 @@ class SourceHuntRunner:
         self._instrumentation_finalized = False
         self._last_reporting_error: dict[str, str] | None = None
         self._on_progress = on_progress
+        self._run_started_at: str | None = None
+        self._run_started_monotonic: float | None = None
+        self._resolved_model_roles: dict[str, dict[str, str]] = {}
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -995,7 +1002,7 @@ class SourceHuntRunner:
         )
         temporary = manifest_path.with_suffix(".json.tmp")
         with open(temporary, "w", encoding="utf-8") as stream:
-            json.dump(combined, stream, indent=2, sort_keys=True, default=str)
+            json.dump(redact_tree(combined), stream, indent=2, sort_keys=True, default=str)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -1003,6 +1010,8 @@ class SourceHuntRunner:
         proof_result.output_paths.update(outputs)
 
     async def arun(self) -> SourceHuntResult:
+        self._run_started_at = datetime.now(timezone.utc).isoformat()
+        self._run_started_monotonic = time.monotonic()
         if self._flow == "proof":
             try:
                 return await self._arun_proof_flow()
@@ -2177,6 +2186,7 @@ class SourceHuntRunner:
                 else None
             )
             output_paths = self._write_report(
+                repo_path=repo_path,
                 findings=all_findings,
                 verified=verified,
                 spent_per_tier=spent_per_tier,
@@ -2543,19 +2553,18 @@ class SourceHuntRunner:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 for finding in rejected:
-                    f.write(_json.dumps(finding, default=str) + "\n")
+                    f.write(_json.dumps(redact_tree(finding), default=str) + "\n")
             logger.info("Wrote %d rejected findings to %s", len(rejected), path)
         except OSError:
             logger.warning("Failed to write rejected findings", exc_info=True)
 
     def _load_file_content(self, repo_path: str, finding: Finding) -> str:
-        """Read the file referenced by a finding. Used by the patch oracle."""
-        rel = finding.get("file", "")
-        if not rel:
+        """Read a finding's file only when it resolves inside the repository."""
+        source_path = resolve_repo_file(repo_path, finding.get("file", ""))
+        if source_path is None:
             return ""
-        abs_path = os.path.join(repo_path, rel)
         try:
-            with open(abs_path, encoding="utf-8", errors="replace") as f:
+            with open(source_path, encoding="utf-8", errors="replace") as f:
                 return f.read()
         except OSError:
             return ""
@@ -2754,6 +2763,7 @@ class SourceHuntRunner:
             finding_ids=finding_ids,
         )
         output_paths = self._write_report(
+            repo_path=repo_path,
             findings=all_findings,
             verified=[],
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
@@ -2902,10 +2912,12 @@ class SourceHuntRunner:
                 )
 
         if client is None or self._spend_ledger is None:
+            self._remember_model_role(task, client)
             return client
         # AsyncMock/MagicMock overrides are test seams rather than real
         # transports. Production native clients expose with_spend_ledger.
         if not isinstance(client, AsyncLLMClient):
+            self._remember_model_role(task, client)
             return client
         stage = budget_stage or task
         key = (id(client), stage)
@@ -2913,7 +2925,19 @@ class SourceHuntRunner:
         if bound is None:
             bound = client.with_spend_ledger(self._spend_ledger, stage=stage)
             self._metered_clients[key] = bound
+        self._remember_model_role(task, bound)
         return bound
+
+    def _remember_model_role(self, task: str, client: Any) -> None:
+        if client is None:
+            return
+        model = getattr(client, "model_name", None)
+        provider = getattr(client, "provider_name", None)
+        if model or provider:
+            self._resolved_model_roles[task] = {
+                "model": str(model or "unknown"),
+                "provider": str(provider or "unknown"),
+            }
 
     def _build_native_from_model_string(self, model: str) -> AsyncLLMClient | None:
         try:
@@ -2943,6 +2967,7 @@ class SourceHuntRunner:
 
     def _write_report(
         self,
+        repo_path: str,
         findings: list[Finding],
         verified: list[Finding],
         spent_per_tier: dict,
@@ -2969,6 +2994,34 @@ class SourceHuntRunner:
             self._record_reporting_failure(exc, findings)
             return {}
         try:
+            duration_seconds = (
+                time.monotonic() - self._run_started_monotonic
+                if self._run_started_monotonic is not None
+                else None
+            )
+            run_metadata = build_run_metadata(
+                repo_path=repo_path,
+                configuration={
+                    "branch": self.branch,
+                    "depth": self.depth,
+                    "flow": self._flow,
+                    "budget_usd": self.budget_usd,
+                    "max_parallel": self.max_parallel,
+                    "output_formats": list(self.output_formats),
+                    "verify": not self.no_verify,
+                    "exploit": not self.no_exploit,
+                    "adversarial_verifier": self.adversarial_verifier,
+                    "validator_mode": self.validator_mode,
+                    "patch_oracle": self.enable_patch_oracle,
+                    "auto_patch": self.enable_auto_patch,
+                    "variant_loop": self.enable_variant_loop,
+                    "mechanism_memory": self.enable_mechanism_memory,
+                    "sandbox_runtime": self._gvisor_runtime or "default",
+                },
+                model_roles=dict(sorted(self._resolved_model_roles.items())),
+                started_at=self._run_started_at,
+                duration_seconds=duration_seconds,
+            )
             return write_sourcehunt_report(
                 output_dir=self.output_dir,
                 session_id=self._session_id,
@@ -2982,6 +3035,7 @@ class SourceHuntRunner:
                 subsystem_stats=subsystem_stats,
                 pipeline_status=pipeline_status,
                 budget_summary=budget_summary,
+                run_metadata=run_metadata,
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)
