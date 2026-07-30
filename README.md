@@ -47,6 +47,10 @@ Clearwing is a dual-mode offensive-security tool:
   workflow with MITRE/HackerOne template generation, SHA-3
   cryptographic commitments for provable priority, timeline
   tracking, and batched disclosure.
+- **Policy-gated remediation** — standalone typed fix DTOs, report-only or
+  transactional apply modes, encrypted rollback snapshots, a host-enforced
+  kill switch, sandboxed PoC replay, and an independent three-persona
+  fix-quality panel.
 - **Benchmarking & evaluation** — OSS-Fuzz crash severity
   ladder for model comparison, and an A/B testing framework for
   measuring whether preprocessing helps or hurts finding quality.
@@ -143,6 +147,11 @@ clearwing campaign run campaign.yaml
 # Responsible disclosure workflow
 clearwing disclose queue ./results/sourcehunt/sh-*/
 clearwing disclose review
+
+# Generate resumable fix DTOs without modifying the target checkout
+clearwing remediate run --repo /path/to/project \
+    --findings ./results/sourcehunt/sh-example/findings.json \
+    --mode report-only
 
 # OSS-Fuzz crash severity benchmark
 clearwing bench ossfuzz --corpus-dir ./oss-fuzz-projects --mode standard

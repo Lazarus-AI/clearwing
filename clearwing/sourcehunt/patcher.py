@@ -17,6 +17,7 @@ suggestion. Optionally, `--auto-pr` opens a draft PR via the `gh` CLI.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections.abc import Callable
@@ -83,18 +84,26 @@ class AutoPatcher:
     PATCH_GATE: EvidenceLevel = "root_cause_explained"
     _ELIGIBLE_SEVERITIES = {"critical", "high"}
 
-    def __init__(self, llm: AsyncLLMClient):
+    def __init__(
+        self,
+        llm: AsyncLLMClient,
+        *,
+        eligible_severities: set[str] | None = None,
+        patch_gate: EvidenceLevel | None = None,
+    ):
         self.llm = llm
+        self.eligible_severities = eligible_severities or set(self._ELIGIBLE_SEVERITIES)
+        self.patch_gate = patch_gate or self.PATCH_GATE
 
     def is_eligible(self, finding: Finding) -> bool:
         if not finding.get("verified", False):
             return False
         sev = (finding.get("severity_verified") or finding.get("severity") or "").lower()
-        if sev not in self._ELIGIBLE_SEVERITIES:
+        if sev not in self.eligible_severities:
             return False
         return evidence_at_or_above(
             cast(EvidenceLevel, finding.get("evidence_level", "suspicion")),
-            self.PATCH_GATE,
+            self.patch_gate,
         )
 
     async def aattempt(
@@ -110,7 +119,9 @@ class AutoPatcher:
             finding: The verified finding to patch.
             file_content: Current source of the file.
             sandbox: Optional SandboxContainer for apply+recompile+rerun.
-            rerun_poc: Optional callable `(sandbox, finding) -> still_crashes: bool`.
+            rerun_poc: Optional callable
+                `(sandbox, finding, candidate_diff) -> still_crashes: bool`.
+                Legacy two-argument callbacks remain supported.
         """
         if not self.is_eligible(finding):
             return PatchAttempt(
@@ -170,7 +181,7 @@ class AutoPatcher:
         if sandbox is not None and rerun_poc is not None:
             try:
                 sandbox.write_file("/scratch/auto_patch.diff", diff.encode("utf-8"))
-                still_crashes = bool(rerun_poc(sandbox, finding))
+                still_crashes = bool(_invoke_rerun_poc(rerun_poc, sandbox, finding, diff))
                 if still_crashes:
                     notes = "rejected — crash reproduces with the patch applied"
                 else:
@@ -206,10 +217,7 @@ class AutoPatcher:
         msg = "Verified vulnerability:\n\n"
         msg += json.dumps(redact_tree(view), indent=2)
         if file_content:
-            msg += (
-                "\n\nCurrent file content (capped to 8 KB):\n"
-                f"{redact_text(file_content)[:8000]}"
-            )
+            msg += f"\n\nCurrent file content (capped to 8 KB):\n{redact_text(file_content)[:8000]}"
         return msg
 
     def _parse_response(self, content: str) -> dict | None:
@@ -218,6 +226,33 @@ class AutoPatcher:
         except ValueError:
             return None
         return parsed
+
+
+def _invoke_rerun_poc(
+    callback: Callable,
+    sandbox: Any,
+    finding: Finding,
+    diff: str,
+) -> Any:
+    """Pass the candidate diff while preserving legacy two-argument callbacks."""
+
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return callback(sandbox, finding, diff)
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    has_varargs = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL
+        for parameter in signature.parameters.values()
+    )
+    if has_varargs or len(positional) >= 3:
+        return callback(sandbox, finding, diff)
+    return callback(sandbox, finding)
 
 
 def apply_patch_attempt(

@@ -243,6 +243,30 @@ Decompiles a closed-source ELF binary via Ghidra headless, reconstructs
 plausible source code with an LLM, then hunts vulnerabilities using
 hybrid source + binary validation (GDB against the original binary).
 
+## `remediate` — policy-gated fix lifecycle
+
+```bash
+clearwing remediate run
+  --repo PATH --findings FINDINGS_JSON
+  [--mode report-only|apply] [--policy POLICY_YAML]
+  [--output-dir DIR] [--resume] [--top N]
+  [--finding-id ID ...] [--sandbox-validate] [--gvisor]
+  [--model MODEL] [--base-url URL] [--api-key KEY]
+
+clearwing remediate validate
+  --repo PATH --output-dir DIR [--policy POLICY_YAML]
+  [--finding-id ID ...] [--sandbox-validate] [--gvisor]
+
+clearwing remediate status --output-dir DIR
+clearwing remediate policy-init POLICY_YAML [--force]
+```
+
+Creates typed, resumable remediation DTOs. `report-only` is the default and
+never edits source. `apply` requires every policy gate, checkpoints encrypted
+rollback bytes, applies through `git apply --check`, and retains the patch only
+after a host-computed three-persona validation verdict. See
+[the remediation lifecycle guide](remediation.md).
+
 ## `disclose` — responsible disclosure workflow
 
 ```bash
