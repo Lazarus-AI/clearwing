@@ -175,9 +175,9 @@ class HunterSandbox:
 
     def _get_client(self):
         if self._client is None:
-            import docker
+            from .dind import get_docker_client
 
-            self._client = docker.from_env()
+            self._client = get_docker_client()
         return self._client
 
     def build_image(self) -> str:
@@ -239,9 +239,12 @@ class HunterSandbox:
         tag = self._compute_tag(dockerfile, sanitizers=sanitizers)
 
         # Check cache via CLI — avoids credential helper issues on cache check too
+        from .dind import get_subprocess_env
+
+        docker_env = get_subprocess_env()
         check = subprocess.run(
             ["docker", "image", "inspect", tag],
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=10, env=docker_env,
         )
         if check.returncode == 0:
             logger.debug("Reusing sourcehunt sandbox image %s", tag)
@@ -269,6 +272,7 @@ class HunterSandbox:
                         build_dir,
                     ],
                     capture_output=True, text=True, timeout=300,
+                    env=docker_env,
                 )
                 if proc.returncode != 0:
                     raise RuntimeError(proc.stderr[-2000:] or proc.stdout[-2000:])
