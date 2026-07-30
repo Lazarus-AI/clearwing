@@ -2,7 +2,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -55,29 +54,66 @@ def _validate_parameters(parameters: list[dict]) -> str | None:
     return None
 
 
-def _sandbox_env() -> dict:
-    return {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-    }
+# Docker image used to execute generated tools. Deliberately minimal — the
+# tool only ever needs a Python interpreter and its stdlib.
+SANDBOX_IMAGE = "python:3.12-slim"
+
+# Timeout covers container start plus tool execution (not an initial image
+# pull; pre-pull the image if the first invocation matters).
+SANDBOX_TIMEOUT_SECONDS = 120
 
 
 def _run_sandboxed(file_path: Path, kwargs: dict) -> str:
-    """Execute a generated tool file in an isolated interpreter."""
-    proc = subprocess.run(
-        [sys.executable, "-I", str(file_path)],
-        input=json.dumps(kwargs),
-        env=_sandbox_env(),
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    """Execute a generated tool file inside a network-isolated Docker container.
+
+    The tool's temp directory is mounted read-only at /tool, the container has
+    no network, all capabilities dropped, no-new-privileges, and memory/pid
+    limits. If Docker is unavailable the call fails closed — there is
+    deliberately no host-interpreter fallback.
+    """
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--network=none",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--memory=512m",
+        "--pids-limit=128",
+        "-v",
+        f"{file_path.parent}:/tool:ro",
+        SANDBOX_IMAGE,
+        "python",
+        "-I",
+        f"/tool/{file_path.name}",
+    ]
+    try:
+        proc = subprocess.run(
+            argv,
+            input=json.dumps(kwargs),
+            capture_output=True,
+            text=True,
+            timeout=SANDBOX_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return json.dumps(
+            {
+                "error": (
+                    "Docker is required to execute custom tools and was not "
+                    "found; refusing to fall back to host execution."
+                )
+            }
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "sandboxed execution timed out"})
     if proc.returncode != 0:
         return json.dumps({"error": proc.stderr.strip() or "sandbox exited non-zero"})
     return proc.stdout
 
 
 def _make_stub(tool_name: str, description: str, parameters: list[dict], file_path: Path):
-    """Build an @tool-decorated stub that shells out to the sandboxed subprocess."""
+    """Build an @tool-decorated stub that runs the tool in a Docker sandbox."""
     param_names = [p["name"] for p in parameters]
 
     async def _stub(**kwargs) -> str:
@@ -98,9 +134,11 @@ def create_custom_tool(
 ) -> dict:
     """Create a new tool at runtime by writing a Python file.
 
-    The generated file is written to an ephemeral temp directory and executed
-    in an isolated Python subprocess (`python -I`) with a minimal environment.
-    It has access to: asyncio, json, re, socket, subprocess.
+    Disabled by default; set CLEARWING_ENABLE_DYNAMIC_TOOLS=1 to enable. The
+    generated file is written to an ephemeral temp directory and executed
+    inside a network-isolated Docker container (`--network=none`, all
+    capabilities dropped, memory/pid limits, read-only mount). It has access
+    to: asyncio, json, re, socket, subprocess.
 
     Args:
         tool_name: Name for the tool (lowercase alphanumeric and underscores,
@@ -113,9 +151,20 @@ def create_custom_tool(
     Returns:
         Dict with keys: success, tool_name, message.
     """
+    if os.environ.get("CLEARWING_ENABLE_DYNAMIC_TOOLS") != "1":
+        return {
+            "success": False,
+            "tool_name": tool_name,
+            "message": (
+                "create_custom_tool is disabled by default for security. "
+                "Set CLEARWING_ENABLE_DYNAMIC_TOOLS=1 to enable runtime "
+                "tool creation."
+            ),
+        }
+
     if not interrupt(
         f"Approve creating custom tool '{tool_name}' that will execute "
-        f"arbitrary Python code in a sandboxed subprocess?"
+        f"arbitrary Python code in a network-isolated Docker container?"
     ):
         return {
             "success": False,
@@ -174,7 +223,7 @@ def create_custom_tool(
         "tool_name": tool_name,
         "message": (
             f"Tool '{tool_name}' created and registered "
-            f"(sandboxed subprocess at {file_path})."
+            f"(runs in a Docker sandbox from {file_path})."
         ),
     }
 

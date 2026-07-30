@@ -1,6 +1,8 @@
 """Tests for dynamic tool creator."""
 
+import inspect
 import json
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -18,8 +20,14 @@ from clearwing.agent.tools.ops.dynamic_tool_creator import (
 
 
 @pytest.fixture
-def approve():
-    """Auto-approve the human-in-the-loop gate for tests that exercise the happy path."""
+def enabled(monkeypatch):
+    """Enable the default-disabled dynamic tools feature."""
+    monkeypatch.setenv("CLEARWING_ENABLE_DYNAMIC_TOOLS", "1")
+
+
+@pytest.fixture
+def approve(enabled):
+    """Enable the feature and auto-approve the human-in-the-loop gate."""
     with patch.object(dtc_mod, "interrupt", return_value=True):
         yield
 
@@ -144,7 +152,7 @@ class TestSecurityHardening:
         yield
         _CUSTOM_TOOL_REGISTRY.clear()
 
-    def test_interrupt_gate_blocks_when_denied(self):
+    def test_interrupt_gate_blocks_when_denied(self, enabled):
         with patch.object(dtc_mod, "interrupt", return_value=False):
             result = create_custom_tool.invoke(
                 {
@@ -209,7 +217,7 @@ class TestSecurityHardening:
         pkg_root = str(clearwing.__path__[0])
         assert not str(CUSTOM_TOOLS_DIR).startswith(pkg_root)
 
-    def test_stub_shells_to_isolated_subprocess(self, approve):
+    def test_stub_runs_in_isolated_docker_container(self, approve):
         create_custom_tool.invoke(
             {
                 "tool_name": "test_greeting",
@@ -219,13 +227,99 @@ class TestSecurityHardening:
             }
         )
         stub = _CUSTOM_TOOL_REGISTRY["test_greeting"]
-        with patch.object(dtc_mod, "subprocess") as mock_sub:
-            mock_sub.run.return_value.returncode = 0
-            mock_sub.run.return_value.stdout = json.dumps("hi")
+        with patch.object(dtc_mod.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = json.dumps("hi")
             out = stub.invoke({"name": "hi"})
         assert out == json.dumps("hi")
-        args, kwargs = mock_sub.run.call_args
+        args, kwargs = mock_run.call_args
         argv = args[0]
-        assert argv[1] == "-I"
+        assert argv[0] == "docker"
+        assert argv[1] == "run"
+        assert "--rm" in argv
+        assert "--network=none" in argv
+        assert "--cap-drop=ALL" in argv
+        assert "--security-opt=no-new-privileges" in argv
+        assert "--memory=512m" in argv
+        assert "--pids-limit=128" in argv
+        # The tool dir is mounted read-only and the file executed from /tool
+        mount = argv[argv.index("-v") + 1]
+        assert mount == f"{CUSTOM_TOOLS_DIR}:/tool:ro"
+        assert argv[-3:] == ["python", "-I", "/tool/test_greeting.py"]
+        # No host interpreter anywhere in the invocation
+        assert sys.executable not in argv
         assert kwargs["capture_output"] is True
-        assert set(kwargs["env"].keys()) == {"PATH"}
+
+    def test_no_host_python_execution_path_in_module(self):
+        # The maintainer-flagged `subprocess.run([sys.executable, "-I", ...])`
+        # host path must be gone entirely: the module must not reference the
+        # host interpreter at all.
+        source = inspect.getsource(dtc_mod)
+        assert "sys.executable" not in source
+        assert not hasattr(dtc_mod, "sys")
+
+    def test_fails_closed_when_docker_missing(self, approve):
+        create_custom_tool.invoke(
+            {
+                "tool_name": "test_greeting",
+                "description": "d",
+                "parameters": [{"name": "name", "type": "str"}],
+                "python_code": "return name",
+            }
+        )
+        stub = _CUSTOM_TOOL_REGISTRY["test_greeting"]
+        with patch.object(
+            dtc_mod.subprocess,
+            "run",
+            side_effect=FileNotFoundError("No such file or directory: 'docker'"),
+        ):
+            out = stub.invoke({"name": "hi"})
+        payload = json.loads(out)
+        assert "error" in payload
+        assert "docker" in payload["error"].lower()
+        assert "host" in payload["error"].lower()
+
+
+class TestDefaultDisabled:
+    """create_custom_tool must be disabled unless explicitly opted in."""
+
+    @pytest.fixture(autouse=True)
+    def cleanup(self):
+        yield
+        _CUSTOM_TOOL_REGISTRY.clear()
+
+    def _invoke(self):
+        return create_custom_tool.invoke(
+            {
+                "tool_name": "gated_tool",
+                "description": "d",
+                "parameters": [],
+                "python_code": "return 'x'",
+            }
+        )
+
+    def test_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("CLEARWING_ENABLE_DYNAMIC_TOOLS", raising=False)
+        with patch.object(
+            dtc_mod, "interrupt", side_effect=AssertionError("interrupt must not be reached")
+        ):
+            result = self._invoke()
+        assert result["success"] is False
+        assert "disabled by default" in result["message"]
+        assert "CLEARWING_ENABLE_DYNAMIC_TOOLS" in result["message"]
+        assert "gated_tool" not in _CUSTOM_TOOL_REGISTRY
+
+    def test_disabled_unless_env_is_exactly_one(self, monkeypatch):
+        for value in ("true", "yes", "0", ""):
+            monkeypatch.setenv("CLEARWING_ENABLE_DYNAMIC_TOOLS", value)
+            result = self._invoke()
+            assert result["success"] is False, f"value {value!r} should not enable"
+        assert "gated_tool" not in _CUSTOM_TOOL_REGISTRY
+
+    def test_enabled_still_requires_interrupt_approval(self, monkeypatch):
+        monkeypatch.setenv("CLEARWING_ENABLE_DYNAMIC_TOOLS", "1")
+        with patch.object(dtc_mod, "interrupt", return_value=False) as mock_interrupt:
+            result = self._invoke()
+        mock_interrupt.assert_called_once()
+        assert result["success"] is False
+        assert "not approved" in result["message"].lower()
