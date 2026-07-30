@@ -13,6 +13,7 @@ from clearwing.providers.env import (
     ENV_API_KEY,
     ENV_BASE_URL,
     ENV_MODEL,
+    EndpointPricing,
     LLMEndpoint,
     resolve_llm_endpoint,
 )
@@ -27,6 +28,7 @@ from clearwing.providers.manager import (
 __all__ = [
     # Endpoint resolution
     "LLMEndpoint",
+    "EndpointPricing",
     "resolve_llm_endpoint",
     "ENV_BASE_URL",
     "ENV_API_KEY",

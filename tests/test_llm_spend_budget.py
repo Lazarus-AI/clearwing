@@ -17,6 +17,7 @@ from clearwing.llm.budget import (
     SpendLedger,
 )
 from clearwing.llm.native import AsyncLLMClient
+from clearwing.providers import EndpointPricing, LLMEndpoint
 from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig
 from clearwing.sourcehunt.runner import SourceHuntRunner
 
@@ -114,10 +115,7 @@ def test_reservations_are_atomic_across_concurrent_native_calls(tmp_path, monkey
 
     async def run_calls():
         return await asyncio.gather(
-            *[
-                client.achat(messages=[ChatMessage("user", f"call {idx}")])
-                for idx in range(8)
-            ],
+            *[client.achat(messages=[ChatMessage("user", f"call {idx}")]) for idx in range(8)],
             return_exceptions=True,
         )
 
@@ -131,7 +129,8 @@ def test_reservations_are_atomic_across_concurrent_native_calls(tmp_path, monkey
 
 
 def test_unlimited_ledger_tracks_usage_without_changing_output_limit(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     ledger = _ledger(tmp_path, budget=0.0)
     client = AsyncLLMClient(
@@ -261,7 +260,9 @@ def test_streaming_calls_settle_against_the_same_ledger(tmp_path, monkeypatch):
         usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1),
     )
     monkeypatch.setattr(
-        AsyncLLMClient, "_build_client", lambda self, cls: StreamingClient(),
+        AsyncLLMClient,
+        "_build_client",
+        lambda self, cls: StreamingClient(),
     )
     monkeypatch.setattr(
         AsyncLLMClient,
@@ -304,8 +305,7 @@ def test_ledger_persists_reservations_settlements_and_final_status(tmp_path):
 
     manifest = json.loads(ledger.manifest_path.read_text(encoding="utf-8"))
     events = [
-        json.loads(line)
-        for line in ledger.ledger_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line) for line in ledger.ledger_path.read_text(encoding="utf-8").splitlines()
     ]
 
     assert summary["status"] == "budget_exhausted"
@@ -363,11 +363,11 @@ def test_cancellation_closes_an_inflight_reservation(tmp_path, monkeypatch):
 
         monkeypatch.setattr(AsyncLLMClient, "_build_client", lambda self, cls: object())
         monkeypatch.setattr(
-            AsyncLLMClient, "_achat_with_provider_policy", wait_forever,
+            AsyncLLMClient,
+            "_achat_with_provider_policy",
+            wait_forever,
         )
-        task = asyncio.create_task(
-            client.achat(messages=[ChatMessage("user", "cancel me")])
-        )
+        task = asyncio.create_task(client.achat(messages=[ChatMessage("user", "cancel me")]))
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -437,7 +437,8 @@ def test_runner_manifest_uses_ranker_ledger_not_hunter_totals(tmp_path, monkeypa
 
 
 def test_runner_returns_clean_partial_result_when_budget_cannot_fit_call(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -456,7 +457,9 @@ def test_runner_returns_clean_partial_result_when_budget_cannot_fit_call(
 
     monkeypatch.setattr(AsyncLLMClient, "_build_client", lambda self, cls: object())
     monkeypatch.setattr(
-        AsyncLLMClient, "_achat_with_provider_policy", should_not_dispatch,
+        AsyncLLMClient,
+        "_achat_with_provider_policy",
+        should_not_dispatch,
     )
 
     runner = SourceHuntRunner(
@@ -473,9 +476,7 @@ def test_runner_returns_clean_partial_result_when_budget_cannot_fit_call(
     )
     result = runner.run()
     manifest = json.loads(
-        (tmp_path / "out" / result.session_id / "manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "out" / result.session_id / "manifest.json").read_text(encoding="utf-8")
     )
 
     assert dispatched is False
@@ -525,3 +526,177 @@ def test_no_rank_skips_ranker_pricing_preflight_and_dispatch(tmp_path, monkeypat
     assert dispatched is False
     assert result.status == "completed"
     assert result.cost_usd == 0.0
+
+
+# --- Per-endpoint pricing -------------------------------------------------
+#
+# An LLMEndpoint may carry an optional EndpointPricing. When it does, the
+# ledger treats it as the authoritative price for that run — ahead of the
+# operator override and the built-in pricing table. When it doesn't, pricing
+# resolution is exactly as before.
+
+
+def test_endpoint_pricing_drives_budget(tmp_path):
+    """A priced endpoint is used verbatim, even for an unknown model."""
+
+    endpoint = LLMEndpoint(
+        provider="openai_compat",
+        model="private-model-with-unknown-price",
+        base_url="https://gateway.example/v1",
+        pricing=EndpointPricing(input_per_mtok=2.0, output_per_mtok=8.0),
+    )
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="endpoint-priced",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+        endpoint=endpoint,
+    )
+
+    # Without endpoint pricing this model has no verified price under a strict
+    # (enforcing) budget and would raise; the endpoint price makes it usable.
+    pricing = ledger.validate_model(
+        model="private-model-with-unknown-price",
+        provider="openai_compat",
+        supports_output_limit=True,
+    )
+
+    assert pricing.source == "endpoint_pricing"
+    assert pricing.input_per_million == pytest.approx(2.0)
+    assert pricing.output_per_million == pytest.approx(8.0)
+    # No distinct cached rate supplied -> falls back to the input rate.
+    assert pricing.cached_input_per_million == pytest.approx(2.0)
+
+
+def test_endpoint_pricing_uses_explicit_cached_rate(tmp_path):
+    endpoint = LLMEndpoint(
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        pricing=EndpointPricing(
+            input_per_mtok=3.0,
+            output_per_mtok=15.0,
+            cached_per_mtok=0.3,
+            cache_creation_per_mtok=3.75,
+        ),
+    )
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="endpoint-cached",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+        endpoint=endpoint,
+    )
+
+    pricing = ledger.validate_model(
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        supports_output_limit=True,
+    )
+
+    assert pricing.cached_input_per_million == pytest.approx(0.3)
+
+
+def test_endpoint_pricing_outranks_operator_override(tmp_path):
+    """Endpoint pricing wins over an explicit input/output price override."""
+
+    endpoint = LLMEndpoint(
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        pricing=EndpointPricing(input_per_mtok=1.0, output_per_mtok=1.0),
+    )
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="endpoint-vs-override",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+        input_price_per_million=99.0,
+        output_price_per_million=99.0,
+        endpoint=endpoint,
+    )
+
+    pricing = ledger.validate_model(
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        supports_output_limit=True,
+    )
+
+    assert pricing.source == "endpoint_pricing"
+    assert pricing.input_per_million == pytest.approx(1.0)
+    assert pricing.output_per_million == pytest.approx(1.0)
+
+
+def test_endpoint_pricing_charges_at_endpoint_rate(tmp_path, monkeypatch):
+    """Settlement uses the endpoint rate: 1 output token costs exactly $1."""
+
+    endpoint = LLMEndpoint(
+        provider="anthropic",
+        model="private-priced-model",
+        pricing=EndpointPricing(
+            input_per_mtok=0.0,
+            output_per_mtok=1_000_000.0,
+        ),
+    )
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="endpoint-charge",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+        endpoint=endpoint,
+    )
+    client = AsyncLLMClient(
+        model_name="private-priced-model",
+        provider_name="anthropic",
+        api_key="test",
+    ).with_spend_ledger(ledger, stage="rank")
+
+    async def fake_policy(self, client_obj, request, options):
+        return ChatResponse(
+            content=[{"text": "done"}],
+            usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1),
+        )
+
+    monkeypatch.setattr(AsyncLLMClient, "_build_client", lambda self, cls: object())
+    monkeypatch.setattr(AsyncLLMClient, "_achat_with_provider_policy", fake_policy)
+
+    asyncio.run(client.achat(messages=[ChatMessage("user", "hi")]))
+
+    assert ledger.spent_usd == pytest.approx(1.0)
+
+
+def test_endpoint_without_pricing_falls_back_to_table(tmp_path):
+    """An endpoint carrying no pricing leaves resolution unchanged."""
+
+    endpoint = LLMEndpoint(provider="anthropic", model="claude-sonnet-4-6")
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="endpoint-no-pricing",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+        endpoint=endpoint,
+    )
+
+    pricing = ledger.validate_model(
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        supports_output_limit=True,
+    )
+
+    assert pricing.source == "pricing_table:claude-sonnet-4-6"
+
+
+def test_no_endpoint_preserves_strict_unknown_model_rejection(tmp_path):
+    """Omitting the endpoint entirely keeps today's strict-budget behavior."""
+
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="no-endpoint",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+    )
+
+    with pytest.raises(BudgetConfigurationError, match="No verified pricing"):
+        ledger.validate_model(
+            model="private-model-with-unknown-price",
+            provider="openai",
+            supports_output_limit=True,
+        )
