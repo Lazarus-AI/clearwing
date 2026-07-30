@@ -85,9 +85,9 @@ class SandboxContainer:
 
     def _get_client(self):
         if self._client is None:
-            import docker  # local import — keeps the module importable without docker
+            from .dind import get_docker_client
 
-            self._client = docker.from_env()
+            self._client = get_docker_client()
         return self._client
 
     def start(self) -> str:
