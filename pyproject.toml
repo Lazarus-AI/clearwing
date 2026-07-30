@@ -182,6 +182,7 @@ ignore_missing_imports = true
 #   - clearwing.capabilities        (Phase 4c)
 #   - clearwing.sourcehunt.*        (Phase 5 — ~37 untyped-def errors
 #                                    cleaned up via real annotations)
+#   - clearwing.remediation.*       (typed remediation lifecycle and policy)
 #   - clearwing.agent.tools.*       (Phase 5 — implicit Optional,
 #                                    no-any-return, browser-state None
 #                                    narrowing, and a handful of real
@@ -195,6 +196,7 @@ module = [
     "clearwing.findings.*",
     "clearwing.capabilities",
     "clearwing.sourcehunt.*",
+    "clearwing.remediation.*",
     "clearwing.agent.tools.*",
     "clearwing.core.*",
     "clearwing.agent.runtime",

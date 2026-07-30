@@ -7,9 +7,11 @@ JSONL audit trail.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,7 +71,7 @@ class ArtifactStore:
         self._init_storage()
 
     def _init_storage(self) -> None:
-        for subdir in ("exploits", "transcripts", "poc", "keys"):
+        for subdir in ("exploits", "transcripts", "poc", "remediation", "keys"):
             (self._base_dir / subdir).mkdir(parents=True, exist_ok=True)
 
         key_path = self._base_dir / "keys" / "master.key"
@@ -122,7 +124,21 @@ class ArtifactStore:
     def _store(self, category: str, finding_id: str, data: bytes, operator: str) -> Path:
         safe_id = finding_id.replace("/", "_").replace("..", "_")
         out_path = self._base_dir / category / f"{safe_id}.enc"
-        out_path.write_bytes(self._encrypt(data))
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{safe_id}-",
+            suffix=".tmp",
+            dir=str(out_path.parent),
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(self._encrypt(data))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, out_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         self._log_access(f"store_{category}", finding_id, str(out_path), operator)
         return out_path
 
@@ -134,6 +150,26 @@ class ArtifactStore:
 
     def store_transcript(self, finding_id: str, data: bytes, operator: str = "system") -> Path:
         return self._store("transcripts", finding_id, data, operator)
+
+    def store_remediation_patch(
+        self,
+        remediation_id: str,
+        data: bytes,
+        operator: str = "remediation-workflow",
+    ) -> Path:
+        """Encrypt an exact patch while the public DTO keeps a redacted rendering."""
+
+        return self._store("remediation", remediation_id, data, operator)
+
+    def store_remediation_backup(
+        self,
+        remediation_id: str,
+        relative_path: str,
+        data: bytes,
+        operator: str = "remediation-workflow",
+    ) -> Path:
+        suffix = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:16]
+        return self._store("remediation", f"{remediation_id}-backup-{suffix}", data, operator)
 
     def retrieve(
         self,
