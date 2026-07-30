@@ -52,6 +52,28 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 
 @dataclass(frozen=True)
+class EndpointPricing:
+    """Per-model price attached to an endpoint, in USD per one million tokens.
+
+    Whoever constructs an :class:`LLMEndpoint` may attach an
+    ``EndpointPricing`` describing the price of that endpoint's model. When
+    present it is the authoritative price the budget ledger uses for cost
+    accounting, ahead of any operator-supplied override or the built-in
+    pricing table. Leaving it ``None`` (the default for every endpoint) keeps
+    the ledger's existing pricing behavior unchanged.
+
+    Only ``input_per_mtok`` and ``output_per_mtok`` are required. The two
+    cache-related rates are optional; a consumer that does not distinguish a
+    cached-read price falls back to the input rate.
+    """
+
+    input_per_mtok: float
+    output_per_mtok: float
+    cached_per_mtok: float | None = None
+    cache_creation_per_mtok: float | None = None
+
+
+@dataclass(frozen=True)
 class LLMEndpoint:
     """The resolved LLM configuration for one command invocation.
 
@@ -84,6 +106,11 @@ class LLMEndpoint:
     #: via `adapter:` in the `provider:` config block (e.g. the
     #: `openai-responses` preset writes `adapter: openai_resp`).
     adapter: str | None = None
+    #: Optional per-model price for this endpoint. When set, budget/cost
+    #: accounting treats it as the authoritative price for this endpoint's
+    #: model, ahead of any operator override or the built-in pricing table.
+    #: ``None`` (the default) leaves existing pricing behavior unchanged.
+    pricing: EndpointPricing | None = None
 
     @property
     def is_openai_compat(self) -> bool:
@@ -517,6 +544,7 @@ __all__ = [
     "ENV_BASE_URL",
     "ENV_MODEL",
     "DEFAULT_ANTHROPIC_MODEL",
+    "EndpointPricing",
     "LLMEndpoint",
     "resolve_llm_endpoint",
 ]
