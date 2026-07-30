@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from itertools import islice
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient, BudgetExceeded
+from clearwing.llm import AsyncLLMClient, BudgetExceeded, extract_json_object
+from clearwing.reporting.safety import redact_text, redact_tree
 
 from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
 
@@ -235,7 +236,7 @@ class Verifier:
             "discovered_by": finding.get("discovered_by"),
         }
         msg = "Verify the following bug report:\n\n"
-        msg += json.dumps(finding_view, indent=2)
+        msg += json.dumps(redact_tree(finding_view), indent=2)
         if file_content:
             excerpts = self._build_file_context(finding, file_content)
             if excerpts:
@@ -243,6 +244,7 @@ class Verifier:
         return msg
 
     def _build_file_context(self, finding: Finding, file_content: str) -> str:
+        file_content = redact_text(file_content)
         lines = file_content.splitlines()
         if not lines:
             return ""
@@ -319,14 +321,12 @@ class Verifier:
         return merged
 
     def _parse_response(self, finding: Finding, content: str) -> VerifierResult:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            logger.warning("Verifier response had no JSON object; got: %s", content[:300])
-            return self._error_result(finding, content, "no JSON in response")
         try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return self._error_result(finding, content, "JSON parse failed")
+            parsed = extract_json_object(content)
+        except ValueError:
+            logger.warning("Verifier response had no valid JSON object; got: %s", content[:300])
+            reason = "JSON parse failed" if "{" in content else "no JSON in response"
+            return self._error_result(finding, content, reason)
 
         is_real = bool(parsed.get("is_real", False))
         severity = parsed.get("severity")
@@ -443,20 +443,20 @@ class Verifier:
             "poc": (finding.get("poc") or "")[:500],
         }
         msg = "Verified finding:\n\n"
-        msg += json.dumps(view, indent=2)
+        msg += json.dumps(redact_tree(view), indent=2)
         if file_content:
-            msg += f"\n\nCurrent file content (capped to 8 KB):\n{file_content[:8000]}"
+            msg += (
+                "\n\nCurrent file content (capped to 8 KB):\n"
+                f"{redact_text(file_content)[:8000]}"
+            )
         return msg
 
     def _parse_patch_oracle_response(self, content: str) -> dict | None:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            return None
         try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
+            parsed = extract_json_object(content)
+        except ValueError:
             return None
-        return parsed if isinstance(parsed, dict) else None
+        return parsed
 
 
 def apply_verifier_result(

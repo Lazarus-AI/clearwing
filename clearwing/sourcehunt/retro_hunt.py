@@ -18,14 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from clearwing.llm import AsyncLLMClient, ChatMessage
+from clearwing.llm import AsyncLLMClient, ChatMessage, extract_json_object
 from clearwing.llm.native import response_text
 
 from .instrumentation import stable_run_id
@@ -196,14 +195,11 @@ class RetroHunter:
             logger.debug("Retro-hunt rule-gen LLM call failed", exc_info=True)
             return None
         content = response_text(response)
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            return None
         try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
+            parsed = extract_json_object(content)
+        except ValueError:
             return None
-        return parsed if isinstance(parsed, dict) else None
+        return parsed
 
     def _format_semgrep_rule(self, rule_info: dict) -> str:
         """Build a minimal Semgrep rule YAML from the parsed rule_info dict."""

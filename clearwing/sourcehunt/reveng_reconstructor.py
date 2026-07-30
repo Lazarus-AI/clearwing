@@ -7,11 +7,11 @@ confidence ratings.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any
+
+from clearwing.llm import extract_json_array
 
 from .reveng_decompiler import DecompilationResult, StaticAnalysisResult
 
@@ -140,18 +140,15 @@ class RevengReconstructor:
         batch: list,
     ) -> list[ReconstructedSource]:
         """Parse LLM JSON response into ReconstructedSource objects."""
-        text = text.strip()
-        json_match = re.search(r"\[.*\]", text, re.DOTALL)
-        if not json_match:
-            return self._fallback_reconstruction(batch)
-
         try:
-            items = json.loads(json_match.group())
-        except json.JSONDecodeError:
+            items = extract_json_array(text)
+        except ValueError:
             return self._fallback_reconstruction(batch)
 
         results = []
         for item in items:
+            if not isinstance(item, dict):
+                continue
             results.append(ReconstructedSource(
                 original_name=item.get("original_name", ""),
                 reconstructed_name=item.get("reconstructed_name", ""),
@@ -191,7 +188,7 @@ class RevengReconstructor:
                 if len(s) > 4
             ]
             if interesting:
-                parts.append(f"Notable strings:\n" + "\n".join(interesting[:30]))
+                parts.append("Notable strings:\n" + "\n".join(interesting[:30]))
         return "\n".join(parts) if parts else "(no static analysis context)"
 
     def _assemble_source(self, sources: list[ReconstructedSource]) -> str:

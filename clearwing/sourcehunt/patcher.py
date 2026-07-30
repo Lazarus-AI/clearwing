@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient, BudgetExceeded
+from clearwing.llm import AsyncLLMClient, BudgetExceeded, extract_json_object
+from clearwing.reporting.safety import redact_text, redact_tree
 
 from .state import EvidenceLevel, Finding, evidence_at_or_above
 
@@ -204,20 +204,20 @@ class AutoPatcher:
             "verifier_pro_argument": finding.get("verifier_pro_argument"),
         }
         msg = "Verified vulnerability:\n\n"
-        msg += json.dumps(view, indent=2)
+        msg += json.dumps(redact_tree(view), indent=2)
         if file_content:
-            msg += f"\n\nCurrent file content (capped to 8 KB):\n{file_content[:8000]}"
+            msg += (
+                "\n\nCurrent file content (capped to 8 KB):\n"
+                f"{redact_text(file_content)[:8000]}"
+            )
         return msg
 
     def _parse_response(self, content: str) -> dict | None:
-        match = re.search(r"\{[\s\S]*\}", content)
-        if not match:
-            return None
         try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
+            parsed = extract_json_object(content)
+        except ValueError:
             return None
-        return parsed if isinstance(parsed, dict) else None
+        return parsed
 
 
 def apply_patch_attempt(

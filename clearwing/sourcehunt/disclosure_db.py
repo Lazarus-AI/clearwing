@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+
+from clearwing.reporting.safety import redact_text, redact_tree
 
 from .state import DisclosureState
 
@@ -141,7 +142,7 @@ def _compute_priority(finding: dict) -> float:
 
 
 def _batch_key_for(finding: dict, repo_url: str) -> str:
-    return repo_url
+    return redact_text(repo_url)
 
 
 class DisclosureDB:
@@ -188,7 +189,7 @@ class DisclosureDB:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         fid,
-                        repo_url,
+                        redact_text(repo_url),
                         session_id,
                         f.get("file"),
                         f.get("line_number"),
@@ -197,9 +198,9 @@ class DisclosureDB:
                         f.get("severity", "info"),
                         f.get("severity_verified"),
                         f.get("evidence_level", "suspicion"),
-                        (f.get("description") or "")[:2000],
-                        (f.get("poc") or "")[:5000],
-                        (f.get("crash_evidence") or "")[:2000],
+                        redact_text((f.get("description") or "")[:2000]),
+                        redact_text((f.get("poc") or "")[:5000]),
+                        redact_text((f.get("crash_evidence") or "")[:2000]),
                         f.get("stability_classification"),
                         f.get("stability_success_rate"),
                         f.get("severity_disagreement"),
@@ -208,7 +209,7 @@ class DisclosureDB:
                         now,
                         now,
                         batch_key,
-                        json.dumps(f, default=str)[:50000],
+                        json.dumps(redact_tree(f), default=str)[:50000],
                     ),
                 )
                 count += 1
@@ -292,7 +293,7 @@ class DisclosureDB:
             params.append(state)
         if repo_url:
             query += " AND repo_url = ?"
-            params.append(repo_url)
+            params.append(redact_text(repo_url))
         query += " ORDER BY priority_score DESC"
         rows = self._conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]

@@ -10,11 +10,12 @@ Tier 5: Full control flow hijack — LLM-assisted
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+
+from clearwing.llm import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -183,15 +184,12 @@ class CrashClassifier:
 
     def _parse_llm_response(self, text: str) -> tuple[int, str]:
         """Parse LLM JSON response into (tier, rationale)."""
-        text = text.strip()
-        json_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
-                tier = int(data.get("tier", 2))
-                tier = max(2, min(5, tier))  # clamp to 2-5
-                rationale = data.get("rationale", "")
-                return tier, rationale
-            except (json.JSONDecodeError, ValueError, TypeError):
-                pass
+        try:
+            data = extract_json_object(text)
+            tier = int(data.get("tier", 2))
+            tier = max(2, min(5, tier))  # clamp to 2-5
+            rationale = data.get("rationale", "")
+            return tier, rationale
+        except (ValueError, TypeError):
+            pass
         return 2, ""
