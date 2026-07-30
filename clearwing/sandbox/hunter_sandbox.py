@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 
 from .builders import (
@@ -48,7 +49,12 @@ class HunterSandbox:
     # image, and spawn containers from either one by name.
     DEFAULT_EXTRA_VARIANTS: tuple[tuple[str, ...], ...] = ()
 
-    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git", "ltrace"]
+    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git"]
+    # Packages that are useful but not available on all architectures.
+    # ltrace is x86_64-only (not packaged for arm64 on any Debian release).
+    # Installed in a separate best-effort layer so their absence doesn't
+    # fail the entire image build.
+    DEEP_AGENT_OPTIONAL_PACKAGES = ["ltrace"]
     EXPLOIT_AGENT_PACKAGES = ["gdb", "python3-pip", "ruby", "binutils"]
     EXPLOIT_POST_INSTALL = [
         "pip3 install --break-system-packages pwntools ROPgadget seccomp-tools 2>/dev/null || true",
@@ -80,12 +86,14 @@ class HunterSandbox:
         for v in self.extra_variants:
             validate_sanitizer_combo(v)
         self.extra_packages = list(extra_packages or [])
+        self._optional_packages: list[str] = []
         self.post_install_commands = list(post_install_commands or [])
         self.deep_agent_mode = deep_agent_mode
         if deep_agent_mode:
             for pkg in self.DEEP_AGENT_PACKAGES:
                 if pkg not in self.extra_packages:
                     self.extra_packages.append(pkg)
+            self._optional_packages.extend(self.DEEP_AGENT_OPTIONAL_PACKAGES)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
         self._image_tag: str | None = None  # primary variant tag
@@ -203,31 +211,71 @@ class HunterSandbox:
         self.build_image()
         return dict(self._variant_images)
 
+    def _target_platform(self) -> str:
+        """Docker platform string for builds.
+
+        C/C++ toolchains (gcc, valgrind, sanitizers) run painfully slow under
+        qemu on Apple Silicon and occasionally miscompile. Use native arm64 for
+        those languages; pin amd64 for everything else for reproducibility.
+        """
+        import platform as _plat
+
+        lang = (self.build_recipe.primary_language or "").lower()
+        if lang in ("c", "cpp", "c++") and _plat.machine() in ("arm64", "aarch64"):
+            return "linux/arm64"
+        return "linux/amd64"
+
     def _build_variant_image(self, sanitizers: list[str]) -> str:
-        """Build one sandbox image for the given sanitizer combo."""
-        client = self._get_client()
+        """Build one sandbox image for the given sanitizer combo.
+
+        Uses the `docker build` CLI instead of the Python SDK's images.build()
+        because the SDK eagerly resolves ALL credential helpers configured in
+        ~/.docker/config.json. If any helper errors (e.g. docker-credential-gcloud
+        with an expired token), the entire build fails — even though the base
+        image doesn't need that registry. The CLI only authenticates against
+        registries it actually needs to pull from.
+        """
         dockerfile = self._render_dockerfile(sanitizers=sanitizers)
         tag = self._compute_tag(dockerfile, sanitizers=sanitizers)
 
-        try:
-            client.images.get(tag)
+        # Check cache via CLI — avoids credential helper issues on cache check too
+        check = subprocess.run(
+            ["docker", "image", "inspect", tag],
+            capture_output=True, timeout=10,
+        )
+        if check.returncode == 0:
             logger.debug("Reusing sourcehunt sandbox image %s", tag)
             return tag
-        except Exception:
-            pass
 
         with tempfile.TemporaryDirectory(prefix="clearwing-sandbox-build-") as build_dir:
             dockerfile_path = os.path.join(build_dir, "Dockerfile")
             with open(dockerfile_path, "w", encoding="utf-8") as f:
                 f.write(dockerfile)
 
+            platform_flag = self._target_platform()
             logger.info(
-                "Building sourcehunt sandbox image %s (sanitizers=%s)",
+                "Building sourcehunt sandbox image %s (sanitizers=%s, platform=%s)",
                 tag,
                 ",".join(sanitizers),
+                platform_flag,
             )
             try:
-                client.images.build(path=build_dir, tag=tag, rm=True, forcerm=True, platform="linux/amd64", network_mode="host")
+                proc = subprocess.run(
+                    [
+                        "docker", "build",
+                        "--progress=plain",
+                        "--platform", platform_flag,
+                        "-t", tag,
+                        build_dir,
+                    ],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(proc.stderr[-2000:] or proc.stdout[-2000:])
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(f"Sandbox image build timed out after 300s") from e
+            except RuntimeError:
+                raise
             except Exception as e:
                 logger.warning("Sandbox image build failed: %s", e)
                 logger.debug("Sandbox image build failed", exc_info=True)
@@ -417,6 +465,18 @@ class HunterSandbox:
         else:
             apt_block = "# (no apt packages)"
 
+        # Optional packages: installed best-effort (e.g. ltrace is missing on
+        # arm64/bookworm). Separate layer so a missing package doesn't fail the
+        # entire build.
+        optional_apt_block = ""
+        if self._optional_packages:
+            opt_list = " ".join(self._optional_packages)
+            optional_apt_block = (
+                f"RUN apt-get update -qq && "
+                f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {opt_list} 2>/dev/null || true ; "
+                f"rm -rf /var/lib/apt/lists/*"
+            )
+
         post_install_block = ""
         if self.post_install_commands:
             post_install_block = "\n".join(f"RUN {cmd}" for cmd in self.post_install_commands)
@@ -429,6 +489,8 @@ class HunterSandbox:
 {variant_header}
 
 {apt_block}
+
+{optional_apt_block}
 
 {post_install_block}
 
