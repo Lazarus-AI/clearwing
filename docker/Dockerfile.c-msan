@@ -1,0 +1,19 @@
+FROM gcc:12-bullseye
+
+# Build system: make | Primary language: c
+# Sanitizer variant: msan (cannot coexist with asan)
+
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      ripgrep gdb strace coreutils ca-certificates build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CFLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -g -O1 -fno-omit-frame-pointer"
+ENV CXXFLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -g -O1 -fno-omit-frame-pointer"
+ENV LDFLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer"
+ENV MSAN_OPTIONS="abort_on_error=0:halt_on_error=0:print_stats=0:exit_code=77:origin_history_size=16"
+
+WORKDIR /workspace
+
+# /scratch is mounted at runtime as a writable tmpfs
+RUN mkdir -p /scratch
