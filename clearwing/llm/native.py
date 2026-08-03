@@ -368,6 +368,12 @@ class AsyncLLMClient:
         # every model except the blacklisted ones (see
         # _REASONING_CAPTURE_UNSUPPORTED_PATTERNS), which error if it's set.
         self.capture_reasoning_content = _model_supports_reasoning_capture(model_name)
+        # Some Responses-compatible gateways reject the standard
+        # `max_output_tokens` field.  Learn that once from an explicit HTTP
+        # 400 and omit the optional provider-side cap for the rest of this
+        # client session; the spend ledger still reserves against the caller's
+        # requested maximum before ChatOptions is built.
+        self._omit_max_tokens = False
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
@@ -585,7 +591,7 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
                 capture_tool_calls=True,
@@ -617,18 +623,36 @@ class AsyncLLMClient:
                         lambda: self._achat_with_provider_policy(client, request, options)
                     )
                 except Exception as exc:
-                    if not self._is_unsupported_reasoning_effort_error(exc):
+                    if (
+                        options.reasoning_effort is not None
+                        and self._is_unsupported_reasoning_effort_error(exc)
+                    ):
+                        logger.warning(
+                            "Provider rejected reasoning_effort for model %r; retrying "
+                            "with reasoning_effort=None and disabling it for this session.",
+                            self.model_name,
+                        )
+                        self.reasoning_effort = None
+                        options = self._rebuild_options_without_reasoning(options)
+                        response = await self._with_rate_limit_retries(
+                            lambda: self._achat_with_provider_policy(client, request, options)
+                        )
+                    elif (
+                        options.max_tokens is not None
+                        and self._is_unsupported_max_output_tokens_error(exc)
+                    ):
+                        logger.warning(
+                            "Provider rejected max_output_tokens for model %r; retrying "
+                            "without it and disabling it for this session.",
+                            self.model_name,
+                        )
+                        self._omit_max_tokens = True
+                        options = self._rebuild_options_without_max_tokens(options)
+                        response = await self._with_rate_limit_retries(
+                            lambda: self._achat_with_provider_policy(client, request, options)
+                        )
+                    else:
                         raise
-                    logger.warning(
-                        "Provider rejected reasoning_effort for model %r; retrying "
-                        "with reasoning_effort=None and disabling it for this session.",
-                        self.model_name,
-                    )
-                    self.reasoning_effort = None
-                    options = self._rebuild_options_without_reasoning(options)
-                    response = await self._with_rate_limit_retries(
-                        lambda: self._achat_with_provider_policy(client, request, options)
-                    )
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
@@ -725,7 +749,7 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
                 capture_tool_calls=True,
@@ -750,7 +774,10 @@ class AsyncLLMClient:
                 try:
                     response = await _consume(options)
                 except Exception as exc:
-                    if self._is_unsupported_reasoning_effort_error(exc):
+                    if (
+                        options.reasoning_effort is not None
+                        and self._is_unsupported_reasoning_effort_error(exc)
+                    ):
                         logger.warning(
                             "Provider rejected reasoning_effort (streaming) for model "
                             "%r; retrying with reasoning_effort=None and disabling it "
@@ -759,6 +786,18 @@ class AsyncLLMClient:
                         )
                         self.reasoning_effort = None
                         options = self._rebuild_options_without_reasoning(options)
+                        response = await _consume(options)
+                    elif (
+                        options.max_tokens is not None
+                        and self._is_unsupported_max_output_tokens_error(exc)
+                    ):
+                        logger.warning(
+                            "Provider rejected max_output_tokens (streaming) for model "
+                            "%r; retrying without it and disabling it for this session.",
+                            self.model_name,
+                        )
+                        self._omit_max_tokens = True
+                        options = self._rebuild_options_without_max_tokens(options)
                         response = await _consume(options)
                     elif self._should_try_openai_http_fallback(exc) and not (
                         self._spend_ledger is not None
@@ -1465,6 +1504,22 @@ class AsyncLLMClient:
         )
 
     @staticmethod
+    def _rebuild_options_without_max_tokens(options: ChatOptions) -> ChatOptions:
+        """Return a copy of *options* with ``max_tokens=None``."""
+
+        return ChatOptions(
+            temperature=options.temperature,
+            max_tokens=None,
+            capture_content=options.capture_content,
+            capture_usage=options.capture_usage,
+            capture_tool_calls=options.capture_tool_calls,
+            capture_reasoning_content=options.capture_reasoning_content,
+            normalize_reasoning_content=options.normalize_reasoning_content,
+            reasoning_effort=options.reasoning_effort,
+            response_json_spec=options.response_json_spec,
+        )
+
+    @staticmethod
     def _is_unsupported_reasoning_effort_error(exc: BaseException) -> bool:
         """True when *exc* indicates the provider rejected ``reasoning_effort``.
 
@@ -1475,6 +1530,15 @@ class AsyncLLMClient:
         """
         text = str(exc).lower()
         if "reasoning_effort" not in text:
+            return False
+        return "400" in text or "unsupported" in text
+
+    @staticmethod
+    def _is_unsupported_max_output_tokens_error(exc: BaseException) -> bool:
+        """True for an explicit rejection of Responses' output-token cap."""
+
+        text = str(exc).lower()
+        if "max_output_tokens" not in text:
             return False
         return "400" in text or "unsupported" in text
 
