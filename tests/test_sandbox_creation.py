@@ -183,22 +183,25 @@ class TestImageTagDeterminism:
 
 
 class TestBuildImageFlow:
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_build_calls_docker_cli_when_not_cached(self, mock_run, c_repo: Path):
-        # First call: `docker image inspect` → not found (returncode=1)
-        # Second call: `docker build` → success
-        inspect_result = MagicMock(returncode=1)
-        build_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_run.side_effect = [inspect_result, build_result]
+    def test_build_calls_docker_cli_when_not_cached(self, mock_run, mock_popen, c_repo: Path):
+        # subprocess.run: `docker image inspect` → not found
+        mock_run.return_value = MagicMock(returncode=1)
+        # subprocess.Popen: `docker build` → success
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
 
         sb = HunterSandbox(repo_path=str(c_repo))
         tag = sb.build_image()
 
         assert tag.startswith("clearwing-sourcehunt:")
-        assert mock_run.call_count == 2
-        # Second call is the actual docker build
-        build_call = mock_run.call_args_list[1]
-        build_argv = build_call[0][0]
+        mock_run.assert_called_once()  # inspect only
+        mock_popen.assert_called_once()
+        build_argv = mock_popen.call_args[0][0]
         assert "docker" in build_argv[0]
         assert "build" in build_argv
         assert tag in build_argv
@@ -214,32 +217,42 @@ class TestBuildImageFlow:
         argv = mock_run.call_args[0][0]
         assert "inspect" in argv
 
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_build_failure_raises_runtime_error(self, mock_run, c_repo: Path):
-        inspect_result = MagicMock(returncode=1)
-        build_result = MagicMock(returncode=1, stdout="", stderr="apt-get failed")
-        mock_run.side_effect = [inspect_result, build_result]
+    def test_build_failure_raises_runtime_error(self, mock_run, mock_popen, c_repo: Path):
+        # inspect → miss
+        mock_run.return_value = MagicMock(returncode=1)
+        # build → failure
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["error: apt-get failed"])
+        mock_proc.wait.return_value = 1
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
 
         sb = HunterSandbox(repo_path=str(c_repo))
         with pytest.raises(RuntimeError):
             sb.build_image()
 
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_extra_variants_built(self, mock_run, c_repo: Path):
-        # Each variant: inspect (miss) + build (ok) = 2 calls per variant
-        mock_run.side_effect = [
-            MagicMock(returncode=1),  # inspect primary
-            MagicMock(returncode=0, stdout="", stderr=""),  # build primary
-            MagicMock(returncode=1),  # inspect msan
-            MagicMock(returncode=0, stdout="", stderr=""),  # build msan
-        ]
+    def test_extra_variants_built(self, mock_run, mock_popen, c_repo: Path):
+        # inspect always misses
+        mock_run.return_value = MagicMock(returncode=1)
+        # build always succeeds
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
         sb = HunterSandbox(
             repo_path=str(c_repo),
             sanitizers=["asan", "ubsan"],
             extra_variants=[["msan"]],
         )
         sb.build_image()
-        assert mock_run.call_count == 4  # 2 inspects + 2 builds
+        assert mock_run.call_count == 2  # 2 inspects
+        assert mock_popen.call_count == 2  # 2 builds
         assert len(sb.available_variants) == 2
 
 
@@ -266,54 +279,24 @@ class TestSpawnContainer:
         assert volumes[repo_abs]["bind"] == "/workspace"
         assert volumes[repo_abs]["mode"] == "ro"
 
-    def test_spawn_writable_workspace_copies_tree(self, c_repo: Path, mock_docker):
+    def test_spawn_writable_workspace_mounts_rw(self, c_repo: Path, mock_docker):
         mock_docker.images.get.return_value = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "writable-cid"
         mock_container.short_id = "writ"
-        mock_container.exec_run.return_value = MagicMock(exit_code=0, output=(b"", b""))
         mock_docker.containers.run.return_value = mock_container
 
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
         sb.build_image()
+        container = sb.spawn(writable_workspace=True, scratch_mount=False)
 
-        with (
-            patch.object(SandboxContainer, "start", return_value="writable-cid"),
-            patch.object(SandboxContainer, "copy_tree_into") as mock_copy,
-            patch.object(SandboxContainer, "exec") as mock_exec,
-        ):
-            mock_exec.return_value = MagicMock(exit_code=0)
-            container = sb.spawn(writable_workspace=True)
-
-        # Must copy, then git init
-        mock_copy.assert_called_once_with(str(c_repo), "/workspace")
-        git_calls = [
-            c for c in mock_exec.call_args_list
-            if isinstance(c[0][0], str) and "git init" in c[0][0]
-        ]
-        assert len(git_calls) == 1
-
-    def test_spawn_writable_no_ro_mount(self, c_repo: Path, mock_docker):
-        """Writable workspace must NOT have a read-only bind mount."""
-        mock_docker.images.get.return_value = MagicMock()
-
-        sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
-
-        with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="img:test"),
-            patch.object(SandboxContainer, "start", return_value="cid"),
-            patch.object(SandboxContainer, "copy_tree_into"),
-            patch.object(SandboxContainer, "exec", return_value=MagicMock(exit_code=0)),
-        ):
-            container = sb.spawn(writable_workspace=True)
-
-        for mount in container.config.mounts:
-            host, container_path, mode = mount
+        # Writable workspace should bind-mount as rw
+        found_rw = False
+        for host, container_path, mode in container.config.mounts:
             if container_path == "/workspace":
-                pytest.fail(
-                    f"Writable workspace should not have a /workspace mount, "
-                    f"found mode={mode}"
-                )
+                assert mode == "rw"
+                found_rw = True
+        assert found_rw, "Expected /workspace mount with mode=rw"
 
     def test_spawn_network_disabled(self, c_repo: Path, mock_docker):
         mock_docker.images.get.return_value = MagicMock()
@@ -552,41 +535,22 @@ class TestCleanup:
 
 
 class TestWritableWorkspaceResilience:
-    def test_git_init_failure_does_not_crash_spawn(self, c_repo: Path, mock_docker):
-        """If git init in writable workspace fails, spawn still succeeds."""
+    def test_writable_workspace_mounts_rw_mode(self, c_repo: Path, mock_docker):
+        """Writable workspace just sets the bind mount to rw."""
         mock_docker.images.get.return_value = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "rw-test"
+        mock_container.short_id = "rw"
+        mock_docker.containers.run.return_value = mock_container
 
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
+        sb.build_image()
+        container = sb.spawn(writable_workspace=True, scratch_mount=False)
 
-        with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="img:t"),
-            patch.object(SandboxContainer, "start", return_value="cid"),
-            patch.object(SandboxContainer, "copy_tree_into"),
-            patch.object(
-                SandboxContainer, "exec",
-                side_effect=RuntimeError("git not installed"),
-            ),
-        ):
-            # Should not raise despite git init failure
-            container = sb.spawn(writable_workspace=True)
-            assert container is not None
-
-    def test_copy_tree_failure_propagates(self, c_repo: Path, mock_docker):
-        """If copy_tree_into fails, spawn MUST fail — we can't hunt without code."""
-        mock_docker.images.get.return_value = MagicMock()
-
-        sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
-
-        with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="img:t"),
-            patch.object(SandboxContainer, "start", return_value="cid"),
-            patch.object(
-                SandboxContainer, "copy_tree_into",
-                side_effect=RuntimeError("tar failed"),
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="tar failed"):
-                sb.spawn(writable_workspace=True)
+        kwargs = mock_docker.containers.run.call_args.kwargs
+        volumes = kwargs["volumes"]
+        repo_abs = os.path.abspath(str(c_repo))
+        assert volumes[repo_abs]["mode"] == "rw"
 
 
 # ---------------------------------------------------------------------------
@@ -620,16 +584,18 @@ class TestVariantSpawn:
         assert "msan" in env["CLEARWING_SANITIZER_VARIANT"]
         assert "MSAN_OPTIONS" in env
 
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_spawn_unbuilt_variant_auto_builds(self, mock_run, c_repo: Path, mock_docker):
+    def test_spawn_unbuilt_variant_auto_builds(self, mock_run, mock_popen, c_repo: Path, mock_docker):
         """Requesting an unbuilt variant auto-builds on demand."""
-        # Primary build: inspect miss + build ok
-        mock_run.side_effect = [
-            MagicMock(returncode=1),  # inspect primary
-            MagicMock(returncode=0, stdout="", stderr=""),  # build primary
-            MagicMock(returncode=1),  # inspect tsan (auto-build)
-            MagicMock(returncode=0, stdout="", stderr=""),  # build tsan
-        ]
+        # subprocess.run: inspect calls always miss
+        mock_run.return_value = MagicMock(returncode=1)
+        # subprocess.Popen: builds always succeed
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
 
         sb = HunterSandbox(repo_path=str(c_repo), sanitizers=["asan", "ubsan"])
         sb.build_image()
@@ -641,5 +607,6 @@ class TestVariantSpawn:
 
         container = sb.spawn(variant=["tsan"], scratch_mount=False)
         assert container.variant == ["tsan"]
-        # 4 subprocess calls: 2 for primary + 2 for tsan auto-build
-        assert mock_run.call_count == 4
+        # 2 inspects (primary + tsan) and 2 builds (primary + tsan)
+        assert mock_run.call_count == 2
+        assert mock_popen.call_count == 2

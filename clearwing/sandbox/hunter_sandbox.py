@@ -27,7 +27,6 @@ from clearwing.core.events import EventBus
 from .builders import (
     BuildRecipe,
     BuildSystemDetector,
-    UPSTREAM_BASE_IMAGES,
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
@@ -199,41 +198,6 @@ class HunterSandbox:
             return "linux/arm64"
         return "linux/amd64"
 
-    def _maybe_fallback_base(self) -> None:
-        """If the preferred clearwing-sourcehunt-* base image isn't present
-        locally, fall back to the upstream image and restore dynamic installs."""
-        base = self.build_recipe.base_image
-        if not base.startswith("clearwing-sourcehunt-"):
-            return
-        want_arch = self._target_platform().split("/", 1)[1]
-        try:
-            img = self._get_client().images.get(base)
-            # If the local base image is a different arch than the sandbox
-            # build's --platform, buildx can't satisfy the FROM from the local
-            # store and reaches out to docker.io. Treat as missing so we fall
-            # through to upstream (which buildx can pull cross-arch).
-            arch = img.attrs.get("Architecture", "")
-            if arch and arch != want_arch:
-                raise RuntimeError(
-                    f"local base image is {arch}, sandbox targets {want_arch} — "
-                    "rebuild via `make -C docker`"
-                )
-            EventBus().emit_message(f"sandbox base ready  image={base}", "info")
-            # Packages are already baked into the static image — skip reinstall
-            self.build_recipe = dataclasses.replace(self.build_recipe, apt_packages=[])
-            self.extra_packages = []
-            self.post_install_commands = []
-        except Exception:
-            lang = self.build_recipe.primary_language
-            upstream = UPSTREAM_BASE_IMAGES.get(lang, "debian:11-slim")
-            logger.info("Static image %s not found; falling back to %s", base, upstream)
-            EventBus().emit_message(
-                f"sandbox base missing  image={base}  falling back to {upstream}  "
-                f"(run `make -C docker` to pre-build — first run will be slow)",
-                "warning",
-            )
-            self.build_recipe = dataclasses.replace(self.build_recipe, base_image=upstream)
-
     def build_image(self) -> str:
         """Build the primary sandbox image. Returns its tag.
 
@@ -242,7 +206,6 @@ class HunterSandbox:
         motivating case: it can't coexist with ASan in a single binary, so
         the caller declares it as an extra variant.
         """
-        self._maybe_fallback_base()
         primary_key = self._variant_key(self.sanitizers)
         primary_tag = self._build_variant_image(self.sanitizers)
         self._variant_images[primary_key] = primary_tag
