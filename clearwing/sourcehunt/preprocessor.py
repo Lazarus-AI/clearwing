@@ -97,6 +97,10 @@ _SOURCE_EXTS_TO_LANG: dict[str, str] = {
     ".hh": "cpp",
     ".hxx": "cpp",
     ".rs": "rust",
+    ".s": "asm",
+    ".asm": "asm",
+    ".pl": "perl",
+    ".pm": "perl",
 }
 
 
