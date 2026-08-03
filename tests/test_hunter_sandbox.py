@@ -159,8 +159,7 @@ class TestHunterSandboxBuildImage:
         (temp_repo / "Makefile").write_text("all:\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
         df = sb._render_dockerfile()
-        # Base image is clearwing-sourcehunt-c (or fallback gcc:12-bullseye)
-        assert "FROM" in df
+        assert "FROM gcc:12-bullseye" in df
         assert "ripgrep" in df
         assert "gdb" in df
         assert "ltrace" not in df
@@ -177,8 +176,7 @@ class TestHunterSandboxBuildImage:
         (temp_repo / "pyproject.toml").write_text("[project]\nname='x'\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
         df = sb._render_dockerfile()
-        # Base is clearwing-sourcehunt-python or fallback python:3.12-slim
-        assert "FROM" in df
+        assert "FROM python:3.12-slim" in df
         assert "gcc" not in df.split("\n")[0].lower()
 
     def test_image_tag_is_content_addressed(self, temp_repo: Path):
