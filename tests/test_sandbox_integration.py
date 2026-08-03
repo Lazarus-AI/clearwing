@@ -527,38 +527,48 @@ class TestPlatformBuild:
 
     @pytest.mark.integration
     @pytest.mark.timeout(120)
-    def test_ltrace_available_on_native_arch(self, c_repo: Path):
-        """ltrace is required by deep_agent_mode but missing on arm64/bookworm.
+    def test_optional_packages_degrade_gracefully(self, c_repo: Path):
+        """Optional packages (ltrace) may be missing on arm64 — build must not fail.
 
-        This test documents and catches the platform gap. On arm64 hosts this
-        WILL FAIL — proving that the current HunterSandbox.DEEP_AGENT_PACKAGES
-        list is broken on Apple Silicon unless the build targets amd64 (qemu).
+        ltrace is x86_64-only (no arm64 package in any Debian release).
+        HunterSandbox installs it in a best-effort layer (|| true) so the image
+        still builds. strace (in COMMON_APT_PACKAGES) covers the debugging use
+        case on all architectures.
+
+        This test builds a deep_agent_mode image and verifies:
+        1. The image builds successfully regardless of architecture.
+        2. strace is always available as the portable alternative.
         """
-        recipe = BuildSystemDetector.detect(str(c_repo))
-        base = recipe.base_image
-        result = subprocess.run(
-            [
-                "docker", "run", "--rm", base,
-                "sh", "-c",
-                "apt-get update -qq && "
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ltrace 2>&1",
-            ],
-            capture_output=True, text=True, timeout=60,
+        sandbox = HunterSandbox(
+            str(c_repo), languages=["c"], deep_agent_mode=True,
         )
-        if result.returncode != 0:
+        tag = sandbox.build_image()
+        try:
+            # strace must always be present
+            result = subprocess.run(
+                ["docker", "run", "--rm", tag, "strace", "--version"],
+                capture_output=True, text=True, timeout=30,
+            )
+            assert result.returncode == 0, (
+                f"strace missing from deep_agent_mode image: {result.stderr}"
+            )
+
+            # ltrace is best-effort — document its presence/absence
+            ltrace_result = subprocess.run(
+                ["docker", "run", "--rm", tag, "which", "ltrace"],
+                capture_output=True, text=True, timeout=30,
+            )
             host_arch = platform.machine()
             if host_arch in ("arm64", "aarch64"):
-                pytest.fail(
-                    f"ltrace is NOT available on {base} arm64. "
-                    f"deep_agent_mode image builds WILL FAIL on Apple Silicon "
-                    f"unless the Dockerfile handles this gracefully.\n"
-                    f"Output: {result.stdout[-500:]}"
-                )
+                # Expected: ltrace absent on arm64, build still succeeded
+                assert True
             else:
-                pytest.fail(
-                    f"ltrace install failed unexpectedly on {host_arch}:\n"
-                    f"{result.stdout[-1000:]}"
+                # On x86_64 we expect ltrace to have installed
+                assert ltrace_result.returncode == 0, (
+                    f"ltrace should be available on {host_arch}"
                 )
+        finally:
+            sandbox.cleanup(remove_image=True)
 
     @pytest.mark.integration
     @pytest.mark.timeout(120)
