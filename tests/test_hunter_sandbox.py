@@ -112,7 +112,8 @@ class TestBuildSystemDetector:
 
 @pytest.fixture
 def mock_docker():
-    with patch("docker.from_env") as mock_from_env:
+    with patch("clearwing.sandbox.dind.get_docker_host", return_value=None), \
+         patch("docker.from_env") as mock_from_env:
         mock_client = MagicMock()
         mock_from_env.return_value = mock_client
         yield mock_client
