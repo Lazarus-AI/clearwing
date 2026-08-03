@@ -27,6 +27,7 @@ from .builders import (
     validate_sanitizer_combo,
 )
 from .container import SandboxConfig, SandboxContainer
+from .factory import create_sandbox, is_kubernetes_backend
 from .seccomp_profiles import get_seccomp_profile
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,15 @@ class HunterSandbox:
         calls can pick between them without another build pass. MSan is the
         motivating case: it can't coexist with ASan in a single binary, so
         the caller declares it as an extra variant.
+
+        When CLEARWING_SANDBOX_BACKEND=kubernetes, image builds are skipped —
+        images are expected to be pre-built and available in the cluster's
+        registry. The tag is computed from the Dockerfile content hash so the
+        same deterministic naming applies.
         """
+        if is_kubernetes_backend():
+            return self._resolve_kube_images()
+
         primary_key = self._variant_key(self.sanitizers)
         primary_tag = self._build_variant_image(self.sanitizers)
         self._variant_images[primary_key] = primary_tag
@@ -201,6 +210,71 @@ class HunterSandbox:
             self._variant_images[key] = tag
 
         return primary_tag
+
+    def _resolve_kube_images(self) -> str:
+        """For k8s backend: resolve image tags, building on-cluster if needed.
+
+        Image resolution order:
+        1. CLEARWING_SANDBOX_IMAGE env var (explicit override — skips builds)
+        2. CLEARWING_SANDBOX_REGISTRY set → compute content-hash tag, build
+           on-cluster via Kaniko if image doesn't exist yet
+        3. Neither set → error (cannot run without knowing which image to use)
+        """
+        override = os.environ.get("CLEARWING_SANDBOX_IMAGE", "")
+        if override:
+            # Use the same override image for all variants
+            primary_key = self._variant_key(self.sanitizers)
+            self._variant_images[primary_key] = override
+            self._image_tag = override
+            for variant in self.extra_variants:
+                key = self._variant_key(variant)
+                self._variant_images[key] = override
+            logger.info("K8s sandbox: using override image %s", override)
+            return override
+
+        # Production path: build on-cluster via Kaniko
+        from .kube_builder import compute_registry_tag
+
+        primary_key = self._variant_key(self.sanitizers)
+        dockerfile = self._render_dockerfile(sanitizers=self.sanitizers)
+        primary_tag = compute_registry_tag(
+            dockerfile, self.sanitizers, self.extra_packages, self.post_install_commands
+        )
+        primary_tag = self._kaniko_build_if_needed(dockerfile, primary_tag)
+        self._variant_images[primary_key] = primary_tag
+        self._image_tag = primary_tag
+
+        for variant in self.extra_variants:
+            key = self._variant_key(variant)
+            if key == primary_key:
+                continue
+            df = self._render_dockerfile(sanitizers=variant)
+            tag = compute_registry_tag(
+                df, variant, self.extra_packages, self.post_install_commands
+            )
+            tag = self._kaniko_build_if_needed(df, tag)
+            self._variant_images[key] = tag
+
+        logger.info(
+            "K8s sandbox: resolved %d image tags (primary=%s)",
+            len(self._variant_images),
+            primary_tag,
+        )
+        return primary_tag
+
+    def _kaniko_build_if_needed(self, dockerfile_content: str, image_tag: str) -> str:
+        """Submit a Kaniko Job to build the image if it doesn't already exist.
+
+        Returns the image_tag on success.
+        """
+        from .kube_builder import build_image_on_cluster, image_exists_in_registry
+
+        if image_exists_in_registry(image_tag):
+            logger.info("K8s sandbox: image %s already exists, skipping build", image_tag)
+            return image_tag
+
+        logger.info("K8s sandbox: building image %s on-cluster via Kaniko", image_tag)
+        return build_image_on_cluster(dockerfile_content, image_tag)
 
     def build_variant_images(self) -> dict[str, str]:
         """Build every declared variant. Returns {variant_key: image_tag}.
@@ -277,7 +351,7 @@ class HunterSandbox:
                 if proc.returncode != 0:
                     raise RuntimeError(proc.stderr[-2000:] or proc.stdout[-2000:])
             except subprocess.TimeoutExpired as e:
-                raise RuntimeError(f"Sandbox image build timed out after 300s") from e
+                raise RuntimeError("Sandbox image build timed out after 300s") from e
             except RuntimeError:
                 raise
             except Exception as e:
@@ -379,7 +453,7 @@ class HunterSandbox:
             runtime=runtime,
         )
 
-        sb = SandboxContainer(cfg)
+        sb = create_sandbox(cfg)
         sb.start()
 
         if writable_workspace:

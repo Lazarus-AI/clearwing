@@ -2656,8 +2656,9 @@ class SourceHuntRunner:
             image_tag = manager.build_image()
         except Exception as exc:
             logger.warning(
-                "HunterSandbox unavailable (%s); falling back to host mode. "
-                "Start Docker to enable sanitizer-backed containers.",
+                "HunterSandbox unavailable (%s); falling back to constrained "
+                "host-source tools. Start Docker (or configure Kubernetes "
+                "sandbox backend) to enable sanitizer-backed containers.",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
