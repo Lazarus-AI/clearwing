@@ -15,6 +15,65 @@ from typing import Any
 from clearwing.agent.tooling import tool
 
 
+class _ExactCaseHTTPMixin:
+    """urllib transport that does not title-case caller header names.
+
+    Python 3.12's ``AbstractHTTPHandler.do_open`` rewrites the final header
+    mapping with ``name.title()`` immediately before sending it. Some targets
+    incorrectly treat application header names as case-sensitive, so the
+    proxy tool must preserve the spelling supplied by the caller on the wire.
+    """
+
+    def do_open(self, http_class: Any, req: urllib.request.Request, **http_conn_args: Any) -> Any:
+        host = req.host
+        if not host:
+            raise urllib.error.URLError("no host given")
+
+        connection = http_class(host, timeout=req.timeout, **http_conn_args)
+        connection.set_debuglevel(self._debuglevel)
+        headers = dict(req.unredirected_hdrs)
+        headers.update({name: value for name, value in req.headers.items() if name not in headers})
+        headers["Connection"] = "close"
+
+        if req._tunnel_host:
+            tunnel_headers = {}
+            proxy_auth = "Proxy-Authorization"
+            if proxy_auth in headers:
+                tunnel_headers[proxy_auth] = headers.pop(proxy_auth)
+            connection.set_tunnel(req._tunnel_host, headers=tunnel_headers)
+
+        try:
+            try:
+                connection.request(
+                    req.get_method(),
+                    req.selector,
+                    req.data,
+                    headers,
+                    encode_chunked=req.has_header("Transfer-encoding"),
+                )
+            except OSError as error:
+                raise urllib.error.URLError(error) from error
+            response = connection.getresponse()
+        except BaseException:
+            connection.close()
+            raise
+
+        if connection.sock:
+            connection.sock.close()
+            connection.sock = None
+        response.url = req.get_full_url()
+        response.msg = response.reason
+        return response
+
+
+class _ExactCaseHTTPHandler(_ExactCaseHTTPMixin, urllib.request.HTTPHandler):
+    pass
+
+
+class _ExactCaseHTTPSHandler(_ExactCaseHTTPMixin, urllib.request.HTTPSHandler):
+    pass
+
+
 @dataclass
 class ProxyRequest:
     """A captured HTTP request/response pair."""
@@ -156,16 +215,16 @@ def proxy_request(
         # header maps that are (incorrectly, but commonly) case-sensitive.
         req.headers.update({str(name): str(value) for name, value in req_headers.items()})
 
-        # Handle redirects
+        handlers: list[Any] = [_ExactCaseHTTPHandler(), _ExactCaseHTTPSHandler()]
         if not follow_redirects:
 
             class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self, *args: Any, **kwargs: Any) -> None:
                     return None
 
-            opener = urllib.request.build_opener(NoRedirectHandler)
-        else:
-            opener = urllib.request.build_opener()
+            handlers.append(NoRedirectHandler())
+
+        opener = urllib.request.build_opener(*handlers)
 
         response = opener.open(req, timeout=30)
         status_code = response.status

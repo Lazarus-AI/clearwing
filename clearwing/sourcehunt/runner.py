@@ -510,6 +510,7 @@ class SourceHuntRunner:
         self.exploiter_llm = exploiter_llm
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
+        self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
@@ -602,6 +603,18 @@ class SourceHuntRunner:
         if self.depth in ("standard", "deep"):
             return "deep"
         return "constrained"
+
+    @property
+    def _effective_agent_mode(self) -> str:
+        """Select tools that can actually access the checked-out source.
+
+        Downgrades ``deep`` to ``constrained`` when no sandbox_factory is
+        available — avoids crashing when Docker isn't installed.
+        """
+        requested = self._agent_mode
+        if requested == "deep" and self.sandbox_factory is None:
+            return "constrained"
+        return requested
 
     @property
     def _starting_band(self) -> str:
@@ -1332,7 +1345,7 @@ class SourceHuntRunner:
                         session_id_prefix=self._session_id,
                         seeded_crashes_by_file=seeded_by_file,
                         semgrep_hints_by_file=semgrep_hints_by_file,
-                        agent_mode=self._agent_mode,
+                        agent_mode=self._effective_agent_mode,
                         prompt_mode=self._prompt_mode,
                         campaign_hint=self._campaign_hint,
                         exploit_mode=self._exploit_mode,
@@ -2227,6 +2240,9 @@ class SourceHuntRunner:
                     self._sandbox_manager.cleanup(remove_image=False)
                 except Exception:
                     logger.debug("HunterSandbox cleanup failed", exc_info=True)
+            if self._preprocessor is not None:
+                self._preprocessor.cleanup()
+                self._preprocessor = None
 
     @property
     def session_id(self) -> str:
@@ -2591,7 +2607,7 @@ class SourceHuntRunner:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
-        pp = Preprocessor(
+        self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
@@ -2602,7 +2618,7 @@ class SourceHuntRunner:
             run_taint=(self.depth != "quick" and self._preprocessing),
             respect_gitignore=self._respect_gitignore,
         )
-        return pp.run()
+        return self._preprocessor.run()
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
