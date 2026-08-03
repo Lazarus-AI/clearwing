@@ -1,9 +1,13 @@
 """Sourcehunt CLI subcommand — runs the Clearwing source-code vulnerability pipeline."""
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
+from dataclasses import asdict
+from typing import Any
+from urllib.parse import urlsplit
 
 
 def _format_budget(budget: float) -> str:
@@ -35,7 +39,8 @@ def add_parser(subparsers):
         "sourcehunt",
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
-    parser.add_argument("repo", help="Git URL or local path to a repository")
+    parser.add_argument("repo", nargs="?", help="Git URL or local path to a repository")
+    parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
         choices=["legacy", "proof"],
@@ -657,11 +662,17 @@ def add_parser(subparsers):
         default=False,
         help="Show a live LLM-activity panel (token counts, cost, latency) while running",
     )
+    parser.set_defaults(_command_parser=parser)
     return parser
 
 
 def handle(cli, args):
     """Run the sourcehunt pipeline."""
+    if args.machine_fd is not None:
+        raise SystemExit(_handle_machine(args.machine_fd))
+    if not args.repo:
+        args._command_parser.error("the following arguments are required: repo")
+
     from ...core.config import default_results_dir
     from ...providers import ProviderManager, resolve_llm_endpoint
     from ...sourcehunt.pool import TierBudget
@@ -1267,6 +1278,152 @@ def handle(cli, args):
             cli.console.print(f"  [{sev}] {file}:{line} — {desc}")
 
     sys.exit(result.exit_code)
+
+
+def _handle_machine(descriptor: int) -> int:
+    from ...providers import ProviderManager, install_runtime_routing
+    from ...sourcehunt.runner import SourceHuntRunner
+    from ..machine import MachineChannel
+
+    channel = MachineChannel(descriptor, "sourcehunt")
+    try:
+        request, routing = channel.read_start()
+        parsed = _machine_request(request)
+        install_runtime_routing(routing)
+        provider_manager = ProviderManager.from_config(routing)
+        result = asyncio.run(
+            SourceHuntRunner(
+                repo_url=parsed["repo_url"],
+                branch=parsed["branch"],
+                depth=parsed["depth"],
+                budget_usd=parsed["budget_usd"],
+                max_parallel=parsed["max_parallel"],
+                output_dir=os.path.abspath("results/sourcehunt"),
+                no_verify=not parsed["verify"],
+                no_exploit=not parsed["exploit"],
+                flow=parsed["flow"],
+                provider_manager=provider_manager,
+                on_progress=lambda progress: channel.emit("progress", progress),
+            ).arun()
+        )
+        channel.result(_public_result(result))
+        return 0
+    except BaseException as exc:  # noqa: BLE001
+        channel.error(exc)
+        return 130 if isinstance(exc, KeyboardInterrupt) else 1
+    finally:
+        channel.close()
+
+
+def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "repo_url",
+        "branch",
+        "depth",
+        "budget_usd",
+        "max_parallel",
+        "verify",
+        "exploit",
+        "flow",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"unknown request field(s): {', '.join(unknown)}")
+    repo_url = _repository_url(value.get("repo_url"))
+    depth = _choice(value.get("depth", "standard"), "depth", {"quick", "standard", "deep"})
+    flow = _choice(value.get("flow", "legacy"), "flow", {"legacy", "proof"})
+    return {
+        "repo_url": repo_url,
+        "branch": _bounded_text(value.get("branch", "main"), "branch", 256),
+        "depth": depth,
+        "budget_usd": _bounded_number(value.get("budget_usd", 0.0), "budget_usd", 0, 10000),
+        "max_parallel": _bounded_integer(
+            value.get("max_parallel", 8), "max_parallel", 1, 64
+        ),
+        "verify": _boolean(value.get("verify", True), "verify"),
+        "exploit": _boolean(value.get("exploit", True), "exploit"),
+        "flow": flow,
+    }
+
+
+def _public_result(result: Any) -> dict[str, Any]:
+    def finding(value: Any) -> dict[str, Any]:
+        item = asdict(value) if not isinstance(value, dict) else dict(value)
+        item.pop("extra", None)
+        file = item.get("file")
+        if isinstance(file, str) and os.path.isabs(file):
+            item["file"] = os.path.basename(file)
+        return item
+
+    return {
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "repo_url": result.repo_url,
+        "session_id": result.session_id,
+        "findings": [finding(item) for item in result.findings],
+        "verified_findings": [finding(item) for item in result.verified_findings],
+        "exploited_findings": [finding(item) for item in result.exploited_findings],
+        "files_ranked": result.files_ranked,
+        "files_hunted": result.files_hunted,
+        "duration_seconds": result.duration_seconds,
+        "cost_usd": result.cost_usd,
+        "tokens_used": result.tokens_used,
+        "budget_usd": result.budget_usd,
+        "pipeline": {
+            name: {
+                "outcome": stage.outcome.value,
+                "error": stage.error,
+                "fallback_description": stage.fallback_description,
+            }
+            for name, stage in result.pipeline_status.stages.items()
+        },
+    }
+
+
+def _repository_url(value: Any) -> str:
+    url = _bounded_text(value, "repo_url", 2048)
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("repo_url must be an absolute http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("repo_url must not contain credentials")
+    return url
+
+
+def _bounded_text(value: Any, name: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise ValueError(f"{name} must be at most {maximum} characters")
+    return normalized
+
+
+def _choice(value: Any, name: str, choices: set[str]) -> str:
+    if not isinstance(value, str) or value not in choices:
+        raise ValueError(f"{name} must be one of: {', '.join(sorted(choices))}")
+    return value
+
+
+def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    result = float(value)
+    if not minimum <= result <= maximum:
+        raise ValueError(f"{name} must be between {minimum:g} and {maximum:g}")
+    return result
+
+
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
 
 
 # --- Elaborate helpers -------------------------------------------------------
