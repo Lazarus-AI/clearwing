@@ -130,9 +130,14 @@ class SpendLedger:
         default_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         manifest_filename: str = "manifest.json",
         endpoint: LLMEndpoint | None = None,
+        initial_spent_usd: float = 0.0,
     ) -> None:
         if not math.isfinite(limit_usd) or limit_usd < 0:
             raise BudgetConfigurationError("LLM budget must be a finite value >= 0")
+        if not math.isfinite(initial_spent_usd) or initial_spent_usd < 0:
+            raise BudgetConfigurationError(
+                "initial_spent_usd must be a finite value >= 0"
+            )
         if (input_price_per_million is None) != (output_price_per_million is None):
             raise BudgetConfigurationError(
                 "input and output token prices must be provided together"
@@ -173,7 +178,9 @@ class SpendLedger:
         self._endpoint_pricing = _endpoint_pricing(endpoint)
 
         self._lock = threading.RLock()
-        self._spent_usd = 0.0
+        # Carried-forward spend from a resumed session's prior spend-ledger, so
+        # `remaining`/`exhausted` honor the original cap from the first call.
+        self._spent_usd = float(initial_spent_usd)
         self._reserved_usd = 0.0
         self._input_tokens = 0
         self._output_tokens = 0
@@ -193,6 +200,7 @@ class SpendLedger:
                     "event": "run_started",
                     "session_id": self.session_id,
                     "budget_usd": self.limit_usd,
+                    "carried_forward_usd": self._spent_usd,
                     "timestamp": self._timestamp(),
                 }
             )

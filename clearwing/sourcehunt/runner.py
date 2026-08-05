@@ -33,6 +33,13 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
+from .checkpoints import (
+    latest_checkpoint,
+    load_stage_checkpoint,
+    resolve_session_dir,
+    sum_prior_spend,
+    write_stage_checkpoint,
+)
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -275,6 +282,7 @@ class SourceHuntRunner:
         emit_rejection_certificates: bool = True,
         falsify: bool = True,
         on_progress: SourceHuntProgressCallback | None = None,
+        resume_session: str | None = None,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -511,7 +519,30 @@ class SourceHuntRunner:
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
-        self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        # --- Resume wiring ---------------------------------------------------
+        # When resuming, adopt the prior run's session id BEFORE the
+        # instrumentation (and every output_dir/session_id/... path) is built,
+        # so findings_pool, trajectories, spend-ledger, and checkpoints all
+        # resolve into the resumed session directory. Resume is deliberate:
+        # if no checkpoint is present, we raise rather than silently start over.
+        self._resume_session = resume_session
+        self._resume_from: str | None = None
+        if resume_session:
+            resumed_dir = resolve_session_dir(resume_session, self.output_dir)
+            self._resume_from = latest_checkpoint(resumed_dir)
+            if self._resume_from is None:
+                raise ValueError(
+                    f"resume_session={resume_session!r} resolved to {resumed_dir} "
+                    "but no stage checkpoint was found there "
+                    "(expected checkpoints/hunt.json, verify.json, or exploit.json). "
+                    "Resume is only for continuing an existing run."
+                )
+            # Anchor all session paths on the resumed dir: parent = output_dir,
+            # name = session id. This works for both bare-name and path forms.
+            self.output_dir = str(resumed_dir.parent)
+            self._session_id = resumed_dir.name
+        else:
+            self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -643,6 +674,36 @@ class SourceHuntRunner:
             return 0.0
         return self._spend_ledger.spent_usd
 
+    def _write_stage_checkpoint_safe(
+        self,
+        stage: str,
+        *,
+        findings: list[Finding],
+        verified: list[Finding] | None = None,
+        rejected: list[Finding] | None = None,
+        exploited: list[Finding] | None = None,
+    ) -> None:
+        """Write a stage checkpoint, swallowing any error.
+
+        A checkpoint is an optional durability aid — a failure to write one
+        (disk full, permissions, serialization edge case) must never crash an
+        otherwise-successful run.
+        """
+        try:
+            path = write_stage_checkpoint(
+                Path(self.output_dir) / self._session_id,
+                stage,
+                findings=findings,
+                budget_spent_usd=self._run_spent_usd(),
+                verified=verified,
+                rejected=rejected,
+                exploited=exploited,
+                session_id=self._session_id,
+            )
+            logger.info("Wrote %s checkpoint: %s", stage, path)
+        except Exception:
+            logger.warning("Failed to write %s checkpoint", stage, exc_info=True)
+
     @property
     def _shard_entry_points(self) -> bool:
         if self._shard_entry_points_override is not None:
@@ -720,6 +781,14 @@ class SourceHuntRunner:
 
     def _ensure_spend_ledger(self) -> SpendLedger:
         if self._spend_ledger is None:
+            # On resume, carry forward the prior run's settled spend so the
+            # original cap is honored across the resumed continuation. The
+            # existing ledger is appended to (not truncated) by SpendLedger.
+            initial_spent = 0.0
+            if self._resume_session:
+                initial_spent = sum_prior_spend(
+                    Path(self.output_dir) / self._session_id
+                )
             self._spend_ledger = SpendLedger(
                 limit_usd=self.budget_usd,
                 session_id=self._session_id,
@@ -730,6 +799,7 @@ class SourceHuntRunner:
                 manifest_filename=(
                     "spend-summary.json" if self._flow == "proof" else "manifest.json"
                 ),
+                initial_spent_usd=initial_spent,
             )
         return self._spend_ledger
 
@@ -737,18 +807,30 @@ class SourceHuntRunner:
         return self._spend_ledger is not None and self._spend_ledger.exhausted
 
     def _preflight_budget_clients(self) -> None:
-        """Validate every model this run may use before the first paid call."""
+        """Validate every model this run may use before the first paid call.
+
+        On resume, phases already completed in the prior run are skipped, so we
+        don't validate their models — a resume-from-exploit run must not fail
+        just because the hunter/verifier model is no longer configured.
+        """
 
         if self._spend_ledger is None or not self._spend_ledger.enforcing:
             return
+        skip_rank = self._no_rank or bool(self._resume_from)
+        skip_hunt = self._resume_from in ("hunt", "verify", "exploit")
+        skip_verify = self._resume_from in ("verify", "exploit")
+        skip_exploit = self._resume_from == "exploit"
         roles: list[tuple[str, AsyncLLMClient | None, str]] = []
-        if not self._no_rank:
+        if not skip_rank:
             roles.append(("ranker", self.ranker_llm, "rank"))
         if self.depth != "quick":
-            roles.append(("hunter", self.hunter_llm, "hunt"))
-            if not self.no_verify:
+            if not skip_hunt:
+                roles.append(("hunter", self.hunter_llm, "hunt"))
+            if not self.no_verify and not skip_verify:
                 roles.append(("verifier", self.verifier_llm, "verify"))
-            if not self.no_exploit or self.enable_auto_patch or self.enable_elaboration:
+            if (
+                not self.no_exploit or self.enable_auto_patch or self.enable_elaboration
+            ) and not skip_exploit:
                 roles.append(("sourcehunt_exploit", self.exploiter_llm, "exploit"))
         for task, override, stage in roles:
             self._get_native_client(task, override, budget_stage=stage)
@@ -1012,6 +1094,35 @@ class SourceHuntRunner:
         self._ensure_output_dir_layout()
         self._ensure_spend_ledger()
         pipeline_status = PipelineStatus()
+
+        # --- Resume: load the highest checkpoint and derive phase skip flags.
+        # Preprocess always re-runs (rebuilds repo checkout / callgraph / sandbox
+        # that verify+exploit need); rank is skipped (its priority fields are
+        # only consumed by the hunt phase). Completed phases are skipped and
+        # their findings are seeded from the checkpoint.
+        resume_ckpt: dict | None = None
+        skip_hunt = skip_verify = skip_exploit = False
+        if self._resume_from:
+            resume_ckpt = load_stage_checkpoint(
+                Path(self.output_dir) / self._session_id, self._resume_from
+            )
+            if resume_ckpt is None:
+                raise RuntimeError(
+                    f"resume checkpoint {self._resume_from!r} vanished for session "
+                    f"{self._session_id}"
+                )
+            skip_hunt = self._resume_from in ("hunt", "verify", "exploit")
+            skip_verify = self._resume_from in ("verify", "exploit")
+            skip_exploit = self._resume_from == "exploit"
+            logger.info(
+                "Resuming session %s from %r checkpoint (skip hunt=%s verify=%s exploit=%s)",
+                self._session_id,
+                self._resume_from,
+                skip_hunt,
+                skip_verify,
+                skip_exploit,
+            )
+
         logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
         self._instrumentation.record(
             "run",
@@ -1037,10 +1148,15 @@ class SourceHuntRunner:
             )
             self._ensure_sandbox_factory(repo_path, files)
 
-            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
+            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank.
+            # On resume rank is skipped entirely: its priority fields are only
+            # consumed by the (now-skipped) hunt phase, so re-ranking would just
+            # burn budget. Force ranker_llm to None so the --no-rank heuristic
+            # path assigns default scores without any LLM call.
+            resume_skips_rank = bool(self._resume_from)
             ranker_llm = (
                 None
-                if self._no_rank
+                if (self._no_rank or resume_skips_rank)
                 else self._get_native_client(
                     "ranker",
                     self.ranker_llm,
@@ -1165,10 +1281,13 @@ class SourceHuntRunner:
 
             # 2.5. Harness Generator (crash-first ordering) — at depth=deep or
             #      when seed_harness_crashes is explicitly enabled (spec 018).
+            #      Feeds the hunt only; skipped on resume (hunt already done).
             seeded_crashes: list[SeededCrash] = []
             if (
-                self.depth == "deep" or self._seed_harness_crashes
-            ) and not self._budget_exhausted():
+                (self.depth == "deep" or self._seed_harness_crashes)
+                and not self._budget_exhausted()
+                and not skip_hunt
+            ):
                 harness_llm = self._get_native_client(
                     "hunter",
                     self.hunter_llm,
@@ -1294,13 +1413,20 @@ class SourceHuntRunner:
                     logger.warning("Historical findings DB load failed", exc_info=True)
                     historical_db = None
 
-            # 3. Tiered hunt
-            hunter_llm = self._get_native_client(
-                "hunter",
-                self.hunter_llm,
-                budget_stage="hunt",
+            # 3. Tiered hunt. On resume the hunt+subsystem phases are skipped, so
+            # we don't resolve (and can't require) the hunter model.
+            hunter_llm = (
+                None
+                if skip_hunt
+                else self._get_native_client(
+                    "hunter",
+                    self.hunter_llm,
+                    budget_stage="hunt",
+                )
             )
-            all_findings: list[Finding] = []
+            all_findings: list[Finding] = (
+                list(resume_ckpt["findings"]) if skip_hunt else []
+            )
             files_hunted = 0
             spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
             band_stats: dict | None = None
@@ -1313,7 +1439,22 @@ class SourceHuntRunner:
                 }
             )
 
-            if self._no_per_file_hunt:
+            if skip_hunt:
+                logger.info(
+                    "Hunt skipped (resumed from %r checkpoint): %d findings loaded",
+                    self._resume_from,
+                    len(all_findings),
+                )
+                self._emit_stage(
+                    "hunt",
+                    "completed",
+                    findings_so_far=len(all_findings),
+                    detail=f"Resumed: {len(all_findings)} findings from checkpoint",
+                    files=[str(finding.file or "") for finding in all_findings],
+                    symbols=self._finding_symbols(all_findings),
+                    finding_ids=[finding.id for finding in all_findings],
+                )
+            elif self._no_per_file_hunt:
                 logger.info("Per-file hunt skipped (--no-per-file-hunt)")
                 self._emit_stage(
                     "hunt",
@@ -1452,7 +1593,7 @@ class SourceHuntRunner:
                 )
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
-            if self._enable_behavior_monitor and all_findings:
+            if self._enable_behavior_monitor and all_findings and not skip_hunt:
                 try:
                     from .behavior_monitor import BehaviorMonitor
 
@@ -1473,12 +1614,20 @@ class SourceHuntRunner:
                     logger.debug("Behavior monitor failed", exc_info=True)
 
             # Promote static findings into the all_findings list so depth=quick
-            # output is still useful when no hunter llm is available
-            all_findings = self._merge_static_findings(all_findings, preprocess_result)
+            # output is still useful when no hunter llm is available. On resume the
+            # checkpoint already contains the merged static findings — re-merging
+            # would duplicate them (each gets a fresh random id), so skip it.
+            if not skip_hunt:
+                all_findings = self._merge_static_findings(all_findings, preprocess_result)
 
             # 3.5. Persist findings to historical DB (spec 005)
             # Skip when running under campaign — campaign handles bulk ingestion.
-            if historical_db is not None and all_findings and self._injected_findings_pool is None:
+            if (
+                historical_db is not None
+                and all_findings
+                and self._injected_findings_pool is None
+                and not skip_hunt
+            ):
                 try:
                     count = historical_db.ingest_campaign(
                         all_findings,
@@ -1494,13 +1643,18 @@ class SourceHuntRunner:
             # 3.7. Subsystem hunt (spec 006)
             subsystems_hunted = 0
             subsystem_spent = 0.0
-            if self._enable_subsystem_hunt and hunter_llm is not None and self._budget_exhausted():
+            if (
+                self._enable_subsystem_hunt
+                and hunter_llm is not None
+                and self._budget_exhausted()
+                and not skip_hunt
+            ):
                 logger.info(
                     "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
                     self.budget_usd,
                     self._run_spent_usd(),
                 )
-            elif self._enable_subsystem_hunt and hunter_llm is not None:
+            elif self._enable_subsystem_hunt and hunter_llm is not None and not skip_hunt:
                 from .subsystem import (
                     SubsystemHuntConfig,
                     identify_subsystems_auto,
@@ -1638,9 +1792,20 @@ class SourceHuntRunner:
                             error={"type": type(exc).__name__, "message": str(exc)},
                         )
 
+            # Checkpoint the end of the hunt phase (preprocess + rank + per-file
+            # hunt + static-merge + subsystem hunt all resolved). A crashed run
+            # resumes verify from here. Never on resume (already present); never
+            # fatal (a checkpoint failure must not sink the run).
+            if not skip_hunt:
+                self._write_stage_checkpoint_safe("hunt", findings=all_findings)
+
             # 4. Verify (unless --no-verify)
-            verified: list[Finding] = []
-            rejected: list[Finding] = []
+            verified: list[Finding] = (
+                list(resume_ckpt.get("verified", [])) if skip_verify else []
+            )
+            rejected: list[Finding] = (
+                list(resume_ckpt.get("rejected", [])) if skip_verify else []
+            )
             verify_status = "completed"
             self._emit_stage(
                 "verify",
@@ -1651,7 +1816,15 @@ class SourceHuntRunner:
                 symbols=self._finding_symbols(all_findings),
                 finding_ids=[finding.id for finding in all_findings],
             )
-            if not self.no_verify:
+            if skip_verify:
+                logger.info(
+                    "Verify skipped (resumed from %r checkpoint): "
+                    "%d verified, %d rejected loaded",
+                    self._resume_from,
+                    len(verified),
+                    len(rejected),
+                )
+            elif not self.no_verify:
                 if self._budget_exhausted():
                     verify_status = "budget_exhausted"
                     pipeline_status.record(
@@ -1716,7 +1889,12 @@ class SourceHuntRunner:
 
             # 4.5. v0.3: Extract mechanisms from verified findings and persist them
             #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
-            if self._mechanism_store is not None and verified and not self._budget_exhausted():
+            if (
+                self._mechanism_store is not None
+                and verified
+                and not self._budget_exhausted()
+                and not skip_verify
+            ):
                 verifier_llm_for_extract = self._get_native_client(
                     "verifier",
                     self.verifier_llm,
@@ -1744,7 +1922,12 @@ class SourceHuntRunner:
             #       match as a new suspicion-level finding linked back to the
             #       original. v0.3 scope: we surface the matches in the report;
             #       we don't re-spawn hunters on each match (that's a v1.0 pass).
-            if self.enable_variant_loop and verified and not self._budget_exhausted():
+            if (
+                self.enable_variant_loop
+                and verified
+                and not self._budget_exhausted()
+                and not skip_verify
+            ):
                 variant_llm = self._get_native_client(
                     "verifier",
                     self.verifier_llm,
@@ -1823,6 +2006,7 @@ class SourceHuntRunner:
                 and verified
                 and self._sandbox_manager is not None
                 and not self._budget_exhausted()
+                and not skip_verify
             ):
                 from .stability import StabilityVerifier, apply_stability_result
 
@@ -1871,6 +2055,17 @@ class SourceHuntRunner:
                 non_poc = [f for f in verified if f not in stability_eligible]
                 verified = stable_verified + non_poc
 
+            # Checkpoint the end of the verify phase (verify + mechanism extraction
+            # + variant loop + stability all resolved). A crashed run resumes
+            # exploit from here.
+            if not skip_verify:
+                self._write_stage_checkpoint_safe(
+                    "verify",
+                    findings=all_findings,
+                    verified=verified,
+                    rejected=rejected,
+                )
+
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
             self._emit_stage(
                 "exploit",
@@ -1880,11 +2075,13 @@ class SourceHuntRunner:
                 symbols=self._finding_symbols(verified),
                 finding_ids=[finding.id for finding in verified],
             )
-            exploited: list[Finding] = []
+            exploited: list[Finding] = (
+                list(resume_ckpt.get("exploited", [])) if skip_exploit else []
+            )
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
             patched: list[Finding] = []
-            if not self.no_exploit and not self._budget_exhausted():
+            if not self.no_exploit and not self._budget_exhausted() and not skip_exploit:
                 exploiter_llm = self._get_native_client(
                     "sourcehunt_exploit",
                     self.exploiter_llm,
@@ -1951,7 +2148,12 @@ class SourceHuntRunner:
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
-            if self.enable_elaboration and exploited and not self._budget_exhausted():
+            if (
+                self.enable_elaboration
+                and exploited
+                and not self._budget_exhausted()
+                and not skip_exploit
+            ):
                 from .elaboration import (
                     ElaborationAgent,
                     prioritize_for_elaboration,
@@ -2009,7 +2211,12 @@ class SourceHuntRunner:
             # 5.5. v0.3: Auto-patch mode (opt-in).
             # The verify-by-recompile gate is MANDATORY — a patch is only marked
             # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
-            if self.enable_auto_patch and verified and not self._budget_exhausted():
+            if (
+                self.enable_auto_patch
+                and verified
+                and not self._budget_exhausted()
+                and not skip_exploit
+            ):
                 patcher_llm = self._get_native_client(
                     "sourcehunt_exploit",
                     self.exploiter_llm,
@@ -2058,15 +2265,17 @@ class SourceHuntRunner:
                         logger.warning("Auto-patcher failed", exc_info=True)
 
             # 5.75. v0.3: Populate the cross-run knowledge graph with source
-            #       findings. Best-effort — never blocks the run.
+            #       findings. Best-effort — never blocks the run. On resume from
+            #       the exploit checkpoint these cross-run side effects already
+            #       fired in the original run; skip them and only re-run report.
             try:
-                if self.enable_knowledge_graph and all_findings:
+                if self.enable_knowledge_graph and all_findings and not skip_exploit:
                     self._populate_knowledge_graph_source(repo_path, all_findings)
             except Exception:
                 logger.warning("Knowledge graph population failed", exc_info=True)
 
             # 5.85. v0.4: Coordinated-disclosure templates (opt-in).
-            if self.export_disclosures and verified:
+            if self.export_disclosures and verified and not skip_exploit:
                 try:
                     self._export_disclosure_bundle(verified)
                 except Exception:
@@ -2089,7 +2298,7 @@ class SourceHuntRunner:
                     logger.warning("Disclosure DB queue failed", exc_info=True)
 
             # 5.87. v0.6: Store exploits in encrypted artifact store (spec 013).
-            if self._enable_artifact_store and exploited:
+            if self._enable_artifact_store and exploited and not skip_exploit:
                 try:
                     from .artifact_store import ArtifactStore
 
@@ -2111,7 +2320,11 @@ class SourceHuntRunner:
             try:
                 from .commitment import CommitmentLog
 
-                committable = filter_by_evidence(verified, "root_cause_explained")
+                committable = (
+                    filter_by_evidence(verified, "root_cause_explained")
+                    if not skip_exploit
+                    else []
+                )
                 if committable:
                     commitment_log = CommitmentLog()
                     for f in committable:
@@ -2138,6 +2351,17 @@ class SourceHuntRunner:
                 symbols=self._finding_symbols(all_findings),
                 finding_ids=[finding.id for finding in all_findings],
             )
+
+            # Checkpoint the end of the exploit phase. A crashed run resumes at
+            # report from here (report is cheap and always re-runs on resume).
+            if not skip_exploit:
+                self._write_stage_checkpoint_safe(
+                    "exploit",
+                    findings=all_findings,
+                    verified=verified,
+                    rejected=rejected,
+                    exploited=exploited,
+                )
 
             # 6. Report
             self._emit_stage(
