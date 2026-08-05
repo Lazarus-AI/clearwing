@@ -195,6 +195,11 @@ class KubeSandboxContainer(SandboxContainer):
 
         # Build the shell command with optional env/workdir prefix
         shell_cmd = self._build_shell_command(command, env, workdir)
+        logger.info(
+            "sandbox exec pod=%s cmd=%s",
+            self._pod_name,
+            shell_cmd[:200],
+        )
         exec_command = ["/bin/sh", "-c", shell_cmd]
 
         started = time.monotonic()
