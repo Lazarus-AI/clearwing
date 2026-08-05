@@ -814,3 +814,98 @@ async def test_exploration_can_only_emit_evidence_cited_candidates() -> None:
     assert candidates[0].experimental
     assert candidates[0].generator == "bounded-exploratory-lane"
     assert candidates[0].fact_ids == [packet["facts"][0]["id"]]
+
+
+def _sentinel_candidate(source_symbol: str, sentinel_fact_id: str) -> Candidate:
+    """A candidate whose only cited fact is one shared sentinel use.
+
+    Models the degenerate corpus (e.g. a single minified JS bundle) where many
+    distinct candidates converge on the same handful of facts. The candidates
+    differ (here by source symbol, part of the candidate identity) but resolve
+    off the identical fact.
+    """
+
+    return Candidate(
+        snapshot_id="snapshot-1",
+        title=f"sentinel candidate for {source_symbol}",
+        invariant_families=["representation_domain_safety"],
+        suspected_mechanism="reserved_value_collides_with_live_value",
+        source_symbols=[source_symbol],
+        state_sinks=["storage"],
+        generator="test",
+        fact_ids=[sentinel_fact_id],
+    )
+
+
+def _sentinel_obligation(candidate: Candidate) -> Obligation:
+    return Obligation(
+        snapshot_id="snapshot-1",
+        candidate_id=candidate.logical_id,
+        proof_plan_id="representation-domain-v1",
+        predicate="reserved_sentinel_established",
+    )
+
+
+def test_evidence_identity_distinguishes_supported_claims() -> None:
+    """Evidence supporting different claims must not collide.
+
+    Two mechanical resolutions firing the same deterministic rule over the
+    same fact — the jsrsasign / minified-bundle case for CVE-2026-4600 —
+    previously produced byte-identical Evidence identity payloads and thus a
+    colliding logical_id, which the append-only ProofGraph rejected.
+    """
+
+    sentinel = _fact("sentinel_use", 225, expression="var sentinel = 0xFFFF;")
+    first = _sentinel_candidate("alpha", sentinel.id)
+    second = _sentinel_candidate("beta", sentinel.id)
+    assert first.logical_id != second.logical_id
+
+    resolver = MechanicalResolver()
+    completeness = _completeness()
+    first_resolution = resolver.resolve(
+        first, _sentinel_obligation(first), [sentinel], completeness
+    )
+    second_resolution = resolver.resolve(
+        second, _sentinel_obligation(second), [sentinel], completeness
+    )
+    assert first_resolution is not None and second_resolution is not None
+
+    first_evidence = first_resolution.evidence[0]
+    second_evidence = second_resolution.evidence[0]
+    # Same kind, facts, and provenance...
+    assert first_evidence.kind == second_evidence.kind
+    assert first_evidence.observations == second_evidence.observations
+    # ...but distinct claims supported, so distinct logical evidence.
+    assert first_evidence.supports != second_evidence.supports
+    assert first_evidence.logical_id != second_evidence.logical_id
+
+
+def test_apply_resolution_tolerates_duplicate_evidence(tmp_path) -> None:
+    """A genuinely identical second resolution must not abort the run.
+
+    Even with distinct identities as the primary fix, apply_resolution stays
+    idempotent: re-applying the same resolution reuses the stored records
+    instead of raising out of the whole proof flow.
+    """
+
+    store = ProofStore(tmp_path / "session")
+    graph = ProofGraph(store, "snapshot-1")
+    sentinel = _fact("sentinel_use", 225, expression="var sentinel = 0xFFFF;")
+    candidate = _sentinel_candidate("shared candidate", sentinel.id)
+    graph.add_candidate(candidate)
+    obligation = _sentinel_obligation(candidate)
+    graph.add_obligation(obligation)
+
+    resolution = MechanicalResolver().resolve(
+        candidate, obligation, [sentinel], _completeness()
+    )
+    assert resolution is not None
+
+    apply_resolution(graph, store, obligation, resolution)
+    # Re-applying the identical resolution used to raise
+    # "Evidence ... already exists; append a successor revision instead".
+    apply_resolution(graph, store, obligation, resolution)
+
+    evidence_id = resolution.evidence[0].logical_id
+    assert evidence_id in graph.evidence
+    assert graph.obligations[obligation.logical_id].status == ObligationStatus.PROVEN
