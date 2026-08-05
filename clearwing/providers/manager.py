@@ -253,6 +253,11 @@ class ProviderManager:
               verifier: qwen2.5-coder:32b
               ranker: anthropic/claude-haiku-4-5
         """
+        # cwpro model_aliases mode: {"model_aliases": {"task": {"provider": {...}}}}
+        aliases = cfg.get("model_aliases")
+        if aliases and isinstance(aliases, dict):
+            return cls._from_model_aliases(aliases)
+
         # Single-endpoint mode
         single = cfg.get("provider")
         if single:
@@ -298,6 +303,53 @@ class ProviderManager:
                 )
             )
 
+        return cls(configs=configs, routes=routes)
+
+    @classmethod
+    def _from_model_aliases(cls, aliases: dict[str, Any]) -> ProviderManager:
+        """Build from cwpro's model_aliases routing format.
+
+        Shape: {"task_name": {"provider": {"model": ..., "api_key": ...,
+        "base_url": ..., "adapter": ...}}}
+
+        Each alias becomes a named provider config, and a route mapping
+        that task to that provider. The "default" alias routes all tasks
+        not explicitly listed.
+        """
+        configs: list[ProviderConfig] = []
+        routes: list[ModelRoute] = []
+        for alias_name, alias_value in aliases.items():
+            if not isinstance(alias_value, dict):
+                continue
+            pcfg = alias_value.get("provider", alias_value)
+            configs.append(
+                ProviderConfig(
+                    name=alias_name,
+                    model=pcfg.get("model", ""),
+                    api_key=pcfg.get("api_key", ""),
+                    base_url=pcfg.get("base_url", ""),
+                    adapter=pcfg.get("adapter", ""),
+                )
+            )
+            routes.append(
+                ModelRoute(
+                    task=alias_name,
+                    provider=alias_name,
+                    model=pcfg.get("model", ""),
+                    reason="cwpro model_aliases routing",
+                )
+            )
+        # Ensure a "default" route exists — fall back to the first alias.
+        if not any(r.task == "default" for r in routes) and configs:
+            first = configs[0]
+            routes.append(
+                ModelRoute(
+                    task="default",
+                    provider=first.name,
+                    model=first.model,
+                    reason="cwpro model_aliases fallback",
+                )
+            )
         return cls(configs=configs, routes=routes)
 
     @classmethod
