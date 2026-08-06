@@ -15,10 +15,29 @@ from .tracer import Span, SpanExporter
 logger = logging.getLogger(__name__)
 
 
+def _span_kind_from_openinference(span: Span):
+    """Derive OTel SpanKind from an ``openinference.span.kind`` attribute.
+
+    Phoenix's UI keys off both the attribute string and the OTel ``SpanKind``
+    enum. We keep the attribute on the outgoing span (so Phoenix classifies it
+    correctly) and additionally translate to the most fitting OTel kind:
+
+    - ``"LLM"`` / ``"TOOL"``  → ``SpanKind.CLIENT`` (outbound call)
+    - ``"CHAIN"`` / ``"AGENT"`` → ``SpanKind.INTERNAL`` (internal orchestration)
+    - unset / anything else   → ``SpanKind.INTERNAL``
+    """
+    from opentelemetry.trace import SpanKind
+
+    kind = span.attributes.get("openinference.span.kind")
+    if kind in ("LLM", "TOOL"):
+        return SpanKind.CLIENT
+    return SpanKind.INTERNAL
+
+
 def _to_readable_span(span: Span, resource):
     """Bridge a Clearwing Span to an OTel ReadableSpan."""
     from opentelemetry.sdk.trace import ReadableSpan as _ReadableSpan
-    from opentelemetry.trace import SpanContext, SpanKind, TraceFlags
+    from opentelemetry.trace import SpanContext, TraceFlags
     from opentelemetry.trace.status import Status, StatusCode
 
     trace_id = int(span.trace_id, 16) & ((1 << 128) - 1)
@@ -37,7 +56,7 @@ def _to_readable_span(span: Span, resource):
         resource=resource,
         attributes=span.attributes,
         events=tuple(),
-        kind=SpanKind.INTERNAL,
+        kind=_span_kind_from_openinference(span),
         status=status,
         start_time=int(span.start_time * 1e9),
         end_time=int(span.end_time * 1e9),
