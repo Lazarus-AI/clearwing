@@ -442,7 +442,7 @@ class TestObservabilityIntegration:
         assert len(obs.tracer._exporters) == 1
 
     def test_cost_update_emits_llm_span(self):
-        """cost_update event creates an llm_call span for Arize."""
+        """cost_update event creates an llm_call span with OpenInference attrs."""
         obs = ObservabilityIntegration()
         obs._on_cost_update({
             "model": "claude-opus-4-6",
@@ -457,9 +457,112 @@ class TestObservabilityIntegration:
         llm_spans = obs._in_memory.get_spans("llm_call")
         assert len(llm_spans) == 1
         s = llm_spans[0]
-        assert s.attributes["llm.model"] == "claude-opus-4-6"
-        assert s.attributes["llm.token_count.input"] == 2000
+        # OpenInference semantic conventions:
+        # https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md
+        assert s.attributes["openinference.span.kind"] == "LLM"
+        assert s.attributes["llm.model_name"] == "claude-opus-4-6"
+        assert s.attributes["llm.provider"] == "anthropic"
+        assert s.attributes["llm.token_count.prompt"] == 2000
+        assert s.attributes["llm.token_count.completion"] == 400
+        assert s.attributes["llm.token_count.total"] == 2400
+        assert s.attributes["llm.token_count.cached"] == 500
         assert s.attributes["llm.cost_usd"] == 0.12
+
+    def test_cost_update_records_elapsed_and_provider(self):
+        """The emitted LLM span's duration reflects elapsed_ms."""
+        obs = ObservabilityIntegration()
+        obs._on_cost_update({
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_cost_usd": 0.001,
+            "elapsed_ms": 1234,
+        })
+        obs.tracer.flush()
+        llm_spans = obs._in_memory.get_spans("llm_call")
+        assert len(llm_spans) == 1
+        s = llm_spans[0]
+        assert s.attributes["llm.provider"] == "anthropic"
+        # duration_ms should be within a small tolerance of elapsed_ms (span
+        # closed roughly at "now"; start backdated by elapsed_ms).
+        assert abs(s.duration_ms - 1234) < 500
+
+    def test_bootstrap_from_env_noop_without_endpoint(self, monkeypatch):
+        monkeypatch.delenv("PHOENIX_ENDPOINT", raising=False)
+        monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
+        # Clear any singleton left over from a prior test.
+        if ObservabilityIntegration._singleton is not None:
+            ObservabilityIntegration._singleton.disconnect()
+        assert ObservabilityIntegration.bootstrap_from_env() is None
+        assert ObservabilityIntegration.bootstrap_from_env() is None
+        assert ObservabilityIntegration._singleton is None
+
+    def test_bootstrap_from_env_connects_when_endpoint_set(self, monkeypatch):
+        monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
+        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing-test")
+        if ObservabilityIntegration._singleton is not None:
+            ObservabilityIntegration._singleton.disconnect()
+        first = ObservabilityIntegration.bootstrap_from_env()
+        try:
+            assert first is not None
+            assert first._connected is True
+            second = ObservabilityIntegration.bootstrap_from_env()
+            assert second is first
+        finally:
+            if first is not None:
+                first.disconnect()
+
+    def test_bootstrap_from_env_disconnect_cleans_up(self, monkeypatch):
+        monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
+        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing-test")
+        if ObservabilityIntegration._singleton is not None:
+            ObservabilityIntegration._singleton.disconnect()
+        first = ObservabilityIntegration.bootstrap_from_env()
+        assert first is not None
+        first.disconnect()
+        assert ObservabilityIntegration._singleton is None
+        second = ObservabilityIntegration.bootstrap_from_env()
+        try:
+            assert second is not None
+            assert second is not first
+        finally:
+            if second is not None:
+                second.disconnect()
+
+    def test_phoenix_span_kind_derived_from_openinference(self):
+        """PhoenixExporter's _to_readable_span picks OTel kind from attrs."""
+        from opentelemetry.trace import SpanKind
+
+        from clearwing.observability.phoenix import _span_kind_from_openinference
+        from clearwing.observability.tracer import Span
+
+        llm_span = Span(
+            trace_id="t1",
+            span_id="s1",
+            name="llm_call",
+            attributes={"openinference.span.kind": "LLM"},
+        )
+        assert _span_kind_from_openinference(llm_span) == SpanKind.CLIENT
+
+        tool_span = Span(
+            trace_id="t1",
+            span_id="s2",
+            name="tool",
+            attributes={"openinference.span.kind": "TOOL"},
+        )
+        assert _span_kind_from_openinference(tool_span) == SpanKind.CLIENT
+
+        chain_span = Span(
+            trace_id="t1",
+            span_id="s3",
+            name="chain",
+            attributes={"openinference.span.kind": "CHAIN"},
+        )
+        assert _span_kind_from_openinference(chain_span) == SpanKind.INTERNAL
+
+        unset_span = Span(trace_id="t1", span_id="s4", name="unset")
+        assert _span_kind_from_openinference(unset_span) == SpanKind.INTERNAL
 
 
 # ---------------------------------------------------------------------------

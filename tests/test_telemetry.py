@@ -1,5 +1,6 @@
 """Tests for the CostTracker telemetry module."""
 
+from clearwing.core.events import EventBus, EventType
 from clearwing.observability.telemetry import CostSummary, CostTracker, ToolUsage
 
 
@@ -130,6 +131,59 @@ class TestCostTracker:
         assert t.total_cost_usd == 0.0
         assert t.tool_calls == 0
         assert t.by_tool == {}
+
+    def test_record_llm_call_emits_cost_update_with_elapsed_and_provider(self):
+        """New keyword args ride along in the COST_UPDATE payload."""
+        received: list[dict] = []
+
+        def handler(data):
+            received.append(data)
+
+        bus = EventBus()
+        bus.subscribe(EventType.COST_UPDATE, handler)
+        try:
+            t = CostTracker()
+            t.record_llm_call(
+                1000,
+                500,
+                "claude-sonnet-4-6",
+                cached_tokens=100,
+                elapsed_ms=1234.5,
+                provider="anthropic",
+            )
+        finally:
+            bus.unsubscribe(EventType.COST_UPDATE, handler)
+
+        assert len(received) == 1
+        payload = received[0]
+        assert payload["input_tokens"] == 1000
+        assert payload["output_tokens"] == 500
+        assert payload["cached_tokens"] == 100
+        assert payload["model"] == "claude-sonnet-4-6"
+        assert payload["provider"] == "anthropic"
+        assert payload["elapsed_ms"] == 1234.5
+
+    def test_record_llm_call_backward_compatible_without_new_kwargs(self):
+        """Legacy callers without the new kwargs still emit a valid payload."""
+        received: list[dict] = []
+
+        def handler(data):
+            received.append(data)
+
+        bus = EventBus()
+        bus.subscribe(EventType.COST_UPDATE, handler)
+        try:
+            t = CostTracker()
+            t.record_llm_call(1000, 500, "claude-sonnet-4-6")
+        finally:
+            bus.unsubscribe(EventType.COST_UPDATE, handler)
+
+        assert len(received) == 1
+        payload = received[0]
+        # Falls back to safe defaults.
+        assert payload["provider"] == "unknown"
+        assert payload["elapsed_ms"] == 0
+        assert payload["cached_tokens"] == 0
 
     def test_pricing_table(self):
         assert "claude-sonnet-4-6" in CostTracker.PRICING

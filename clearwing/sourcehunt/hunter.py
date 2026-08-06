@@ -1537,12 +1537,16 @@ class NativeHunter:
                     messages = await self.summarizer.summarize(messages, self.llm)
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
+                import time as _time
+
+                _llm_start = _time.perf_counter()
                 response = await self.llm.achat(
                     messages=messages,
                     system=self.prompt,
                     tools=self.tools,
                     max_tokens=24000,
                 )
+                _llm_elapsed_ms = (_time.perf_counter() - _llm_start) * 1000.0
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate
@@ -1577,12 +1581,25 @@ class NativeHunter:
             # response where nothing was cache-served.
             details = getattr(response.usage, "prompt_tokens_details", None)
             cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
+            _prompt_toks = response.usage.prompt_tokens or 0
+            _completion_toks = response.usage.completion_tokens or 0
             total_cost_usd += _estimate_cost_usd(
-                response.usage.prompt_tokens or 0,
-                response.usage.completion_tokens or 0,
+                _prompt_toks,
+                _completion_toks,
                 self.llm.model_name,
                 cached_tokens,
             )
+            # Also push through the singleton so ObservabilityIntegration
+            # emits a Phoenix LLM span for this hunter call.
+            if _prompt_toks or _completion_toks:
+                CostTracker().record_llm_call(
+                    _prompt_toks,
+                    _completion_toks,
+                    self.llm.model_name,
+                    cached_tokens=cached_tokens,
+                    elapsed_ms=_llm_elapsed_ms,
+                    provider=getattr(self.llm, "provider_name", None),
+                )
 
             last_assistant_text = response.first_text or ""
             last_reasoning_content = response.reasoning_content or ""

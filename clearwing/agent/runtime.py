@@ -258,12 +258,16 @@ class NativeAgentGraph:
         system, chat_messages = _coerce_chat_messages(messages)
         system = "\n\n".join(part for part in (sys_prompt, system) if part) or sys_prompt
 
+        import time as _time
+
+        _llm_start = _time.perf_counter()
         response = await self.llm.achat_stream(
             messages=chat_messages,
             system=system,
             tools=self.native_tools or None,
             on_text_delta=self.on_text_delta,
         )
+        _llm_elapsed_ms = (_time.perf_counter() - _llm_start) * 1000.0
 
         assistant_text = response_text(response)
         # tool_calls are raw genai ToolCall objects (.call_id/.fn_name/
@@ -289,7 +293,13 @@ class NativeAgentGraph:
         input_tokens = (usage.prompt_tokens or 0) if usage else 0
         output_tokens = (usage.completion_tokens or 0) if usage else 0
         if self.cost_tracker and (input_tokens or output_tokens):
-            self.cost_tracker.record_llm_call(input_tokens, output_tokens, self.model_name)
+            self.cost_tracker.record_llm_call(
+                input_tokens,
+                output_tokens,
+                self.model_name,
+                elapsed_ms=_llm_elapsed_ms,
+                provider=getattr(self.llm, "provider_name", None),
+            )
             state["total_cost_usd"] = self.cost_tracker.total_cost_usd
             state["total_tokens"] = self.cost_tracker.input_tokens + self.cost_tracker.output_tokens
             if self.audit_logger:

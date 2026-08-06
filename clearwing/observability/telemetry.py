@@ -115,6 +115,9 @@ class CostTracker:
         output_tokens: int,
         model: str,
         cached_tokens: int = 0,
+        *,
+        elapsed_ms: float | None = None,
+        provider: str | None = None,
     ) -> None:
         """Record token usage for a single LLM call and update the running cost.
 
@@ -122,6 +125,12 @@ class CostTracker:
         pricing is used.  ``cached_tokens`` bills at the model's cached rate.
         When an ``EventBus`` is available a ``COST_UPDATE`` event is emitted
         after updating counters.
+
+        ``elapsed_ms`` (wall-clock latency of the call) and ``provider`` are
+        optional; when supplied they ride along in the ``COST_UPDATE`` payload
+        so ``ObservabilityIntegration`` can attach them to the synthetic
+        Phoenix LLM span. Keyword-only to keep call sites explicit and future
+        additions non-breaking.
         """
         cost = self.estimate_cost(input_tokens, output_tokens, model, cached_tokens)
 
@@ -131,14 +140,17 @@ class CostTracker:
             self.total_cost_usd += cost
 
         try:
-            EventBus.emit(
+            EventBus().emit(
                 EventType.COST_UPDATE,
                 {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "cached_tokens": cached_tokens,
                     "cost": cost,
                     "total_cost_usd": self.total_cost_usd,
                     "model": model,
+                    "provider": provider or "unknown",
+                    "elapsed_ms": elapsed_ms or 0,
                 },
             )
         except Exception:
