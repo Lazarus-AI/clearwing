@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -1286,23 +1285,14 @@ def _handle_machine(descriptor: int) -> int:
     from ...sourcehunt.runner import SourceHuntRunner
     from ..machine import MachineChannel
 
-    log = logging.getLogger("clearwing.sourcehunt.machine")
-
     channel = MachineChannel(descriptor, "sourcehunt")
     try:
         request, routing = channel.read_start()
-        # Log the raw request payload before validation. Bridge callers land
-        # here with mystery misconfigurations (wrong subsystem paths, missing
-        # repo_url, unexpected branch defaults); dumping the wire format
-        # makes those obvious in `kubectl logs` / bridge stderr. Do NOT log
-        # `routing` — it carries the provider API key.
-        try:
-            log.info(
-                "sourcehunt machine-fd request: %s",
-                json.dumps(request, sort_keys=True, default=str),
-            )
-        except Exception:
-            log.info("sourcehunt machine-fd request (repr): %r", request)
+        # Surface the raw request on stderr so bridge misconfigs (wrong
+        # subsystem paths, missing repo_url, unexpected branch defaults)
+        # show up in `kubectl logs`. Do NOT print `routing` — it carries
+        # the provider API key.
+        print(f"sourcehunt machine-fd request: {request!r}", file=sys.stderr)
         parsed = _machine_request(request)
         install_runtime_routing(routing)
         provider_manager = ProviderManager.from_config(routing)
