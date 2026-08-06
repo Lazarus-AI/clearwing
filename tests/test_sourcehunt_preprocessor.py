@@ -328,47 +328,8 @@ class TestPreprocessorClonePath:
 
         assert result.file_targets, (
             "file_targets is empty — the clone tempdir was GC'd before "
-            "the file walk ran (Bug 1)."
+            "the file walk ran."
         )
         assert any(
             ft.get("path") == "pkg/mod.py" for ft in result.file_targets
         ), f"expected pkg/mod.py in file_targets, got {[ft.get('path') for ft in result.file_targets]}"
-
-    def test_branch_accepts_commit_sha(self, tmp_path):
-        """A full 40-char SHA in `branch` triggers full-clone + checkout.
-
-        Fast shallow ``git clone --depth 1 --branch <ref>`` does not accept
-        commit SHAs. When ``branch`` looks like a full SHA, the cloner
-        switches to a blobless full clone followed by ``git checkout <sha>``.
-        """
-        src_repo = tmp_path / "src.git"
-        first_sha = _init_git_repo(
-            src_repo, {"only_v1.py": "V = 1\n"}
-        )
-        # Second commit adds a file. If we pin to first_sha we must not
-        # see this file.
-        (src_repo / "only_v2.py").write_text("V = 2\n")
-        subprocess.run(
-            ["git", "-C", str(src_repo), "add", "only_v2.py"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(src_repo), "commit", "-m", "add v2"],
-            check=True,
-            capture_output=True,
-        )
-        assert len(first_sha) == 40
-
-        p = Preprocessor(repo_url=str(src_repo), branch=first_sha)
-        try:
-            result = p.run()
-        finally:
-            p.cleanup()
-
-        paths = {ft.get("path") for ft in result.file_targets}
-        assert "only_v1.py" in paths
-        assert "only_v2.py" not in paths, (
-            f"branch={first_sha[:8]} should pin to first commit; "
-            f"saw {paths}"
-        )

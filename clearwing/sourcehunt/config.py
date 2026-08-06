@@ -17,7 +17,7 @@ class TargetConfig:
     """Where to find the code to hunt."""
 
     repo_url: str
-    branch: str = "main"  # branch name, tag, OR full 40-char commit SHA
+    branch: str = "main"
     local_path: str | None = None
     depth: str = "standard"  # quick | standard | deep
 
