@@ -146,26 +146,37 @@ class ObservabilityIntegration:
         if not isinstance(data, dict):
             return
         model = data.get("model", "unknown")
+        input_tokens = int(data.get("input_tokens", 0) or 0)
+        output_tokens = int(data.get("output_tokens", 0) or 0)
+        cached_tokens = int(data.get("cached_tokens", 0) or 0)
+
         self.metrics.increment("llm_calls_total", labels={"model": model})
-        self.metrics.increment("input_tokens_total", value=float(data.get("input_tokens", 0)))
-        self.metrics.increment("output_tokens_total", value=float(data.get("output_tokens", 0)))
+        self.metrics.increment("input_tokens_total", value=float(input_tokens))
+        self.metrics.increment("output_tokens_total", value=float(output_tokens))
         self.metrics.set_gauge("total_cost_usd", data.get("total_cost_usd", 0.0))
 
-        # Emit a synthetic span so Arize sees per-call LLM telemetry
+        # Emit a synthetic span so Arize Phoenix sees per-call LLM telemetry.
+        # Attribute names follow the OpenInference semantic conventions —
+        # https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md
+        # — so Phoenix renders the span in its LLM view rather than as a
+        # generic "internal" span.
         import time
 
         now = time.time()
-        elapsed_s = data.get("elapsed_ms", 0) / 1000.0
-        with self.tracer.span("llm_call", attributes={
-            "llm.model": model,
+        elapsed_ms = data.get("elapsed_ms", 0) or 0
+        elapsed_s = elapsed_ms / 1000.0
+        attributes = {
+            "openinference.span.kind": "LLM",
+            "llm.model_name": model,
             "llm.provider": data.get("provider", "unknown"),
-            "llm.token_count.input": data.get("input_tokens", 0),
-            "llm.token_count.output": data.get("output_tokens", 0),
-            "llm.token_count.cached": data.get("cached_tokens", 0),
+            "llm.token_count.prompt": input_tokens,
+            "llm.token_count.completion": output_tokens,
+            "llm.token_count.total": input_tokens + output_tokens,
+            "llm.token_count.cached": cached_tokens,
             "llm.cost_usd": data.get("total_cost_usd", 0.0),
-            "span.kind": "llm",
-        }) as s:
-            # Backdate start to reflect actual call timing
+        }
+        with self.tracer.span("llm_call", attributes=attributes) as s:
+            # Backdate start so the span duration reflects actual call latency.
             if elapsed_s > 0:
                 s.start_time = now - elapsed_s
 
