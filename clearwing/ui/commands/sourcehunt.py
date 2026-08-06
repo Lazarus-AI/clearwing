@@ -1302,6 +1302,15 @@ def _handle_machine(descriptor: int) -> int:
                 no_verify=not parsed["verify"],
                 no_exploit=not parsed["exploit"],
                 flow=parsed["flow"],
+                agent_mode=parsed["agent_mode"],
+                no_rank=parsed["no_rank"],
+                no_per_file_hunt=parsed["no_per_file_hunt"],
+                enable_subsystem_hunt=parsed["subsystem_hunt"]
+                or bool(parsed.get("subsystem_paths")),
+                subsystem_paths=parsed.get("subsystem_paths"),
+                subsystem_budget_usd=parsed.get("subsystem_budget_usd", 0.0),
+                subsystem_max_parallel=parsed.get("subsystem_max_parallel", 4),
+                output_formats=parsed.get("format"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1325,6 +1334,14 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "verify",
         "exploit",
         "flow",
+        "agent_mode",
+        "no_rank",
+        "format",
+        "subsystem_hunt",
+        "subsystem_paths",
+        "subsystem_budget_usd",
+        "subsystem_max_parallel",
+        "no_per_file_hunt",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -1332,7 +1349,10 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
     repo_url = _repository_url(value.get("repo_url"))
     depth = _choice(value.get("depth", "standard"), "depth", {"quick", "standard", "deep"})
     flow = _choice(value.get("flow", "legacy"), "flow", {"legacy", "proof"})
-    return {
+    agent_mode = _choice(
+        value.get("agent_mode", "auto"), "agent_mode", {"auto", "constrained", "deep"}
+    )
+    parsed = {
         "repo_url": repo_url,
         "branch": _bounded_text(value.get("branch", "main"), "branch", 256),
         "depth": depth,
@@ -1343,7 +1363,21 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "verify": _boolean(value.get("verify", True), "verify"),
         "exploit": _boolean(value.get("exploit", True), "exploit"),
         "flow": flow,
+        "agent_mode": agent_mode,
+        "no_rank": _boolean(value.get("no_rank", False), "no_rank"),
+        "no_per_file_hunt": _boolean(value.get("no_per_file_hunt", False), "no_per_file_hunt"),
+        "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),
     }
+    if "subsystem_paths" in value:
+        parsed["subsystem_paths"] = value["subsystem_paths"]
+    if "subsystem_budget_usd" in value:
+        parsed["subsystem_budget_usd"] = value["subsystem_budget_usd"]
+    if "subsystem_max_parallel" in value:
+        parsed["subsystem_max_parallel"] = value["subsystem_max_parallel"]
+    if "format" in value:
+        fmt = value["format"]
+        parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
+    return parsed
 
 
 def _public_result(result: Any) -> dict[str, Any]:
