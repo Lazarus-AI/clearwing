@@ -1288,10 +1288,6 @@ def _handle_machine(descriptor: int) -> int:
     channel = MachineChannel(descriptor, "sourcehunt")
     try:
         request, routing = channel.read_start()
-        # Surface the raw request on stderr so bridge misconfigs (wrong
-        # subsystem paths, missing repo_url, unexpected branch defaults)
-        # show up in `kubectl logs`. Do NOT print `routing` — it carries
-        # the provider API key.
         print(f"sourcehunt machine-fd request: {request!r}", file=sys.stderr)
         parsed = _machine_request(request)
         install_runtime_routing(routing)
