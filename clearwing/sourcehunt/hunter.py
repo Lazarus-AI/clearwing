@@ -14,7 +14,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from clearwing.agent.tools.hunt import (
     build_propagation_auditor_tools,
 )
 from clearwing.core.events import EventBus, EventType
+from clearwing.data.memory import ContextSummarizer
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
 from clearwing.llm.budget import spend_metadata
 from clearwing.observability.telemetry import CostTracker
@@ -1379,6 +1380,7 @@ class NativeHunter:
     budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
+    summarizer: ContextSummarizer | None = field(default=None)
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
         """Return a stop reason string, or None to continue."""
@@ -1449,6 +1451,11 @@ class NativeHunter:
                 },
             )
             with spend_metadata(model_call_id=model_call_id):
+                if self.summarizer and self.summarizer.should_summarize(messages):
+                    pre = len(messages)
+                    messages = await self.summarizer.summarize(messages, self.llm)
+                    logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
+
                 response = await self.llm.achat(
                     messages=messages,
                     system=self.prompt,
@@ -1997,4 +2004,5 @@ def build_hunter_agent(
         max_steps=max_steps,
         agent_mode=agent_mode,
         budget_usd=budget_usd,
+        summarizer=ContextSummarizer(),
     ), ctx

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
-# Patterns that indicate a captured flag — these messages must never be dropped.
+from clearwing.llm import ChatMessage
+
+logger = logging.getLogger(__name__)
+
 _FLAG_PATTERNS = re.compile(
     r"(flag\{[^}]*\}|FLAG\{[^}]*\}|HTB\{[^}]*\}|CTF\{[^}]*\})", re.IGNORECASE
 )
@@ -17,63 +21,54 @@ _SUMMARIZE_PROMPT = (
 
 
 class ContextSummarizer:
-    """Decides when and how to compress the message history."""
-
-    # ------------------------------------------------------------------
-    # Token estimation
-    # ------------------------------------------------------------------
+    """Compresses message history, keeping tool calls and flags verbatim."""
 
     @staticmethod
     def _estimate_tokens(messages: list) -> int:
-        """Rough token count — ~4 characters per token."""
         total_chars = 0
         for msg in messages:
-            content = msg.content if hasattr(msg, "content") else str(msg)
+            content = getattr(msg, "content", None) or str(msg)
             total_chars += len(content)
+            for tc in getattr(msg, "tool_calls", None) or []:
+                total_chars += len(getattr(tc, "fn_arguments_json", None) or "")
         return total_chars // 4
 
     def should_summarize(self, messages: list, max_tokens: int = 150_000) -> bool:
-        """Return True when the estimated token count exceeds 80% of *max_tokens*."""
         return self._estimate_tokens(messages) > int(max_tokens * 0.8)
 
-    # ------------------------------------------------------------------
-    # Summarisation
-    # ------------------------------------------------------------------
-
     async def summarize(self, messages: list, llm: Any) -> list:
-        """Compress the oldest 70% of messages via *llm*, keeping the newest 30%.
+        """Compress oldest 70%, keeping tool calls/results and flags verbatim.
 
-        Messages that contain flag patterns are always preserved verbatim.
+        Returns [summary, ...preserved, ...recent_messages].
         """
         if not messages:
             return messages
 
         total = len(messages)
         split_idx = int(total * 0.7)
-
         old_messages = messages[:split_idx]
         recent_messages = messages[split_idx:]
 
-        # Pull out flag-bearing messages from the old batch so they survive.
-        flag_messages: list = []
+        preserved: list = []
         to_summarize: list = []
 
         for msg in old_messages:
-            content = msg.content if hasattr(msg, "content") else str(msg)
-            if _FLAG_PATTERNS.search(content):
-                flag_messages.append(msg)
+            content = getattr(msg, "content", None) or ""
+            if (
+                _FLAG_PATTERNS.search(content)
+                or getattr(msg, "tool_calls", None)
+                or getattr(msg, "tool_response_call_id", None)
+            ):
+                preserved.append(msg)
             else:
                 to_summarize.append(msg)
 
-        # Build the text block to hand to the LLM.
         text_block = "\n\n".join(
-            f"[{type(m).__name__}]: {m.content}" for m in to_summarize if hasattr(m, "content")
+            f"[{getattr(m, 'role', 'msg')}]: {getattr(m, 'content', '')}"
+            for m in to_summarize
+            if getattr(m, "content", None)
         )
 
-        # Native LLM surface: `aask_text` returns a genai ``ChatResponse``.
-        # This works against both today's ``ChatModel`` (which delegates
-        # ``aask_text`` to its underlying client) and a bare ``AsyncLLMClient``
-        # once the runtime is repointed off the ChatModel facade.
         from clearwing.llm.native import response_text
 
         summary_response = await llm.aask_text(
@@ -82,11 +77,11 @@ class ContextSummarizer:
         )
         summary_text = response_text(summary_response)
 
-        # Reconstruct the message list.
-        result: list = [
-            {"role": "system", "content": f"[Session Summary]\n{summary_text}"},
-        ]
-        result.extend(flag_messages)
-        result.extend(recent_messages)
+        summary = ChatMessage("system", f"[Session Summary]\n{summary_text}")
+        result: list = [summary, *preserved, *recent_messages]
 
+        logger.info(
+            "context summarizer: %d msgs → %d (preserved=%d, recent=%d)",
+            total, len(result), len(preserved), len(recent_messages),
+        )
         return result
