@@ -1281,14 +1281,6 @@ def handle(cli, args):
 
 
 def _handle_machine(descriptor: int) -> int:
-    import logging as _logging
-
-    _logging.basicConfig(
-        level=_logging.DEBUG,
-        format="%(name)s %(levelname)s: %(message)s",
-        force=True,
-    )
-
     from ...providers import ProviderManager, install_runtime_routing
     from ...sourcehunt.runner import SourceHuntRunner
     from ..machine import MachineChannel
