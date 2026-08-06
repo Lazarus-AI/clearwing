@@ -1318,6 +1318,7 @@ def _handle_machine(descriptor: int) -> int:
                 subsystem_paths=parsed.get("subsystem_paths"),
                 subsystem_budget_usd=parsed.get("subsystem_budget_usd", 0.0),
                 subsystem_max_parallel=parsed.get("subsystem_max_parallel", 4),
+                output_formats=parsed.get("format"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1343,7 +1344,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "flow",
         "agent_mode",
         "no_rank",
-        "format",  # accepted for cwpro contract compatibility; not consumed
+        "format",
         "subsystem_hunt",
         "subsystem_paths",
         "subsystem_budget_usd",
@@ -1390,6 +1391,9 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         parsed["subsystem_max_parallel"] = _bounded_integer(
             value["subsystem_max_parallel"], "subsystem_max_parallel", 1, 64
         )
+    if "format" in value:
+        fmt = value["format"]
+        parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
     return parsed
 
 
