@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import os
+from typing import Any, ClassVar
 
 from clearwing.core.events import EventBus, EventType
 
@@ -32,7 +33,15 @@ class ObservabilityIntegration:
         # ... run agent ...
         obs.disconnect()
         print(obs.metrics.format_prometheus())
+
+    For env-driven auto-wiring at process startup, prefer
+    :meth:`bootstrap_from_env` — it is a no-op unless Phoenix env vars are set.
     """
+
+    # Process-wide singleton established by :meth:`bootstrap_from_env` so
+    # startup hooks in the CLI and webui don't double-subscribe. Tests may
+    # clear this by calling ``disconnect()``, which unsets the reference.
+    _singleton: ClassVar["ObservabilityIntegration | None"] = None
 
     def __init__(self, debug: bool = False, exporters: list = None):
         if exporters is None:
@@ -48,6 +57,26 @@ class ObservabilityIntegration:
         self.metrics = MetricsCollector()
         self._connected = False
         self._handlers = {}
+
+    @classmethod
+    def bootstrap_from_env(cls) -> "ObservabilityIntegration | None":
+        """Idempotently instantiate + connect when Phoenix env vars are set.
+
+        Returns the shared singleton, or ``None`` if
+        ``PHOENIX_ENDPOINT`` / ``PHOENIX_PROJECT`` are unset. Safe to call
+        from every process entry point (CLI ``main()``, FastAPI
+        ``create_app()``, machine-fd subcommand); subsequent calls return the
+        already-connected instance without re-subscribing to the EventBus.
+        """
+        if cls._singleton is not None:
+            return cls._singleton
+        if not os.environ.get("PHOENIX_ENDPOINT") or not os.environ.get("PHOENIX_PROJECT"):
+            return None
+        instance = cls()
+        instance.connect()
+        cls._singleton = instance
+        logger.info("ObservabilityIntegration bootstrapped from env")
+        return instance
 
     def connect(self) -> None:
         """Subscribe to EventBus events."""
@@ -80,6 +109,10 @@ class ObservabilityIntegration:
 
         self.tracer.shutdown()
         self._connected = False
+        # Release the bootstrap singleton so a follow-up bootstrap can create
+        # a fresh instance (primarily useful for tests).
+        if type(self)._singleton is self:
+            type(self)._singleton = None
 
     @property
     def spans(self) -> list:

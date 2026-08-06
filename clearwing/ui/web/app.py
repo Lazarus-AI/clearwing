@@ -21,6 +21,7 @@ from clearwing.agent.operator import OperatorAgent, OperatorConfig
 from clearwing.agent.runtime import Command
 from clearwing.core.events import EventBus, EventType
 from clearwing.observability import MetricsCollector
+from clearwing.observability.integration import ObservabilityIntegration
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,14 @@ def create_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Auto-wire Phoenix / OTLP tracing when PHOENIX_ENDPOINT is set. Flush the
+    # OTel batch processor on graceful shutdown so nothing gets dropped.
+    _obs = ObservabilityIntegration.bootstrap_from_env()
+    if _obs is not None:
+        @app.on_event("shutdown")
+        def _flush_observability() -> None:
+            _obs.disconnect()
 
     # ---------------------------------------------------------------
     # Authentication for privileged endpoints
