@@ -1377,20 +1377,11 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),
     }
     if "subsystem_paths" in value:
-        paths = value["subsystem_paths"]
-        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
-            raise ValueError("subsystem_paths must be a list of strings")
-        if len(paths) > 128:
-            raise ValueError("subsystem_paths exceeds the 128-entry limit")
-        parsed["subsystem_paths"] = paths
+        parsed["subsystem_paths"] = value["subsystem_paths"]
     if "subsystem_budget_usd" in value:
-        parsed["subsystem_budget_usd"] = _bounded_number(
-            value["subsystem_budget_usd"], "subsystem_budget_usd", 0, 10000
-        )
+        parsed["subsystem_budget_usd"] = value["subsystem_budget_usd"]
     if "subsystem_max_parallel" in value:
-        parsed["subsystem_max_parallel"] = _bounded_integer(
-            value["subsystem_max_parallel"], "subsystem_max_parallel", 1, 64
-        )
+        parsed["subsystem_max_parallel"] = value["subsystem_max_parallel"]
     if "format" in value:
         fmt = value["format"]
         parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
