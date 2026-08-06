@@ -257,6 +257,7 @@ class Preprocessor:
         self.max_imports_by_files = max_imports_by_files
         self.respect_gitignore = respect_gitignore
         self._analyzer: SourceAnalyzer | None = None
+        self._cloner: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
@@ -544,9 +545,11 @@ class Preprocessor:
 
     def cleanup(self) -> None:
         """Clean up the cloned repo (if we cloned one)."""
-        if self._analyzer is not None:
+        for holder in (self._cloner, self._analyzer):
+            if holder is None:
+                continue
             try:
-                self._analyzer.cleanup()
+                holder.cleanup()
             except Exception:
                 logger.debug("Preprocessor cleanup failed", exc_info=True)
 
@@ -559,8 +562,8 @@ class Preprocessor:
 
         # Heuristic: looks like a git URL?
         if self._is_git_url(self.repo_url):
-            self._analyzer = SourceAnalyzer()
-            return self._analyzer.clone(self.repo_url, branch=self.branch)
+            self._cloner = SourceAnalyzer()
+            return self._cloner.clone(self.repo_url, branch=self.branch)
 
         # Otherwise treat repo_url as a local path
         if os.path.isdir(self.repo_url):

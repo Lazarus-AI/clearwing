@@ -517,23 +517,38 @@ class SourceAnalyzer:
         """
         self._temp_dir = tempfile.TemporaryDirectory(prefix="clearwing-src-")
         clone_path = self._temp_dir.name
-        try:
+        if re.fullmatch(r"[0-9a-f]{40}", branch):
             subprocess.run(
-                ["git", "clone", "--depth", "1", "--branch", branch, git_url, clone_path],
+                ["git", "clone", "--filter=blob:none", "--no-checkout", git_url, clone_path],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", clone_path, "checkout", branch],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=True,
             )
-        except subprocess.CalledProcessError:
-            # Try without --branch (default branch)
-            subprocess.run(
-                ["git", "clone", "--depth", "1", git_url, clone_path],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=True,
-            )
+        else:
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "--branch", branch, git_url, clone_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", git_url, clone_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                )
         self.repo_path = clone_path
         return clone_path
 

@@ -1288,6 +1288,7 @@ def _handle_machine(descriptor: int) -> int:
     channel = MachineChannel(descriptor, "sourcehunt")
     try:
         request, routing = channel.read_start()
+        print(f"sourcehunt machine-fd request: {request!r}", file=sys.stderr)
         parsed = _machine_request(request)
         install_runtime_routing(routing)
         provider_manager = ProviderManager.from_config(routing)
