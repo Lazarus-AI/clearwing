@@ -7,6 +7,7 @@ semgrep_findings, fuzz_corpora) are present and default to None/empty.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -274,3 +275,100 @@ class TestIsGitUrl:
 
     def test_local_path_not_git(self):
         assert not Preprocessor._is_git_url("/tmp/some/dir")
+
+
+def _init_git_repo(path: Path, files: dict[str, str]) -> str:
+    """Init a git repo with the given files, return HEAD SHA."""
+    path.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        target = path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    run = lambda *args: subprocess.run(  # noqa: E731
+        ["git", "-C", str(path), *args], check=True, capture_output=True
+    )
+    run("init", "-b", "main")
+    run("config", "user.email", "test@example.com")
+    run("config", "user.name", "test")
+    run("add", ".")
+    run("commit", "-m", "initial")
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+class TestPreprocessorClonePath:
+    """Regression tests for the git-clone code path.
+
+    These tests hit the real ``git clone`` machinery against a local bare-ish
+    repo (URL ending in ``.git`` so ``_is_git_url`` treats it as a URL).
+    """
+
+    def test_clone_survives_analyzer_rebind(self, tmp_path):
+        """Regression: Preprocessor.run() must not lose the cloned tree.
+
+        Before the GC-safe cloner ref, ``_clone_or_use_local`` stashed the
+        cloner on ``self._analyzer`` which ``run()`` then rebound, dropping
+        the only strong reference to the cloner's ``TemporaryDirectory``.
+        Python GC finalized the tempdir and the subsequent file walk saw an
+        empty tree — producing zero ``file_targets``.
+        """
+        src_repo = tmp_path / "src.git"
+        _init_git_repo(src_repo, {"pkg/mod.py": "def f():\n    return 1\n"})
+
+        p = Preprocessor(repo_url=str(src_repo), branch="main")
+        try:
+            result = p.run()
+        finally:
+            p.cleanup()
+
+        assert result.file_targets, (
+            "file_targets is empty — the clone tempdir was GC'd before "
+            "the file walk ran (Bug 1)."
+        )
+        assert any(
+            ft.get("path") == "pkg/mod.py" for ft in result.file_targets
+        ), f"expected pkg/mod.py in file_targets, got {[ft.get('path') for ft in result.file_targets]}"
+
+    def test_branch_accepts_commit_sha(self, tmp_path):
+        """A full 40-char SHA in `branch` triggers full-clone + checkout.
+
+        Fast shallow ``git clone --depth 1 --branch <ref>`` does not accept
+        commit SHAs. When ``branch`` looks like a full SHA, the cloner
+        switches to a blobless full clone followed by ``git checkout <sha>``.
+        """
+        src_repo = tmp_path / "src.git"
+        first_sha = _init_git_repo(
+            src_repo, {"only_v1.py": "V = 1\n"}
+        )
+        # Second commit adds a file. If we pin to first_sha we must not
+        # see this file.
+        (src_repo / "only_v2.py").write_text("V = 2\n")
+        subprocess.run(
+            ["git", "-C", str(src_repo), "add", "only_v2.py"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(src_repo), "commit", "-m", "add v2"],
+            check=True,
+            capture_output=True,
+        )
+        assert len(first_sha) == 40
+
+        p = Preprocessor(repo_url=str(src_repo), branch=first_sha)
+        try:
+            result = p.run()
+        finally:
+            p.cleanup()
+
+        paths = {ft.get("path") for ft in result.file_targets}
+        assert "only_v1.py" in paths
+        assert "only_v2.py" not in paths, (
+            f"branch={first_sha[:8]} should pin to first commit; "
+            f"saw {paths}"
+        )

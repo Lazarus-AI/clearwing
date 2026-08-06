@@ -505,35 +505,69 @@ class SourceAnalyzer:
         if max_file_size is not None:
             self.MAX_FILE_SIZE = max_file_size
 
+    _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
     def clone(self, git_url: str, branch: str = "main") -> str:
         """Clone a git repository to a temporary directory.
 
-        Args:
-            git_url: Git repository URL.
-            branch: Branch to clone.
-
-        Returns:
-            Path to the cloned repository.
+        ``branch`` accepts a branch name, tag name, OR a full 40-char commit
+        SHA. Branches/tags take the fast ``git clone --depth 1 --branch``
+        path. A full SHA triggers a blobless full-history clone followed by
+        ``git checkout <sha>`` — ``--depth 1 --branch`` does not accept SHAs.
         """
         self._temp_dir = tempfile.TemporaryDirectory(prefix="clearwing-src-")
         clone_path = self._temp_dir.name
-        try:
+
+        if self._COMMIT_SHA_RE.match(branch):
+            # Same shape as evaluations/cve-2026-27775.sh.
             subprocess.run(
-                ["git", "clone", "--depth", "1", "--branch", branch, git_url, clone_path],
+                [
+                    "git",
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    git_url,
+                    clone_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", clone_path, "checkout", branch],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=True,
             )
-        except subprocess.CalledProcessError:
-            # Try without --branch (default branch)
-            subprocess.run(
-                ["git", "clone", "--depth", "1", git_url, clone_path],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=True,
-            )
+        else:
+            try:
+                subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        branch,
+                        git_url,
+                        clone_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                # Try without --branch (default branch)
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", git_url, clone_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=True,
+                )
         self.repo_path = clone_path
         return clone_path
 
