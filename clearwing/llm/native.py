@@ -392,40 +392,34 @@ def _mark_cache_prefix(
     requests.
 
     When True, a single ``cache_control="ephemeral"`` marker is placed on the
-    *last* message. Providers that support prompt caching (Anthropic maps this
-    to a content-part ``cache_control``; OpenAI to request-level caching) then
-    cache the whole prefix up to and including it — i.e. ``system`` + ``tools``
-    + every prior turn. On the next turn the marker rides the new last message,
-    so the just-grown history is a cache *read* rather than a fresh write. This
-    is a transport/billing hint only: it does not alter the tokens the model
-    conditions on, so outputs are unchanged by construction.
+    *last* message and cleared from every earlier one. Providers that support
+    prompt caching (Anthropic maps this to a content-part ``cache_control``;
+    OpenAI to request-level caching) then cache the whole prefix up to and
+    including it — i.e. ``system`` + ``tools`` + every prior turn. On the next
+    turn the marker rides the new last message, so the just-grown history is a
+    cache *read* rather than a fresh write. This is a transport/billing hint
+    only: it does not alter the tokens the model conditions on, so outputs are
+    unchanged by construction.
 
-    The marked message is a *copy* — the caller's own ``ChatMessage`` objects
-    are never mutated. That matters because the hunter reuses one growing
-    ``messages`` list across turns; mutating in place would leave a stale
-    marker on every message and blow past Anthropic's 4-breakpoint cap.
+    The ``cache_control`` field is mutated *in place*. It is the one field that
+    is purely a transport hint — never part of the tokenized prompt — so
+    toggling it is invisible to the model. We deliberately do NOT reconstruct
+    the message: a rebuilt ``ChatMessage`` cannot round-trip ``reasoning_content``
+    (no constructor arg) or ``raw_content_json``, and dropping the reasoning
+    value that pairs with an assistant turn's ``thought_signature`` makes
+    Anthropic reject the request ("thinking blocks require one reasoning value
+    per thought signature"). Because the hunter reuses one growing ``messages``
+    list across turns, we also clear any stale marker left on earlier messages
+    so there is never more than one breakpoint (Anthropic caps at 4).
     """
-    out = list(messages)
-    if not cache_prefix or not out:
-        return out
-    last = out[-1]
-    if last.cache_control:
-        return out
-    # ``raw_content_json`` cannot be faithfully reconstructed through the
-    # ChatMessage constructor (which takes ``raw_content``); rather than risk
-    # dropping provider-native content, leave such a message unmarked. Our
-    # caching callers (hunter loop, ranker) never set it.
-    if getattr(last, "raw_content_json", None):
-        return out
-    out[-1] = ChatMessage(
-        last.role,
-        last.content,
-        tool_calls=last.tool_calls,
-        tool_response_call_id=last.tool_response_call_id,
-        cache_control="ephemeral",
-        thought_signatures=last.thought_signatures,
-    )
-    return out
+    if not cache_prefix or not messages:
+        return list(messages)
+    last_index = len(messages) - 1
+    for i, msg in enumerate(messages):
+        want = "ephemeral" if i == last_index else None
+        if msg.cache_control != want:
+            msg.cache_control = want
+    return list(messages)
 
 
 def response_text(response: ChatResponse) -> str:
