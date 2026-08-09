@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -432,3 +431,95 @@ async def test_subsystem_hunt_runner_no_subsystems():
     ))
     result = await runner.arun()
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# File-cap: configurable + never silent (regression for CVE-2026-5747)
+# ---------------------------------------------------------------------------
+
+
+def test_subsystem_from_path_uncapped_by_default():
+    """An explicit --subsystem PATH is a deliberate scope: hunt every match."""
+    files = [_ft(f"net/f{i}.c", priority=1.0) for i in range(120)]
+    st = subsystem_from_path("net", files)
+    assert len(st.files) == 120
+
+
+def test_explicit_scope_retains_ground_truth_file_uncapped():
+    """CVE-2026-5747 shape: >50 equal-priority siblings, ground-truth file last.
+
+    Under the old silent [:50] cap it was dropped out of scope; uncapped-by-
+    default now keeps it.
+    """
+    files = [_ft(f"transport/pci/f{i}.c", priority=1.0) for i in range(85)]
+    files.append(_ft("transport/pci/common_config.c", priority=1.0))
+    st = subsystem_from_path("transport/pci", files)
+    assert "transport/pci/common_config.c" in [f["path"] for f in st.files]
+
+
+def test_subsystem_from_path_explicit_cap_warns_and_drops(caplog):
+    files = [_ft(f"net/f{i}.c", priority=float(i)) for i in range(60)]
+    with caplog.at_level("WARNING"):
+        st = subsystem_from_path("net", files, max_files=50)
+    assert len(st.files) == 50
+    assert "DROPPING" in caplog.text
+
+
+def test_identify_subsystems_auto_default_cap_warns_on_drop(caplog):
+    files = [_ft(f"net/ipv4/f{i}.c", priority=3.5) for i in range(60)]
+    with caplog.at_level("WARNING"):
+        subs = identify_subsystems_auto(files)
+    assert len(subs) == 1
+    assert len(subs[0].files) == 50  # DEFAULT_MAX_FILES_PER_SUBSYSTEM
+    assert "DROPPED" in caplog.text
+
+
+def test_identify_subsystems_auto_uncapped_keeps_all():
+    files = [_ft(f"net/ipv4/f{i}.c", priority=3.5) for i in range(60)]
+    subs = identify_subsystems_auto(files, max_files_per_subsystem=None)
+    assert len(subs) == 1
+    assert len(subs[0].files) == 60
+
+
+def test_identify_subsystems_auto_custom_cap_is_honored():
+    files = [_ft(f"net/ipv4/f{i}.c", priority=3.5) for i in range(60)]
+    subs = identify_subsystems_auto(files, max_files_per_subsystem=10)
+    assert len(subs[0].files) == 10
+
+
+# ---------------------------------------------------------------------------
+# _build_subsystem_prompt file-listing cap (second, independent 50-file cap)
+# ---------------------------------------------------------------------------
+
+
+def test_subsystem_prompt_uncapped_by_default_lists_all_files():
+    """The prompt builder must not re-truncate an (already-scoped) subsystem.
+
+    CVE-2026-5747 shape: 85 equal-priority siblings plus the ground-truth file
+    last. The old hard-coded ``subsystem.files[:50]`` in the prompt builder hid
+    it from the model's file listing even after the partitioner kept it.
+    """
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    files = [_ft(f"transport/pci/f{i:03d}.c", priority=1.0) for i in range(85)]
+    files.append(_ft("transport/pci/common_config.c", priority=1.0))
+    subsystem = SubsystemTarget(
+        name="transport_pci", root_path="transport/pci", files=files
+    )
+    prompt = _build_subsystem_prompt(subsystem, "target")
+    assert "transport/pci/common_config.c" in prompt
+    assert "transport/pci/f000.c" in prompt
+
+
+def test_subsystem_prompt_cap_warns_and_keeps_highest_priority(caplog):
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    files = [_ft(f"net/f{i:03d}.c", priority=float(i)) for i in range(60)]
+    subsystem = SubsystemTarget(name="net", root_path="net", files=files)
+    with caplog.at_level("WARNING"):
+        prompt = _build_subsystem_prompt(subsystem, "target", max_files_in_prompt=10)
+    # Highest-priority files survive the cap; lowest-priority are dropped.
+    assert "net/f059.c" in prompt
+    assert "net/f000.c" not in prompt
+    # And the drop is never silent.
+    assert "dropping" in caplog.text.lower()

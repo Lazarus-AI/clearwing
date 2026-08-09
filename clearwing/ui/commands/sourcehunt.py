@@ -261,6 +261,16 @@ def add_parser(subparsers):
         "Implies --subsystem-hunt. Example: --subsystem net/ipv4/",
     )
     parser.add_argument(
+        "--subsystem-max-files",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="subsystem_max_files",
+        help="Max files hunted per subsystem. Default: 50 for auto-detected "
+        "subsystems, uncapped for an explicit --subsystem PATH. Raise it (or "
+        "pass 0 to disable) so ground-truth files aren't dropped out of scope.",
+    )
+    parser.add_argument(
         "--no-per-file-hunt",
         action="store_true",
         default=False,
@@ -1175,6 +1185,8 @@ def handle(cli, args):
         enable_findings_pool=not args.no_findings_pool,
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
+        # 0 disables the cap (uncapped); None falls back to the library default.
+        subsystem_max_files=args.subsystem_max_files or None,
         no_per_file_hunt=args.no_per_file_hunt,
         no_rank=args.no_rank,
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
@@ -1311,6 +1323,7 @@ def _handle_machine(descriptor: int) -> int:
                 subsystem_paths=parsed.get("subsystem_paths"),
                 subsystem_budget_usd=parsed.get("subsystem_budget_usd", 0.0),
                 subsystem_max_parallel=parsed.get("subsystem_max_parallel", 4),
+                subsystem_max_files=parsed.get("subsystem_max_files") or None,
                 output_formats=parsed.get("format"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
@@ -1342,6 +1355,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_paths",
         "subsystem_budget_usd",
         "subsystem_max_parallel",
+        "subsystem_max_files",
         "no_per_file_hunt",
     }
     unknown = sorted(set(value) - allowed)
@@ -1375,6 +1389,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         parsed["subsystem_budget_usd"] = value["subsystem_budget_usd"]
     if "subsystem_max_parallel" in value:
         parsed["subsystem_max_parallel"] = value["subsystem_max_parallel"]
+    if "subsystem_max_files" in value:
+        parsed["subsystem_max_files"] = value["subsystem_max_files"]
     if "format" in value:
         fmt = value["format"]
         parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
