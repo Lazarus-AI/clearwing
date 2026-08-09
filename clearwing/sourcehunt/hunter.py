@@ -1226,11 +1226,42 @@ def _build_subsystem_prompt(
     project_name: str,
     findings_pool: Any = None,
     callgraph: Any = None,
+    max_files_in_prompt: int | None = None,
 ) -> str:
-    """Build the subsystem hunt prompt listing all files and cross-file relationships."""
+    """Build the subsystem hunt prompt listing all files and cross-file relationships.
+
+    ``max_files_in_prompt`` bounds how many files are enumerated in the prompt (and
+    scanned for cross-file call edges). ``None`` lists every file in the subsystem —
+    the correct default for an explicitly-scoped subsystem, which must never silently
+    drop its ground-truth file from the model's view. When a cap is applied the
+    highest-priority files are kept, and a WARNING names how many were dropped. Note
+    that under ``--no-rank`` all priorities are equal, so a cap degenerates to
+    ``os.walk`` order and can hide the ground-truth file — hence the warning and the
+    uncapped default.
+    """
+    files = list(subsystem.files)
+    if max_files_in_prompt is not None and len(files) > max_files_in_prompt:
+        # Keep highest-priority files; a stable sort leaves equal-priority
+        # (--no-rank) files in their original order.
+        files = sorted(files, key=lambda ft: ft.get("priority", 0.0), reverse=True)
+        dropped = files[max_files_in_prompt:]
+        files = files[:max_files_in_prompt]
+        sample = ", ".join(ft.get("path", "?") for ft in dropped[:10])
+        logger.warning(
+            "Subsystem %s prompt lists only %d of %d files (cap=%d); dropping %d "
+            "from the prompt. Dropped sample: %s%s",
+            subsystem.name,
+            len(files),
+            len(subsystem.files),
+            max_files_in_prompt,
+            len(dropped),
+            sample,
+            "" if len(dropped) <= 10 else ", ...",
+        )
+
     file_lines = []
     subsystem_files = set()
-    for ft in subsystem.files[:50]:
+    for ft in files:
         path = ft.get("path", "?")
         subsystem_files.add(path)
         pri = ft.get("priority", 0.0)
@@ -1325,6 +1356,7 @@ def build_subsystem_hunter_agent(
     findings_pool: Any = None,
     campaign_hint: str | None = None,
     callgraph: Any = None,
+    max_files_in_prompt: int | None = None,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a subsystem-level hunter agent (spec 006).
 
@@ -1348,6 +1380,7 @@ def build_subsystem_hunter_agent(
         project_name,
         findings_pool=findings_pool,
         callgraph=callgraph,
+        max_files_in_prompt=max_files_in_prompt,
     )
 
     if campaign_hint:
@@ -1381,7 +1414,9 @@ class HunterRunResult:
     findings: list[Finding]
     cost_usd: float
     tokens_used: int
-    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps" | "degenerate_loop"
+    # "completed" | "budget_exhausted" | "max_steps" | "degenerate_loop"
+    # | "empty_response"
+    stop_reason: str
     transcript_summary: str = ""
 
 
@@ -1432,7 +1467,6 @@ class NativeHunter:
         lines_read: dict[str, list[tuple[int, int]]] = {}
         flags_raised: int = 0
         empty_response_nudges: int = 0
-
 
         step = 0
         while True:
@@ -1578,6 +1612,10 @@ class NativeHunter:
                 )
             tool_calls_in_response = response.tool_calls
             if tool_calls_in_response:
+                # A productive turn resets the consecutive-empty-turn counter so
+                # the empty_response terminal only fires on a genuine run of
+                # empty/truncated turns, not scattered ones across a live hunt.
+                empty_response_nudges = 0
                 messages.append(
                     ChatMessage(
                         "assistant",
@@ -1737,7 +1775,11 @@ class NativeHunter:
             # Empty response: model sent no text and no tool calls.
             # This happens mid-reasoning on some providers (reasoning content
             # present but visible response empty). Nudge it to continue rather
-            # than treating it as a clean finish. Cap at 3 nudges.
+            # than treating it as a clean finish. Cap at 3 nudges; if it is still
+            # empty after that, this is the truncation/empty-response fingerprint,
+            # NOT a genuine "I'm done" turn (which always carries a summary) — so
+            # record an honest non-completed terminal state instead of scoring a
+            # truncated turn as a clean "completed" 0-finding miss.
             if not last_assistant_text and not tool_calls_in_response:
                 empty_response_nudges += 1
                 if empty_response_nudges <= 3:
@@ -1770,6 +1812,35 @@ class NativeHunter:
                         nudge_text = "Continue your investigation. Use a tool to proceed."
                     messages.append(ChatMessage("user", nudge_text))
                     continue
+
+                # Nudges exhausted and the turn is still empty: honest terminal
+                # state rather than a false "completed".
+                logger.warning(
+                    "Hunter got an empty turn (no tool calls, no text) for %s at "
+                    "step %d after %d nudges; recording stop_reason=empty_response "
+                    "(degraded, not a genuine completion).",
+                    self.ctx.file_path,
+                    step,
+                    empty_response_nudges - 1,
+                )
+                trajectory.log(
+                    "finish",
+                    {
+                        "step": step,
+                        "status": "empty_response",
+                        "findings": [self._serialize_finding(f) for f in self.ctx.findings],
+                        "total_input_tokens": total_input_tokens,
+                        "total_output_tokens": total_output_tokens,
+                        "total_cost_usd": total_cost_usd,
+                    },
+                )
+                return HunterRunResult(
+                    findings=list(self.ctx.findings),
+                    cost_usd=total_cost_usd,
+                    tokens_used=total_input_tokens + total_output_tokens,
+                    stop_reason="empty_response",
+                    transcript_summary=last_assistant_text[-500:],
+                )
 
             if last_assistant_text:
                 messages.append(ChatMessage("assistant", last_assistant_text))

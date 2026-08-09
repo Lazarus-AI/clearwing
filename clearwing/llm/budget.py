@@ -115,7 +115,13 @@ def current_spend_metadata() -> dict[str, Any]:
 class SpendLedger:
     """Concurrency-safe, progressively persisted spend ledger for one run."""
 
-    DEFAULT_MAX_OUTPUT_TOKENS = 4096
+    # Per-call output-token ceiling applied when a dollar budget is enforced.
+    # This is only a per-call cap, not a spend limit — the affordability clamp
+    # in `reserve_call` still bounds total spend, so a larger value cannot
+    # overspend. It was 4096, which starved reasoning models: their reasoning
+    # tokens alone could exhaust the cap, truncating the decisive turn before it
+    # emitted any tool call or answer. 32768 leaves room for reasoning + output.
+    DEFAULT_MAX_OUTPUT_TOKENS = 32768
     _EPSILON = 1e-9
 
     def __init__(

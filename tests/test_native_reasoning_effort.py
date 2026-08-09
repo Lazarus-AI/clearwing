@@ -10,11 +10,40 @@ from unittest.mock import patch
 import pytest
 from genai_pyo3 import ChatResponse
 
+from clearwing.llm.budget import BudgetExceeded
 from clearwing.llm.native import (
     _REASONING_EFFORT_OVERRIDE_ALLOW,
     _REASONING_EFFORT_UNSUPPORTED_PATTERNS,
+    _TRUNCATION_RETRY_ESCALATION,
     AsyncLLMClient,
+    _looks_truncated,
 )
+
+
+class _FakeUsage:
+    def __init__(self, prompt_tokens: int = 10, completion_tokens: int = 0):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = prompt_tokens + completion_tokens
+        self.prompt_tokens_details = None
+
+
+class _FakeResponse:
+    """Stand-in for genai_pyo3.ChatResponse (which is Rust-backed and can't have
+    its usage set from Python) — carries just the attributes the achat/settle
+    path reads."""
+
+    provider_model_name = "fake-model"
+    reasoning_content = None
+
+    def __init__(self, *, completion_tokens: int, tool_calls=None, text: str = "ok"):
+        self.usage = _FakeUsage(completion_tokens=completion_tokens)
+        self.tool_calls = tool_calls or []
+        self._text = text
+
+    @property
+    def first_text(self) -> str:
+        return self._text
 
 
 class TestAutoResolveReasoningEffort:
@@ -39,6 +68,14 @@ class TestAutoResolveReasoningEffort:
     def test_deepseek_r1_keeps_medium(self):
         result = AsyncLLMClient._auto_resolve_reasoning_effort("deepseek-r1")
         assert result == "medium"
+
+    def test_deepseek_v4_flash_resolves_to_low(self):
+        result = AsyncLLMClient._auto_resolve_reasoning_effort("deepseek-v4-flash")
+        assert result == "low"
+
+    def test_deepseek_v4_flash_match_is_case_insensitive(self):
+        result = AsyncLLMClient._auto_resolve_reasoning_effort("DeepSeek-V4-Flash")
+        assert result == "low"
 
     def test_mistral_resolves_to_none(self):
         result = AsyncLLMClient._auto_resolve_reasoning_effort("mistral-large-2407")
@@ -329,3 +366,190 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
         assert result.first_text == "streamed-ok"
         assert len(call_log) == 2
         assert client.reasoning_effort is None
+
+
+class TestLooksTruncated:
+    """The truncation proxy: completion_tokens reached the applied cap."""
+
+    def test_at_cap_is_truncated(self):
+        resp = _FakeResponse(completion_tokens=4096)
+        assert _looks_truncated(resp, 4096) is True
+
+    def test_over_cap_is_truncated(self):
+        resp = _FakeResponse(completion_tokens=5000)
+        assert _looks_truncated(resp, 4096) is True
+
+    def test_under_cap_is_not_truncated(self):
+        resp = _FakeResponse(completion_tokens=100)
+        assert _looks_truncated(resp, 4096) is False
+
+    def test_no_cap_is_never_truncated(self):
+        resp = _FakeResponse(completion_tokens=999999)
+        assert _looks_truncated(resp, None) is False
+
+
+class TestAchatTruncationRetry:
+    """achat detects a capped, tool-call-less response and retries once."""
+
+    def _make_client(self):
+        # No spend ledger → reservation is None and max_tokens flows straight
+        # from the caller, so we control the applied cap directly.
+        return AsyncLLMClient(
+            model_name="deepseek-v4-flash",
+            provider_name="openai_compat",
+            api_key="sk-test",
+        )
+
+    def _run(self, client, fake_policy, *, max_tokens):
+        with (
+            patch.object(
+                AsyncLLMClient, "_achat_with_provider_policy", new=fake_policy
+            ),
+            patch.object(
+                AsyncLLMClient, "_build_client", new=lambda self, cls: object()
+            ),
+        ):
+            return asyncio.run(
+                client.achat(
+                    messages=[], system=None, tools=None, max_tokens=max_tokens
+                )
+            )
+
+    def test_retries_once_with_escalated_cap(self):
+        client = self._make_client()
+        caps: list = []
+
+        async def fake_policy(self_, client_obj, request, options):
+            caps.append(options.max_tokens)
+            if len(caps) == 1:
+                # Truncation fingerprint: at cap, no tool call, no text.
+                return _FakeResponse(completion_tokens=100, tool_calls=[], text="")
+            return _FakeResponse(completion_tokens=50, tool_calls=[], text="done")
+
+        result = self._run(client, fake_policy, max_tokens=100)
+
+        assert caps == [100, 100 * _TRUNCATION_RETRY_ESCALATION]
+        assert result.usage.completion_tokens == 50
+
+    def test_no_retry_when_text_present_even_at_cap(self):
+        """A text-bearing answer at the cap (e.g. ranker JSON on a tight budget)
+        is a real answer, not a truncation — must NOT retry."""
+        client = self._make_client()
+        caps: list = []
+
+        async def fake_policy(self_, client_obj, request, options):
+            caps.append(options.max_tokens)
+            return _FakeResponse(
+                completion_tokens=100, tool_calls=[], text='{"results": []}'
+            )
+
+        result = self._run(client, fake_policy, max_tokens=100)
+
+        assert caps == [100]
+        assert result.first_text == '{"results": []}'
+
+    def test_no_retry_when_tool_calls_present(self):
+        client = self._make_client()
+        caps: list = []
+
+        async def fake_policy(self_, client_obj, request, options):
+            caps.append(options.max_tokens)
+            # At cap, but a tool call means the turn did useful work.
+            return _FakeResponse(completion_tokens=100, tool_calls=[object()])
+
+        result = self._run(client, fake_policy, max_tokens=100)
+
+        assert caps == [100]
+        assert result.tool_calls
+
+    def test_no_retry_when_under_cap(self):
+        client = self._make_client()
+        caps: list = []
+
+        async def fake_policy(self_, client_obj, request, options):
+            caps.append(options.max_tokens)
+            return _FakeResponse(completion_tokens=50, tool_calls=[])
+
+        self._run(client, fake_policy, max_tokens=100)
+
+        assert caps == [100]
+
+    def test_only_one_retry_even_if_still_truncated(self):
+        client = self._make_client()
+        caps: list = []
+
+        async def fake_policy(self_, client_obj, request, options):
+            caps.append(options.max_tokens)
+            # Always truncated at whatever cap was applied → would loop forever
+            # if the single-retry guard were missing.
+            return _FakeResponse(
+                completion_tokens=options.max_tokens, tool_calls=[], text=""
+            )
+
+        self._run(client, fake_policy, max_tokens=100)
+
+        assert caps == [100, 100 * _TRUNCATION_RETRY_ESCALATION]
+
+    def test_budget_exceeded_on_retry_returns_truncated_response(self):
+        client = self._make_client()
+        caps: list = []
+        first = _FakeResponse(completion_tokens=100, tool_calls=[], text="")
+
+        async def fake_policy(self_, client_obj, request, options):
+            caps.append(options.max_tokens)
+            if len(caps) == 1:
+                return first
+            raise BudgetExceeded("no budget for the escalated retry")
+
+        result = self._run(client, fake_policy, max_tokens=100)
+
+        assert caps == [100, 100 * _TRUNCATION_RETRY_ESCALATION]
+        assert result is first
+
+    def test_streaming_retries_once_with_escalated_cap(self):
+        client = self._make_client()
+        caps: list = []
+
+        class FakeEvent:
+            content = None
+            end = object()
+
+        async def fake_stream(model_name, request, options):
+            caps.append(options.max_tokens)
+
+            async def gen():
+                yield FakeEvent()
+
+            return gen()
+
+        fake_client = type(
+            "FakeClient", (), {"astream_chat": staticmethod(fake_stream)}
+        )()
+        responses = [
+            _FakeResponse(completion_tokens=100, tool_calls=[], text=""),  # truncated
+            _FakeResponse(completion_tokens=50, tool_calls=[], text="ok"),  # under cap
+        ]
+
+        def fake_from_end(self_, end):
+            return responses.pop(0)
+
+        with (
+            patch.object(
+                AsyncLLMClient, "_build_client", new=lambda self, cls: fake_client
+            ),
+            patch.object(
+                AsyncLLMClient, "_chat_response_from_stream_end", new=fake_from_end
+            ),
+        ):
+            result = asyncio.run(
+                client.achat_stream(
+                    messages=[],
+                    system=None,
+                    tools=None,
+                    on_text_delta=lambda chunk: None,
+                    max_tokens=100,
+                )
+            )
+
+        assert caps == [100, 100 * _TRUNCATION_RETRY_ESCALATION]
+        assert result.usage.completion_tokens == 50

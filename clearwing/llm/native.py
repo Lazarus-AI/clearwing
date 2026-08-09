@@ -32,6 +32,7 @@ from genai_pyo3 import (
 from pydantic import BaseModel, ConfigDict, RootModel
 
 from .budget import (
+    BudgetExceeded,
     BudgetReservation,
     SpendLedger,
     current_spend_metadata,
@@ -165,6 +166,14 @@ _REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
 # name. Intentionally empty today; populate as such models ship.
 _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 
+# Models that default to "low" reasoning_effort. deepseek-v4-flash has no
+# "medium" tier (only low/high/xhigh/max), so the usual "medium" default is
+# invalid; low also avoids reasoning tokens starving the output-token cap.
+# Case-insensitive substring match on the model name.
+_REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
+    "deepseek-v4-flash",
+)
+
 # Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
 # genai-pyo3 / the backend errors when reasoning capture is requested for them.
 # Everything else supports it, so we capture reasoning by default and only skip
@@ -173,6 +182,36 @@ _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 _REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
     "gpt-5.3-codex-spark",
 )
+
+# Truncation-retry policy. Under a dollar budget the applied output cap is
+# known locally; a response whose completion_tokens reached that cap AND
+# carries no tool call was almost certainly cut off mid-generation
+# (provider finish_reason == "length"). genai-pyo3's ChatResponse does not
+# surface finish_reason, so we detect via the token count and retry ONCE with
+# a larger cap so reasoning models aren't robbed of the turn that would have
+# emitted their tool call. Bounded to a single escalation to avoid loops; the
+# affordability clamp in reserve_call still bounds total spend, and a
+# genuinely-exhausted budget raises BudgetExceeded which we swallow so the
+# truncated response is returned rather than looping.
+_TRUNCATION_RETRY_ESCALATION = 4
+_TRUNCATION_RETRY_CEILING = 65536
+
+
+def _looks_truncated(response: ChatResponse, applied_max_tokens: int | None) -> bool:
+    """True when *response* appears cut off at the output-token cap.
+
+    genai-pyo3's ChatResponse carries no finish_reason, so we use the reliable
+    proxy: a capped call whose completion_tokens reached the applied cap was
+    truncated. Returns False when no cap was applied (``applied_max_tokens is
+    None``) or usage is unavailable.
+    """
+    if applied_max_tokens is None:
+        return False
+    usage = getattr(response, "usage", None)
+    completion = getattr(usage, "completion_tokens", None) if usage is not None else None
+    if completion is None:
+        return False
+    return completion >= applied_max_tokens
 
 
 def _model_supports_reasoning_capture(model_name: str) -> bool:
@@ -266,6 +305,9 @@ class AsyncLLMClient:
                     pattern,
                 )
                 return None
+        for pattern in _REASONING_EFFORT_LOW_DEFAULT_PATTERNS:
+            if pattern in lower:
+                return "low"
         return "medium"
 
     def __init__(
@@ -571,6 +613,7 @@ class AsyncLLMClient:
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
+        _truncation_retry: int = 0,
     ) -> ChatResponse:
         request_tools = None
         if tools:
@@ -710,6 +753,50 @@ class AsyncLLMClient:
             ok=True,
             cached_tokens=cached_tokens,
         )
+
+        applied_cap = None if self._omit_max_tokens else max_tokens
+        # Only retry the truncation fingerprint: a capped turn that produced
+        # NEITHER a tool call NOR visible text (reasoning tokens consumed the
+        # whole cap before any output). A response carrying text is a real
+        # answer — e.g. a ranker emitting JSON at a tight cap — and must never
+        # be retried, or we'd regenerate valid output and risk over-spending.
+        has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
+        if (
+            _truncation_retry < 1
+            and not has_output
+            and _looks_truncated(response, applied_cap)
+        ):
+            escalated = min(
+                applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING
+            )
+            if escalated > applied_cap:
+                logger.warning(
+                    "LLM response for model=%s truncated at output cap "
+                    "(completion_tokens=%s >= max_tokens=%s) with no tool call "
+                    "or text; retrying once with max_tokens=%s.",
+                    self.model_name,
+                    completion_tokens,
+                    applied_cap,
+                    escalated,
+                )
+                try:
+                    return await self.achat(
+                        messages=messages,
+                        system=system,
+                        tools=tools,
+                        temperature=temperature,
+                        max_tokens=escalated,
+                        response_schema=response_schema,
+                        response_schema_name=response_schema_name,
+                        response_schema_description=response_schema_description,
+                        _truncation_retry=_truncation_retry + 1,
+                    )
+                except BudgetExceeded:
+                    logger.warning(
+                        "Truncation retry for model=%s could not be afforded "
+                        "(budget exhausted); returning the truncated response.",
+                        self.model_name,
+                    )
         return response
 
     async def achat_stream(
@@ -721,6 +808,7 @@ class AsyncLLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         on_text_delta: Callable[[str], None] | None = None,
+        _truncation_retry: int = 0,
     ) -> ChatResponse:
         """Like ``achat`` but streams text deltas via *on_text_delta*.
 
@@ -870,15 +958,56 @@ class AsyncLLMClient:
         completion_tokens = usage.completion_tokens
         cached_tokens = details.cached_tokens if details is not None else None
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        n_tool_calls = len(response.tool_calls or [])
         _record_call(
             self.model_name,
             elapsed_ms,
             prompt_tokens,
             completion_tokens,
-            len(response.tool_calls or []),
+            n_tool_calls,
             ok=True,
             cached_tokens=cached_tokens,
         )
+
+        applied_cap = None if self._omit_max_tokens else max_tokens
+        # Same fingerprint as achat: retry only a capped turn with no tool call
+        # AND no visible text; a text-bearing answer is never a truncation.
+        has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
+        if (
+            _truncation_retry < 1
+            and not has_output
+            and _looks_truncated(response, applied_cap)
+        ):
+            escalated = min(
+                applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING
+            )
+            if escalated > applied_cap:
+                logger.warning(
+                    "LLM stream for model=%s truncated at output cap "
+                    "(completion_tokens=%s >= max_tokens=%s) with no tool call "
+                    "or text; retrying once with max_tokens=%s.",
+                    self.model_name,
+                    completion_tokens,
+                    applied_cap,
+                    escalated,
+                )
+                try:
+                    return await self.achat_stream(
+                        messages=messages,
+                        system=system,
+                        tools=tools,
+                        temperature=temperature,
+                        max_tokens=escalated,
+                        on_text_delta=on_text_delta,
+                        _truncation_retry=_truncation_retry + 1,
+                    )
+                except BudgetExceeded:
+                    logger.warning(
+                        "Truncation retry (streaming) for model=%s could not be "
+                        "afforded (budget exhausted); returning the truncated "
+                        "response.",
+                        self.model_name,
+                    )
         return response
 
     def chat(self, **kwargs: Any) -> ChatResponse:
