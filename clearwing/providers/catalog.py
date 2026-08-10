@@ -137,6 +137,25 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         provider_adapter="openai",
     ),
     ProviderPreset(
+        key="orcarouter",
+        display_name="OrcaRouter",
+        description="OpenAI-compatible multi-model gateway. One key, 190+ models — "
+        "Claude / GPT / Gemini / DeepSeek / Qwen via "
+        "`anthropic/...` / `openai/...` model names.",
+        docs_url="https://www.orcarouter.ai",
+        default_base_url="https://api.orcarouter.ai/v1",
+        default_model="anthropic/claude-sonnet-4.6",
+        api_key_env_var="ORCAROUTER_API_KEY",
+        alt_models=(
+            "orcarouter/auto",
+            "openai/gpt-5.5",
+            "openai/gpt-4o",
+            "deepseek/deepseek-chat",
+            "anthropic/claude-haiku-4.5",
+        ),
+        provider_adapter="openai",
+    ),
+    ProviderPreset(
         key="ollama",
         display_name="Ollama (local, native adapter)",
         description="Local models, free, no API key. Uses the native "
