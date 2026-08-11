@@ -409,7 +409,10 @@ provider:
 The model picker also offers `kimi-k2.7-code`,
 `kimi-k2.7-code-highspeed`, and `kimi-k2.6`. Kimi K3 always uses
 thinking mode; Clearwing sends the supported `high` reasoning effort
-instead of its generic `medium` default.
+instead of its generic `medium` default. K2.7 Code uses its own
+permanently enabled thinking mode and does not accept
+`reasoning_effort`, so Clearwing omits that parameter for both K2.7
+Code variants.
 
 ### Kimi Code (membership)
 

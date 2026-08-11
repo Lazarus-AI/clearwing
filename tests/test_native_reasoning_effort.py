@@ -97,8 +97,16 @@ class TestAutoResolveReasoningEffort:
         result = AsyncLLMClient._auto_resolve_reasoning_effort(model)
         assert result == "high"
 
-    @pytest.mark.parametrize("model", ["kimi-for-coding", "kimi-for-coding-highspeed"])
-    def test_kimi_code_k2_7_omits_reasoning_effort(self, model):
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+        ],
+    )
+    def test_kimi_k2_7_models_omit_reasoning_effort(self, model):
         result = AsyncLLMClient._auto_resolve_reasoning_effort(model)
         assert result is None
 
