@@ -158,6 +158,8 @@ _REASONING_EFFORT_MODEL_DEFAULTS: dict[str, str | None] = {
     "kimi-k3": "high",
     "k3": "high",
     "k3-256k": "high",
+    "kimi-k2.7-code": None,
+    "kimi-k2.7-code-highspeed": None,
     "kimi-for-coding": None,
     "kimi-for-coding-highspeed": None,
 }
