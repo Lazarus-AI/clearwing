@@ -20,8 +20,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from rich.console import Console
 import yaml
+from rich.console import Console
 
 from clearwing.providers import KNOWN_PROVIDERS, preset_by_key
 from clearwing.ui.commands import doctor, setup
@@ -32,7 +32,7 @@ from clearwing.ui.commands.doctor import (
     DoctorCheck,
     DoctorSection,
 )
-from clearwing.ui.commands.setup import _mask_secret, _write_config
+from clearwing.ui.commands.setup import _mask_secret, _run_test_invoke, _write_config
 
 # --- Provider catalog ------------------------------------------------------
 
@@ -214,6 +214,7 @@ class TestWriteConfig:
         )
         path = tmp_cli.config.DEFAULT_CONFIG_PATH
         assert path.exists()
+        assert path.stat().st_mode & 0o777 == 0o600
         data = yaml.safe_load(path.read_text())
         assert data == {
             "provider": {
@@ -292,6 +293,46 @@ class TestWriteConfig:
         assert data["provider"]["model"] == "claude-sonnet-4-6"
         assert data["provider"]["api_key"] == "sk-ant-test"
 
+    def test_writes_kimi_provider_section(self, tmp_cli):
+        preset = preset_by_key("kimi")
+        _write_config(
+            tmp_cli,
+            preset,
+            base_url="https://api.moonshot.ai/v1",
+            api_key_literal="${MOONSHOT_API_KEY}",
+            model="kimi-k3",
+        )
+
+        data = yaml.safe_load(tmp_cli.config.DEFAULT_CONFIG_PATH.read_text())
+        assert data == {
+            "provider": {
+                "base_url": "https://api.moonshot.ai/v1",
+                "api_key": "${MOONSHOT_API_KEY}",
+                "model": "kimi-k3",
+                "adapter": "openai",
+            }
+        }
+
+    def test_writes_kimi_code_provider_section(self, tmp_cli):
+        preset = preset_by_key("kimi-code")
+        _write_config(
+            tmp_cli,
+            preset,
+            base_url="https://api.kimi.com/coding/v1",
+            api_key_literal="${KIMI_CODE_API_KEY}",
+            model="k3-256k",
+        )
+
+        data = yaml.safe_load(tmp_cli.config.DEFAULT_CONFIG_PATH.read_text())
+        assert data == {
+            "provider": {
+                "base_url": "https://api.kimi.com/coding/v1",
+                "api_key": "${KIMI_CODE_API_KEY}",
+                "model": "k3-256k",
+                "adapter": "openai",
+            }
+        }
+
     def test_openai_oauth_writes_auth_marker_without_api_key(self, tmp_cli):
         preset = preset_by_key("openai-oauth")
         _write_config(
@@ -310,6 +351,52 @@ class TestWriteConfig:
                 "adapter": "openai_codex",
             }
         }
+
+
+class TestRunTestInvoke:
+    def test_kimi_401_explains_product_and_region_key_isolation(self):
+        stream = io.StringIO()
+        console = Console(file=stream, force_terminal=False)
+        preset = preset_by_key("kimi")
+
+        with patch(
+            "clearwing.providers.ProviderManager.for_endpoint",
+            side_effect=RuntimeError("HTTP 401: Invalid Authentication"),
+        ):
+            _run_test_invoke(
+                console,
+                preset,
+                base_url="https://api.moonshot.ai/v1",
+                api_key_literal="sk-test",
+                model="kimi-k3",
+            )
+
+        output = stream.getvalue()
+        assert "isolated by product and region" in output
+        assert "platform.kimi.ai/console/api-keys" in output
+        assert "Kimi Code, Membership" in output
+
+    def test_kimi_code_401_explains_membership_key_isolation(self):
+        stream = io.StringIO()
+        console = Console(file=stream, force_terminal=False)
+        preset = preset_by_key("kimi-code")
+
+        with patch(
+            "clearwing.providers.ProviderManager.for_endpoint",
+            side_effect=RuntimeError("HTTP 401: Invalid Authentication"),
+        ):
+            _run_test_invoke(
+                console,
+                preset,
+                base_url="https://api.kimi.com/coding/v1",
+                api_key_literal="sk-test",
+                model="k3-256k",
+            )
+
+        output = stream.getvalue()
+        assert "separate from Open Platform keys" in output
+        assert "www.kimi.com/code/console" in output
+        assert "membership tier" in output
 
 
 # --- Doctor: DoctorCheck + DoctorSection aggregation ---------------------

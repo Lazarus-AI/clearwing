@@ -18,8 +18,8 @@ Backends covered below:
 - **OpenAI (Responses API)** — GPT-5.x / o-series via `/v1/responses`
   (`openai_resp` adapter). Required for GPT-5.x and o-series.
 - **OpenAI OAuth (ChatGPT)** — Plus/Pro login via Codex backend (`openai_codex`).
-- **OpenRouter, OrcaRouter, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
-  anything that speaks `/v1/chat/completions` (`openai` adapter).
+- **OpenRouter, OrcaRouter, Together, Groq, Fireworks, DeepSeek, Kimi, LM Studio,
+  vLLM, custom** — anything that speaks `/v1/chat/completions` (`openai` adapter).
 - **MiniMax** — M2.7 / M2.5 via the Anthropic-compatible endpoint
   (`anthropic` adapter at `api.minimax.io/anthropic`).
 - **Ollama** — local models via the native rust-genai Ollama adapter
@@ -47,6 +47,7 @@ Direct variants:
 
 ```bash
 clearwing setup --provider openrouter
+clearwing setup --provider kimi
 clearwing setup --provider ollama --no-test
 clearwing init   # alias
 ```
@@ -371,6 +372,70 @@ export CLEARWING_MODEL=deepseek-chat
 For OpenAI itself, use the [Chat Completions](#openai-chat-completions-api)
 or [Responses](#openai-responses-api) section above — the model
 generation decides which.
+
+## Kimi
+
+Kimi has two separate API products. Their credentials, billing, base
+URLs, and model IDs are not interchangeable, so Clearwing exposes one
+setup choice for each.
+
+### Kimi Open Platform (pay-as-you-go)
+
+Kimi's API speaks the OpenAI Chat Completions protocol and supports
+tool calling. The setup preset uses Kimi K3, Moonshot AI's flagship
+model with a 1M-token context window, by default.
+
+```bash
+export MOONSHOT_API_KEY=your-key
+clearwing setup --provider kimi
+```
+
+Create the key in the [Kimi API Open Platform](https://platform.kimi.ai/console/api-keys).
+Kimi Open Platform, Kimi Code, Membership, and regional platforms use
+independent credentials; mixing a key from another product or region
+with `api.moonshot.ai` returns HTTP 401.
+
+The wizard detects `MOONSHOT_API_KEY` and offers to keep the secret out
+of the config file. It writes:
+
+```yaml
+provider:
+  base_url: https://api.moonshot.ai/v1
+  api_key: ${MOONSHOT_API_KEY}
+  model: kimi-k3
+  adapter: openai
+```
+
+The model picker also offers `kimi-k2.7-code`,
+`kimi-k2.7-code-highspeed`, and `kimi-k2.6`. Kimi K3 always uses
+thinking mode; Clearwing sends the supported `high` reasoning effort
+instead of its generic `medium` default.
+
+### Kimi Code (membership)
+
+Use this option for API keys created in the Kimi Code Console and backed
+by a Kimi Code membership:
+
+```bash
+export KIMI_CODE_API_KEY=your-key
+clearwing setup --provider kimi-code
+```
+
+The generated provider section uses Kimi Code's separate endpoint and
+model IDs:
+
+```yaml
+provider:
+  base_url: https://api.kimi.com/coding/v1
+  api_key: ${KIMI_CODE_API_KEY}
+  model: k3-256k
+  adapter: openai
+```
+
+`k3-256k` is the recommended default because it provides K3 capability
+while consuming less membership quota than the 1M-context `k3` model.
+The model picker also offers `k3`, `kimi-for-coding`, and
+`kimi-for-coding-highspeed`; availability depends on membership tier.
 
 ## MiniMax
 

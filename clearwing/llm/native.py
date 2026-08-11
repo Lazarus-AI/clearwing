@@ -287,6 +287,16 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
     "qwen3.8",
 )
 
+# Per-model defaults for APIs whose accepted reasoning-effort values do not
+# include Clearwing's generic "medium" default. Kimi K3 accepts low/high/max.
+_REASONING_EFFORT_MODEL_DEFAULTS: dict[str, str | None] = {
+    "kimi-k3": "high",
+    "k3": "high",
+    "k3-256k": "high",
+    "kimi-for-coding": None,
+    "kimi-for-coding-highspeed": None,
+}
+
 # Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
 # genai-pyo3 / the backend errors when reasoning capture is requested for them.
 # Everything else supports it, so we capture reasoning by default and only skip
@@ -517,12 +527,15 @@ class AsyncLLMClient:
     def _auto_resolve_reasoning_effort(model_name: str) -> str | None:
         """Return the effective reasoning_effort for *model_name*.
 
-        Returns ``None`` (i.e. omit the parameter) when the model name matches
-        a pattern in :data:`_REASONING_EFFORT_UNSUPPORTED_PATTERNS` and is not
+        Uses a model-specific supported value when one is registered. Returns
+        ``None`` (i.e. omit the parameter) when the model name matches a
+        pattern in :data:`_REASONING_EFFORT_UNSUPPORTED_PATTERNS` and is not
         in :data:`_REASONING_EFFORT_OVERRIDE_ALLOW`. Returns ``"medium"``
         otherwise — the previous default for all callers.
         """
         lower = model_name.lower()
+        if lower in _REASONING_EFFORT_MODEL_DEFAULTS:
+            return _REASONING_EFFORT_MODEL_DEFAULTS[lower]
         if lower in _REASONING_EFFORT_OVERRIDE_ALLOW:
             return "medium"
         for pattern in _REASONING_EFFORT_UNSUPPORTED_PATTERNS:
