@@ -49,7 +49,8 @@ def add_parser(subparsers):
         help=(
             "Skip the menu and configure this provider directly "
             "(e.g. openrouter, ollama, lmstudio, anthropic, openai, "
-            "openai-oauth, together, groq, deepseek, fireworks, custom)"
+            "openai-oauth, together, groq, deepseek, kimi, kimi-code, "
+            "fireworks, custom)"
         ),
     )
     parser.add_argument(
@@ -458,6 +459,7 @@ def _write_config(
 
     existing["provider"] = provider_section
     path.write_text(yaml.safe_dump(existing, default_flow_style=False, sort_keys=True))
+    path.chmod(0o600)
 
     # Keep the in-memory Config object in sync for the current process.
     cli.config.set("provider", value=provider_section)
@@ -555,12 +557,28 @@ def _run_test_invoke(
 
         client = ProviderManager.for_endpoint(endpoint).get_native_client("default")
         start = time.monotonic()
-        resp = asyncio.run(
-            client.aask_text(system="", user="Reply with exactly the word PONG.")
-        )
+        resp = asyncio.run(client.aask_text(system="", user="Reply with exactly the word PONG."))
         elapsed_ms = int((time.monotonic() - start) * 1000)
     except Exception as exc:
         console.print(f"\n[red]Test failed: {exc}[/red]")
+        error_text = str(exc).lower()
+        if preset.key == "kimi" and ("401" in error_text or "invalid authentication" in error_text):
+            console.print(
+                "[yellow]Kimi API keys are isolated by product and region. "
+                "Use an Open Platform key created at "
+                "https://platform.kimi.ai/console/api-keys with the default "
+                "https://api.moonshot.ai/v1 endpoint. Kimi Code, Membership, "
+                "and keys from other regional platforms are not interchangeable.[/yellow]"
+            )
+        elif preset.key == "kimi-code" and (
+            "401" in error_text or "invalid authentication" in error_text
+        ):
+            console.print(
+                "[yellow]Kimi Code keys are separate from Open Platform keys. "
+                "Use a membership key created at https://www.kimi.com/code/console "
+                "with the default https://api.kimi.com/coding/v1 endpoint, and "
+                "confirm that your membership tier includes the selected model.[/yellow]"
+            )
         console.print(
             "[yellow]The config was still written. "
             "Run `clearwing doctor` for a fuller diagnosis.[/yellow]"

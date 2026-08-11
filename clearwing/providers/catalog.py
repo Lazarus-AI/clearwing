@@ -235,6 +235,38 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         provider_adapter="openai",
     ),
     ProviderPreset(
+        key="kimi",
+        display_name="Kimi Open Platform (pay-as-you-go)",
+        description="Kimi K3 and Kimi coding models via Moonshot AI's global "
+        "OpenAI-compatible API. Uses Open Platform billing and keys.",
+        docs_url="https://platform.kimi.ai/console/api-keys",
+        default_base_url="https://api.moonshot.ai/v1",
+        default_model="kimi-k3",
+        api_key_env_var="MOONSHOT_API_KEY",
+        alt_models=(
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.6",
+        ),
+        provider_adapter="openai",
+    ),
+    ProviderPreset(
+        key="kimi-code",
+        display_name="Kimi Code (membership)",
+        description="Kimi coding models using a Kimi Code membership key from "
+        "kimi.com/code. Separate from Open Platform keys and billing.",
+        docs_url="https://www.kimi.com/code/console",
+        default_base_url="https://api.kimi.com/coding/v1",
+        default_model="k3-256k",
+        api_key_env_var="KIMI_CODE_API_KEY",
+        alt_models=(
+            "k3",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+        ),
+        provider_adapter="openai",
+    ),
+    ProviderPreset(
         key="minimax",
         display_name="MiniMax",
         description="MiniMax M2.7 / M2.5 reasoning models via the Anthropic-compatible "
@@ -277,6 +309,7 @@ def preset_by_key(key: str) -> ProviderPreset | None:
         "anthropic_oauth": "anthropic-oauth",
         "claude-code": "anthropic-oauth",
         "claude_code": "anthropic-oauth",
+        "kimi_code": "kimi-code",
     }
     key_lower = aliases.get(key_lower, key_lower)
     for preset in PROVIDER_PRESETS:

@@ -40,6 +40,20 @@ class TestAutoResolveReasoningEffort:
         result = AsyncLLMClient._auto_resolve_reasoning_effort("deepseek-r1")
         assert result == "medium"
 
+    def test_kimi_k3_uses_supported_high_effort(self):
+        result = AsyncLLMClient._auto_resolve_reasoning_effort("kimi-k3")
+        assert result == "high"
+
+    @pytest.mark.parametrize("model", ["k3", "k3-256k"])
+    def test_kimi_code_k3_uses_supported_high_effort(self, model):
+        result = AsyncLLMClient._auto_resolve_reasoning_effort(model)
+        assert result == "high"
+
+    @pytest.mark.parametrize("model", ["kimi-for-coding", "kimi-for-coding-highspeed"])
+    def test_kimi_code_k2_7_omits_reasoning_effort(self, model):
+        result = AsyncLLMClient._auto_resolve_reasoning_effort(model)
+        assert result is None
+
     def test_mistral_resolves_to_none(self):
         result = AsyncLLMClient._auto_resolve_reasoning_effort("mistral-large-2407")
         assert result is None
@@ -273,6 +287,7 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
             "Status: 400 Bad Request. "
             'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
         )
+
         # A minimal stand-in for genai's StreamEnd (captured_* fields);
         # achat_stream rebuilds a ChatResponse from it via
         # _chat_response_from_stream_end.
