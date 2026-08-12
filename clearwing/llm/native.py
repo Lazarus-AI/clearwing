@@ -166,12 +166,37 @@ _REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
 # name. Intentionally empty today; populate as such models ship.
 _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 
-# Models that default to "low" reasoning_effort. deepseek-v4-flash has no
-# "medium" tier (only low/high/xhigh/max), so the usual "medium" default is
-# invalid; low also avoids reasoning tokens starving the output-token cap.
+# Models that default to "low" reasoning_effort. A model belongs here when its
+# provider has no "medium" tier (only low/high/xhigh/max) so the usual "medium"
+# default is invalid, and low both keeps behaviour reasoning-on and avoids
+# reasoning tokens starving the output-token cap.
 # Case-insensitive substring match on the model name.
-_REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
+_REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = ()
+
+# Models that default to "none" reasoning_effort (thinking fully off).
+# deepseek-v4-flash: probing the Fireworks-backed litellm endpoint showed
+# reasoning_effort="low" is indistinguishable from full thinking (identical
+# reasoning_content + completion tokens), while "none" is the only value that
+# actually suppresses it (reasoning_content empties, completion tokens collapse
+# to the answer alone). Case-insensitive substring match on the model name.
+_REASONING_EFFORT_NONE_DEFAULT_PATTERNS: tuple[str, ...] = (
     "deepseek-v4-flash",
+)
+
+# Models whose reasoning_effort must ALSO be echoed inside chat_template_kwargs
+# (the vLLM/SlimServe chat-template channel), not only as the top-level OpenAI
+# field. SlimServe's DeepSeek-V4 tokenizer decides thinking on/off from
+# chat_template_kwargs (reasoning_effort=="none" forces non-thinking "chat"
+# mode); when the deployment sits behind a litellm proxy, the top-level
+# reasoning_effort field is dropped in transit, so the chat_template_kwargs copy
+# is the only channel that survives. Sending it in both places is safe: a
+# Fireworks-hosted deepseek-v4-flash ignores the chat_template_kwargs copy and
+# honors the top-level field, while the SlimServe-hosted deployment does the
+# reverse. Only applied when the resolved reasoning_effort is the literal
+# "none" (thinking off) — see _reasoning_extra_body. Case-insensitive substring
+# match on the model name.
+_CHAT_TEMPLATE_REASONING_PASSTHROUGH_PATTERNS: tuple[str, ...] = (
+    "deepseek-v4",
 )
 
 # Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
@@ -305,10 +330,33 @@ class AsyncLLMClient:
                     pattern,
                 )
                 return None
+        for pattern in _REASONING_EFFORT_NONE_DEFAULT_PATTERNS:
+            if pattern in lower:
+                return "none"
         for pattern in _REASONING_EFFORT_LOW_DEFAULT_PATTERNS:
             if pattern in lower:
                 return "low"
         return "medium"
+
+    def _reasoning_extra_body(self) -> dict[str, Any] | None:
+        """Top-level request body fields that make thinking-off actually stick.
+
+        Returns ``None`` unless the resolved ``reasoning_effort`` is the literal
+        ``"none"`` *and* the model needs the value echoed into
+        ``chat_template_kwargs`` (see
+        :data:`_CHAT_TEMPLATE_REASONING_PASSTHROUGH_PATTERNS`). For those models
+        the top-level ``reasoning_effort`` alone is not enough — a litellm proxy
+        strips it before it reaches the SlimServe backend, whose DeepSeek-V4
+        tokenizer reads the switch from ``chat_template_kwargs`` instead. Passed
+        to ChatOptions(extra_body=...), which serializes to the wire as an extra
+        top-level field.
+        """
+        if self.reasoning_effort != "none":
+            return None
+        lower = self.model_name.lower()
+        if not any(p in lower for p in _CHAT_TEMPLATE_REASONING_PASSTHROUGH_PATTERNS):
+            return None
+        return {"chat_template_kwargs": {"reasoning_effort": "none"}}
 
     def __init__(
         self,
@@ -661,6 +709,7 @@ class AsyncLLMClient:
                 capture_reasoning_content=self.capture_reasoning_content,
                 normalize_reasoning_content=self.capture_reasoning_content,
                 reasoning_effort=self.reasoning_effort,
+                extra_body=self._reasoning_extra_body(),
                 response_json_spec=(
                     _json_spec_from_model(
                         response_schema,
@@ -858,6 +907,7 @@ class AsyncLLMClient:
                 capture_reasoning_content=self.capture_reasoning_content,
                 normalize_reasoning_content=self.capture_reasoning_content,
                 reasoning_effort=self.reasoning_effort,
+                extra_body=self._reasoning_extra_body(),
             )
             async with self._semaphore:
                 client = self._build_client(Client)
@@ -1301,6 +1351,13 @@ class AsyncLLMClient:
             body["seed"] = options.seed
         if options.reasoning_effort:
             body["reasoning_effort"] = options.reasoning_effort
+        if options.extra_body_json:
+            try:
+                extra_body = json.loads(options.extra_body_json)
+            except json.JSONDecodeError:
+                extra_body = None
+            if isinstance(extra_body, dict):
+                body.update(extra_body)
         if request.tools:
             body["tools"] = [self._openai_tool_body(tool) for tool in request.tools]
         if options.response_json_spec is not None:
@@ -1674,7 +1731,10 @@ class AsyncLLMClient:
         """Return a copy of *options* with ``reasoning_effort=None``.
 
         ``ChatOptions`` is a frozen Rust struct from genai-pyo3, so we
-        reconstruct it from scratch. ``response_json_spec`` is preserved.
+        reconstruct it from scratch. ``response_json_spec`` is preserved. The
+        chat_template_kwargs reasoning passthrough (``extra_body``) is
+        deliberately dropped here: this rebuild runs when the provider rejected
+        ``reasoning_effort`` outright, so we stop echoing it everywhere.
         """
         return ChatOptions(
             temperature=options.temperature,
@@ -1692,6 +1752,9 @@ class AsyncLLMClient:
     def _rebuild_options_without_max_tokens(options: ChatOptions) -> ChatOptions:
         """Return a copy of *options* with ``max_tokens=None``."""
 
+        extra_body = (
+            json.loads(options.extra_body_json) if options.extra_body_json else None
+        )
         return ChatOptions(
             temperature=options.temperature,
             max_tokens=None,
@@ -1701,6 +1764,7 @@ class AsyncLLMClient:
             capture_reasoning_content=options.capture_reasoning_content,
             normalize_reasoning_content=options.normalize_reasoning_content,
             reasoning_effort=options.reasoning_effort,
+            extra_body=extra_body,
             response_json_spec=options.response_json_spec,
         )
 
