@@ -1,30 +1,9 @@
-"""Tests for the Kimi provider preset and endpoint resolution."""
+"""Tests for the Kimi Code provider preset and endpoint resolution."""
 
 from __future__ import annotations
 
 from clearwing.providers.catalog import preset_by_key
 from clearwing.providers.env import _default_openai_compat_model, resolve_llm_endpoint
-
-
-class TestKimiOpenPlatformCatalog:
-    def test_preset_uses_official_api_defaults(self):
-        preset = preset_by_key("kimi")
-
-        assert preset is not None
-        assert preset.display_name == "Kimi Open Platform (pay-as-you-go)"
-        assert preset.default_base_url == "https://api.moonshot.ai/v1"
-        assert preset.default_model == "kimi-k3"
-        assert preset.api_key_env_var == "MOONSHOT_API_KEY"
-        assert preset.provider_adapter == "openai"
-        assert preset.is_openai_compat
-        assert preset.docs_url == "https://platform.kimi.ai/console/api-keys"
-
-    def test_preset_offers_current_coding_models(self):
-        preset = preset_by_key("kimi")
-
-        assert preset is not None
-        assert "kimi-k2.7-code" in preset.alt_models
-        assert "kimi-k2.7-code-highspeed" in preset.alt_models
 
 
 class TestKimiCodeCatalog:
@@ -58,22 +37,19 @@ class TestKimiCodeCatalog:
 
 
 class TestKimiEndpointResolution:
-    def test_moonshot_url_has_kimi_default(self):
-        assert _default_openai_compat_model("https://api.moonshot.ai/v1") == "kimi-k3"
-
     def test_kimi_code_url_has_membership_default(self):
         assert _default_openai_compat_model("https://api.kimi.com/coding/v1") == "k3-256k"
 
     def test_cli_flags_route_to_openai_adapter(self):
         endpoint = resolve_llm_endpoint(
-            cli_base_url="https://api.moonshot.ai/v1",
+            cli_base_url="https://api.kimi.com/coding/v1",
             cli_api_key="test-key",
             config_provider={},
         )
 
         assert endpoint.provider == "openai_compat"
-        assert endpoint.base_url == "https://api.moonshot.ai/v1"
-        assert endpoint.model == "kimi-k3"
+        assert endpoint.base_url == "https://api.kimi.com/coding/v1"
+        assert endpoint.model == "k3-256k"
         assert endpoint.api_key == "test-key"
         assert endpoint.is_openai_compat
 
@@ -83,13 +59,13 @@ class TestKimiEndpointResolution:
 
         endpoint = resolve_llm_endpoint(
             config_provider={
-                "base_url": "https://api.moonshot.ai/v1",
+                "base_url": "https://api.kimi.com/coding/v1",
                 "api_key": "test-key",
-                "model": "kimi-k2.7-code",
+                "model": "kimi-for-coding",
                 "adapter": "openai",
             },
         )
 
         assert endpoint.provider == "openai_compat"
-        assert endpoint.model == "kimi-k2.7-code"
+        assert endpoint.model == "kimi-for-coding"
         assert endpoint.adapter == "openai"

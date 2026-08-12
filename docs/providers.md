@@ -47,7 +47,7 @@ Direct variants:
 
 ```bash
 clearwing setup --provider openrouter
-clearwing setup --provider kimi
+clearwing setup --provider kimi-code
 clearwing setup --provider ollama --no-test
 clearwing init   # alias
 ```
@@ -322,48 +322,7 @@ For OpenAI itself, use the [Chat Completions](#openai-chat-completions-api)
 or [Responses](#openai-responses-api) section above — the model
 generation decides which.
 
-## Kimi
-
-Kimi has two separate API products. Their credentials, billing, base
-URLs, and model IDs are not interchangeable, so Clearwing exposes one
-setup choice for each.
-
-### Kimi Open Platform (pay-as-you-go)
-
-Kimi's API speaks the OpenAI Chat Completions protocol and supports
-tool calling. The setup preset uses Kimi K3, Moonshot AI's flagship
-model with a 1M-token context window, by default.
-
-```bash
-export MOONSHOT_API_KEY=your-key
-clearwing setup --provider kimi
-```
-
-Create the key in the [Kimi API Open Platform](https://platform.kimi.ai/console/api-keys).
-Kimi Open Platform, Kimi Code, Membership, and regional platforms use
-independent credentials; mixing a key from another product or region
-with `api.moonshot.ai` returns HTTP 401.
-
-The wizard detects `MOONSHOT_API_KEY` and offers to keep the secret out
-of the config file. It writes:
-
-```yaml
-provider:
-  base_url: https://api.moonshot.ai/v1
-  api_key: ${MOONSHOT_API_KEY}
-  model: kimi-k3
-  adapter: openai
-```
-
-The model picker also offers `kimi-k2.7-code`,
-`kimi-k2.7-code-highspeed`, and `kimi-k2.6`. Kimi K3 always uses
-thinking mode; Clearwing sends the supported `high` reasoning effort
-instead of its generic `medium` default. K2.7 Code uses its own
-permanently enabled thinking mode and does not accept
-`reasoning_effort`, so Clearwing omits that parameter for both K2.7
-Code variants.
-
-### Kimi Code (membership)
+## Kimi Code (membership)
 
 Use this option for API keys created in the Kimi Code Console and backed
 by a Kimi Code membership:

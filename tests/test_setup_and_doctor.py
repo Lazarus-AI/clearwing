@@ -284,26 +284,6 @@ class TestWriteConfig:
         assert data["provider"]["model"] == "claude-sonnet-4-6"
         assert data["provider"]["api_key"] == "sk-ant-test"
 
-    def test_writes_kimi_provider_section(self, tmp_cli):
-        preset = preset_by_key("kimi")
-        _write_config(
-            tmp_cli,
-            preset,
-            base_url="https://api.moonshot.ai/v1",
-            api_key_literal="${MOONSHOT_API_KEY}",
-            model="kimi-k3",
-        )
-
-        data = yaml.safe_load(tmp_cli.config.DEFAULT_CONFIG_PATH.read_text())
-        assert data == {
-            "provider": {
-                "base_url": "https://api.moonshot.ai/v1",
-                "api_key": "${MOONSHOT_API_KEY}",
-                "model": "kimi-k3",
-                "adapter": "openai",
-            }
-        }
-
     def test_writes_kimi_code_provider_section(self, tmp_cli):
         preset = preset_by_key("kimi-code")
         _write_config(
@@ -345,28 +325,6 @@ class TestWriteConfig:
 
 
 class TestRunTestInvoke:
-    def test_kimi_401_explains_product_and_region_key_isolation(self):
-        stream = io.StringIO()
-        console = Console(file=stream, force_terminal=False)
-        preset = preset_by_key("kimi")
-
-        with patch(
-            "clearwing.providers.ProviderManager.for_endpoint",
-            side_effect=RuntimeError("HTTP 401: Invalid Authentication"),
-        ):
-            _run_test_invoke(
-                console,
-                preset,
-                base_url="https://api.moonshot.ai/v1",
-                api_key_literal="sk-test",
-                model="kimi-k3",
-            )
-
-        output = stream.getvalue()
-        assert "isolated by product and region" in output
-        assert "platform.kimi.ai/console/api-keys" in output
-        assert "Kimi Code, Membership" in output
-
     def test_kimi_code_401_explains_membership_key_isolation(self):
         stream = io.StringIO()
         console = Console(file=stream, force_terminal=False)

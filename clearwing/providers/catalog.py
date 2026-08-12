@@ -235,22 +235,6 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         provider_adapter="openai",
     ),
     ProviderPreset(
-        key="kimi",
-        display_name="Kimi Open Platform (pay-as-you-go)",
-        description="Kimi K3 and Kimi coding models via Moonshot AI's global "
-        "OpenAI-compatible API. Uses Open Platform billing and keys.",
-        docs_url="https://platform.kimi.ai/console/api-keys",
-        default_base_url="https://api.moonshot.ai/v1",
-        default_model="kimi-k3",
-        api_key_env_var="MOONSHOT_API_KEY",
-        alt_models=(
-            "kimi-k2.7-code",
-            "kimi-k2.7-code-highspeed",
-            "kimi-k2.6",
-        ),
-        provider_adapter="openai",
-    ),
-    ProviderPreset(
         key="kimi-code",
         display_name="Kimi Code (membership)",
         description="Kimi coding models using a Kimi Code membership key from "
