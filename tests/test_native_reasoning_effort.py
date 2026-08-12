@@ -88,10 +88,6 @@ class TestAutoResolveReasoningEffort:
     def test_qwen3_8_variants_resolve_to_low(self, model_name):
         assert AsyncLLMClient._auto_resolve_reasoning_effort(model_name) == "low"
 
-    def test_kimi_k3_uses_supported_high_effort(self):
-        result = AsyncLLMClient._auto_resolve_reasoning_effort("kimi-k3")
-        assert result == "high"
-
     @pytest.mark.parametrize("model", ["k3", "k3-256k"])
     def test_kimi_code_k3_uses_supported_high_effort(self, model):
         result = AsyncLLMClient._auto_resolve_reasoning_effort(model)
@@ -100,8 +96,6 @@ class TestAutoResolveReasoningEffort:
     @pytest.mark.parametrize(
         "model",
         [
-            "kimi-k2.7-code",
-            "kimi-k2.7-code-highspeed",
             "kimi-for-coding",
             "kimi-for-coding-highspeed",
         ],

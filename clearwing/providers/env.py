@@ -534,8 +534,6 @@ def _default_openai_compat_model(base_url: str) -> str:
         return "gpt-4o"
     if "api.deepseek.com" in host:
         return "deepseek-chat"
-    if "api.moonshot.ai" in host:
-        return "kimi-k3"
     if "api.kimi.com" in host and "/coding" in host:
         return "k3-256k"
     # Catch-all

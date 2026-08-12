@@ -288,13 +288,11 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
 )
 
 # Per-model defaults for APIs whose accepted reasoning-effort values do not
-# include Clearwing's generic "medium" default. Kimi K3 accepts low/high/max.
+# include Clearwing's generic "medium" default. Kimi Code K3 accepts
+# low/high/max.
 _REASONING_EFFORT_MODEL_DEFAULTS: dict[str, str | None] = {
-    "kimi-k3": "high",
     "k3": "high",
     "k3-256k": "high",
-    "kimi-k2.7-code": None,
-    "kimi-k2.7-code-highspeed": None,
     "kimi-for-coding": None,
     "kimi-for-coding-highspeed": None,
 }

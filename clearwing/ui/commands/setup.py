@@ -49,7 +49,7 @@ def add_parser(subparsers):
         help=(
             "Skip the menu and configure this provider directly "
             "(e.g. openrouter, orcarouter, ollama, lmstudio, anthropic, openai, "
-            "openai-oauth, together, groq, deepseek, kimi, kimi-code, "
+            "openai-oauth, together, groq, deepseek, kimi-code, "
             "fireworks, custom)"
         ),
     )
@@ -639,15 +639,7 @@ def _run_test_invoke(
     except Exception as exc:
         console.print(f"\n[red]Test failed: {exc}[/red]")
         error_text = str(exc).lower()
-        if preset.key == "kimi" and ("401" in error_text or "invalid authentication" in error_text):
-            console.print(
-                "[yellow]Kimi API keys are isolated by product and region. "
-                "Use an Open Platform key created at "
-                "https://platform.kimi.ai/console/api-keys with the default "
-                "https://api.moonshot.ai/v1 endpoint. Kimi Code, Membership, "
-                "and keys from other regional platforms are not interchangeable.[/yellow]"
-            )
-        elif preset.key == "kimi-code" and (
+        if preset.key == "kimi-code" and (
             "401" in error_text or "invalid authentication" in error_text
         ):
             console.print(
