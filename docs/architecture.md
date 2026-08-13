@@ -132,6 +132,27 @@ input for the next:
     writes pre-filled MITRE CVE-request and HackerOne templates for
     every verified finding `>= root_cause_explained`.
 
+### Standalone sourcehunt resume
+
+Legacy-flow standalone sessions use immutable completion records rather than a
+mutable workflow snapshot. `session.json` records the schema, behavior-affecting
+configuration, repository metadata, and the hash of exactly the source files
+selected by preprocessing. `rank-plan.json` appears only after the complete
+ranking pass succeeds. Each successful hunt invocation atomically creates one
+`work-results/<deterministic-work-id>.json`, including successful zero-finding
+work and any context needed to derive a promoted band. `spend-ledger.jsonl`
+remains the only authority for lifetime model spend. A single advisory lock
+prevents concurrent writers.
+
+The recovery rule is: if a valid atomic work result exists, reuse it; otherwise
+run that work again. Missing, truncated, or interrupted work therefore restarts
+from its beginning, while completed findings and cluster descriptors are loaded
+into the live findings pool before unfinished hunters run. Missing or invalid
+rank plans cause the whole ranking pass to restart; partial rank chunks are not
+stored. Verification, exploitation, reporting, and later enrichment may rerun.
+This does not restore a coroutine, provider request, sandbox, or mid-agent
+transcript. Provider credentials are never written to the session.
+
 ## The shared Finding type
 
 `clearwing.findings.Finding` is the single canonical finding

@@ -88,6 +88,41 @@ clearwing config --show-provider
 which prints the effective model, base URL, API key status, and
 source (`cli` / `env` / `config` / `default`).
 
+## Recovering a sourcehunt from provider exhaustion
+
+Standalone legacy-flow sourcehunt sessions stop promptly with the distinct
+resumable status `provider_exhausted` when a provider reports terminal account
+quota exhaustion. This includes Kimi Code's HTTP 403 response whose structured
+type is `access_terminated_error` and whose message states that the usage or
+billing-cycle limit was reached. Ordinary HTTP 401 and non-quota HTTP 403
+responses remain authentication/authorization errors. Temporary HTTP 429 and
+transport errors keep their existing bounded exponential retries.
+
+The stopped command prints the session ID and exact recovery command:
+
+```bash
+clearwing sourcehunt --resume sh-deadbeef
+```
+
+Provider resolution happens again when the resume command starts. Update the
+environment or `~/.clearwing/config.yaml`, replenish the original account, or
+provide replacement CLI credentials before resuming. API keys are never stored
+in `session.json`.
+
+```bash
+export CLEARWING_API_KEY="$REPLACEMENT_API_KEY"
+clearwing sourcehunt --resume sh-deadbeef
+
+# Or use a replacement compatible endpoint for this resume:
+clearwing sourcehunt --resume sh-deadbeef \
+  --base-url https://example.invalid/v1 \
+  --api-key "$REPLACEMENT_API_KEY" \
+  --model replacement-model
+```
+
+See [CLI reference](cli.md#resuming-a-standalone-session) for selected-source
+identity, configuration, budget, and legacy-session compatibility rules.
+
 ## Anthropic direct (default)
 
 No setup beyond the API key. This is what Clearwing used before

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -51,7 +52,9 @@ class CLI:
     def run(self, args: list | None = None) -> None:
         """Run the CLI."""
         parser = self._create_parser()
-        parsed_args = parser.parse_args(args)
+        raw_args = list(args) if args is not None else sys.argv[1:]
+        parsed_args = parser.parse_args(raw_args)
+        parsed_args._raw_args = raw_args
 
         # Dispatch to the matching command module. A module's base name
         # matches the subcommand it registers; command modules may also

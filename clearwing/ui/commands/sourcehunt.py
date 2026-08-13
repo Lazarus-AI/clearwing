@@ -40,6 +40,12 @@ def add_parser(subparsers):
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", nargs="?", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        default=None,
+        help="Continue a resumable standalone session from its completed work results",
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -666,12 +672,36 @@ def add_parser(subparsers):
     return parser
 
 
+def _parse_resume_options(raw_args, *, default_output_dir):
+    """Use argparse to enforce the intentionally small resume CLI surface."""
+
+    from ...sourcehunt.config import SourceHuntResumeOptions
+
+    parser = argparse.ArgumentParser(prog="clearwing sourcehunt --resume", add_help=False)
+    parser.add_argument("command", choices=["sourcehunt"])
+    parser.add_argument("--resume", required=True, dest="session_id")
+    parser.add_argument("--output-dir", default=default_output_dir)
+    parser.add_argument("--model", dest="model_override")
+    parser.add_argument("--base-url")
+    parser.add_argument("--api-key")
+    parser.add_argument("--live", action="store_true")
+    parser.add_argument("--log-level")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parsed = parser.parse_args(raw_args)
+    return SourceHuntResumeOptions(
+        session_id=parsed.session_id,
+        output_dir=parsed.output_dir,
+        model_override=parsed.model_override,
+        live=parsed.live,
+    )
+
+
 def handle(cli, args):
     """Run the sourcehunt pipeline."""
     if args.machine_fd is not None:
         raise SystemExit(_handle_machine(args.machine_fd))
-    if not args.repo:
-        args._command_parser.error("the following arguments are required: repo")
+    if not args.repo and not args.resume:
+        args._command_parser.error("repo is required unless --resume SESSION_ID is used")
 
     from ...core.config import default_results_dir
     from ...providers import ProviderManager, resolve_llm_endpoint
@@ -680,6 +710,24 @@ def handle(cli, args):
 
     if args.output_dir is None:
         args.output_dir = default_results_dir("sourcehunt")
+
+    if args.resume:
+        incompatible_modes = {
+            "--retro-hunt": args.retro_hunt,
+            "--nday": args.nday,
+            "--reveng": args.reveng,
+            "--watch": args.watch,
+            "--webhook": args.webhook,
+            "--calibrate": args.calibrate,
+            "--elaborate": args.elaborate or args.elaborate_auto,
+        }
+        conflicts = [name for name, enabled in incompatible_modes.items() if enabled]
+        if conflicts:
+            args._command_parser.error(f"--resume cannot be combined with {', '.join(conflicts)}")
+        resume_options = _parse_resume_options(
+            args._raw_args,
+            default_output_dir=args.output_dir,
+        )
 
     _log_level_name = "DEBUG" if args.verbose else args.log_level
     logging.basicConfig(
@@ -1130,7 +1178,7 @@ def handle(cli, args):
         )
         sys.exit(1)
 
-    runner = SourceHuntRunner(
+    runner_options = dict(
         repo_url=args.repo,
         branch=args.branch,
         local_path=args.local_path,
@@ -1199,6 +1247,27 @@ def handle(cli, args):
         emit_rejection_certificates=args.emit_rejection_certificates,
         falsify=args.falsify,
     )
+    if args.resume:
+        try:
+            runner = SourceHuntRunner.resume(
+                resume_options.session_id,
+                output_dir=resume_options.output_dir,
+                provider_manager=provider_manager,
+                model_override=resume_options.model_override,
+                live=resume_options.live,
+            )
+        except ValueError as exc:
+            args._command_parser.error(str(exc))
+        args.repo = runner.repo_url
+        args.branch = runner.branch
+        args.local_path = runner.local_path
+        args.flow = runner.flow
+        args.depth = runner.depth
+        args.max_parallel = runner.max_parallel
+        args.budget = runner.budget_usd
+        formats = runner.output_formats
+    else:
+        runner = SourceHuntRunner(**runner_options)
 
     cli.console.print(
         f"[bold blue]Sourcehunt: {args.repo} flow={args.flow} depth={args.depth} "
@@ -1243,7 +1312,13 @@ def handle(cli, args):
         bus.unsubscribe(EventType.TOOL_START, _on_tool_start)
 
     # Summary
-    if result.status == "budget_exhausted":
+    if result.status == "provider_exhausted":
+        cli.console.print(
+            "\n[bold yellow]Sourcehunt stopped: provider quota exhausted[/bold yellow]"
+        )
+        cli.console.print("  Status: provider_exhausted (resumable)")
+        cli.console.print(f"  Resume: clearwing sourcehunt --resume {result.session_id}")
+    elif result.status == "budget_exhausted":
         cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
         cli.console.print("  Status: partial (budget exhausted)")
     else:

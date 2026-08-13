@@ -53,6 +53,52 @@ clearwing sourcehunt <repo_url_or_path>
 See [LLM providers](providers.md) for the full precedence rules and
 provider-specific snippets.
 
+### Resuming a standalone session
+
+Every new legacy-flow standalone run writes `session.json`, a complete atomic
+`rank-plan.json`, and one atomic JSON result per completed hunt work item in its
+`sh-*` session directory. Continue that exact session after provider quota
+exhaustion, interruption, or process failure with:
+
+```bash
+clearwing sourcehunt --resume sh-deadbeef
+```
+
+The command deliberately has a narrow surface: `--output-dir`, provider/model
+options, `--live`, and logging options may be supplied. The repository and all
+behavior-affecting options come from `session.json`.
+
+Resume reruns preprocessing and hashes exactly the selected relative paths and
+their complete contents. The selected-input hash is authoritative; a recorded
+Git commit is metadata and is not used as a substitute for detecting dirty
+source changes. The session output directory is excluded from preprocessing,
+so regenerated reports and other session artifacts do not invalidate the
+identity check.
+
+A complete rank plan is restored exactly. Missing, invalid, or interrupted
+ranking restarts from the beginning. A valid atomic work result is skipped,
+including zero-finding work; missing, invalid, or interrupted work runs from
+the beginning. Completed findings and cluster state are restored before new
+hunters start, and completed promotions deterministically reconstruct their
+next band. Verification, exploitation, reporting, and later enrichment stages
+may rerun. Resume does not restore an exact coroutine, provider request,
+sandbox, or mid-agent transcript. Only one process may run a session at a time.
+
+Provider/model credentials are deliberately absent from session metadata and are
+resolved fresh from the current CLI flags, environment, and config on every
+resume. This permits a replenished key or a replacement endpoint:
+
+```bash
+clearwing sourcehunt --resume sh-deadbeef --api-key "$REPLACEMENT_API_KEY"
+```
+
+The saved budget remains the total lifetime session cap and cannot be overridden
+on resume. Settled calls are restored once from `spend-ledger.jsonl`; an orphaned
+reservation is handled according to whether the cap was active when it was
+reserved. Resume currently supports standalone `--flow legacy` sessions created
+with session schema 1. Older sessions without `session.json` are not resumable
+and produce an explicit unsupported-session error.
+
 Depths:
 - **`quick`** — preprocessor + ranker + static findings. No LLM
   hunters. Free. Useful as a sanity check or for CI.
