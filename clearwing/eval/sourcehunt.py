@@ -143,6 +143,28 @@ class GroundTruthManifest(_EvalModel):
         raise KeyError(case_id)
 
 
+def include_fixed_negative_cases(manifest: GroundTruthManifest) -> GroundTruthManifest:
+    """Add patched snapshots as clean controls when a fixed commit is pinned."""
+
+    cases = list(manifest.cases)
+    for case in manifest.cases:
+        if not case.fixed_commit:
+            continue
+        fixed_truth = case.ground_truth.model_copy(update={"expected_decision": "disproven"})
+        cases.append(
+            case.model_copy(
+                update={
+                    "id": f"{case.id}-fixed-negative",
+                    "cves": [],
+                    "vulnerable_commit": case.fixed_commit,
+                    "fixed_commit": None,
+                    "ground_truth": fixed_truth,
+                }
+            )
+        )
+    return GroundTruthManifest(cases=cases)
+
+
 class AblationLevel(IntEnum):
     REPOSITORY = 1
     TARGET_FILE = 2
@@ -157,6 +179,22 @@ class AblationArm(_EvalModel):
     flow: Literal["legacy", "proof"]
     model_tier: Literal["local", "frontier"]
     model: str = Field(min_length=1)
+    prompt_bundle: str = "legacy-v1"
+    scaffold_profile: str = "native-v1"
+    context_profile: str = "legacy-context-v1"
+
+    @model_validator(mode="after")
+    def _validate_profiles(self) -> AblationArm:
+        from clearwing.sourcehunt.optimization import (
+            get_context_profile,
+            get_prompt_bundle,
+            get_scaffold_profile,
+        )
+
+        get_prompt_bundle(self.prompt_bundle)
+        get_scaffold_profile(self.scaffold_profile)
+        get_context_profile(self.context_profile)
+        return self
 
 
 class AblationRunSpec(_EvalModel):
@@ -169,12 +207,24 @@ class AblationRunSpec(_EvalModel):
     flow: Literal["legacy", "proof"]
     model_tier: Literal["local", "frontier"]
     model: str = Field(min_length=1)
+    prompt_bundle: str = "legacy-v1"
+    scaffold_profile: str = "native-v1"
+    context_profile: str = "legacy-context-v1"
     level: AblationLevel
     replicate: int = Field(default=1, ge=1)
     hints: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _assign_ids(self) -> AblationRunSpec:
+        from clearwing.sourcehunt.optimization import (
+            get_context_profile,
+            get_prompt_bundle,
+            get_scaffold_profile,
+        )
+
+        get_prompt_bundle(self.prompt_bundle)
+        get_scaffold_profile(self.scaffold_profile)
+        get_context_profile(self.context_profile)
         context_payload = {
             "case_id": self.case_id,
             "case_digest": self.case_digest,
@@ -199,6 +249,9 @@ class AblationRunSpec(_EvalModel):
                 "flow": self.flow,
                 "model_tier": self.model_tier,
                 "model": self.model,
+                "prompt_bundle": self.prompt_bundle,
+                "scaffold_profile": self.scaffold_profile,
+                "context_profile": self.context_profile,
                 "replicate": self.replicate,
             },
         )
@@ -249,11 +302,23 @@ class AblationPlan(_EvalModel):
         run_ids = [run.id for run in self.runs]
         if len(run_ids) != len(set(run_ids)):
             raise ValueError("Ablation plan contains duplicate run IDs")
-        tiers_by_cell: dict[tuple[str, str, int, int], set[str]] = defaultdict(set)
-        tier_counts_by_cell: dict[tuple[str, str, int, int], Counter[str]] = defaultdict(Counter)
-        contexts_by_cell: dict[tuple[str, str, int, int], set[str]] = defaultdict(set)
+        tiers_by_cell: dict[tuple[str, str, str, str, str, int, int], set[str]] = defaultdict(set)
+        tier_counts_by_cell: dict[
+            tuple[str, str, str, str, str, int, int], Counter[str]
+        ] = defaultdict(Counter)
+        contexts_by_cell: dict[
+            tuple[str, str, str, str, str, int, int], set[str]
+        ] = defaultdict(set)
         for run in self.runs:
-            cell = (run.case_id, run.flow, int(run.level), run.replicate)
+            cell = (
+                run.case_id,
+                run.flow,
+                run.prompt_bundle,
+                run.scaffold_profile,
+                run.context_profile,
+                int(run.level),
+                run.replicate,
+            )
             tiers_by_cell[cell].add(run.model_tier)
             tier_counts_by_cell[cell][run.model_tier] += 1
             contexts_by_cell[cell].add(run.context_id)
@@ -363,6 +428,9 @@ def build_ablation_plan(
             flow=arm.flow,
             model_tier=arm.model_tier,
             model=arm.model,
+            prompt_bundle=arm.prompt_bundle,
+            scaffold_profile=arm.scaffold_profile,
+            context_profile=arm.context_profile,
             level=level,
             replicate=replicate,
             hints=ablation_hints(case, level),
@@ -405,6 +473,9 @@ class RunObservation(_EvalModel):
     flow: Literal["legacy", "proof"]
     model_tier: Literal["local", "frontier"]
     model: str = ""
+    prompt_bundle: str = "legacy-v1"
+    scaffold_profile: str = "native-v1"
+    context_profile: str = "legacy-context-v1"
     level: AblationLevel
     replicate: int
     session_dir: str
@@ -420,6 +491,10 @@ class RunObservation(_EvalModel):
     cost_usd: float = Field(default=0.0, ge=0.0)
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
+    model_calls: int = Field(default=0, ge=0)
+    compaction_count: int = Field(default=0, ge=0)
+    peak_context_tokens: int = Field(default=0, ge=0)
+    peak_input_tokens: int = Field(default=0, ge=0)
     report_claim_count: int = Field(default=0, ge=0)
     unsupported_claims: int = Field(default=0, ge=0)
     report_failures: int = Field(default=0, ge=0)
@@ -443,6 +518,9 @@ class BaselineGroup(_EvalModel):
     flow: str
     model_tier: str
     model: str
+    prompt_bundle: str
+    scaffold_profile: str
+    context_profile: str
     level: int
     runs: int
     true_positives: int
@@ -485,8 +563,8 @@ class BaselineReport(_EvalModel):
             f"- Matrix complete: `{str(self.complete).lower()}`",
             f"- Runs: {self.observed_runs}/{self.expected_runs}",
             "",
-            "| Flow | Tier | Model | Level | Runs | Precision | Recall | Mean cost | Mean tokens | Unsupported claims | Report failures | First failures |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| Flow | Tier | Model | Prompt | Scaffold | Context | Level | Runs | Precision | Recall | Mean cost | Mean tokens | Unsupported claims | Report failures | First failures |",
+            "|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
         for group in self.groups:
             failures = (
@@ -495,7 +573,9 @@ class BaselineReport(_EvalModel):
             )
             lines.append(
                 f"| {group.flow} | {group.model_tier} | {group.model or '-'} | "
-                f"{group.level} | {group.runs} | {group.precision:.3f} | "
+                f"{group.prompt_bundle} | {group.scaffold_profile} | "
+                f"{group.context_profile} | {group.level} | "
+                f"{group.runs} | {group.precision:.3f} | "
                 f"{group.recall:.3f} | ${group.mean_cost_usd:.4f} | "
                 f"{group.mean_tokens:.0f} | {group.unsupported_claims}/"
                 f"{group.report_claims} ({group.unsupported_claim_rate:.3f}) | "
@@ -542,7 +622,7 @@ def aggregate_baseline(
     for run_id in sorted(expected_ids & observed_ids):
         _validate_observation_against_spec(by_id[run_id], specs_by_id[run_id])
 
-    grouped: dict[tuple[str, str, str, int], list[RunObservation]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, str, str, str, int], list[RunObservation]] = defaultdict(list)
     for observation in observed:
         if observation.run_id not in expected_ids:
             continue
@@ -551,11 +631,22 @@ def aggregate_baseline(
                 observation.flow,
                 observation.model_tier,
                 observation.model,
+                observation.prompt_bundle,
+                observation.scaffold_profile,
+                observation.context_profile,
                 int(observation.level),
             )
         ].append(observation)
     groups: list[BaselineGroup] = []
-    for (flow, tier, model, level), values in sorted(grouped.items()):
+    for (
+        flow,
+        tier,
+        model,
+        prompt_bundle,
+        scaffold_profile,
+        context_profile,
+        level,
+    ), values in sorted(grouped.items()):
         tp = sum(item.true_positives for item in values)
         fp = sum(item.false_positives for item in values)
         fn = sum(item.false_negatives for item in values)
@@ -569,6 +660,9 @@ def aggregate_baseline(
                 flow=flow,
                 model_tier=tier,
                 model=model,
+                prompt_bundle=prompt_bundle,
+                scaffold_profile=scaffold_profile,
+                context_profile=context_profile,
                 level=level,
                 runs=len(values),
                 true_positives=tp,
@@ -657,6 +751,9 @@ def _validate_observation_against_spec(
         "flow": spec.flow,
         "model_tier": spec.model_tier,
         "model": spec.model,
+        "prompt_bundle": spec.prompt_bundle,
+        "scaffold_profile": spec.scaffold_profile,
+        "context_profile": spec.context_profile,
         "level": spec.level,
         "replicate": spec.replicate,
     }
@@ -686,6 +783,19 @@ async def execute_sourcehunt_run(
     output_dir: str | Path,
     provider_manager: Any,
     budget_usd: float,
+    input_price_per_million: float | None = None,
+    output_price_per_million: float | None = None,
+    max_hunt_files: int | None = None,
+    max_hunter_steps: int | None = None,
+    ranker_chunk_size: int | None = None,
+    ranker_max_inflight_chunks: int | None = None,
+    ranker_chunk_max_retries: int | None = None,
+    max_parallel: int = 4,
+    sandbox_cpus: float | None = None,
+    starting_band: str = "fast",
+    redundancy_override: int = 1,
+    depth: str = "deep",
+    no_rank: bool = False,
     compile_commands: str | None = None,
     validation_manifest: str | None = None,
     scheduler_calibration: str | None = None,
@@ -693,6 +803,8 @@ async def execute_sourcehunt_run(
     proof_max_actions: int = 200,
     proof_max_model_calls: int = 40,
     proof_max_dynamic_actions: int = 20,
+    prompt_candidate: str | None = None,
+    session_id: str | None = None,
 ) -> RunObservation:
     """Run one planned arm against a pre-positioned immutable checkout."""
 
@@ -736,16 +848,33 @@ async def execute_sourcehunt_run(
         if path and not Path(path).expanduser().is_file():
             raise ValueError(f"{label} does not exist for {case.id}: {path}")
     output_root = Path(output_dir).expanduser().resolve()
+    actual_session_id = session_id or spec.id
     runner = SourceHuntRunner(
         repo_url=case.repository,
         local_path=str(checkout_path),
-        depth="deep",
+        depth=depth,
         budget_usd=budget_usd,
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
+        max_hunt_files=max_hunt_files,
+        max_hunter_steps=max_hunter_steps,
+        ranker_chunk_size=ranker_chunk_size,
+        ranker_max_inflight_chunks=ranker_max_inflight_chunks,
+        ranker_chunk_max_retries=ranker_chunk_max_retries,
+        max_parallel=max_parallel,
+        sandbox_cpus=sandbox_cpus,
+        starting_band=starting_band,
+        redundancy_override=redundancy_override,
+        no_rank=no_rank,
         output_dir=str(output_root),
         output_formats=["sarif", "markdown", "json"],
-        parent_session_id=spec.id,
+        parent_session_id=actual_session_id,
         provider_manager=provider_manager,
         model_override=spec.model,
+        prompt_bundle=spec.prompt_bundle,
+        scaffold_profile=spec.scaffold_profile,
+        context_profile=spec.context_profile,
+        prompt_candidate=prompt_candidate,
         campaign_hint=spec.campaign_hint(),
         flow=spec.flow,
         proof_compile_commands=compile_commands,
@@ -768,7 +897,7 @@ async def execute_sourcehunt_run(
         enable_behavior_monitor=False,
     )
     await runner.arun()
-    return inspect_ablation_session(spec, case, output_root / spec.id)
+    return inspect_ablation_session(spec, case, output_root / actual_session_id)
 
 
 async def run_ablation_campaign(
@@ -1034,6 +1163,9 @@ def _inspect_proof_session(
         flow=spec.flow,
         model_tier=spec.model_tier,
         model=spec.model,
+        prompt_bundle=spec.prompt_bundle,
+        scaffold_profile=spec.scaffold_profile,
+        context_profile=spec.context_profile,
         level=spec.level,
         replicate=spec.replicate,
         session_dir=str(root),
@@ -1052,6 +1184,43 @@ def _inspect_proof_session(
         unsupported_claims=unsupported_report_claims,
         report_failures=0,
     )
+
+
+def _legacy_finding_matches_truth(finding: dict[str, Any], truth: IntermediateGroundTruth) -> bool:
+    """Require mechanism-bearing evidence, not merely a target file and CWE."""
+
+    target_files = {path.removeprefix("./") for path in truth.target_files}
+    finding_file = str(finding.get("file") or "").removeprefix("./")
+    if target_files and finding_file not in target_files:
+        return False
+    if truth.expected_cwes and str(finding.get("cwe") or "") not in set(truth.expected_cwes):
+        return False
+    if str(finding.get("evidence_level") or "suspicion") == "suspicion":
+        return False
+
+    trace = finding.get("vulnerability_trace") or finding.get("trace") or {}
+    steps = trace.get("steps", []) if isinstance(trace, dict) else []
+    if not isinstance(steps, list) or len(steps) < 2:
+        return False
+    trace_files = {
+        str(step.get("file") or "").removeprefix("./")
+        for step in steps
+        if isinstance(step, dict)
+    }
+    if target_files and not target_files.intersection(trace_files):
+        return False
+
+    serialized = json.dumps(finding, sort_keys=True, default=str).casefold()
+    distinctive_symbols = [
+        value
+        for value in [*truth.target_functions, *truth.expected_fact_symbols]
+        if len(value) >= 4
+    ]
+    required_symbol_hits = min(2, len(distinctive_symbols))
+    symbol_hits = sum(value.casefold() in serialized for value in distinctive_symbols)
+    if symbol_hits < required_symbol_hits:
+        return False
+    return bool(str(finding.get("description") or "").strip())
 
 
 def _inspect_legacy_session(
@@ -1075,8 +1244,7 @@ def _inspect_legacy_session(
     matched = [
         finding
         for finding in findings
-        if (not truth.target_files or str(finding.get("file") or "") in set(truth.target_files))
-        and (not truth.expected_cwes or str(finding.get("cwe") or "") in set(truth.expected_cwes))
+        if isinstance(finding, dict) and _legacy_finding_matches_truth(finding, truth)
     ]
     expected_positive = truth.expected_decision == "confirmed"
     true_positive = int(expected_positive and bool(matched))
@@ -1104,6 +1272,7 @@ def _inspect_legacy_session(
     total_tokens = int(manifest.get("total_tokens", 0) or 0)
     output_tokens = int(manifest.get("output_tokens", 0) or 0)
     input_tokens = int(manifest.get("input_tokens", max(0, total_tokens - output_tokens)) or 0)
+    context_metrics = manifest.get("context_metrics", {}) or {}
     unsupported_claims = sum(
         str(finding.get("evidence_level") or "suspicion") == "suspicion" for finding in findings
     )
@@ -1114,6 +1283,9 @@ def _inspect_legacy_session(
         flow=spec.flow,
         model_tier=spec.model_tier,
         model=spec.model,
+        prompt_bundle=spec.prompt_bundle,
+        scaffold_profile=spec.scaffold_profile,
+        context_profile=spec.context_profile,
         level=spec.level,
         replicate=spec.replicate,
         session_dir=str(root),
@@ -1126,6 +1298,12 @@ def _inspect_legacy_session(
         cost_usd=float(manifest.get("total_spent", 0.0) or 0.0),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        model_calls=int(context_metrics.get("model_calls", 0) or 0),
+        compaction_count=int(context_metrics.get("compaction_count", 0) or 0),
+        peak_context_tokens=int(
+            context_metrics.get("peak_context_tokens_estimate", 0) or 0
+        ),
+        peak_input_tokens=int(context_metrics.get("peak_input_tokens", 0) or 0),
         report_claim_count=len(findings),
         unsupported_claims=unsupported_claims,
         report_failures=report_failures,

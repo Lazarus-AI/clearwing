@@ -40,6 +40,10 @@ class TestAutoResolveReasoningEffort:
         result = AsyncLLMClient._auto_resolve_reasoning_effort("deepseek-r1")
         assert result == "medium"
 
+    def test_local_deepseek_v4_flash_omits_reasoning_effort(self):
+        result = AsyncLLMClient._auto_resolve_reasoning_effort("dsv4-flash-nvfp4")
+        assert result is None
+
     @pytest.mark.parametrize("model", ["k3", "k3-256k"])
     def test_kimi_code_k3_uses_supported_high_effort(self, model):
         result = AsyncLLMClient._auto_resolve_reasoning_effort(model)

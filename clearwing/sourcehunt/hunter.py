@@ -20,9 +20,12 @@ from typing import Any
 
 from clearwing.agent.tools.hunt import (
     HunterContext,
+    build_candidate_tools,
     build_deep_agent_tools,
     build_hunter_tools,
     build_propagation_auditor_tools,
+    build_window_tools,
+    candidate_matches_domain,
 )
 from clearwing.core.events import EventBus, EventType
 from clearwing.data.memory import ContextSummarizer
@@ -31,7 +34,20 @@ from clearwing.llm.budget import spend_metadata
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
+from .context import (
+    SourceHuntContextManager,
+    compact_tool_specs,
+    estimate_request_tokens,
+)
 from .instrumentation import stable_run_id
+from .optimization import (
+    GENERIC_INSTRUCTIONS_COMPACT_V1,
+    GENERIC_PROMPT_HEADER,
+    GENERIC_PROMPT_HEADER_COMPACT,
+    get_context_profile,
+    get_prompt_bundle,
+    get_scaffold_profile,
+)
 from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
@@ -251,6 +267,7 @@ class HunterTrajectoryLogger:
                 "specialist": ctx.specialist,
                 "prompt": prompt,
                 "tools": [tool.name for tool in tools],
+                "context_profile": getattr(ctx, "context_profile", "legacy-context-v1"),
                 "seeded_crash": ctx.seeded_crash,
             },
         )
@@ -916,6 +933,11 @@ Rules:
 """
 
 
+COMPACT_TRACE_INSTRUCTIONS = """Trace: record exact source-backed entry, relevant conditions/flow, and sink as you
+read them. Submit only after the trace is coherent and counterevidence is resolved.
+"""
+
+
 _SPECIALIST_PROMPTS = {
     "general": GENERAL_HUNTER_PROMPT,
     "memory_safety": MEMORY_SAFETY_HUNTER_PROMPT,
@@ -1171,6 +1193,84 @@ def _build_unconstrained_prompt(
     return prompt
 
 
+def _build_generic_prompt(
+    file_target: FileTarget,
+    project_name: str,
+    seeded_crash: dict | None,
+    semgrep_hints: list[dict] | None,
+    *,
+    template: str,
+    prompt_candidate: str | None = None,
+    campaign_hint: str | None = None,
+    exploit_mode: bool = False,
+    entry_point: Any = None,
+    findings_pool: Any = None,
+    agent_mode: str = "constrained",
+    compact_static: bool = False,
+) -> str:
+    """Render a versioned generic prompt without solution-derived context."""
+
+    seed_parts: list[str] = []
+    if seeded_crash:
+        report = seeded_crash.get("report", "")
+        seed_parts.append(
+            "\nA pre-run harness produced this crash. Treat it as evidence to explain, "
+            "not as proof of a particular root cause:\n"
+            f"{report[:2000]}\n"
+        )
+    if semgrep_hints:
+        hint_lines = [
+            f"  - line {hint.get('line', '?')}: {hint.get('description', '')}"
+            for hint in semgrep_hints[:5]
+        ]
+        seed_parts.append(
+            "\nMachine-generated static hints (untrusted starting points):\n"
+            + "\n".join(hint_lines)
+            + "\n"
+        )
+
+    render_values = {
+        "project_name": project_name,
+        "file_path": file_target.get("path", "unknown"),
+        "language": file_target.get("language", "unknown"),
+        "tags": ", ".join(file_target.get("tags", [])) or "none",
+        "seed_context_block": "".join(seed_parts),
+    }
+    if compact_static:
+        prompt = GENERIC_PROMPT_HEADER_COMPACT.format(**render_values) + (
+            prompt_candidate
+            if prompt_candidate is not None
+            else GENERIC_INSTRUCTIONS_COMPACT_V1
+        )
+    elif prompt_candidate is not None:
+        prompt = GENERIC_PROMPT_HEADER.format(**render_values) + prompt_candidate
+    else:
+        prompt = template.format(**render_values)
+    if campaign_hint:
+        prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
+    if exploit_mode:
+        prompt += "\n" + EXPLOIT_EXTENSION + "\n" + MITIGATION_REASONING
+    if entry_point is not None:
+        prompt += "\n" + ENTRY_POINT_FOCUS.format(
+            entry_point=entry_point.function_name,
+            file_path=file_target.get("path", "unknown"),
+            start_line=entry_point.start_line,
+            end_line=entry_point.end_line,
+            entry_type=entry_point.entry_type,
+        )
+    if findings_pool is not None:
+        count = len(findings_pool.all_findings())
+        if count > 0:
+            prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
+    if compact_static:
+        prompt += "\n" + COMPACT_TRACE_INSTRUCTIONS
+    else:
+        prompt += "\n" + (
+            DEEP_TRACE_INSTRUCTIONS if agent_mode == "deep" else TRACE_BUILDING_INSTRUCTIONS
+        )
+    return prompt
+
+
 SEED_TRANSCRIPT_BLOCK = """
 A previous investigation of this file found the following:
 {transcript}
@@ -1365,8 +1465,14 @@ class HunterRunResult:
     findings: list[Finding]
     cost_usd: float
     tokens_used: int
-    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps" | "degenerate_loop"
+    stop_reason: str  # completed | budget_exhausted | max_steps | degenerate_loop | no_source_action
     transcript_summary: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model_calls: int = 0
+    compaction_count: int = 0
+    peak_context_tokens: int = 0
+    peak_input_tokens: int = 0
 
 
 @dataclass
@@ -1378,9 +1484,24 @@ class NativeHunter:
     max_steps: int = 20
     agent_mode: str = "constrained"  # "constrained" | "deep"
     budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
+    candidate_gate_after_source_actions: int = 0
+    require_source_windows: bool = False
+    ranked_windows_before_candidate: int = 0
+    state_packets_before_candidate: int = 0
+    value_domains_before_candidate: int = 0
+    enable_domain_proof_refinement: bool = False
     summarizer: ContextSummarizer | None = field(default=None)
+    context_profile: str = "legacy-context-v1"
+    context_manager: SourceHuntContextManager | None = field(default=None)
+    tool_result_chars: int = 0
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    closing_steps: int = 0
+    initial_source_action_retries: int = 0
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
         """Return a stop reason string, or None to continue."""
@@ -1389,6 +1510,30 @@ class NativeHunter:
         if step > self.max_steps:
             return "max_steps"
         return None
+
+    def _request_tools(self) -> list[NativeToolSpec]:
+        """Expose the refinement schema only after a proof records a gap."""
+
+        if self.enable_domain_proof_refinement and self.ctx.domain_proof_obligations:
+            return self.tools
+        return [
+            tool for tool in self.tools if tool.name != "read_domain_proof_refinement"
+        ]
+
+    def _request_system(self, step: int) -> str:
+        """Add a tiny, generic closure signal only near the hard step cap."""
+
+        remaining = self.max_steps - step + 1
+        if self.closing_steps < 1 or remaining > self.closing_steps:
+            return self.prompt
+        return (
+            self.prompt
+            + f"\n\nBudget closure: {remaining} model call(s) remain, including this one. "
+            "Focus only on the strongest active candidate. Use at most one narrow "
+            "check to resolve its decisive counterargument. If coherent, record the "
+            "exact trace and submit now; if disproved, reject it. If none survives, "
+            "finish without a finding. Do not start broad exploration."
+        )
 
     async def arun(self) -> HunterRunResult:
         user_msg = (
@@ -1409,6 +1554,14 @@ class NativeHunter:
         total_repeated_skips = 0
         tools_by_name = {tool.name: tool for tool in self.tools}
         last_assistant_text = ""
+        candidate_revision_seen = self.ctx.candidate_revision
+        source_actions_since_candidate_update = 0
+        model_calls = 0
+        compaction_count = 0
+        peak_context_tokens = 0
+        peak_input_tokens = 0
+        source_actions_completed = 0
+        source_action_retries = 0
 
         step = 0
         while True:
@@ -1440,6 +1593,12 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason=stop_reason,
                     transcript_summary=last_assistant_text[-500:],
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    model_calls=model_calls,
+                    compaction_count=compaction_count,
+                    peak_context_tokens=peak_context_tokens,
+                    peak_input_tokens=peak_input_tokens,
                 )
 
             model_call_id = stable_run_id(
@@ -1450,16 +1609,49 @@ class NativeHunter:
                     "step": step,
                 },
             )
+            request_tools = self._request_tools()
+            request_system = self._request_system(step)
             with spend_metadata(model_call_id=model_call_id):
-                if self.summarizer and self.summarizer.should_summarize(messages):
+                if self.context_manager and self.context_manager.should_compact(
+                    messages,
+                    system=request_system,
+                    tools=request_tools,
+                ):
+                    compaction = self.context_manager.compact(
+                        messages,
+                        system=request_system,
+                        tools=request_tools,
+                    )
+                    messages = compaction.messages
+                    compaction_count += 1
+                    trajectory.log(
+                        "context_compaction",
+                        {
+                            "step": step,
+                            "context_profile": self.context_profile,
+                            "before_tokens_estimate": compaction.before_tokens,
+                            "after_tokens_estimate": compaction.after_tokens,
+                            "dropped_messages": compaction.dropped_messages,
+                            "compaction_count": compaction_count,
+                        },
+                    )
+                elif self.summarizer and self.summarizer.should_summarize(messages):
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
+                estimated_context_tokens = estimate_request_tokens(
+                    messages,
+                    system=request_system,
+                    tools=request_tools,
+                )
+                peak_context_tokens = max(peak_context_tokens, estimated_context_tokens)
                 response = await self.llm.achat(
                     messages=messages,
-                    system=self.prompt,
-                    tools=self.tools,
+                    system=request_system,
+                    tools=request_tools,
+                    temperature=self.temperature,
+                    max_tokens=self.max_output_tokens,
                 )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
@@ -1486,21 +1678,36 @@ class NativeHunter:
                         "total_tokens": response.usage.total_tokens or 0,
                     },
                     "model": response.provider_model_name,
+                    "context_profile": self.context_profile,
+                    "estimated_context_tokens": estimated_context_tokens,
+                    "compaction_count": compaction_count,
                 },
             )
+            model_calls += 1
             total_input_tokens += response.usage.prompt_tokens or 0
             total_output_tokens += response.usage.completion_tokens or 0
+            peak_input_tokens = max(peak_input_tokens, response.usage.prompt_tokens or 0)
             # Older genai-pyo3 responses and lightweight test doubles may not
             # expose prompt_tokens_details at all. Treat that the same as a
             # response where nothing was cache-served.
             details = getattr(response.usage, "prompt_tokens_details", None)
             cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
-            total_cost_usd += _estimate_cost_usd(
-                response.usage.prompt_tokens or 0,
-                response.usage.completion_tokens or 0,
-                self.llm.model_name,
-                cached_tokens,
-            )
+            if (
+                self.input_price_per_million is not None
+                and self.output_price_per_million is not None
+            ):
+                total_cost_usd += (
+                    (response.usage.prompt_tokens or 0) * self.input_price_per_million
+                    + (response.usage.completion_tokens or 0)
+                    * self.output_price_per_million
+                ) / 1_000_000
+            else:
+                total_cost_usd += _estimate_cost_usd(
+                    response.usage.prompt_tokens or 0,
+                    response.usage.completion_tokens or 0,
+                    self.llm.model_name,
+                    cached_tokens,
+                )
 
             last_assistant_text = response.first_text or ""
             if last_assistant_text:
@@ -1552,13 +1759,353 @@ class NativeHunter:
                     # two tools' arguments literal — only tools without an
                     # inherent legitimate-pagination shape benefit from
                     # normalizing away incrementing digits.
-                    if tool_call.fn_name in ("read_file", "read_source_file"):
+                    if tool_call.fn_name in (
+                        "read_file",
+                        "read_ranked_window",
+                        "read_source_file",
+                    ):
                         key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
                     else:
                         normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
                         key = (tool_call.fn_name, normalized_args[:300])
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
+                    if self.ctx.candidate_revision != candidate_revision_seen:
+                        candidate_revision_seen = self.ctx.candidate_revision
+                        source_actions_since_candidate_update = 0
+                    source_action = tool_call.fn_name in {
+                        "read_domain_consequences",
+                        "read_ranked_window",
+                        "read_state_interactions",
+                        "read_source_file",
+                        "grep_source",
+                        "read_file",
+                        "execute",
+                    }
+                    ranked_coverage_target = min(
+                        self.ranked_windows_before_candidate,
+                        len(self.ctx.source_window_plan),
+                    )
+                    ranked_coverage_incomplete = bool(
+                        ranked_coverage_target > 0
+                        and len(self.ctx.source_windows_read) < ranked_coverage_target
+                    )
+                    state_packet_coverage_incomplete = bool(
+                        self.state_packets_before_candidate > 0
+                        and len(self.ctx.state_packets_read)
+                        < self.state_packets_before_candidate
+                    )
+                    value_domain_coverage_incomplete = bool(
+                        self.value_domains_before_candidate > 0
+                        and len(self.ctx.value_domains) < self.value_domains_before_candidate
+                    )
+                    unresolved_domain_ids = {
+                        domain_id
+                        for domain_id, domain in self.ctx.value_domains.items()
+                        if domain.get("assessment") in {"overlap_possible", "unresolved"}
+                    }
+                    consequence_coverage_incomplete = bool(
+                        unresolved_domain_ids
+                        - set(self.ctx.domain_consequences)
+                    )
+                    candidate_gate_blocked = bool(
+                        source_action
+                        and self.candidate_gate_after_source_actions > 0
+                        and source_actions_since_candidate_update
+                        >= self.candidate_gate_after_source_actions
+                        and not ranked_coverage_incomplete
+                        and tool_call.fn_name != "read_domain_consequences"
+                    )
+                    proof_checkpoint = next(
+                        (
+                            (domain_id, candidate_id)
+                            for domain_id, candidate_id in self.ctx.domain_candidate_ids.items()
+                            if "record_domain_proof" in tools_by_name
+                            and self.ctx.value_domains.get(domain_id, {}).get("assessment")
+                            in {"overlap_possible", "unresolved"}
+                            and not self.ctx.value_domains.get(domain_id, {}).get(
+                                "blocking_guard_locations"
+                            )
+                            and self.ctx.domain_consequences.get(domain_id, {}).get("assessment")
+                            != "benign"
+                            and self.ctx.domain_consequence_plans.get(domain_id, {}).get(
+                                "boundary_facts"
+                            )
+                            and self.ctx.candidates.get(candidate_id, {}).get("status")
+                            in {"pending", "investigating"}
+                        ),
+                        None,
+                    )
+                    domain_proof_gate_blocked = bool(
+                        proof_checkpoint
+                        and (
+                            bool(self.ctx.domain_proof_obligations.get(proof_checkpoint[0]))
+                            or (
+                                self.candidate_gate_after_source_actions > 0
+                                and source_actions_since_candidate_update
+                                >= self.candidate_gate_after_source_actions
+                            )
+                        )
+                        and (source_action or tool_call.fn_name == "record_candidate")
+                    )
+                    domain_refinement_pending = bool(
+                        self.enable_domain_proof_refinement
+                        and proof_checkpoint
+                        and proof_checkpoint[0] in self.ctx.domain_refinement_pending_proof
+                    )
+                    window_gate_blocked = bool(
+                        source_action
+                        and self.require_source_windows
+                        and not self.ctx.source_windows_ranked
+                    )
+                    ranked_coverage_blocked = bool(
+                        source_action
+                        and self.require_source_windows
+                        and self.ctx.source_window_plan
+                        and ranked_coverage_incomplete
+                        and tool_call.fn_name != "read_ranked_window"
+                    )
+                    candidate_window_gate_blocked = bool(
+                        tool_call.fn_name == "record_candidate"
+                        and ranked_coverage_incomplete
+                    )
+                    state_packet_gate_blocked = bool(
+                        source_action
+                        and not ranked_coverage_incomplete
+                        and state_packet_coverage_incomplete
+                        and tool_call.fn_name != "read_state_interactions"
+                    )
+                    candidate_state_packet_gate_blocked = bool(
+                        tool_call.fn_name == "record_candidate"
+                        and not ranked_coverage_incomplete
+                        and state_packet_coverage_incomplete
+                    )
+                    value_domain_gate_blocked = bool(
+                        source_action
+                        and not ranked_coverage_incomplete
+                        and not state_packet_coverage_incomplete
+                        and value_domain_coverage_incomplete
+                    )
+                    candidate_value_domain_gate_blocked = bool(
+                        tool_call.fn_name == "record_candidate"
+                        and not ranked_coverage_incomplete
+                        and not state_packet_coverage_incomplete
+                        and value_domain_coverage_incomplete
+                    )
+                    consequence_gate_blocked = bool(
+                        source_action
+                        and not value_domain_coverage_incomplete
+                        and consequence_coverage_incomplete
+                        and tool_call.fn_name != "read_domain_consequences"
+                    )
+                    candidate_consequence_gate_blocked = bool(
+                        tool_call.fn_name == "record_candidate"
+                        and consequence_coverage_incomplete
+                    )
+                    candidate_text = " ".join(
+                        str(tool_arguments.get(field, ""))
+                        for field in ("hypothesis", "invariant", "evidence")
+                    ).casefold()
+                    domain_rejection_blocked = bool(
+                        tool_call.fn_name == "record_candidate"
+                        and str(tool_arguments.get("status", "")) == "rejected"
+                        and any(
+                            consequence.get("assessment") != "benign"
+                            and candidate_matches_domain(candidate_text, domain)
+                            for domain_id, consequence in self.ctx.domain_consequences.items()
+                            if (domain := self.ctx.value_domains.get(domain_id)) is not None
+                        )
+                    )
+                    domain_candidate_mismatch = False
+                    domain_guard_reassessment_blocked = False
+                    if tool_call.fn_name == "record_candidate":
+                        candidate_id = str(tool_arguments.get("candidate_id", ""))
+                        domain_guard_reassessment_blocked = any(
+                            tracked_id == candidate_id
+                            and self.ctx.value_domains.get(domain_id, {}).get("assessment")
+                            in {"overlap_possible", "unresolved"}
+                            and bool(
+                                self.ctx.value_domains.get(domain_id, {}).get(
+                                    "blocking_guard_locations"
+                                )
+                            )
+                            for domain_id, tracked_id in self.ctx.domain_candidate_ids.items()
+                        )
+                        tracked_domain = next(
+                            (
+                                self.ctx.value_domains[domain_id]
+                                for domain_id, tracked_id in self.ctx.domain_candidate_ids.items()
+                                if tracked_id == candidate_id
+                                and self.ctx.value_domains[domain_id].get("assessment")
+                                in {"overlap_possible", "unresolved"}
+                                and self.ctx.domain_consequences.get(domain_id, {}).get(
+                                    "assessment"
+                                )
+                                != "benign"
+                            ),
+                            None,
+                        )
+                        unresolved_domains = [
+                            domain
+                            for domain in self.ctx.value_domains.values()
+                            if domain.get("assessment") in {"overlap_possible", "unresolved"}
+                        ]
+                        domain = tracked_domain or (
+                            unresolved_domains[0]
+                            if not self.ctx.candidates and unresolved_domains
+                            else None
+                        )
+                        if domain is not None:
+                            domain_candidate_mismatch = not candidate_matches_domain(
+                                candidate_text,
+                                domain,
+                            )
+                    gate_name: str | None = None
+                    gate_message: str | None = None
+                    if candidate_window_gate_blocked:
+                        gate_name = "candidate_window_gate"
+                        gate_message = (
+                            "inspect at least "
+                            f"{ranked_coverage_target} "
+                            "ranked windows before "
+                            "forming a candidate; compare different signal mixes first."
+                        )
+                    elif candidate_state_packet_gate_blocked:
+                        gate_name = "candidate_state_packet_gate"
+                        gate_message = (
+                            "expand the first ranked anchor before forming a candidate. "
+                            "Call read_state_interactions on a ranked window you already read."
+                        )
+                    elif candidate_value_domain_gate_blocked:
+                        gate_name = "candidate_value_domain_gate"
+                        gate_message = (
+                            "record one value-domain comparison before forming a candidate. "
+                            "Call record_value_domain using only the interaction packet."
+                        )
+                    elif candidate_consequence_gate_blocked:
+                        gate_name = "candidate_consequence_gate"
+                        gate_message = (
+                            "expand and assess the overlapping domain before forming a candidate. "
+                            "Call read_domain_consequences, then record_domain_consequence."
+                        )
+                    elif domain_rejection_blocked:
+                        gate_name = "domain_rejection_gate"
+                        gate_message = (
+                            "do not reject this domain candidate until its recorded consequence is "
+                            "benign or the candidate's next_check falsifies the security effect."
+                        )
+                    elif domain_guard_reassessment_blocked:
+                        gate_name = "domain_guard_reassessment_gate"
+                        gate_message = (
+                            "the packet extracted a terminating producer guard. Reassess the "
+                            "value domain with record_value_domain before updating this candidate; "
+                            "cite that guard's source location and the distinguished value."
+                        )
+                    elif (
+                        domain_refinement_pending
+                        and proof_checkpoint is not None
+                        and tool_call.fn_name != "record_domain_proof"
+                    ):
+                        domain_id, candidate_id = proof_checkpoint
+                        gate_name = "domain_refinement_proof_gate"
+                        gate_message = (
+                            "proof refinement consumed. Call record_domain_proof now with "
+                            f"domain_id={domain_id} and candidate_id={candidate_id}; update the "
+                            "refined obligation and preserve the other answers."
+                        )
+                    elif (
+                        self.enable_domain_proof_refinement
+                        and
+                        proof_checkpoint is not None
+                        and self.ctx.domain_proof_obligations.get(proof_checkpoint[0])
+                        and tool_call.fn_name
+                        not in {"read_domain_proof_refinement", "record_domain_proof"}
+                    ):
+                        domain_id, _candidate_id = proof_checkpoint
+                        unresolved = self.ctx.domain_proof_obligations[domain_id]
+                        gate_name = "domain_proof_refinement_gate"
+                        gate_message = (
+                            "domain proof has one prerequisite unresolved. Call "
+                            "read_domain_proof_refinement with "
+                            f"domain_id={domain_id} and obligation={unresolved[0]}."
+                        )
+                    elif domain_proof_gate_blocked and proof_checkpoint is not None:
+                        domain_id, candidate_id = proof_checkpoint
+                        unresolved = [
+                            obligation
+                            for obligation in self.ctx.domain_proof_obligations.get(domain_id, [])
+                            if (domain_id, obligation) not in self.ctx.domain_refinements_read
+                        ]
+                        if (
+                            self.enable_domain_proof_refinement
+                            and unresolved
+                            and "read_domain_proof_refinement" in tools_by_name
+                            and tool_call.fn_name != "read_domain_proof_refinement"
+                        ):
+                            gate_name = "domain_proof_refinement_gate"
+                            choices = ", ".join(unresolved)
+                            gate_message = (
+                                "domain proof has unresolved obligations. Call "
+                                "read_domain_proof_refinement with "
+                                f"domain_id={domain_id} and one of: {choices}."
+                            )
+                        elif tool_call.fn_name != "read_domain_proof_refinement":
+                            gate_name = "domain_proof_gate"
+                            gate_message = (
+                                "domain proof checkpoint required before more source actions or "
+                                "candidate rewrites. Call record_domain_proof now with "
+                                f"domain_id={domain_id} and candidate_id={candidate_id}. Answer "
+                                "its four booleans from source read so far; use false for anything "
+                                "unresolved. It will narrow the next check or validate and seed "
+                                "the exact trace."
+                            )
+                    elif domain_candidate_mismatch:
+                        gate_name = "candidate_domain_mismatch"
+                        gate_message = (
+                            "the candidate must stay tied to the concrete state identifiers "
+                            "extracted by the domain packet and, when present, its distinguished "
+                            "value. The scaffold supplies its next check automatically."
+                        )
+                    elif window_gate_blocked:
+                        gate_name = "window_gate"
+                        gate_message = (
+                            "source-window ranking required before direct source actions. "
+                            "Call rank_source_windows on the assigned file, then choose a "
+                            "small, signal-diverse set of windows to inspect."
+                        )
+                    elif state_packet_gate_blocked:
+                        gate_name = "state_packet_gate"
+                        gate_message = (
+                            "expand the first ranked anchor before free-form source actions. "
+                            "Call read_state_interactions on a ranked window you already read."
+                        )
+                    elif value_domain_gate_blocked:
+                        gate_name = "value_domain_gate"
+                        gate_message = (
+                            "record one value-domain comparison before free-form source actions. "
+                            "Call record_value_domain using only the interaction packet."
+                        )
+                    elif consequence_gate_blocked:
+                        gate_name = "domain_consequence_gate"
+                        gate_message = (
+                            "assess the overlapping domain before free-form source actions. Call "
+                            "read_domain_consequences, then record_domain_consequence."
+                        )
+                    elif ranked_coverage_blocked:
+                        gate_name = "ranked_window_gate"
+                        gate_message = (
+                            "finish ranked-window coverage before free-form source actions. "
+                            "Call read_ranked_window using the next diverse window_id from "
+                            "the previous result."
+                        )
+                    elif candidate_gate_blocked:
+                        gate_name = "candidate_gate"
+                        gate_message = (
+                            "candidate ledger checkpoint required before more source actions. "
+                            "Call record_candidate now. Create the best concrete hypothesis if "
+                            "the queue is empty; otherwise update the selected candidate with "
+                            "new evidence, counterevidence, status, and one narrow next_check."
+                        )
 
                     if skipped:
                         total_repeated_skips += 1
@@ -1571,7 +2118,7 @@ class NativeHunter:
                                 "final summary and no tool calls to finish this hunt."
                             )
                         }
-                        tool_summary = _tool_output_text(
+                        tool_summary = self._tool_output_text(
                             tool_call.fn_name,
                             tool_arguments,
                             tool_output,
@@ -1586,6 +2133,23 @@ class NativeHunter:
                                 "repeated_skip": True,
                             },
                         )
+                    elif gate_message is not None:
+                        tool_output = {"error": gate_message}
+                        tool_summary = self._tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                        gate_payload = {
+                            "step": step,
+                            "tool_call": _serialize_tool_call(tool_call),
+                            "tool_output": tool_output,
+                            "tool_summary": tool_summary,
+                            "repeated_skip": False,
+                        }
+                        if gate_name is not None:
+                            gate_payload[gate_name] = True
+                        trajectory.log("tool_result", gate_payload)
                     else:
                         trajectory.log(
                             "tool_call",
@@ -1594,8 +2158,14 @@ class NativeHunter:
                                 "tool_call": _serialize_tool_call(tool_call),
                             },
                         )
+                        if source_action:
+                            source_actions_since_candidate_update += 1
                         tool_output = await self._run_tool(tools_by_name, tool_call)
-                        tool_summary = _tool_output_text(
+                        if source_action and not (
+                            isinstance(tool_output, dict) and tool_output.get("error")
+                        ):
+                            source_actions_completed += 1
+                        tool_summary = self._tool_output_text(
                             tool_call.fn_name,
                             tool_arguments,
                             tool_output,
@@ -1651,8 +2221,55 @@ class NativeHunter:
                             tokens_used=total_input_tokens + total_output_tokens,
                             stop_reason="degenerate_loop",
                             transcript_summary=last_assistant_text[-500:],
+                            input_tokens=total_input_tokens,
+                            output_tokens=total_output_tokens,
+                            model_calls=model_calls,
+                            compaction_count=compaction_count,
+                            peak_context_tokens=peak_context_tokens,
+                            peak_input_tokens=peak_input_tokens,
                         )
                 continue
+
+            if source_actions_completed == 0 and self.initial_source_action_retries > 0:
+                if last_assistant_text:
+                    messages.append(ChatMessage("assistant", last_assistant_text))
+                if source_action_retries < self.initial_source_action_retries:
+                    source_action_retries += 1
+                    retry_message = (
+                        "No source tool ran. Use one available source-read or search tool "
+                        "now. Do not write or simulate a tool call in text."
+                    )
+                    messages.append(ChatMessage("user", retry_message))
+                    trajectory.log(
+                        "source_action_retry",
+                        {"step": step, "retry": source_action_retries},
+                    )
+                    continue
+
+                trajectory.log(
+                    "finish",
+                    {
+                        "step": step,
+                        "status": "no_source_action",
+                        "findings": [],
+                        "total_input_tokens": total_input_tokens,
+                        "total_output_tokens": total_output_tokens,
+                        "total_cost_usd": total_cost_usd,
+                    },
+                )
+                return HunterRunResult(
+                    findings=[],
+                    cost_usd=total_cost_usd,
+                    tokens_used=total_input_tokens + total_output_tokens,
+                    stop_reason="no_source_action",
+                    transcript_summary=last_assistant_text[-500:],
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    model_calls=model_calls,
+                    compaction_count=compaction_count,
+                    peak_context_tokens=peak_context_tokens,
+                    peak_input_tokens=peak_input_tokens,
+                )
 
             if last_assistant_text:
                 messages.append(ChatMessage("assistant", last_assistant_text))
@@ -1679,7 +2296,19 @@ class NativeHunter:
                 tokens_used=total_input_tokens + total_output_tokens,
                 stop_reason="completed",
                 transcript_summary=last_assistant_text[-500:],
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                model_calls=model_calls,
+                compaction_count=compaction_count,
+                peak_context_tokens=peak_context_tokens,
+                peak_input_tokens=peak_input_tokens,
             )
+
+    def _tool_output_text(self, tool_name: str, arguments: dict[str, Any], value: Any) -> str:
+        rendered = _tool_output_text(tool_name, arguments, value)
+        if self.tool_result_chars > 0:
+            return _clip_text(rendered, self.tool_result_chars)
+        return rendered
 
     async def _run_tool(
         self,
@@ -1877,7 +2506,16 @@ def build_hunter_agent(
     default_sanitizers: tuple = ("asan", "ubsan"),  # v0.4: primary sanitizer combo
     agent_mode: str = "constrained",  # "constrained" | "deep"
     budget_usd: float = 0.0,
+    input_price_per_million: float | None = None,
+    output_price_per_million: float | None = None,
     prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
+    prompt_bundle: str = "legacy-v1",
+    scaffold_profile: str = "native-v1",
+    context_profile: str = "legacy-context-v1",
+    prompt_candidate: str | None = None,
+    max_steps_override: int | None = None,
+    temperature: float | None = None,
+    max_output_tokens: int | None = None,
     campaign_hint: str | None = None,
     exploit_mode: bool = False,
     seed_transcript: str | None = None,
@@ -1903,8 +2541,15 @@ def build_hunter_agent(
         variant_seed: v0.3 — variant hunter loop seed.
         agent_mode: "constrained" (legacy 9-tool) or "deep" (full-shell 4+1 tool).
         budget_usd: Per-agent budget in USD (0 = unlimited, bounded by max_steps).
+        input_price_per_million: Optional run-scoped input token price override.
+        output_price_per_million: Optional run-scoped output token price override.
         prompt_mode: "unconstrained" (simple discovery prompt) or "specialist"
                      (legacy prescriptive checklists with execution rules).
+        prompt_bundle: Versioned prompt unit. ``generic-security-v1`` disables
+                       solution-derived heuristics and historical CVE context.
+        scaffold_profile: Versioned tool/control surface. ``minimal-linear-v1``
+                          exposes a Pi-like narrow tool set.
+        prompt_candidate: Optional optimizer-proposed generic instruction text.
         campaign_hint: Optional campaign objective, e.g. "bugs reachable from
                        unauthenticated remote input".
         exploit_mode: When True, append exploit-writing and mitigation-reasoning
@@ -1917,6 +2562,17 @@ def build_hunter_agent(
         (native_hunter, hunter_context). The caller owns the context and
         reads ctx.findings after the run completes.
     """
+    bundle = get_prompt_bundle(prompt_bundle)
+    scaffold = get_scaffold_profile(scaffold_profile)
+    context_policy = get_context_profile(context_profile)
+    if prompt_candidate is not None and not bundle.is_generic:
+        raise ValueError("prompt_candidate requires a generic prompt bundle")
+    if max_steps_override is not None and max_steps_override < 1:
+        raise ValueError("max_steps_override must be positive when provided")
+    if temperature is not None and not 0.0 <= temperature <= 2.0:
+        raise ValueError("temperature must be between 0 and 2")
+    if max_output_tokens is not None and max_output_tokens < 1:
+        raise ValueError("max_output_tokens must be positive when provided")
     tier = file_target.get("tier", "B")
     if specialist is None:
         if tier == "C":
@@ -1924,24 +2580,55 @@ def build_hunter_agent(
         else:
             specialist = _choose_specialist(file_target)
 
+    if bundle.is_generic:
+        context_specialist = "generic"
+    elif prompt_mode == "specialist" or specialist == "propagation":
+        context_specialist = specialist
+    else:
+        context_specialist = "unconstrained"
+
     ctx = HunterContext(
         repo_path=repo_path,
         sandbox=sandbox,
         findings=[],
         file_path=file_target.get("path"),
         session_id=session_id,
-        specialist=(
-            specialist
-            if prompt_mode == "specialist" or specialist == "propagation"
-            else "unconstrained"
-        ),
+        specialist=context_specialist,
         seeded_crash=seeded_crash,
         sandbox_manager=sandbox_manager,
         default_sanitizers=tuple(default_sanitizers),
         findings_pool=findings_pool,
+        require_validated_candidate_before_finding=(
+            scaffold.require_validated_candidate_before_finding
+        ),
+        require_active_candidate_before_finding=(
+            scaffold.require_active_candidate_before_finding
+        ),
     )
 
-    if specialist == "propagation":
+    if bundle.is_generic:
+        combined_hints = list(semgrep_hints or [])
+        prompt = _build_generic_prompt(
+            file_target,
+            project_name,
+            seeded_crash,
+            combined_hints,
+            template=bundle.discovery_template or "",
+            prompt_candidate=prompt_candidate,
+            campaign_hint=campaign_hint,
+            exploit_mode=exploit_mode,
+            entry_point=entry_point,
+            findings_pool=findings_pool,
+            agent_mode=agent_mode,
+            compact_static=context_policy.compact_static_instructions,
+        )
+        if agent_mode == "deep":
+            tools = build_deep_agent_tools(ctx)
+            max_steps = 500
+        else:
+            tools = build_hunter_tools(ctx)
+            max_steps = 20
+    elif specialist == "propagation":
         tools = build_propagation_auditor_tools(ctx)
         prompt = _build_propagation_prompt(file_target)
         max_steps = 20
@@ -1982,7 +2669,7 @@ def build_hunter_agent(
     else:
         tools = build_hunter_tools(ctx)
         combined_hints = list(semgrep_hints or [])
-        if specialist == "memory_safety":
+        if specialist == "memory_safety" and bundle.allow_solution_heuristics:
             combined_hints = _memory_safety_heuristic_hints(repo_path, file_target) + combined_hints
         prompt = _build_hunter_prompt(
             file_target,
@@ -1993,8 +2680,45 @@ def build_hunter_agent(
         )
         max_steps = 20
 
+    allowed_tools = scaffold.tool_names(agent_mode)
+    if allowed_tools is not None:
+        if {
+            "record_candidate",
+            "record_value_domain",
+            "record_domain_consequence",
+            "record_domain_proof",
+        } & allowed_tools:
+            tools.extend(build_candidate_tools(ctx))
+        if {
+            "rank_source_windows",
+            "read_state_interactions",
+            "read_domain_consequences",
+            "read_domain_proof_refinement",
+        } & allowed_tools:
+            tools.extend(build_window_tools(ctx))
+        tools = [tool for tool in tools if tool.name in allowed_tools]
+    scaffold_instructions = (
+        scaffold.compact_instructions
+        if context_policy.compact_static_instructions and scaffold.compact_instructions
+        else scaffold.instructions
+    )
+    if scaffold_instructions:
+        prompt += "\n\n" + scaffold_instructions
+    if max_steps_override is not None:
+        max_steps = max_steps_override
+
     if seed_transcript:
         prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)
+
+    if context_policy.compact_tool_specs:
+        tools = compact_tool_specs(tools)
+    ctx.context_profile = context_policy.name
+    ctx.enable_domain_proof_refinement = scaffold.enable_domain_proof_refinement
+    context_manager = (
+        SourceHuntContextManager(context_policy, ctx)
+        if context_policy.strategy != "legacy"
+        else None
+    )
 
     return NativeHunter(
         llm=llm,
@@ -2004,5 +2728,21 @@ def build_hunter_agent(
         max_steps=max_steps,
         agent_mode=agent_mode,
         budget_usd=budget_usd,
-        summarizer=ContextSummarizer(),
+        input_price_per_million=input_price_per_million,
+        output_price_per_million=output_price_per_million,
+        initial_user_message=("Begin." if context_policy.strategy != "legacy" else ""),
+        summarizer=ContextSummarizer() if context_policy.strategy == "legacy" else None,
+        candidate_gate_after_source_actions=scaffold.candidate_gate_after_source_actions,
+        require_source_windows=scaffold.require_source_windows,
+        ranked_windows_before_candidate=scaffold.ranked_windows_before_candidate,
+        state_packets_before_candidate=scaffold.state_packets_before_candidate,
+        value_domains_before_candidate=scaffold.value_domains_before_candidate,
+        enable_domain_proof_refinement=scaffold.enable_domain_proof_refinement,
+        context_profile=context_policy.name,
+        context_manager=context_manager,
+        tool_result_chars=context_policy.tool_result_chars,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        closing_steps=scaffold.closing_steps,
+        initial_source_action_retries=scaffold.initial_source_action_retries,
     ), ctx

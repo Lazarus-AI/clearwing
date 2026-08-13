@@ -186,6 +186,8 @@ class HuntPoolConfig:
     llm: object | None = None  # Required if hunter_factory is None
     max_parallel: int = 8
     budget_usd: float = 0.0
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
     tier_budget: TierBudget = field(default_factory=TierBudget)
     cost_limit_per_file_a: float = 0.25
     cost_limit_per_file_b: float = 0.15
@@ -200,6 +202,13 @@ class HuntPoolConfig:
     semgrep_hints_by_file: dict = field(default_factory=dict)
     agent_mode: str = "constrained"  # "constrained" | "deep"
     prompt_mode: str = "unconstrained"  # "unconstrained" | "specialist"
+    prompt_bundle: str = "legacy-v1"
+    scaffold_profile: str = "native-v1"
+    context_profile: str = "legacy-context-v1"
+    prompt_candidate: str | None = None
+    max_hunter_steps: int | None = None
+    hunter_temperature: float | None = None
+    hunter_max_output_tokens: int | None = None
     campaign_hint: str | None = None
     exploit_mode: bool = False
     starting_band: str = "fast"  # "fast" | "standard" | "deep"
@@ -834,9 +843,18 @@ class HunterPool:
             sandbox_manager=self.config.sandbox_manager,
             agent_mode=self.config.agent_mode,
             prompt_mode=self.config.prompt_mode,
+            prompt_bundle=self.config.prompt_bundle,
+            scaffold_profile=self.config.scaffold_profile,
+            context_profile=self.config.context_profile,
+            prompt_candidate=self.config.prompt_candidate,
+            max_steps_override=self.config.max_hunter_steps,
+            temperature=self.config.hunter_temperature,
+            max_output_tokens=self.config.hunter_max_output_tokens,
             campaign_hint=self.config.campaign_hint,
             exploit_mode=self.config.exploit_mode,
             budget_usd=budget_usd,
+            input_price_per_million=self.config.input_price_per_million,
+            output_price_per_million=self.config.output_price_per_million,
             seed_transcript=seed_transcript,
             entry_point=entry_point,
             seed_context=seed_context,

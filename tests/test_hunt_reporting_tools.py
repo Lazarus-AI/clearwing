@@ -67,3 +67,38 @@ def test_record_finding_allows_different_lines(tools, ctx):
 
     assert "Finding recorded" in result
     assert len(ctx.findings) == 2
+
+
+def test_scaffold_finding_requires_validated_candidate_and_corroboration(tools, ctx):
+    ctx.require_validated_candidate_before_finding = True
+    ctx.candidates["C1"] = {"status": "investigating"}
+    tools["record_trace_step"](file="app.py", line=42, note="entry to sink")
+
+    unresolved = _record_finding(tools, candidate_id="C1")
+    ctx.candidates["C1"]["status"] = "validated"
+    suspicion = _record_finding(tools, candidate_id="C1")
+    accepted = _record_finding(
+        tools,
+        candidate_id="C1",
+        evidence_level="static_corroboration",
+    )
+
+    assert "already marked validated" in unresolved
+    assert "static_corroboration or stronger" in suspicion
+    assert "Finding recorded" in accepted
+    assert ctx.findings[0].extra["candidate_id"] == "C1"
+
+
+def test_scaffold_finding_requires_an_active_candidate(tools, ctx):
+    ctx.require_active_candidate_before_finding = True
+    ctx.candidates["C1"] = {"status": "rejected"}
+    tools["record_trace_step"](file="app.py", line=42, note="entry to sink")
+
+    absent = _record_finding(tools)
+    rejected = _record_finding(tools, candidate_id="C1")
+    ctx.candidates["C1"]["status"] = "investigating"
+    accepted = _record_finding(tools, candidate_id="C1")
+
+    assert "requires candidate_id for an active candidate" in absent
+    assert "requires candidate_id for an active candidate" in rejected
+    assert "Finding recorded" in accepted

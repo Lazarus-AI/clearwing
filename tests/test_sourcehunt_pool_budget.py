@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import clearwing.sourcehunt.pool as pool_module
 from clearwing.sourcehunt.pool import (
     HunterPool,
     HuntPoolConfig,
@@ -86,6 +87,30 @@ def _stub_hunter_factory(per_call_cost: float, finding_per_file: bool = True):
         return _StubHunter(), ctx
 
     return factory
+
+
+def test_pool_propagates_run_scoped_zero_prices_to_native_hunters(monkeypatch):
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return MagicMock(), MagicMock()
+
+    monkeypatch.setattr(pool_module, "_DEFAULT_HUNTER_FACTORY", factory)
+    pool = HunterPool(
+        HuntPoolConfig(
+            files=[_ft("src/parser.c", 4, 2)],
+            repo_path="/repo",
+            llm=MagicMock(),
+            input_price_per_million=0.0,
+            output_price_per_million=0.0,
+        )
+    )
+
+    pool._build_hunter_for_file(pool.config.files[0], None, budget_usd=5.0)
+
+    assert captured["input_price_per_million"] == 0.0
+    assert captured["output_price_per_million"] == 0.0
 
 
 def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05), per_call_cost=0.5, max_parallel=4):

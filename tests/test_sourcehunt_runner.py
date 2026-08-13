@@ -168,6 +168,225 @@ class TestQuickDepth:
 
 
 class TestStandardDepth:
+    def test_deterministic_ranker_uses_static_signals_without_llm(self):
+        files = [
+            {"path": "z.c", "tags": ["memory_unsafe"], "static_hint": 0},
+            {"path": "a_parser.c", "tags": ["memory_unsafe", "parser"], "static_hint": 0},
+        ]
+
+        Ranker(None).rank_heuristically(files)  # type: ignore[arg-type]
+
+        assert files[1]["priority"] > files[0]["priority"]
+
+    def test_deterministic_ranker_uses_file_contents_without_solution_hints(self, tmp_path):
+        dense = tmp_path / "dense.c"
+        diverse = tmp_path / "diverse.c"
+        dense.write_text("\n".join("memcpy(dst, src, len);" for _ in range(100)))
+        diverse.write_text(
+            "packet = read_input();\n"
+            "if (packet_size + offset > buffer_len) return -1;\n"
+            "dst[index] = (uint16_t)packet[value];\n"
+            "memset(state, -1, sizeof(*state));\n"
+            "free(state);\n"
+        )
+        files = [
+            {
+                "path": "src/dense.c",
+                "absolute_path": str(dense),
+                "language": "c",
+                "tags": ["memory_unsafe"],
+            },
+            {
+                "path": "src/diverse.c",
+                "absolute_path": str(diverse),
+                "language": "c",
+                "tags": ["memory_unsafe"],
+            },
+        ]
+
+        Ranker(None).rank_heuristically(files)  # type: ignore[arg-type]
+
+        assert files[1]["security_signal_score"] > files[0]["security_signal_score"]
+        assert files[1]["deterministic_rank_score"] > files[0]["deterministic_rank_score"]
+
+    def test_max_hunt_files_caps_ranked_fanout(self, tmp_path):
+        file_paths = [
+            "include/codec_limits.h",
+            "src/codec_a.c",
+            "src/codec_b.c",
+            "src/codec_c.c",
+        ]
+        hunter_llm = AsyncMock()
+        hunter_llm.achat.return_value = ChatResponse(content=[{"text": "No finding."}])
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="standard",
+            budget_usd=1.0,
+            max_parallel=1,
+            max_hunt_files=1,
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(file_paths),
+            hunter_llm=hunter_llm,
+            verifier_llm=_make_verifier_llm(),
+            no_exploit=True,
+        )
+
+        result = runner.run()
+
+        assert result.files_hunted == 1
+
+    def test_hunt_file_offset_selects_non_overlapping_rank_wave(self, tmp_path):
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="standard",
+            budget_usd=1.0,
+            max_parallel=1,
+            max_hunt_files=1,
+            hunt_file_offset=1,
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
+            hunter_llm=AsyncMock(),
+            verifier_llm=_make_verifier_llm(),
+            no_exploit=True,
+        )
+        runner.hunter_llm.achat.return_value = ChatResponse(content=[{"text": "No finding."}])
+
+        result = runner.run()
+
+        assert result.files_hunted == 1
+        events = [
+            json.loads(line)
+            for line in (tmp_path / runner.session_id / "instrumentation" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        bounded = next(
+            event
+            for event in events
+            if event.get("stage") == "rank" and event.get("status") == "bounded"
+        )
+        assert bounded["files"] == ["src/codec_b.c"]
+
+    def test_hunt_file_offsets_select_exact_sparse_rank_slots(self, tmp_path):
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="standard",
+            budget_usd=1.0,
+            max_parallel=1,
+            hunt_file_offsets=[0, 2],
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
+            hunter_llm=AsyncMock(),
+            verifier_llm=_make_verifier_llm(),
+            no_exploit=True,
+        )
+        runner.hunter_llm.achat.return_value = ChatResponse(content=[{"text": "No finding."}])
+
+        result = runner.run()
+
+        assert result.files_hunted == 2
+        events = [
+            json.loads(line)
+            for line in (tmp_path / runner.session_id / "instrumentation" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        bounded = next(
+            event
+            for event in events
+            if event.get("stage") == "rank" and event.get("status") == "bounded"
+        )
+        assert bounded["files"] == ["src/codec_a.c", "src/codec_c.c"]
+
+    def test_sparse_rank_slots_reject_ambiguous_window_options(self, tmp_path):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            SourceHuntRunner(
+                repo_url=str(FIXTURE_C_PROPAGATION),
+                local_path=str(FIXTURE_C_PROPAGATION),
+                max_hunt_files=1,
+                hunt_file_offsets=[0],
+                output_dir=str(tmp_path),
+            )
+
+    def test_hunt_file_paths_pin_selection_across_rank_changes(self, tmp_path):
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="standard",
+            budget_usd=1.0,
+            max_parallel=1,
+            hunt_file_paths=["src/codec_c.c", "include/codec_limits.h"],
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
+            hunter_llm=AsyncMock(),
+            verifier_llm=_make_verifier_llm(),
+            no_exploit=True,
+        )
+        runner.hunter_llm.achat.return_value = ChatResponse(content=[{"text": "No finding."}])
+
+        result = runner.run()
+
+        assert result.files_hunted == 2
+        events = [
+            json.loads(line)
+            for line in (tmp_path / runner.session_id / "instrumentation" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        bounded = next(
+            event
+            for event in events
+            if event.get("stage") == "rank" and event.get("status") == "bounded"
+        )
+        assert set(bounded["files"]) == {"src/codec_c.c", "include/codec_limits.h"}
+
+    def test_hunt_file_paths_fail_closed_when_a_path_is_absent(self, tmp_path):
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="standard",
+            hunt_file_paths=["src/missing.c"],
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(
+                [
+                    "include/codec_limits.h",
+                    "src/codec_a.c",
+                    "src/codec_b.c",
+                    "src/codec_c.c",
+                ]
+            ),
+            hunter_llm=AsyncMock(),
+            verifier_llm=_make_verifier_llm(),
+            no_exploit=True,
+        )
+
+        with pytest.raises(ValueError, match="absent from ranked source"):
+            runner.run()
+
     def test_standard_pipeline_completes(self, tmp_path):
         runner = SourceHuntRunner(
             repo_url=str(FIXTURE_C_PROPAGATION),

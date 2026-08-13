@@ -25,6 +25,8 @@ from clearwing.sourcehunt.calibration import CalibrationRecord, CalibrationStore
 from clearwing.sourcehunt.state import Axes, AxisResult, ValidatorVerdict
 from clearwing.sourcehunt.validator import (
     VALIDATOR_QUICK_PROMPT,
+    VALIDATOR_SOURCE_FIRST_COMPACT_PROMPT,
+    VALIDATOR_SOURCE_FIRST_PROMPT,
     VALIDATOR_SYSTEM_PROMPT,
     Validator,
     _VerdictSchema,
@@ -131,6 +133,57 @@ class TestPromptGate:
         f = _make_finding(evidence_level="suspicion")
         assert val._prompt_for_finding(f) is VALIDATOR_SYSTEM_PROMPT
 
+    def test_source_first_profile_selects_compact_full_prompt(self):
+        val = Validator(
+            MagicMock(),
+            enable_quick_pass=False,
+            prompt_profile="source-first-high-recall-v1",
+        )
+
+        prompt = val._prompt_for_finding(_make_finding())
+
+        assert prompt is VALIDATOR_SOURCE_FIRST_PROMPT
+        assert "current source is authoritative" in prompt
+        assert len(prompt) < len(VALIDATOR_SYSTEM_PROMPT)
+
+    def test_unknown_prompt_profile_fails_closed(self):
+        with pytest.raises(ValueError, match="Unknown validator prompt profile"):
+            Validator(MagicMock(), prompt_profile="missing")
+
+    def test_source_first_compact_profile_includes_decision_rule(self):
+        val = Validator(
+            MagicMock(),
+            enable_quick_pass=False,
+            prompt_profile="source-first-compact-v2",
+        )
+
+        prompt = val._prompt_for_finding(_make_finding())
+
+        assert prompt is VALIDATOR_SOURCE_FIRST_COMPACT_PROMPT
+        assert "Set advance=true only when" in prompt
+        assert "Return the schema now" in prompt
+        assert len(prompt) < len(VALIDATOR_SOURCE_FIRST_PROMPT)
+
+    def test_custom_system_prompt_overrides_selected_profile(self):
+        val = Validator(
+            MagicMock(),
+            enable_quick_pass=False,
+            prompt_profile="source-first-compact-v2",
+            system_prompt="Custom generic validator instruction.",
+        )
+
+        assert val._prompt_for_finding(_make_finding()) == (
+            "Custom generic validator instruction."
+        )
+
+    def test_invalid_output_budget_fails_closed(self):
+        with pytest.raises(ValueError, match="max_output_tokens must be positive"):
+            Validator(MagicMock(), max_output_tokens=0)
+
+    def test_invalid_temperature_fails_closed(self):
+        with pytest.raises(ValueError, match="temperature must be between 0 and 2"):
+            Validator(MagicMock(), temperature=2.1)
+
 
 # --- Independent context tests -----------------------------------------------
 
@@ -150,6 +203,45 @@ class TestIndependentContext:
         assert "CWE-787" in msg
         assert "src/codec_a.c" in msg
         assert "memcpy overflow" in msg
+
+    def test_user_message_includes_source_backed_trace(self):
+        val = Validator(MagicMock())
+        f = _make_finding(
+            vulnerability_trace={
+                "steps": [
+                    {
+                        "file": "src/entry.c",
+                        "line": 12,
+                        "code_snippet": "parse_one(input);",
+                        "note": "entry dispatch",
+                    }
+                ]
+            }
+        )
+
+        msg = val._build_user_message(f, "")
+
+        assert "src/entry.c" in msg
+        assert "parse_one(input);" in msg
+        assert "entry dispatch" in msg
+
+    def test_user_message_treats_trace_as_an_allegation(self):
+        val = Validator(MagicMock())
+        msg = val._build_user_message(_make_finding(), "")
+
+        assert "reporter's alleged source chain" in msg
+        assert "independently verify every step" in msg
+
+    def test_user_message_includes_independent_source_context(self):
+        val = Validator(MagicMock())
+        msg = val._build_user_message(
+            _make_finding(),
+            "",
+            "--- src/codec_a.c:1-2 ---\ncurrent source",
+        )
+
+        assert "current source snapshot" in msg
+        assert "current source" in msg
 
 
 # --- Response parsing tests ---------------------------------------------------
@@ -438,6 +530,40 @@ class TestAvalidate:
         assert verdict.axes.impactful.boundary_crossed == "privilege"
 
     @pytest.mark.asyncio
+    async def test_avalidate_applies_output_budget_to_first_call(self):
+        mock_llm = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.first_text = json.dumps({
+            "axes": {
+                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "triggerable": {
+                    "passed": True,
+                    "confidence": "high",
+                    "rationale": "yes",
+                },
+                "impactful": {
+                    "passed": True,
+                    "confidence": "high",
+                    "rationale": "yes",
+                },
+                "general": {"passed": True, "confidence": "high", "rationale": "yes"},
+            },
+            "advance": True,
+            "severity": "high",
+            "evidence_level": "static_corroboration",
+        })
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
+
+        await Validator(
+            mock_llm,
+            max_output_tokens=4096,
+            temperature=0.0,
+        ).avalidate(_make_finding())
+
+        assert mock_llm.aask_text.await_args.kwargs["max_tokens"] == 4096
+        assert mock_llm.aask_text.await_args.kwargs["temperature"] == 0.0
+
+    @pytest.mark.asyncio
     async def test_avalidate_llm_error_returns_error_verdict(self):
         mock_llm = AsyncMock()
         mock_llm.aask_text = AsyncMock(side_effect=RuntimeError("API down"))
@@ -446,6 +572,48 @@ class TestAvalidate:
         verdict = await val.avalidate(_make_finding())
         assert verdict.advance is False
         assert "validator error" in verdict.tie_breaker
+        assert mock_llm.aask_text.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_avalidate_retries_empty_response_with_compact_prompt(self):
+        mock_llm = AsyncMock()
+        empty_response = MagicMock()
+        empty_response.first_text = ""
+        empty_response.texts = []
+        valid_response = MagicMock()
+        valid_response.first_text = json.dumps({
+            "axes": {
+                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "triggerable": {
+                    "passed": True,
+                    "confidence": "medium",
+                    "rationale": "reachable",
+                },
+                "impactful": {
+                    "passed": True,
+                    "confidence": "high",
+                    "rationale": "memory corruption",
+                    "boundary_crossed": "user",
+                },
+                "general": {
+                    "passed": True,
+                    "confidence": "medium",
+                    "rationale": "default parser",
+                },
+            },
+            "advance": True,
+            "severity": "high",
+            "evidence_level": "static_corroboration",
+        })
+        mock_llm.aask_text = AsyncMock(side_effect=[empty_response, valid_response])
+
+        verdict = await Validator(mock_llm).avalidate(_make_finding())
+
+        assert verdict.advance is True
+        assert mock_llm.aask_text.await_count == 2
+        retry = mock_llm.aask_text.await_args_list[1].kwargs
+        assert retry["max_tokens"] == 8192
+        assert "Return the structured verdict immediately" in retry["system"]
 
 
 # --- File context tests -------------------------------------------------------

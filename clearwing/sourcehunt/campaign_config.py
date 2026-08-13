@@ -41,6 +41,9 @@ class CampaignConfig:
     max_concurrent_containers: int = 200
     depth: str = "deep"
     prompt_mode: str = "unconstrained"
+    prompt_bundle: str = "legacy-v1"
+    scaffold_profile: str = "native-v1"
+    context_profile: str = "legacy-context-v1"
     campaign_hint: str | None = None
     targets: list[CampaignTargetConfig] = field(default_factory=list)
     oss_fuzz_corpus: OSSFuzzCorpusConfig | None = None
@@ -102,6 +105,9 @@ def load_campaign_config(path: str | Path) -> CampaignConfig:
         max_concurrent_containers=int(raw.get("max_concurrent_containers", 200)),
         depth=raw.get("depth", "deep"),
         prompt_mode=raw.get("prompt_mode", "unconstrained"),
+        prompt_bundle=raw.get("prompt_bundle", "legacy-v1"),
+        scaffold_profile=raw.get("scaffold_profile", "native-v1"),
+        context_profile=raw.get("context_profile", "legacy-context-v1"),
         campaign_hint=raw.get("campaign_hint"),
         targets=targets,
         oss_fuzz_corpus=oss_fuzz,
@@ -137,6 +143,11 @@ def validate_campaign_config(config: CampaignConfig) -> None:
             f"Invalid campaign depth '{config.depth}', "
             f"must be one of: {', '.join(sorted(_VALID_DEPTHS))}",
         )
+    from .optimization import get_context_profile, get_prompt_bundle, get_scaffold_profile
+
+    get_prompt_bundle(config.prompt_bundle)
+    get_scaffold_profile(config.scaffold_profile)
+    get_context_profile(config.context_profile)
     for t in config.targets:
         if not t.repo:
             raise ValueError("Target repo URL is required")

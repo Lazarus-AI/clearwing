@@ -1,0 +1,13 @@
+[
+  "libavcodec/dxva2_h264.c",
+  "libavcodec/flashsv2enc.c",
+  "libavcodec/hnm4video.c",
+  "libavcodec/pngenc.c",
+  "libavcodec/vp9dsp_template.c",
+  "libavcodec/vulkan_encode_av1.c",
+  "libavfilter/af_afwtdn.c",
+  "libavfilter/avf_ahistogram.c",
+  "libavfilter/vf_xpsnr.c",
+  "libavformat/id3v2.c",
+  "libswscale/graph.c"
+]

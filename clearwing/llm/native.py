@@ -156,6 +156,7 @@ _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 # include Clearwing's generic "medium" default. Kimi Code K3 accepts
 # low/high/max.
 _REASONING_EFFORT_MODEL_DEFAULTS: dict[str, str | None] = {
+    "dsv4-flash-nvfp4": None,
     "k3": "high",
     "k3-256k": "high",
     "kimi-for-coding": None,

@@ -30,6 +30,23 @@ class HunterContext:
     repo_path: str  # absolute host path
     sandbox: SandboxContainer | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
+    candidates: dict[str, dict] = field(default_factory=dict)
+    candidate_revision: int = 0
+    source_windows_ranked: bool = False
+    source_window_plan: dict[str, dict] = field(default_factory=dict)
+    source_windows_read: set[str] = field(default_factory=set)
+    state_packets_read: set[str] = field(default_factory=set)
+    value_domain_plans: dict[str, dict] = field(default_factory=dict)
+    value_domains: dict[str, dict] = field(default_factory=dict)
+    domain_consequence_plans: dict[str, dict] = field(default_factory=dict)
+    domain_consequences: dict[str, dict] = field(default_factory=dict)
+    domain_candidate_ids: dict[str, str] = field(default_factory=dict)
+    domain_proof_obligations: dict[str, list[str]] = field(default_factory=dict)
+    domain_refinements_read: set[tuple[str, str]] = field(default_factory=set)
+    domain_refinement_pending_proof: set[str] = field(default_factory=set)
+    enable_domain_proof_refinement: bool = False
+    require_validated_candidate_before_finding: bool = False
+    require_active_candidate_before_finding: bool = False
     trace_steps: list = field(default_factory=list)  # accumulator for TraceStep dicts
     files_read: set = field(default_factory=set)  # files accessed via read_source_file
     agent_mode: str = "constrained"  # "constrained" | "deep"; deep reads via shell so files_read is not authoritative
@@ -48,6 +65,7 @@ class HunterContext:
     trajectory_dir: object | None = None  # Path override for transcript output
     work_item_id: str | None = None  # Stable run-local join key for evaluation
     instrumentation: object | None = None  # SourceHuntInstrumentation, kept generic
+    context_profile: str = "legacy-context-v1"
     exploit_result: object | None = None  # ExploiterResult slot for exploit agent
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
 

@@ -34,6 +34,8 @@ from .analysis import (
     _parse_sanitizer_report,
     build_analysis_tools,
 )
+from .candidates import build_candidate_tools, candidate_matches_domain
+from .deep_agent import build_deep_agent_tools
 from .discovery import (
     _container_path,
     _grep_python_fallback,
@@ -41,10 +43,10 @@ from .discovery import (
     _parse_rg_output,
     build_discovery_tools,
 )
-from .deep_agent import build_deep_agent_tools
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext, _parse_variant_arg
+from .windows import build_window_tools
 
 
 def build_hunter_tools(ctx: HunterContext) -> list:
@@ -84,12 +86,15 @@ __all__ = [
     # Public API
     "HunterContext",
     "build_deep_agent_tools",
+    "build_candidate_tools",
+    "candidate_matches_domain",
     "build_hunter_tools",
     "build_propagation_auditor_tools",
     # Per-domain builders (for callers that want a narrower tool set)
     "build_discovery_tools",
     "build_analysis_tools",
     "build_reporting_tools",
+    "build_window_tools",
     "build_pool_query_tools",
     # Re-exported helpers for test reach-ins
     "_container_path",
