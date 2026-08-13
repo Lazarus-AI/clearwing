@@ -36,6 +36,15 @@ class BudgetConfigurationError(ValueError):
     """Raised when a requested hard cap cannot be enforced safely."""
 
 
+@dataclass(slots=True)
+class _RestoredRun:
+    reservations: dict[str, dict[str, Any]]
+    settlements: dict[str, dict[str, Any]]
+    status: str | None = None
+    active_budget_usd: float | None = None
+    exhausted_budget_usd: float | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ModelPricing:
     """USD rates per one million tokens."""
@@ -130,6 +139,7 @@ class SpendLedger:
         default_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         manifest_filename: str = "manifest.json",
         endpoint: LLMEndpoint | None = None,
+        resume: bool = False,
     ) -> None:
         if not math.isfinite(limit_usd) or limit_usd < 0:
             raise BudgetConfigurationError("LLM budget must be a finite value >= 0")
@@ -188,15 +198,130 @@ class SpendLedger:
         self.ledger_path = session_dir / "spend-ledger.jsonl"
         self.manifest_path = session_dir / manifest_filename
         with self._lock:
+            if resume:
+                self._restore_settled_history_locked()
             self._persist_event_locked(
                 {
-                    "event": "run_started",
+                    "event": "run_resumed" if resume else "run_started",
                     "session_id": self.session_id,
                     "budget_usd": self.limit_usd,
+                    "carried_forward_usd": self._spent_usd,
                     "timestamp": self._timestamp(),
                 }
             )
             self._persist_snapshot_locked()
+
+    def _restore_settled_history_locked(self) -> None:
+        """Restore settled calls and conservatively close orphaned reservations."""
+
+        if not self.ledger_path.is_file():
+            return
+        restored = self._read_prior_run_locked()
+        for record in restored.settlements.values():
+            self._restore_settlement_locked(record)
+        for call_id, reservation in restored.reservations.items():
+            if call_id not in restored.settlements:
+                self._recover_orphaned_reservation_locked(call_id, reservation)
+
+        cap_was_not_raised = (
+            restored.exhausted_budget_usd is not None
+            and self.limit_usd <= restored.exhausted_budget_usd + self._EPSILON
+        )
+        exhausted_at_current_cap = self._spent_usd >= self.limit_usd - self._EPSILON
+        if (
+            self.enforcing
+            and restored.status != "completed"
+            and (exhausted_at_current_cap or cap_was_not_raised)
+        ):
+            self._exhausted = True
+            self._status = "budget_exhausted"
+
+    def _read_prior_run_locked(self) -> _RestoredRun:
+        restored = _RestoredRun(reservations={}, settlements={})
+        for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") in {"run_started", "run_resumed"}:
+                try:
+                    restored.active_budget_usd = float(record.get("budget_usd"))
+                except (TypeError, ValueError):
+                    restored.active_budget_usd = None
+                restored.status = None
+            elif record.get("event") == "budget_exhausted":
+                restored.exhausted_budget_usd = restored.active_budget_usd
+            if record.get("event") == "run_finished":
+                restored.status = str(record.get("status") or "")
+                if restored.status == "budget_exhausted":
+                    restored.exhausted_budget_usd = restored.active_budget_usd
+            call_id = str(record.get("call_id") or "")
+            if not call_id:
+                continue
+            if record.get("event") == "call_reserved":
+                restored.reservations.setdefault(call_id, record)
+            elif record.get("event") == "call_settled":
+                restored.settlements.setdefault(call_id, record)
+        return restored
+
+    def _restore_settlement_locked(self, record: dict[str, Any]) -> None:
+        try:
+            cost = float(record["cost_usd"])
+            input_tokens = int(record["input_tokens"])
+            output_tokens = int(record["output_tokens"])
+            cached_tokens = int(record["cached_input_tokens"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if (
+            not math.isfinite(cost)
+            or cost < 0
+            or input_tokens < 0
+            or output_tokens < 0
+            or cached_tokens < 0
+        ):
+            return
+        self._records.append(record)
+        self._spent_usd += cost
+        self._input_tokens += input_tokens
+        self._output_tokens += output_tokens
+        self._cached_input_tokens += cached_tokens
+
+    def _recover_orphaned_reservation_locked(
+        self,
+        call_id: str,
+        reservation: dict[str, Any],
+    ) -> None:
+        try:
+            reserved_usd = float(reservation["reserved_usd"])
+        except (KeyError, TypeError, ValueError):
+            reserved_usd = 0.0
+        if not math.isfinite(reserved_usd) or reserved_usd < 0:
+            reserved_usd = 0.0
+        metadata = reservation.get("metadata")
+        reserved_with_cap = reservation.get("budget_enforcing")
+        if not isinstance(reserved_with_cap, bool):
+            reserved_with_cap = reserved_usd > 0
+        recovered_cost = reserved_usd if reserved_with_cap else 0.0
+        recovered = {
+            "event": "call_settled",
+            "call_id": call_id,
+            "timestamp": self._timestamp(),
+            "stage": reservation.get("stage"),
+            "model": reservation.get("model"),
+            "provider": reservation.get("provider"),
+            "status": "recovered_ambiguous_failure",
+            "reserved_usd": reserved_usd,
+            "cost_usd": recovered_cost,
+            "cost_source": "reservation" if reserved_with_cap else "none",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "error": "Process exited before spend settlement; charged on resume",
+        }
+        self._records.append(recovered)
+        self._spent_usd += recovered_cost
+        self._persist_event_locked(recovered)
 
     @property
     def enforcing(self) -> bool:
@@ -349,6 +474,8 @@ class SpendLedger:
                     "stage": stage,
                     "model": model,
                     "provider": provider,
+                    "budget_usd": self.limit_usd,
+                    "budget_enforcing": self.enforcing,
                     "reserved_usd": reserved_usd,
                     "input_token_upper_bound": input_token_upper_bound,
                     "max_output_tokens": effective_max_tokens,

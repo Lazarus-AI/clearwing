@@ -8,7 +8,7 @@ legacy keyword arguments for full backward compatibility.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 
@@ -92,8 +92,11 @@ class HuntTuning:
     seed_corpus_sources: list[str] | None = None
     subsystem_paths: list[str] | None = None
     campaign_hint: str | None = None
+    mechanism_store_path: str | None = None
+    historical_db_path: str | None = None
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
+    respect_gitignore: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,3 +140,65 @@ class SourceHuntConfig:
     features: FeatureFlags = field(default_factory=FeatureFlags)
     tuning: HuntTuning = field(default_factory=HuntTuning)
     proof: ProofConfig = field(default_factory=ProofConfig)
+
+    @classmethod
+    def from_options(cls, options: dict[str, Any]) -> SourceHuntConfig:
+        """Group the runner's effective legacy options into typed config."""
+
+        def build(
+            model: type[Any],
+            prefix: str = "",
+            source: dict[str, Any] = options,
+        ) -> Any:
+            values = {
+                item.name: source[f"{prefix}{item.name}"]
+                for item in fields(model)
+                if f"{prefix}{item.name}" in source
+            }
+            return model(**values)
+
+        proof_options = dict(options)
+        for name in ("flow", "retain_incomplete_certificates", "emit_rejection_certificates", "falsify"):
+            proof_options[f"proof_{name}"] = options[name]
+        return cls(
+            target=build(TargetConfig),
+            budget=build(BudgetConfig),
+            output=build(OutputConfig),
+            features=build(FeatureFlags),
+            tuning=build(HuntTuning),
+            proof=build(ProofConfig, "proof_", proof_options),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-compatible representation persisted with a session."""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SourceHuntConfig:
+        """Restore a config previously produced by :meth:`to_dict`."""
+
+        budget = dict(payload.get("budget") or {})
+        tier_budget = budget.get("tier_budget")
+        if isinstance(tier_budget, dict):
+            from .pool import TierBudget
+
+            budget["tier_budget"] = TierBudget(**tier_budget)
+        return cls(
+            target=TargetConfig(**payload["target"]),
+            budget=BudgetConfig(**budget),
+            output=OutputConfig(**(payload.get("output") or {})),
+            features=FeatureFlags(**(payload.get("features") or {})),
+            tuning=HuntTuning(**(payload.get("tuning") or {})),
+            proof=ProofConfig(**(payload.get("proof") or {})),
+        )
+
+
+@dataclass(frozen=True)
+class SourceHuntResumeOptions:
+    """Runtime-only options permitted while resuming a saved hunt plan."""
+
+    session_id: str
+    output_dir: str
+    model_override: str | None = None
+    live: bool = False
