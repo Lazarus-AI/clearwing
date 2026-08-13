@@ -26,6 +26,7 @@ from typing import Any, Literal
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.budget import BudgetExceeded, SpendLedger
+from clearwing.llm.errors import ProviderExhaustedError, ProviderExhaustionState
 from clearwing.llm.native import AsyncLLMClient
 from clearwing.providers import (
     ProviderManager,
@@ -53,6 +54,13 @@ from .poc_runner import build_rerun_poc_callback
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
+from .resume import (
+    SourceHuntResumeError,
+    SourceHuntResumeStore,
+    SourceHuntSessionLock,
+    resolve_session_dir,
+    source_input_identity,
+)
 from .state import (
     EvidenceLevel,
     FileTarget,
@@ -185,8 +193,66 @@ def _apply_elaboration(finding: Finding, elab_result) -> Finding:
     }
 
 
+class _DeferredInstrumentation:
+    """Create session instrumentation only after the runner holds its lock."""
+
+    def __init__(self, session_dir: Path, run_id: str):
+        self._session_dir = session_dir
+        self._run_id = run_id
+        self._instrumentation: SourceHuntInstrumentation | None = None
+
+    def _get(self) -> SourceHuntInstrumentation:
+        if self._instrumentation is None:
+            self._instrumentation = SourceHuntInstrumentation(
+                self._session_dir,
+                self._run_id,
+            )
+        return self._instrumentation
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+
 class SourceHuntRunner:
     """Public entry point for the sourcehunt pipeline."""
+
+    @classmethod
+    def resume(
+        cls,
+        session_id: str,
+        *,
+        output_dir: str | None = None,
+        provider_manager: ProviderManager | None = None,
+        model_override: str | None = None,
+        live: bool = False,
+        sandbox_factory: Any = None,
+    ) -> SourceHuntRunner:
+        """Restore run behavior while accepting fresh runtime dependencies."""
+
+        if output_dir is None:
+            from clearwing.core.config import default_results_dir
+
+            output_dir = default_results_dir("sourcehunt")
+        session_dir = resolve_session_dir(output_dir, session_id)
+        store = SourceHuntResumeStore.load(session_dir)
+        config = SourceHuntConfig.from_dict(store.config())
+        if config.proof.flow != "legacy":
+            raise SourceHuntResumeError("Standalone sourcehunt resume supports only flow=legacy")
+
+        payload = config.to_dict()
+        payload["output"]["output_dir"] = output_dir
+        runner = cls(
+            config=SourceHuntConfig.from_dict(payload),
+            provider_manager=provider_manager,
+            model_override=model_override,
+            live=live,
+            sandbox_factory=sandbox_factory,
+            parent_session_id=session_id,
+        )
+        runner._completion_store = store
+        runner._standalone_session = True
+        runner._resume_session = session_id
+        return runner
 
     def __init__(
         self,
@@ -376,8 +442,15 @@ class SourceHuntRunner:
             )
             subsystem_paths = subsystem_paths if subsystem_paths is not None else h.subsystem_paths
             campaign_hint = campaign_hint if campaign_hint is not None else h.campaign_hint
+            mechanism_store_path = (
+                mechanism_store_path if mechanism_store_path is not None else h.mechanism_store_path
+            )
+            historical_db_path = (
+                historical_db_path if historical_db_path is not None else h.historical_db_path
+            )
             gvisor_runtime = gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
+            respect_gitignore = respect_gitignore or h.respect_gitignore
             p = config.proof
             flow = flow if flow != "legacy" else p.flow
             proof_compile_commands = (
@@ -453,8 +526,13 @@ class SourceHuntRunner:
         if proof_structured_fraction + proof_exploration_fraction > 1.000001:
             raise ValueError("proof structured and exploration budgets exceed 100%")
 
-        # Store the config for introspection (None if constructed the old way)
-        self._config = config
+        tier_budget = tier_budget or TierBudget()
+        if output_dir is None:
+            from clearwing.core.config import default_results_dir
+
+            output_dir = default_results_dir("sourcehunt")
+        output_formats = output_formats or ["sarif", "markdown", "json"]
+        effective_config = SourceHuntConfig.from_options(locals())
 
         self.repo_url = repo_url
         self.branch = branch
@@ -464,13 +542,9 @@ class SourceHuntRunner:
         self.input_price_per_million = input_price_per_million
         self.output_price_per_million = output_price_per_million
         self.max_parallel = max_parallel
-        self.tier_budget = tier_budget or TierBudget()
-        if output_dir is None:
-            from clearwing.core.config import default_results_dir
-
-            output_dir = default_results_dir("sourcehunt")
+        self.tier_budget = tier_budget
         self.output_dir = output_dir
-        self.output_formats = output_formats or ["sarif", "markdown", "json"]
+        self.output_formats = output_formats
         self.no_verify = no_verify
         self.no_exploit = no_exploit
         self._exploit_budget_override = exploit_budget
@@ -542,7 +616,12 @@ class SourceHuntRunner:
         self._live = live
         self._spend_ledger: SpendLedger | None = None
         self._spend_instrumented = False
+        self._provider_exhaustion = ProviderExhaustionState()
         self._metered_clients: dict[tuple[int, str], AsyncLLMClient] = {}
+        self._completion_store: SourceHuntResumeStore | None = None
+        self._standalone_session = parent_session_id is None
+        self._resume_session: str | None = None
+        self._session_lock: SourceHuntSessionLock | None = None
         self._flow = flow
         self._proof_compile_commands = proof_compile_commands
         self._proof_validation_manifest = proof_validation_manifest
@@ -558,13 +637,14 @@ class SourceHuntRunner:
         self._retain_incomplete_certificates = retain_incomplete_certificates
         self._emit_rejection_certificates = emit_rejection_certificates
         self._falsify = falsify
-        self._instrumentation = SourceHuntInstrumentation(
+        self._instrumentation = _DeferredInstrumentation(
             Path(self.output_dir) / self._session_id,
             self._session_id,
         )
         self._instrumentation_finalized = False
         self._last_reporting_error: dict[str, str] | None = None
         self._on_progress = on_progress
+        self._config = effective_config
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -642,6 +722,31 @@ class SourceHuntRunner:
         if self._spend_ledger is None:
             return 0.0
         return self._spend_ledger.spent_usd
+
+    @staticmethod
+    def _resolved_commit(repo_path: str) -> str:
+        """Resolve a Git commit for useful repository metadata."""
+
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return result.stdout.strip().lower()
+
+    @staticmethod
+    def _ranked_targets(files: list[FileTarget]) -> list[dict[str, Any]]:
+        targets = []
+        for target in files:
+            payload = dict(target)
+            payload.pop("absolute_path", None)
+            targets.append(payload)
+        return targets
 
     @property
     def _shard_entry_points(self) -> bool:
@@ -730,6 +835,7 @@ class SourceHuntRunner:
                 manifest_filename=(
                     "spend-summary.json" if self._flow == "proof" else "manifest.json"
                 ),
+                resume=self._resume_session is not None,
             )
         return self._spend_ledger
 
@@ -742,7 +848,11 @@ class SourceHuntRunner:
         if self._spend_ledger is None or not self._spend_ledger.enforcing:
             return
         roles: list[tuple[str, AsyncLLMClient | None, str]] = []
-        if not self._no_rank:
+        rank_complete = (
+            self._completion_store is not None
+            and self._completion_store.load_rank_plan() is not None
+        )
+        if not self._no_rank and not rank_complete:
             roles.append(("ranker", self.ranker_llm, "rank"))
         if self.depth != "quick":
             roles.append(("hunter", self.hunter_llm, "hunt"))
@@ -769,11 +879,9 @@ class SourceHuntRunner:
     def run(self) -> SourceHuntResult:
         from clearwing.ui.llm_activity import llm_activity_panel
 
-        self._ensure_spend_ledger()
         with llm_activity_panel(
             live=self._live,
             budget_usd=self.budget_usd or None,
-            spend_ledger=self._spend_ledger,
         ):
             return asyncio.run(self.arun())
 
@@ -1009,23 +1117,51 @@ class SourceHuntRunner:
             finally:
                 self._finalize_instrumentation("failed")
         start_time = time.monotonic()
-        self._ensure_output_dir_layout()
-        self._ensure_spend_ledger()
-        pipeline_status = PipelineStatus()
-        logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
-        self._instrumentation.record(
-            "run",
-            stage="run",
-            status="started",
-            metadata={"flow": self._flow, "repository": self.repo_url},
-        )
+        session_dir = self._ensure_output_dir_layout()
+        try:
+            if self._standalone_session:
+                self._acquire_session_lock(session_dir)
+                self._refresh_resume_store_locked()
+            self._ensure_spend_ledger()
+            pipeline_status = PipelineStatus()
+            if self._standalone_session and self._completion_store is None:
+                self._completion_store = SourceHuntResumeStore(session_dir)
+            logger.info("Sourcehunt session %s starting on %s", self._session_id, self.repo_url)
+            self._instrumentation.record(
+                "run",
+                stage="run",
+                status="started",
+                metadata={"flow": self._flow, "repository": self.repo_url},
+            )
+        except BaseException:
+            self._release_session_lock()
+            raise
         try:
             self._preflight_budget_clients()
             # 1. Preprocess
             self._emit_stage("preprocess", "started")
             preprocess_result = self._preprocess()
             repo_path = preprocess_result.repo_path
+            resolved_commit = self._resolved_commit(repo_path)
             files = preprocess_result.file_targets
+            identity = source_input_identity(
+                repo_path,
+                files,
+            )
+            if self._completion_store is not None:
+                if self._resume_session is not None:
+                    self._completion_store.validate_source_identity(identity)
+                elif self._standalone_session:
+                    self._completion_store.create_session(
+                        repository={
+                            "url": self.repo_url,
+                            "branch": self.branch,
+                            "local_path": self.local_path,
+                            "resolved_commit": resolved_commit or None,
+                        },
+                        config=self._config.to_dict(),
+                        source_identity=identity,
+                    )
             files_ranked = len(files)
             logger.info("Preprocessor enumerated %d files", files_ranked)
             stage_files = [str(file_target.get("path") or "") for file_target in files]
@@ -1038,9 +1174,25 @@ class SourceHuntRunner:
             self._ensure_sandbox_factory(repo_path, files)
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
+            restored_targets = (
+                self._completion_store.load_rank_plan()
+                if self._completion_store is not None
+                else None
+            )
+            rank_complete = restored_targets is not None
+            rank_plan_ready = rank_complete
+            if restored_targets is not None:
+                current_by_path = {target["path"]: target for target in files}
+                files = [
+                    {
+                        **target,
+                        "absolute_path": current_by_path[target["path"]]["absolute_path"],
+                    }
+                    for target in restored_targets
+                ]
             ranker_llm = (
                 None
-                if self._no_rank
+                if self._no_rank or rank_complete
                 else self._get_native_client(
                     "ranker",
                     self.ranker_llm,
@@ -1053,7 +1205,9 @@ class SourceHuntRunner:
                 detail=f"{len(files)} files",
                 files=stage_files,
             )
-            if self._no_rank:
+            if rank_complete:
+                logger.info("Ranker skipped; restored complete ranked target plan")
+            elif self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
                 for ft in files:
                     ft["surface"] = ft.get("surface") or 3
@@ -1072,8 +1226,10 @@ class SourceHuntRunner:
                     detail="Skipped (--no-rank)",
                     files=stage_files,
                 )
+                rank_plan_ready = True
             elif ranker_llm is not None and files:
                 logger.info("Ranker starting on %d files", len(files))
+                unranked_files = [dict(target) for target in files]
                 try:
                     ranker_config = RankerConfig()
                     if not self._preprocessing:
@@ -1088,16 +1244,27 @@ class SourceHuntRunner:
                             ranker_config.chunk_size,
                             ranker_config.max_inflight_chunks,
                         )
-                    await Ranker(ranker_llm, ranker_config).arank(files)
+                    ranker = Ranker(ranker_llm, ranker_config)
+                    await ranker.arank(files)
                     logger.info("Ranker completed")
-                    pipeline_status.record_succeeded("ranker")
+                    if ranker.completed_successfully:
+                        pipeline_status.record_succeeded("ranker")
+                    else:
+                        pipeline_status.record_degraded(
+                            "ranker",
+                            "Incomplete rank output; the whole plan used heuristic scores",
+                        )
                     self._emit_stage(
                         "rank",
-                        "completed",
+                        "completed" if ranker.completed_successfully else "degraded",
                         detail=f"Ranked {len(files)} files",
                         files=stage_files,
                     )
+                    rank_plan_ready = ranker.completed_successfully
+                except ProviderExhaustedError:
+                    raise
                 except BudgetExceeded:
+                    files = unranked_files
                     logger.info("Ranker stopped because the run budget is exhausted")
                     pipeline_status.record(
                         "ranker",
@@ -1111,6 +1278,7 @@ class SourceHuntRunner:
                         files=stage_files,
                     )
                 except Exception:
+                    files = unranked_files
                     logger.warning("Ranker failed", exc_info=True)
                     pipeline_status.record_degraded(
                         "ranker",
@@ -1142,6 +1310,7 @@ class SourceHuntRunner:
                     detail="No ranker model available; default priority scores used",
                     files=stage_files,
                 )
+                rank_plan_ready = not files
 
             # Ensure a partial/failed rank pass still leaves every file
             # schedulable by the deterministic fallback.
@@ -1152,6 +1321,9 @@ class SourceHuntRunner:
                 ft["priority"] = ft.get("priority") or (
                     ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                 )
+
+            if self._completion_store is not None and not rank_complete and rank_plan_ready:
+                self._completion_store.save_rank_plan(self._ranked_targets(files))
 
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
@@ -1283,8 +1455,7 @@ class SourceHuntRunner:
                 from .findings_pool import FindingsPool
                 from .historical_findings_db import HistoricalFindingsDB
 
-                checkpoint_path = Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
-                findings_pool = FindingsPool(checkpoint_path=checkpoint_path)
+                findings_pool = FindingsPool()
                 try:
                     historical_db = HistoricalFindingsDB(path=self._historical_db_path)
                     prior = historical_db.query_prior(repo_url=self.repo_url)
@@ -1300,9 +1471,20 @@ class SourceHuntRunner:
                 self.hunter_llm,
                 budget_stage="hunt",
             )
-            all_findings: list[Finding] = []
-            files_hunted = 0
-            spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
+            all_findings = (
+                self._completion_store.completed_findings()
+                if self._completion_store is not None
+                else []
+            )
+            files_hunted = (
+                self._completion_store.completed_target_count()
+                if self._completion_store is not None
+                else 0
+            )
+            lifetime_spend_by_tier = self._ensure_spend_ledger().spent_by("tier")
+            spent_per_tier: dict[str, float] = {
+                tier: lifetime_spend_by_tier.get(tier, 0.0) for tier in ("A", "B", "C")
+            }
             band_stats: dict | None = None
             hunt_symbols = sorted(
                 {
@@ -1358,6 +1540,9 @@ class SourceHuntRunner:
                         findings_pool=findings_pool,
                         trajectory_root=(Path(self.output_dir) / self._session_id / "trajectories"),
                         instrumentation=self._instrumentation,
+                        resume_store=self._completion_store,
+                        prior_spend_per_tier=self._ensure_spend_ledger().spent_by("tier"),
+                        provider_exhaustion_state=self._provider_exhaustion,
                     )
                 )
                 try:
@@ -1391,6 +1576,10 @@ class SourceHuntRunner:
                             symbols=self._finding_symbols(all_findings),
                             finding_ids=[finding.id for finding in all_findings],
                         )
+                except ProviderExhaustedError:
+                    if self._completion_store is not None:
+                        all_findings = self._completion_store.completed_findings()
+                    raise
                 except BudgetExceeded:
                     logger.info("HunterPool stopped because the run budget is exhausted")
                     pipeline_status.record(
@@ -1603,6 +1792,7 @@ class SourceHuntRunner:
                                 Path(self.output_dir) / self._session_id / "trajectories"
                             ),
                             instrumentation=self._instrumentation,
+                            provider_exhaustion_state=self._provider_exhaustion,
                         )
                     )
                     try:
@@ -2205,6 +2395,8 @@ class SourceHuntRunner:
                     "instrumentation_events": str(self._instrumentation.events_path),
                 }
             )
+            if self._completion_store is not None:
+                output_paths["session"] = str(self._completion_store.session_path)
 
             duration = time.monotonic() - start_time
             exit_findings = all_findings if self.no_verify else verified
@@ -2231,6 +2423,47 @@ class SourceHuntRunner:
                 status=run_status,
                 budget_usd=self.budget_usd,
             )
+        except ProviderExhaustedError:
+            pipeline_status = locals().get("pipeline_status", PipelineStatus())
+            summary = self._finalize_spend_ledger("provider_exhausted")
+            self._finalize_instrumentation("provider_exhausted")
+            findings = (
+                self._completion_store.completed_findings()
+                if self._completion_store is not None
+                else []
+            )
+            partial_preprocess = locals().get("preprocess_result")
+            if isinstance(partial_preprocess, PreprocessResult):
+                findings = self._merge_static_findings(findings, partial_preprocess)
+            return SourceHuntResult(
+                exit_code=3,
+                repo_url=self.repo_url,
+                repo_path=locals().get("repo_path", self.local_path or self.repo_url),
+                findings=findings,
+                verified_findings=[finding for finding in findings if finding.verified],
+                exploited_findings=[finding for finding in findings if finding.exploit_success],
+                files_ranked=locals().get("files_ranked", 0),
+                files_hunted=(
+                    self._completion_store.completed_target_count()
+                    if self._completion_store is not None
+                    else 0
+                ),
+                duration_seconds=round(time.monotonic() - start_time, 2),
+                cost_usd=summary["total_spent"],
+                spent_per_tier=self._ensure_spend_ledger().spent_by("tier"),
+                tokens_used=summary["total_tokens"],
+                output_paths=(
+                    {"session": str(self._completion_store.session_path)}
+                    if self._completion_store is not None
+                    else {}
+                ),
+                session_id=self._session_id,
+                pipeline_status=pipeline_status,
+                status="provider_exhausted",
+                budget_usd=self.budget_usd,
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise
         finally:
             if self._spend_ledger is not None:
                 self._finalize_spend_ledger("failed")
@@ -2243,10 +2476,21 @@ class SourceHuntRunner:
             if self._preprocessor is not None:
                 self._preprocessor.cleanup()
                 self._preprocessor = None
+            self._release_session_lock()
 
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def flow(self) -> str:
+        return self._flow
+
+    @property
+    def session_path(self) -> Path:
+        """Public path to the immutable standalone session metadata."""
+
+        return Path(self.output_dir) / self._session_id / "session.json"
 
     # --- Pipeline helpers ---------------------------------------------------
 
@@ -2254,6 +2498,25 @@ class SourceHuntRunner:
         session_dir = Path(self.output_dir) / self._session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
+
+    def _acquire_session_lock(self, session_dir: Path) -> None:
+        if self._session_lock is None:
+            lock = SourceHuntSessionLock(session_dir)
+            lock.acquire()
+            self._session_lock = lock
+
+    def _release_session_lock(self) -> None:
+        if self._session_lock is not None:
+            self._session_lock.release()
+            self._session_lock = None
+
+    def _refresh_resume_store_locked(self) -> None:
+        if self._resume_session is None:
+            return
+        if self._session_lock is None:
+            raise SourceHuntResumeError("Sourcehunt resume must refresh its store under lock")
+        session_dir = Path(self.output_dir) / self._session_id
+        self._completion_store = SourceHuntResumeStore.load(session_dir)
 
     def _export_disclosure_bundle(
         self,
@@ -2617,6 +2880,7 @@ class SourceHuntRunner:
             run_semgrep=(self.depth != "quick" and self._preprocessing),
             run_taint=(self.depth != "quick" and self._preprocessing),
             respect_gitignore=self._respect_gitignore,
+            excluded_roots=[Path(self.output_dir) / self._session_id],
         )
         return self._preprocessor.run()
 
@@ -2777,6 +3041,8 @@ class SourceHuntRunner:
                 "instrumentation_events": str(self._instrumentation.events_path),
             }
         )
+        if self._completion_store is not None:
+            output_paths["session"] = str(self._completion_store.session_path)
         duration = time.monotonic() - start_time
         return SourceHuntResult(
             exit_code=(3 if run_status == "budget_exhausted" else self._exit_code(all_findings)),
@@ -2911,7 +3177,11 @@ class SourceHuntRunner:
         key = (id(client), stage)
         bound = self._metered_clients.get(key)
         if bound is None:
-            bound = client.with_spend_ledger(self._spend_ledger, stage=stage)
+            bound = client.with_spend_ledger(
+                self._spend_ledger,
+                stage=stage,
+                provider_exhaustion_state=self._provider_exhaustion,
+            )
             self._metered_clients[key] = bound
         return bound
 

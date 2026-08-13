@@ -107,6 +107,37 @@ def _make_pool(files, budget=10.0, tier_split=(0.7, 0.25, 0.05), per_call_cost=0
     return HunterPool(config)
 
 
+def _recording_pool(files, dispatch_order, *, prior_spend):
+    def factory(file_target, sandbox, session_id):
+        dispatch_order.append(file_target["path"])
+
+        class _StubHunter:
+            async def arun(self):
+                return _StubRunResult(
+                    findings=[], cost_usd=1.0, tokens_used=0, stop_reason="completed"
+                )
+
+        return _StubHunter(), MagicMock(
+            findings=[], session_id=session_id, cleanup_variants=MagicMock()
+        )
+
+    return HunterPool(
+        HuntPoolConfig(
+            files=files,
+            repo_path="/tmp/repo",
+            hunter_factory=factory,
+            max_parallel=1,
+            budget_usd=10.0,
+            tier_budget=TierBudget(0.7, 0.25, 0.05),
+            prior_spend_per_tier=prior_spend,
+            session_id_prefix="hunt",
+            starting_band="deep",
+            max_band="deep",
+            redundancy_override=1,
+        )
+    )
+
+
 # --- Tier assignment in __init__ -------------------------------------------
 
 
@@ -147,16 +178,19 @@ class TestWithinTierPriorityOrder:
             class _StubHunter:
                 async def arun(self):
                     return _StubRunResult(
-                        findings=[], cost_usd=0.0, tokens_used=0,
+                        findings=[],
+                        cost_usd=0.0,
+                        tokens_used=0,
                         stop_reason="completed",
                     )
 
-            return _StubHunter(), MagicMock(findings=[], session_id=session_id,
-                                            cleanup_variants=MagicMock())
+            return _StubHunter(), MagicMock(
+                findings=[], session_id=session_id, cleanup_variants=MagicMock()
+            )
 
         # Both are tier A (priority >= 3.0). Low-priority listed first.
         files = [
-            _ft("aaa_low_priority.c", 4, 4),   # priority 3.7 → A (lower)
+            _ft("aaa_low_priority.c", 4, 4),  # priority 3.7 → A (lower)
             _ft("zzz_high_priority.c", 5, 5),  # priority 4.4 → A (highest)
         ]
         config = HuntPoolConfig(
@@ -184,7 +218,6 @@ class TestWithinTierPriorityOrder:
         assert dispatch_order.index("zzz_high_priority.c") < dispatch_order.index(
             "aaa_low_priority.c"
         )
-
 
 
 # --- Tier A spending --------------------------------------------------------
@@ -291,6 +324,37 @@ class TestRollover:
         spent = pool.spent_per_tier
         assert spent["C"] == pytest.approx(0.8)
 
+
+class TestResumeTierBudget:
+    def test_prior_tier_a_spend_reduces_lifetime_allocation(self):
+        dispatch_order: list[str] = []
+        pool = _recording_pool(
+            [
+                *[_ft(f"a{i}.c", 5, 5) for i in range(4)],
+                _ft("b.c", 2, 2),
+            ],
+            dispatch_order,
+            prior_spend={"A": 6.0, "B": 0.0, "C": 0.0},
+        )
+
+        pool.run()
+
+        assert sum(path.startswith("a") for path in dispatch_order) == 1
+        assert "b.c" in dispatch_order
+
+    def test_prior_a_spend_is_not_rolled_over_again_when_a_is_complete(self):
+        dispatch_order: list[str] = []
+        pool = _recording_pool(
+            [_ft(f"b{i}.c", 2, 2) for i in range(5)],
+            dispatch_order,
+            prior_spend={"A": 6.0, "B": 2.0, "C": 0.0},
+        )
+
+        pool.run()
+
+        # Lifetime A+B allowance is $9.50. With $8 already settled, the
+        # sliding window admits two indivisible $1 calls, but not all five.
+        assert dispatch_order == ["b0.c", "b1.c"]
 
 # --- Skip-tier-c -----------------------------------------------------------
 

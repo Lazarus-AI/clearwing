@@ -169,6 +169,22 @@ class TestPreprocessorRun:
         assert [ft["path"] for ft in result.file_targets] == ["src.js"]
         assert [Path(f.file_path).name for f in result.static_findings] == ["src.js"]
 
+    def test_excluded_root_is_removed_from_all_selected_inputs(self, tmp_path):
+        source = tmp_path / "src.py"
+        output = tmp_path / "results" / "sh-test"
+        output.mkdir(parents=True)
+        source.write_text("value = 1\n")
+        (output / "generated.py").write_text("from src import value\n")
+
+        result = Preprocessor(
+            repo_url=str(tmp_path),
+            local_path=str(tmp_path),
+            excluded_roots=[output],
+        ).run()
+
+        assert [target["path"] for target in result.file_targets] == ["src.py"]
+        assert result.file_targets[0]["imports_by"] == 0
+
     def test_codec_limits_h_tagged_memory_unsafe(self):
         pp = Preprocessor(
             repo_url=str(FIXTURE_C_PROPAGATION),

@@ -227,6 +227,60 @@ class FindingsPool:
     def all_findings(self) -> list[Finding]:
         return list(self._findings.values())
 
+    def restore(
+        self,
+        findings: list[Finding],
+        clusters: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Restore findings and their clustering state without writing JSONL."""
+
+        for item in clusters or []:
+            cluster_id = str(item.get("cluster_id") or "")
+            if not cluster_id:
+                continue
+            self._clusters[cluster_id] = FindingCluster(
+                cluster_id=cluster_id,
+                root_cause_summary=str(item.get("root_cause_summary") or ""),
+                primitive_type=str(item.get("primitive_type") or "unknown"),
+                cwe=str(item.get("cwe") or ""),
+            )
+        for finding in findings:
+            finding_id = finding.get("id", "")
+            if not finding_id:
+                continue
+            self._findings[finding_id] = finding
+            cluster_id = finding.get("cluster_id", "")
+            if not cluster_id:
+                continue
+            cluster = self._clusters.get(cluster_id)
+            if cluster is None:
+                cluster = FindingCluster(
+                    cluster_id=cluster_id,
+                    root_cause_summary=finding.get("description", "")[:200],
+                    primitive_type=finding.get("primitive_type", "unknown"),
+                    cwe=finding.get("cwe", ""),
+                )
+                self._clusters[cluster_id] = cluster
+            if finding_id not in cluster.finding_ids:
+                cluster.finding_ids.append(finding_id)
+            file_path = finding.get("file", "")
+            if file_path:
+                cluster.file_paths.add(file_path)
+
+    def cluster_state(self, cluster_ids: set[str]) -> list[dict[str, Any]]:
+        """Serialize only the clusters referenced by one completed work item."""
+
+        return [
+            {
+                "cluster_id": cluster.cluster_id,
+                "root_cause_summary": cluster.root_cause_summary,
+                "primitive_type": cluster.primitive_type,
+                "cwe": cluster.cwe,
+            }
+            for cluster_id in sorted(cluster_ids)
+            if (cluster := self._clusters.get(cluster_id)) is not None
+        ]
+
     def clusters(self) -> list[FindingCluster]:
         return list(self._clusters.values())
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +27,7 @@ from typing import Any, Literal, cast
 
 from clearwing.core.event_payloads import HuntProgressPayload
 from clearwing.core.events import EventBus
+from clearwing.llm import ProviderExhaustedError, ProviderExhaustionState
 from clearwing.llm.budget import BudgetExceeded, spend_metadata
 from clearwing.runners.parallel.executor import (
     TargetResult,
@@ -36,6 +37,7 @@ from clearwing.runners.parallel.executor import (
 )
 
 from .instrumentation import stable_run_id
+from .resume import CompletedWork, SourceHuntResumeStore, deterministic_work_id
 from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
@@ -73,19 +75,16 @@ class WorkItem:
     entry_point: Any = None  # EntryPoint | None — spec 004
     seed_context: str | None = None  # spec 004 seed corpus
 
-    def stable_identifier(self, run_id: str) -> str:
-        entry_point = self.entry_point
-        return stable_run_id(
-            "work",
-            {
-                "run_id": run_id,
-                "file": self.file_target.get("path", ""),
-                "band": self.band,
-                "attempt": self.attempt,
-                "entry_point": (
-                    getattr(entry_point, "function_name", "") if entry_point is not None else ""
-                ),
-            },
+    def stable_identifier(self, run_id: str, tier: str) -> str:
+        return deterministic_work_id(
+            run_id,
+            file=str(self.file_target.get("path") or ""),
+            tier=tier,
+            band=self.band,
+            attempt=self.attempt,
+            entry_point=HunterPool._entry_point_payload(self),
+            seed_context=self.seed_context,
+            seed_transcript=self.seed_transcript,
         )
 
 
@@ -212,6 +211,9 @@ class HuntPoolConfig:
     findings_pool: Any = None  # FindingsPool | None — spec 005
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
+    resume_store: SourceHuntResumeStore | None = None
+    prior_spend_per_tier: dict[str, float] = field(default_factory=dict)
+    provider_exhaustion_state: ProviderExhaustionState | None = None
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -274,7 +276,10 @@ class HunterPool:
         for ft in self.config.files:
             ft["tier"] = assign_tier(ft)
         self._results: dict[str, TargetResult] = {}
-        self._spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
+        self._spent_per_tier: dict[str, float] = {
+            tier: max(0.0, float(self.config.prior_spend_per_tier.get(tier, 0.0)))
+            for tier in ("A", "B", "C")
+        }
         self._spent_per_band: dict[str, float] = {"fast": 0.0, "standard": 0.0, "deep": 0.0}
         self._runs_per_band: dict[str, int] = {"fast": 0, "standard": 0, "deep": 0}
         self._promotion_counts: dict[str, int] = {"fast→standard": 0, "standard→deep": 0}
@@ -329,9 +334,88 @@ class HunterPool:
                     )
         return items
 
+    @staticmethod
+    def _entry_point_payload(item: WorkItem) -> dict[str, Any] | None:
+        entry_point = item.entry_point
+        if entry_point is None:
+            return None
+        return {
+            "file_path": getattr(entry_point, "file_path", ""),
+            "function_name": getattr(entry_point, "function_name", ""),
+            "start_line": getattr(entry_point, "start_line", 0),
+            "end_line": getattr(entry_point, "end_line", 0),
+            "entry_type": getattr(entry_point, "entry_type", ""),
+            "description": getattr(entry_point, "description", ""),
+        }
+
+    def _pending_work_items(
+        self,
+        initial: list[WorkItem],
+        tier: str,
+    ) -> list[WorkItem]:
+        store = self.config.resume_store
+        if store is None:
+            return initial
+        completed = store.load_completed_work()
+        pending: list[WorkItem] = []
+        queue = deque(initial)
+        seen: set[str] = set()
+        while queue:
+            item = queue.popleft()
+            work_id = item.stable_identifier(self.config.session_id_prefix, tier)
+            if work_id in seen:
+                continue
+            seen.add(work_id)
+            result = completed.get(work_id)
+            if result is None:
+                pending.append(item)
+                continue
+            self._restore_result(result)
+            next_band = promotion_decision(
+                result.findings,
+                result.stop_reason,
+                item.band,
+                self.config.max_band,
+            )
+            if next_band:
+                self._promotion_counts[f"{item.band}→{next_band}"] += 1
+                queue.append(
+                    WorkItem(
+                        file_target=item.file_target,
+                        band=next_band,
+                        attempt=item.attempt,
+                        seed_transcript=result.promotion_transcript,
+                        entry_point=item.entry_point,
+                        seed_context=item.seed_context,
+                    )
+                )
+        return pending
+
+    def _restore_result(self, result: CompletedWork) -> None:
+        key = result.work_id
+        if key in self._results:
+            return
+        self._results[key] = TargetResult(
+            target=result.file,
+            status="completed",
+            findings=cast(list[dict], result.findings),
+            cost_usd=0.0,
+            tokens_used=0,
+            tier=result.tier,
+            band=result.band,
+            stop_reason=result.stop_reason,
+        )
+
     async def arun(self) -> list[Finding]:
         """Run the full A → B → C pipeline with band promotion. Returns merged findings."""
         logger.info("HunterPool dispatching %d tiered file tasks", len(self.config.files))
+        if self.config.provider_exhaustion_state is not None:
+            self.config.provider_exhaustion_state.raise_if_exhausted()
+        if self.config.resume_store is not None and self.config.findings_pool is not None:
+            self.config.findings_pool.restore(
+                self.config.resume_store.completed_findings(),
+                self.config.resume_store.completed_clusters(),
+            )
         by_tier: dict[str, list[FileTarget]] = {"A": [], "B": [], "C": []}
         for item in self.config.files:
             by_tier[item.get("tier", "C")].append(item)
@@ -348,25 +432,42 @@ class HunterPool:
 
         total_budget = self.config.budget_usd
         tb = self.config.tier_budget
+        prior_spend = dict(self._spent_per_tier)
         if total_budget <= 0:
             budget_a = budget_b = budget_c = float("inf")
         else:
-            budget_a = total_budget * tb.tier_a_fraction
-            budget_b = total_budget * tb.tier_b_fraction
-            budget_c = total_budget * tb.tier_c_fraction
+            allocation_a = total_budget * tb.tier_a_fraction
+            allocation_b = total_budget * tb.tier_b_fraction
+            budget_a = max(0.0, allocation_a - prior_spend["A"])
+            # Rollover is based on lifetime spend, including completed work
+            # restored from an earlier invocation.
+            budget_b = max(
+                0.0,
+                allocation_a + allocation_b - prior_spend["A"] - prior_spend["B"],
+            )
+            budget_c = max(
+                0.0,
+                total_budget - sum(prior_spend.values()),
+            )
 
         starting_band = self.config.starting_band
 
-        work_items_a = self._expand_to_work_items(by_tier["A"], starting_band)
+        work_items_a = self._pending_work_items(
+            self._expand_to_work_items(by_tier["A"], starting_band), "A"
+        )
         spent_a = await self._run_tier_phase(work_items_a, "A", budget_a)
-        budget_b += max(0.0, budget_a - spent_a)
 
-        work_items_b = self._expand_to_work_items(by_tier["B"], starting_band)
+        work_items_b = self._pending_work_items(
+            self._expand_to_work_items(by_tier["B"], starting_band), "B"
+        )
+        budget_b = max(0.0, budget_b - spent_a)
         spent_b = await self._run_tier_phase(work_items_b, "B", budget_b)
-        budget_c += max(0.0, budget_b - spent_b)
+        budget_c = max(0.0, budget_c - spent_a - spent_b)
 
         if by_tier["C"] and tb.tier_c_fraction > 0:
-            work_items_c = self._expand_to_work_items(by_tier["C"], starting_band)
+            work_items_c = self._pending_work_items(
+                self._expand_to_work_items(by_tier["C"], starting_band), "C"
+            )
             await self._run_tier_phase(work_items_c, "C", budget_c)
 
         target_results = list(self._results.values())
@@ -379,6 +480,8 @@ class HunterPool:
         all_findings: list[Finding] = []
         if self.config.findings_pool is not None:
             all_findings = self.config.findings_pool.all_findings()
+        elif self.config.resume_store is not None:
+            all_findings = self.config.resume_store.completed_findings()
         else:
             for tr in target_results:
                 if tr.status == "completed":
@@ -428,7 +531,16 @@ class HunterPool:
         return any(result.status == "budget_exhausted" for result in self._results.values())
 
     @property
+    def provider_exhausted(self) -> bool:
+        state = self.config.provider_exhaustion_state
+        return bool(state is not None and state.exhausted) or any(
+            result.status == "provider_exhausted" for result in self._results.values()
+        )
+
+    @property
     def completed_target_count(self) -> int:
+        if self.config.resume_store is not None:
+            return self.config.resume_store.completed_target_count()
         return len(
             {result.target for result in self._results.values() if result.status == "completed"}
         )
@@ -450,22 +562,29 @@ class HunterPool:
         spent = 0.0
         in_flight: dict[asyncio.Task[TargetResult], WorkItem] = {}
         item_iter = iter(work_items)
-        promotion_queue: list[WorkItem] = []
+        promotion_queue: deque[WorkItem] = deque()
 
         def _submit_next() -> bool:
             nonlocal spent
-            if self._cancelled or spent >= budget:
+            if (
+                self._cancelled
+                or spent >= budget
+                or (
+                    self.config.provider_exhaustion_state is not None
+                    and self.config.provider_exhaustion_state.exhausted
+                )
+            ):
                 return False
             wi: WorkItem | None = None
             try:
                 wi = next(item_iter)
             except StopIteration:
                 if promotion_queue:
-                    wi = promotion_queue.pop(0)
+                    wi = promotion_queue.popleft()
             if wi is None:
                 return False
             band_cost = self.config.band_budget.for_band(wi.band)
-            work_item_id = wi.stable_identifier(self.config.session_id_prefix)
+            work_item_id = wi.stable_identifier(self.config.session_id_prefix, tier)
             task = asyncio.create_task(
                 self._run_file_task(
                     wi.file_target,
@@ -535,6 +654,17 @@ class HunterPool:
                         band=wi.band,
                         stop_reason="budget_exhausted",
                     )
+                except ProviderExhaustedError as exc:
+                    logger.warning("tier %s hunter for %s exhausted provider quota", tier, key)
+                    self._cancelled = True
+                    result = TargetResult(
+                        target=key,
+                        status="provider_exhausted",
+                        error=str(exc),
+                        tier=tier,
+                        band=wi.band,
+                        stop_reason="provider_exhausted",
+                    )
                 except Exception as exc:
                     logger.warning("tier %s hunter for %s failed: %s", tier, key, exc)
                     result = TargetResult(
@@ -545,6 +675,70 @@ class HunterPool:
                         band=wi.band,
                     )
                 ep_suffix = f":{wi.entry_point.function_name}" if wi.entry_point else ""
+                next_band = None
+                promoted_item = None
+                if result.status == "completed":
+                    next_band = promotion_decision(
+                        cast(list[Finding], result.findings),
+                        result.stop_reason,
+                        wi.band,
+                        self.config.max_band,
+                    )
+                    if next_band:
+                        promoted_item = WorkItem(
+                            file_target=wi.file_target,
+                            band=next_band,
+                            attempt=wi.attempt,
+                            seed_transcript=_extract_transcript(result),
+                            entry_point=wi.entry_point,
+                            seed_context=wi.seed_context,
+                        )
+                if result.status == "completed":
+                    try:
+                        if self.config.findings_pool is not None:
+                            for finding in cast(list[Finding], result.findings):
+                                await self.config.findings_pool.add(finding)
+                        if self.config.resume_store is not None:
+                            self.config.resume_store.save_work_result(
+                                work_id=wi.stable_identifier(self.config.session_id_prefix, tier),
+                                file=str(wi.file_target.get("path") or ""),
+                                tier=tier,
+                                band=wi.band,
+                                attempt=wi.attempt,
+                                entry_point=self._entry_point_payload(wi),
+                                seed_context=wi.seed_context,
+                                seed_transcript=wi.seed_transcript,
+                                findings=cast(list[Finding], result.findings),
+                                clusters=(
+                                    self.config.findings_pool.cluster_state(
+                                        {
+                                            finding.cluster_id
+                                            for finding in cast(list[Finding], result.findings)
+                                            if finding.cluster_id
+                                        }
+                                    )
+                                    if self.config.findings_pool is not None
+                                    else []
+                                ),
+                                cost_usd=result.cost_usd,
+                                tokens_used=result.tokens_used,
+                                stop_reason=result.stop_reason,
+                                promotion_transcript=(
+                                    promoted_item.seed_transcript
+                                    if promoted_item is not None
+                                    else None
+                                ),
+                            )
+                    except ProviderExhaustedError as exc:
+                        self._cancelled = True
+                        result = TargetResult(
+                            target=key,
+                            status="provider_exhausted",
+                            error=str(exc),
+                            tier=tier,
+                            band=wi.band,
+                            stop_reason="provider_exhausted",
+                        )
                 async with self._state_lock:
                     self._results[f"{key}{ep_suffix}:{wi.band}:{wi.attempt}"] = result
                     self._spent_per_tier[tier] += result.cost_usd
@@ -593,20 +787,8 @@ class HunterPool:
                             f.get("description", "") or "",
                             trace_chain,
                         )
-                        if self.config.findings_pool is not None:
-                            try:
-                                await self.config.findings_pool.add(f)
-                            except Exception:
-                                logger.debug("findings_pool.add failed", exc_info=True)
-
                 if result.status == "completed":
-                    next_band = promotion_decision(
-                        cast(list[Finding], result.findings),
-                        result.stop_reason,
-                        wi.band,
-                        self.config.max_band,
-                    )
-                    if next_band:
+                    if next_band and promoted_item is not None:
                         promo_key = f"{wi.band}→{next_band}"
                         async with self._state_lock:
                             self._promotion_counts[promo_key] = (
@@ -618,17 +800,17 @@ class HunterPool:
                             wi.band,
                             next_band,
                         )
-                        promotion_queue.append(
-                            WorkItem(
-                                file_target=wi.file_target,
-                                band=next_band,
-                                attempt=wi.attempt,
-                                seed_transcript=_extract_transcript(result),
-                            )
-                        )
+                        promotion_queue.append(promoted_item)
+
+                if result.status == "provider_exhausted":
+                    for active_task in in_flight:
+                        if not active_task.done():
+                            active_task.cancel()
 
                 _submit_next()
 
+        if self.provider_exhausted:
+            raise ProviderExhaustedError("Provider quota exhausted during hunt")
         return spent
 
     # --- Internals: hunter-specific logic the runner delegates back to ----
@@ -686,12 +868,15 @@ class HunterPool:
                     seed_context=seed_context,
                     work_item_id=work_item_id,
                 )
-            except Exception as exc:
+            except BaseException as exc:
+                status = (
+                    "provider_exhausted" if isinstance(exc, ProviderExhaustedError) else "failed"
+                )
                 if instrumentation is not None:
                     instrumentation.record(
                         "work_item",
                         stage="hunt",
-                        status="failed",
+                        status=status,
                         files=[file_target.get("path", "")],
                         symbols=[entry_symbol] if entry_symbol else [],
                         work_item_id=work_item_id,
@@ -811,9 +996,12 @@ class HunterPool:
             return result
 
         global _DEFAULT_HUNTER_FACTORY
-        if _DEFAULT_HUNTER_FACTORY is None:
-            from .hunter import build_hunter_agent
+        from .hunter import build_hunter_agent
 
+        if (
+            _DEFAULT_HUNTER_FACTORY is None
+            or _DEFAULT_HUNTER_FACTORY.__module__ != build_hunter_agent.__module__
+        ):
             _DEFAULT_HUNTER_FACTORY = build_hunter_agent
 
         if self.config.llm is None:

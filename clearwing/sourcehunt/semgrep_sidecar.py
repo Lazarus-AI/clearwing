@@ -63,7 +63,11 @@ class SemgrepSidecar:
     def available(self) -> bool:
         return shutil.which(self.binary) is not None
 
-    def run_scan(self, repo_path: str) -> list[SemgrepFinding]:
+    def run_scan(
+        self,
+        repo_path: str,
+        files: list[str] | None = None,
+    ) -> list[SemgrepFinding]:
         """Invoke `semgrep --json --config <config> <repo_path>`.
 
         Returns a list of normalized findings. On any failure, logs and
@@ -85,7 +89,10 @@ class SemgrepSidecar:
         ]
         if not self.respect_gitignore:
             cmd.append("--no-git-ignore")  # also scan ignored files — v0.1 choice
-        cmd = cmd + self.extra_args + [repo_path]
+        targets = files if files is not None else [repo_path]
+        if not targets:
+            return []
+        cmd = cmd + self.extra_args + targets
 
         try:
             proc = subprocess.run(

@@ -498,10 +498,14 @@ class SourceAnalyzer:
         *,
         max_file_size: int | None = None,
         respect_gitignore: bool = False,
+        excluded_roots: list[str | Path] | None = None,
     ):
         self.repo_path = repo_path
         self._temp_dir: tempfile.TemporaryDirectory | None = None
         self.respect_gitignore = respect_gitignore
+        self.excluded_roots = tuple(
+            Path(path).expanduser().resolve() for path in (excluded_roots or [])
+        )
         if max_file_size is not None:
             self.MAX_FILE_SIZE = max_file_size
 
@@ -607,12 +611,18 @@ class SourceAnalyzer:
     def _iter_source_files(self, root: str):
         """Yield source file paths, skipping irrelevant directories."""
         gitignore = _GitignoreMatcher.from_repo(root) if self.respect_gitignore else None
+
+        def excluded(path: str) -> bool:
+            resolved = Path(path).resolve()
+            return any(resolved == root or resolved.is_relative_to(root) for root in self.excluded_roots)
+
         for dirpath, dirnames, filenames in os.walk(root):
             # Prune skip directories
             dirnames[:] = [
                 d
                 for d in dirnames
                 if d not in self.SKIP_DIRS
+                and not excluded(os.path.join(dirpath, d))
                 and not (gitignore and gitignore.matches_dir(os.path.join(dirpath, d)))
             ]
 
@@ -620,6 +630,8 @@ class SourceAnalyzer:
                 if any(fname.endswith(skip) for skip in self.SKIP_FILES):
                     continue
                 full_path = os.path.join(dirpath, fname)
+                if excluded(full_path):
+                    continue
                 if gitignore and gitignore.matches_file(full_path):
                     continue
                 try:

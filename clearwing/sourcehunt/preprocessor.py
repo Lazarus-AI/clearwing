@@ -164,6 +164,7 @@ def _count_imports_by(
     repo_path: str,
     file_path: str,
     language: str,
+    source_files: list[str],
     gitignore: _GitignoreMatcher | None = None,
 ) -> int:
     """Cheap heuristic for `imports_by`: grep the repo for references to this
@@ -189,28 +190,20 @@ def _count_imports_by(
         return 0
 
     count = 0
-    for dirpath, dirnames, filenames in os.walk(repo_path):
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if d not in SourceAnalyzer.SKIP_DIRS
-            and not (gitignore and gitignore.matches_dir(os.path.join(dirpath, d)))
-        ]
-        for fname in filenames:
-            other = os.path.join(dirpath, fname)
-            if other == file_path:
+    for other in source_files:
+        if other == file_path:
+            continue
+        if gitignore and gitignore.matches_file(other):
+            continue
+        try:
+            if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
                 continue
-            if gitignore and gitignore.matches_file(other):
-                continue
-            try:
-                if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
-                    continue
-                with open(other, encoding="utf-8", errors="ignore") as f:
-                    head = f.read(64 * 1024)  # only scan the first 64 KB
-                if pattern.search(head):
-                    count += 1
-            except OSError:
-                continue
+            with open(other, encoding="utf-8", errors="ignore") as f:
+                head = f.read(64 * 1024)  # only scan the first 64 KB
+            if pattern.search(head):
+                count += 1
+        except OSError:
+            continue
     return count
 
 
@@ -244,6 +237,7 @@ class Preprocessor:
         run_taint: bool = False,  # v0.4: tree-sitter taint analysis
         max_imports_by_files: int = 1000,  # cap the imports_by walk
         respect_gitignore: bool = False,
+        excluded_roots: list[str | Path] | None = None,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -256,6 +250,7 @@ class Preprocessor:
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
         self.respect_gitignore = respect_gitignore
+        self.excluded_roots = list(excluded_roots or [])
         self._analyzer: SourceAnalyzer | None = None
         self._cloner: SourceAnalyzer | None = None
 
@@ -268,6 +263,7 @@ class Preprocessor:
         self._analyzer = SourceAnalyzer(
             repo_path=repo_path,
             respect_gitignore=self.respect_gitignore,
+            excluded_roots=self.excluded_roots,
         )
         gitignore = _GitignoreMatcher.from_repo(repo_path) if self.respect_gitignore else None
         analysis_result = self._analyzer.analyze()
@@ -337,7 +333,13 @@ class Preprocessor:
             # v0.1 imports_by — capped to keep large repos snappy
             imports_by = 0
             if len(file_targets) < imports_by_budget:
-                imports_by = _count_imports_by(repo_path, abs_path, language, gitignore)
+                imports_by = _count_imports_by(
+                    repo_path,
+                    abs_path,
+                    language,
+                    source_files,
+                    gitignore,
+                )
 
             target: FileTarget = {
                 "path": rel_path,
@@ -373,7 +375,7 @@ class Preprocessor:
             try:
                 builder = CallGraphBuilder()
                 if builder.available:
-                    callgraph = builder.build(repo_path)
+                    callgraph = builder.build(repo_path, files=source_files)
                     self._populate_callgraph_signals(file_targets, callgraph)
                 else:
                     logger.info("tree-sitter grammars not available; callgraph skipped")
@@ -390,7 +392,10 @@ class Preprocessor:
             try:
                 sidecar = SemgrepSidecar(respect_gitignore=self.respect_gitignore)
                 if sidecar.available:
-                    semgrep_findings_objs = sidecar.run_scan(repo_path)
+                    semgrep_findings_objs = sidecar.run_scan(
+                        repo_path,
+                        files=source_files,
+                    )
                     semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]
                     self._apply_semgrep_hints(file_targets, semgrep_findings)
                 else:
@@ -407,7 +412,7 @@ class Preprocessor:
             try:
                 analyzer = TaintAnalyzer()
                 if analyzer.available:
-                    taint_result = analyzer.analyze_repo(repo_path)
+                    taint_result = analyzer.analyze_repo(repo_path, files=source_files)
                     taint_paths = taint_result.paths
                     self._apply_taint_signals(file_targets, taint_paths)
                 else:
