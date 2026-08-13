@@ -59,6 +59,10 @@ class CompatibilityTraceInput(ToolInputModel):
 
 
 class RecordFindingInput(ToolInputModel):
+    candidate_id: str = Field(
+        default="",
+        description="Validated candidate ledger ID when the active scaffold requires one",
+    )
     file: str
     line_number: int
     finding_type: str
@@ -168,6 +172,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         crypto_attack_class: str = "",
         key_material_exposed: str = "",
         trace: dict | None = None,
+        candidate_id: str = "",
         **_: object,
     ) -> str:
         """Record a finding into the hunter's state.
@@ -203,6 +208,31 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             trace: Optional compatibility trace or summary. Streamed trace
                 steps take precedence when present.
         """
+        if ctx.require_active_candidate_before_finding:
+            candidate = ctx.candidates.get(candidate_id)
+            if candidate is None or candidate.get("status") not in {
+                "pending",
+                "investigating",
+                "validated",
+            }:
+                return (
+                    "ERROR: this scaffold requires candidate_id for an active candidate. "
+                    "Do not submit a rejected or absent hypothesis; keep its strongest "
+                    "counterargument and one unresolved next check in the ledger."
+                )
+        if ctx.require_validated_candidate_before_finding:
+            candidate = ctx.candidates.get(candidate_id)
+            if candidate is None or candidate.get("status") != "validated":
+                return (
+                    "ERROR: this scaffold requires candidate_id for a candidate already marked "
+                    "validated with record_candidate. Resolve its counterargument and exact "
+                    "entry-to-effect trace before submitting."
+                )
+            if evidence_level == "suspicion":
+                return (
+                    "ERROR: a validated candidate requires static_corroboration or stronger "
+                    "evidence_level; unresolved suspicion remains in the candidate ledger."
+                )
         explicit_steps = trace.get("steps", []) if trace else []
         try:
             authoritative_steps = (
@@ -256,6 +286,8 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             },
         )
         finding_metadata = {"stable_finding_id": stable_finding_id}
+        if candidate_id:
+            finding_metadata["candidate_id"] = candidate_id
         if ctx.work_item_id:
             finding_metadata["work_item_id"] = ctx.work_item_id
 

@@ -1,0 +1,4 @@
+[
+  "libavcodec/rawdec.c",
+  "libavfilter/af_anequalizer.c"
+]

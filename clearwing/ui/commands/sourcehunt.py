@@ -206,6 +206,36 @@ def add_parser(subparsers):
         "(default), 'specialist' uses legacy prescriptive checklists",
     )
     parser.add_argument(
+        "--prompt-bundle",
+        choices=["legacy-v1", "generic-security-v1"],
+        default="legacy-v1",
+        dest="prompt_bundle",
+        help="Versioned prompt candidate. 'generic-security-v1' enforces the "
+        "solution-independent optimization baseline",
+    )
+    parser.add_argument(
+        "--scaffold-profile",
+        choices=[
+            "native-v1",
+            "minimal-linear-v1",
+            "candidate-ledger-v1",
+            "window-ledger-v1",
+            "guided-window-ledger-v1",
+            "state-interaction-ledger-v1",
+            "proof-refinement-ledger-v1",
+        ],
+        default="native-v1",
+        dest="scaffold_profile",
+        help="Versioned agent tool/control surface (default: native-v1)",
+    )
+    parser.add_argument(
+        "--context-profile",
+        choices=["legacy-context-v1", "compact-small-model-v1"],
+        default="legacy-context-v1",
+        dest="context_profile",
+        help="Versioned request-context policy (default: legacy-context-v1)",
+    )
+    parser.add_argument(
         "--campaign-hint",
         default=None,
         dest="campaign_hint",
@@ -1213,6 +1243,9 @@ def handle(cli, args):
         provider_manager=provider_manager,
         agent_mode=args.agent_mode,
         prompt_mode=args.prompt_mode,
+        prompt_bundle=args.prompt_bundle,
+        scaffold_profile=args.scaffold_profile,
+        context_profile=args.context_profile,
         campaign_hint=args.campaign_hint,
         exploit_mode=args.exploit_mode,
         starting_band=args.starting_band,

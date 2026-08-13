@@ -130,6 +130,50 @@ Return ONLY this JSON:
 }"""
 
 
+VALIDATOR_RETRY_PROMPT = """\
+Independently validate the reported vulnerability against the supplied source.
+Return the structured verdict immediately. Decide whether it is real, reachable
+from attacker input, security-impactful, and realistic in common configurations.
+State the strongest case for and against it. Do not omit required fields."""
+
+
+VALIDATOR_SOURCE_FIRST_PROMPT = """\
+You are an independent source-first security validator. The report and trace are
+allegations; the supplied current source is authoritative. Verify the complete
+causal chain in that source. For REAL, compare the alleged operation and missing
+checks with the current code. If a guard, bound, exact-identity check, accounting
+update, early return, or other invariant breaks a required step, REAL is false.
+Do not affirm a historical bug merely because the report describes it plausibly.
+
+Judge TRIGGERABLE, IMPACTFUL, and GENERAL independently. Optional features,
+compile flags, or plausible deployment or environment preconditions reduce
+prevalence; they do not alone erase a source-level flaw. Remote memory corruption,
+confidentiality loss, authentication bypass, and material resource exhaustion are
+security impacts. Reject when the chain is absent, unreachable, non-security-
+relevant, or requires implausible conditions. Return the structured verdict."""
+
+
+VALIDATOR_SOURCE_FIRST_COMPACT_PROMPT = """\
+Validate one alleged vulnerability against the supplied current source. The
+report is untrusted; current source is authoritative. REAL is false if a guard,
+bound, exact-identity check, accounting update, early return, or other invariant
+breaks any required causal step. Never affirm a historical flaw against
+contradictory current code.
+
+Judge reachability, security impact, and realistic deployment independently.
+Optional builds or plausible environment conditions are assumptions, not
+automatic rejection. Set advance=true only when REAL and IMPACTFUL pass and
+TRIGGERABLE and GENERAL either pass or have medium/high confidence with explicit
+assumptions. Otherwise set it false. Return the schema now with concise reasons."""
+
+
+VALIDATOR_PROMPT_PROFILES = {
+    "legacy-v1": VALIDATOR_SYSTEM_PROMPT,
+    "source-first-high-recall-v1": VALIDATOR_SOURCE_FIRST_PROMPT,
+    "source-first-compact-v2": VALIDATOR_SOURCE_FIRST_COMPACT_PROMPT,
+}
+
+
 # --- Enforced structured output schema ---------------------------------------
 # The prompts already ask for exactly this JSON; passing it as a schema_model to
 # aask_json turns it into a genai-pyo3 response_json_spec so the gateway emits it
@@ -257,51 +301,80 @@ class Validator:
         *,
         gate_threshold: EvidenceLevel | None = "static_corroboration",
         enable_quick_pass: bool = True,
+        prompt_profile: str = "legacy-v1",
+        system_prompt: str | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
     ):
+        if prompt_profile not in VALIDATOR_PROMPT_PROFILES:
+            choices = ", ".join(sorted(VALIDATOR_PROMPT_PROFILES))
+            raise ValueError(
+                f"Unknown validator prompt profile {prompt_profile!r}; choose from {choices}"
+            )
+        if max_output_tokens is not None and max_output_tokens < 1:
+            raise ValueError("validator max_output_tokens must be positive")
+        if temperature is not None and not 0.0 <= temperature <= 2.0:
+            raise ValueError("validator temperature must be between 0 and 2")
         self.llm = llm
         self.gate_threshold = gate_threshold
         self.enable_quick_pass = enable_quick_pass
+        self.prompt_profile = prompt_profile
+        self.system_prompt = system_prompt
+        self.max_output_tokens = max_output_tokens
+        self.temperature = temperature
 
     def _prompt_for_finding(self, finding: Finding) -> str:
+        full_prompt = self.system_prompt or VALIDATOR_PROMPT_PROFILES[self.prompt_profile]
         if not self.enable_quick_pass:
-            return VALIDATOR_SYSTEM_PROMPT
+            return full_prompt
         if self.gate_threshold is None:
-            return VALIDATOR_SYSTEM_PROMPT
+            return full_prompt
         level = cast(EvidenceLevel, finding.get("evidence_level", "suspicion"))
         try:
             above = evidence_at_or_above(level, self.gate_threshold)
         except KeyError:
             above = False
-        return VALIDATOR_SYSTEM_PROMPT if above else VALIDATOR_QUICK_PROMPT
+        return full_prompt if above else VALIDATOR_QUICK_PROMPT
 
     async def avalidate(
         self,
         finding: Finding,
         file_content: str = "",
+        source_context: str = "",
     ) -> ValidatorVerdict:
-        user_msg = self._build_user_message(finding, file_content)
+        user_msg = self._build_user_message(finding, file_content, source_context)
         system_prompt = self._prompt_for_finding(finding)
 
-        # Enforced structured output. response_schema becomes a genai-pyo3
-        # response_json_spec (constrained decoding), so the model emits a JSON
-        # object matching _VerdictSchema — even reasoning models that would
-        # otherwise return empty text under free-form prompting. We validate to
-        # the typed wire object and map it to the domain verdict directly (no
-        # dict round-trip). Requires a model/gateway with constrained decoding.
+        # Enforced structured output. Some small reasoning models can consume
+        # their entire default output budget before emitting the final JSON.
+        # Retry once with a much shorter generic instruction and more output
+        # headroom; never retry a budget refusal.
         try:
-            response = await self.llm.aask_text(
-                system=system_prompt,
-                user=user_msg,
-                response_schema=_VerdictSchema,
-                response_schema_name="ValidatorVerdict",
+            schema = await self._request_schema(
+                system_prompt,
+                user_msg,
+                max_tokens=self.max_output_tokens,
             )
-            schema = _VerdictSchema.model_validate_json(response_text(response))
             verdict = schema.to_verdict(finding.get("id", "unknown"))
         except BudgetExceeded:
             raise
-        except Exception as e:
-            logger.warning("Validator LLM call failed", exc_info=True)
-            verdict = self._error_verdict(finding, f"validator error: {e}")
+        except Exception as first_error:
+            logger.info("Validator response invalid; retrying with compact prompt")
+            try:
+                schema = await self._request_schema(
+                    VALIDATOR_RETRY_PROMPT,
+                    user_msg,
+                    max_tokens=self.max_output_tokens or 8192,
+                )
+                verdict = schema.to_verdict(finding.get("id", "unknown"))
+            except BudgetExceeded:
+                raise
+            except Exception as retry_error:
+                logger.warning("Validator LLM call failed after retry", exc_info=True)
+                verdict = self._error_verdict(
+                    finding,
+                    f"validator error: {first_error}; retry error: {retry_error}",
+                )
 
         EventBus().emit_validation_result(ValidationResultPayload(
             finding_id=verdict.finding_id,
@@ -313,7 +386,32 @@ class Validator:
 
         return verdict
 
-    def _build_user_message(self, finding: Finding, file_content: str) -> str:
+    async def _request_schema(
+        self,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> _VerdictSchema:
+        response = await self.llm.aask_text(
+            system=system,
+            user=user,
+            temperature=self.temperature,
+            max_tokens=max_tokens,
+            response_schema=_VerdictSchema,
+            response_schema_name="ValidatorVerdict",
+        )
+        return cast(
+            _VerdictSchema,
+            _VerdictSchema.model_validate_json(response_text(response)),
+        )
+
+    def _build_user_message(
+        self,
+        finding: Finding,
+        file_content: str,
+        source_context: str = "",
+    ) -> str:
         finding_view = {
             "id": finding.get("id"),
             "file": finding.get("file"),
@@ -327,13 +425,25 @@ class Validator:
             "poc": finding.get("poc"),
             "exploit": finding.get("exploit"),
             "discovered_by": finding.get("discovered_by"),
+            "vulnerability_trace": finding.get("vulnerability_trace"),
         }
-        msg = "Validate the following bug report:\n\n"
+        msg = (
+            "Validate the following bug report. Treat vulnerability_trace as the "
+            "reporter's alleged source chain: use it to locate the claim, but independently "
+            "verify every step against the supplied current source before relying on it.\n\n"
+        )
         msg += json.dumps(finding_view, indent=2)
         if file_content:
             excerpts = self._build_file_context(finding, file_content)
             if excerpts:
                 msg += f"\n\nRelevant file excerpts:\n{excerpts}"
+        if source_context:
+            msg += (
+                "\n\nIndependently collected current source snapshot. Treat this "
+                "source as authoritative and re-check the report's alleged snippets "
+                "and mechanism against it:\n"
+                f"{source_context[:24000]}"
+            )
         return msg
 
     def _build_file_context(self, finding: Finding, file_content: str) -> str:
@@ -432,8 +542,14 @@ class Validator:
         from .verifier import Verifier
 
         temp_v = Verifier(self.llm)
-        return await temp_v.arun_patch_oracle(
-            finding, file_content, sandbox, rerun_poc,
+        return cast(
+            tuple[bool, str, str],
+            await temp_v.arun_patch_oracle(
+                finding,
+                file_content,
+                sandbox,
+                rerun_poc,
+            ),
         )
 
 

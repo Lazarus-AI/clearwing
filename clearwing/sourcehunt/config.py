@@ -78,6 +78,9 @@ class FeatureFlags:
     exploit_mode: bool = False
     agent_mode: str = "auto"  # "auto" | "constrained" | "deep"
     prompt_mode: str = "unconstrained"  # "unconstrained" | "specialist"
+    prompt_bundle: str = "legacy-v1"
+    scaffold_profile: str = "native-v1"
+    context_profile: str = "legacy-context-v1"
 
 
 @dataclass(frozen=True)

@@ -18,8 +18,8 @@ Backends covered below:
 - **OpenAI (Responses API)** — GPT-5.x / o-series via `/v1/responses`
   (`openai_resp` adapter). Required for GPT-5.x and o-series.
 - **OpenAI OAuth (ChatGPT)** — Plus/Pro login via Codex backend (`openai_codex`).
-- **OpenRouter, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
-  anything that speaks `/v1/chat/completions` (`openai` adapter).
+- **OpenRouter, Together, Groq, Fireworks, DeepSeek, Kimi, LM Studio, vLLM,
+  custom** — anything that speaks `/v1/chat/completions` (`openai` adapter).
 - **MiniMax** — M2.7 / M2.5 via the Anthropic-compatible endpoint
   (`anthropic` adapter at `api.minimax.io/anthropic`).
 - **Ollama** — local models via the native rust-genai Ollama adapter
@@ -47,6 +47,7 @@ Direct variants:
 
 ```bash
 clearwing setup --provider openrouter
+clearwing setup --provider kimi-code
 clearwing setup --provider ollama --no-test
 clearwing init   # alias
 ```
@@ -355,6 +356,32 @@ export CLEARWING_MODEL=deepseek-chat
 For OpenAI itself, use the [Chat Completions](#openai-chat-completions-api)
 or [Responses](#openai-responses-api) section above — the model
 generation decides which.
+
+## Kimi Code (membership)
+
+Use this option for API keys created in the Kimi Code Console and backed
+by a Kimi Code membership:
+
+```bash
+export KIMI_CODE_API_KEY=your-key
+clearwing setup --provider kimi-code
+```
+
+The generated provider section uses Kimi Code's separate endpoint and
+model IDs:
+
+```yaml
+provider:
+  base_url: https://api.kimi.com/coding/v1
+  api_key: ${KIMI_CODE_API_KEY}
+  model: k3-256k
+  adapter: openai
+```
+
+`k3-256k` is the recommended default because it provides K3 capability
+while consuming less membership quota than the 1M-context `k3` model.
+The model picker also offers `k3`, `kimi-for-coding`, and
+`kimi-for-coding-highspeed`; availability depends on membership tier.
 
 ## MiniMax
 

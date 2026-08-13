@@ -1,0 +1,7 @@
+[
+  "libavcodec/rawdec.c",
+  "libavcodec/vc1.c",
+  "libavcodec/msvideo1.c",
+  "libavfilter/af_anequalizer.c",
+  "libavcodec/bsf/dts2pts.c"
+]

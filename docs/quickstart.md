@@ -26,7 +26,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Or use an OpenAI-compatible endpoint (OpenRouter, Ollama, LM Studio,
-vLLM, Together, Groq, DeepSeek, OpenAI, ...):
+vLLM, Together, Groq, DeepSeek, Kimi, OpenAI, ...):
 
 ```bash
 # Per-command
@@ -137,4 +137,4 @@ make gate          # full CI gate locally: lint + type + test + build
 - [**Architecture**](architecture.md) — how the pieces fit together.
 - [**CLI reference**](cli.md) — every flag, with examples.
 - [**LLM providers**](providers.md) — OpenRouter, Ollama, LM Studio,
-  vLLM, Together, Groq, DeepSeek, OpenAI direct.
+  vLLM, Kimi, Together, Groq, DeepSeek, OpenAI direct.

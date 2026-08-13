@@ -1,0 +1,22 @@
+[
+  "libavcodec/qtrle.c",
+  "libavcodec/atrac9dec.c",
+  "libavfilter/vf_histogram.c",
+  "libavfilter/vf_zscale.c",
+  "libavformat/hdsenc.c",
+  "libavcodec/g729postfilter.c",
+  "libavcodec/nuv.c",
+  "libavcodec/opus/silk.c",
+  "libavcodec/svq1enc.c",
+  "libavformat/dashdec.c",
+  "libavformat/ty.c",
+  "fftools/cmdutils.c",
+  "libavcodec/vc2enc.c",
+  "libavfilter/af_headphone.c",
+  "libavfilter/af_replaygain.c",
+  "libavfilter/f_graphmonitor.c",
+  "libavfilter/vf_pullup.c",
+  "libavfilter/vf_v360.c",
+  "libavformat/mpeg.c",
+  "libavformat/sga.c"
+]

@@ -1,0 +1,1325 @@
+[
+  {
+    "case_id": "h264-slice-sentinel-collision",
+    "finding": {
+      "id": "ffmpeg-h264-slice-sentinel-collision",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavcodec/h264_slice.c",
+      "line_number": 1982,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "The per-picture slice counter is an unbounded int, while decoded macroblock ownership is stored in a uint16_t slice table initialized to 0xFFFF. On slice 65535, storing slice_num aliases the unused-entry sentinel. Neighbor checks can then treat padded or uninitialized entries as members of the current slice, enabling the left-border exchange path at a row boundary to access top_borders at mb_x - 1.",
+      "code_snippet": "sl->slice_num = ++h->current_slice;",
+      "poc": "Decode one H.264 picture containing at least 65535 accepted slices so slice_num becomes 0xFFFF, then reach an intra macroblock at the left edge with the cross-slice deblock path active.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "attacker-controlled slice count reaches a wider counter, truncates into the 16-bit ownership table as its 0xFFFF sentinel, and corrupts a neighbor-existence decision before a left-border exchange",
+        "steps": [
+          {"file": "libavcodec/h264dec.c", "line": 210, "function": "ff_h264_alloc_tables", "code_snippet": "memset(h->slice_table_base, -1, st_size * sizeof(*h->slice_table_base));", "note": "The 16-bit table uses 0xFFFF for unavailable/padded entries."},
+          {"file": "libavcodec/h264_slice.c", "line": 1982, "function": "h264_slice_init", "code_snippet": "sl->slice_num = ++h->current_slice;", "note": "No terminating bound prevents slice_num from reaching 65535."},
+          {"file": "libavcodec/h264_cabac.c", "line": 2033, "function": "decode_mb_cabac", "code_snippet": "h->slice_table[mb_xy] = sl->slice_num;", "note": "The int counter is stored into the uint16_t table."},
+          {"file": "libavcodec/h264_mb.c", "line": 532, "function": "xchg_mb_border", "code_snippet": "deblock_topleft = h->slice_table[sl->mb_xy - 1 - (h->mb_stride << MB_FIELD(sl))] == sl->slice_num;", "note": "At the collision, the unused sentinel compares equal to the current slice."},
+          {"file": "libavcodec/h264_mb.c", "line": 543, "function": "xchg_mb_border", "code_snippet": "top_border_m1 = sl->top_borders[top_idx][sl->mb_x - 1];", "note": "A falsely present top-left neighbor enables exchange through the left-border pointer."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/h264dec.h", "start": 395, "end": 505},
+      {"path": "libavcodec/h264dec.c", "start": 185, "end": 218},
+      {"path": "libavcodec/h264_slice.c", "start": 1965, "end": 2005},
+      {"path": "libavcodec/h264_cabac.c", "start": 2018, "end": 2040},
+      {"path": "libavcodec/h264_mb.c", "start": 509, "end": 585}
+    ]
+  },
+  {
+    "case_id": "vulkan-hevc-rps-list-overflow",
+    "finding": {
+      "id": "ffmpeg-vulkan-hevc-rps-list-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavcodec/vulkan_hevc.c",
+      "line_number": 775,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "The Vulkan HEVC start-frame path copies each current short- or long-term RPS list into a Vulkan StdVideoDecodeH265PictureInfo array whose API-defined capacity is 8. FFmpeg's parser and RPS builder allow an individual list to contain up to 15 short-term references or up to 16 retained references. Unlike the NVDEC path, the Vulkan path does not reject a list count above the destination capacity, so i >= 8 writes beyond RefPicSetStCurrBefore, RefPicSetStCurrAfter, or RefPicSetLtCurr into adjacent picture-info fields.",
+      "code_snippet": "for (int i = 0; i < h->rps[ST_CURR_BEF].nb_refs; i++) { ... hp->h265pic.RefPicSetStCurrBefore[i] = j; }",
+      "poc": "Use Vulkan HEVC decoding on a valid stream whose current short-term-before, short-term-after, or long-term RPS contains more than eight used references that resolve in the DPB.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "bitstream RPS counts survive parser checks and RPS construction with more than eight members, then directly bound writes into three eight-entry Vulkan API arrays",
+        "steps": [
+          {"file": "libavcodec/hevc/ps.c", "line": 197, "function": "ff_hevc_decode_short_term_rps", "code_snippet": "if (rps->num_negative_pics >= HEVC_MAX_REFS || nb_positive_pics >= HEVC_MAX_REFS)", "note": "Each short-term side may have 15 entries; it is not capped at 8."},
+          {"file": "libavcodec/hevc/refs.c", "line": 503, "function": "add_candidate_ref", "code_snippet": "if (ref == s->cur_frame || list->nb_refs >= HEVC_MAX_REFS)", "note": "RPS construction permits a list up to HEVC_MAX_REFS (16)."},
+          {"file": "libavcodec/vulkan_hevc.c", "line": 770, "function": "vk_hevc_start_frame", "code_snippet": "for (int i = 0; i < h->rps[ST_CURR_BEF].nb_refs; i++)", "note": "The producer count directly controls the destination index."},
+          {"file": "libavcodec/vulkan_hevc.c", "line": 775, "function": "vk_hevc_start_frame", "code_snippet": "hp->h265pic.RefPicSetStCurrBefore[i] = j;", "note": "The Khronos header defines this and the other two RefPicSet arrays with capacity 8."},
+          {"file": "libavcodec/nvdec_hevc.c", "line": 222, "function": "nvdec_hevc_start_frame", "code_snippet": "if (s->rps[LT_CURR].nb_refs > FF_ARRAY_ELEMS(ppc->RefPicSetLtCurr) || ...)", "note": "An independent hardware path explicitly enforces the missing invariant."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/hevc/hevc.h", "start": 112, "end": 128},
+      {"path": "libavcodec/hevc/ps.c", "start": 180, "end": 225},
+      {"path": "libavcodec/hevc/refs.c", "start": 495, "end": 590},
+      {"path": "libavcodec/vulkan_hevc.c", "start": 710, "end": 820},
+      {"path": "libavcodec/nvdec_hevc.c", "start": 210, "end": 265}
+    ]
+  },
+  {
+    "case_id": "arnndn-denoise-output-stack-overflow",
+    "finding": {
+      "id": "ffmpeg-arnndn-denoise-output-stack-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-121",
+      "file": "libavfilter/af_arnndn.c",
+      "line_number": 1253,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The arnndn model parser accepts denoise_output->nb_neurons values from 0 through 128 but validates only that the separate VAD output has one neuron. During non-silent audio processing, rnnoise_channel supplies a fixed 22-float stack array as the gains destination. compute_dense writes nb_neurons floats to that pointer, so a model declaring 23 or more denoise outputs writes beyond the stack array. A generated 23-output model deterministically aborts under ASan at compute_dense with g in rnnoise_channel identified as the overflowed object.",
+      "code_snippet": "compute_dense(rnn->model->denoise_output, gains, rnn->denoise_gru_state);",
+      "poc": "Generate the model with `python evaluations/build_ffmpeg_arnndn_model.py /tmp/arnndn-23.model`, then process non-silent 48 kHz audio through `ffmpeg -f lavfi -i anoisesrc=r=48000:d=0.1 -af arnndn=m=/tmp/arnndn-23.model -f null -` using an ASan build.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a model-controlled denoise output count passes the generic 128-neuron parser bound, then controls a dense-layer loop writing into a fixed 22-float stack destination",
+        "steps": [
+          {"file": "libavfilter/af_arnndn.c", "line": 227, "function": "rnnoise_model_from_file", "code_snippet": "if (fscanf(f, \"%d\", &in) != 1 || in < 0 || in > 128)", "note": "Every model dimension, including denoise output neurons, is accepted up to 128."},
+          {"file": "libavfilter/af_arnndn.c", "line": 317, "function": "rnnoise_model_from_file", "code_snippet": "INPUT_DENSE(denoise_output);", "note": "The attacker-selected output count is persisted on the final denoise layer."},
+          {"file": "libavfilter/af_arnndn.c", "line": 320, "function": "rnnoise_model_from_file", "code_snippet": "if (vad_output->nb_neurons != 1)", "note": "Only the VAD output shape is validated; denoise_output is not required to equal NB_BANDS."},
+          {"file": "libavfilter/af_arnndn.c", "line": 1369, "function": "rnnoise_channel", "code_snippet": "float g[NB_BANDS];", "note": "The inference caller allocates exactly 22 float gains on the stack."},
+          {"file": "libavfilter/af_arnndn.c", "line": 1357, "function": "compute_rnn", "code_snippet": "compute_dense(rnn->model->denoise_output, gains, rnn->denoise_gru_state);", "note": "The fixed stack array is passed as the destination for the model-sized output."},
+          {"file": "libavfilter/af_arnndn.c", "line": 1255, "function": "compute_dense", "code_snippet": "for (int i = 0; i < N; i++)", "note": "N is the model's nb_neurons, and output[i] writes past g[21] when N exceeds 22."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/af_arnndn.c", "start": 187, "end": 327},
+      {"path": "libavfilter/af_arnndn.c", "start": 1245, "end": 1378}
+    ]
+  },
+  {
+    "case_id": "rtp-qdm2-small-block-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-rtp-qdm2-small-block-heap-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-122",
+      "file": "libavformat/rtpdec_qdm2.c",
+      "line_number": 211,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The RTP QDM2 configuration parser accepts an attacker-controlled 32-bit block_size without enforcing the minimum size of the reconstructed superblock header. qdm2_restore_block allocates exactly block_size bytes and unconditionally writes a header of at least two bytes. With block_size 1 and one cached subpacket, the header advances p beyond the packet, the remaining-size expression becomes -1, and memcpy receives that negative int as a huge size_t. The direct parse_packet harness deterministically aborts under ASan with negative-size-param (size=-1) in qdm2_parse_packet.",
+      "code_snippet": "to_copy = FFMIN(qdm->len[n], pkt->size - (p - pkt->data)); memcpy(p, qdm->buf[n], to_copy);",
+      "poc": "Build evaluations/ffmpeg_qdm2_reproducer.c against the sanitizer-instrumented FFmpeg static libraries and run it with ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an RTP configuration field controls the reconstructed packet allocation without a header-size invariant, producing an out-of-bounds header write and a negative copy length",
+        "steps": [
+          {"file": "libavformat/rtpdec_qdm2.c", "line": 104, "function": "qdm2_parse_config", "code_snippet": "case 4: /* stream with extradata */", "note": "An RTP configuration item enters the stream-with-extradata path."},
+          {"file": "libavformat/rtpdec_qdm2.c", "line": 121, "function": "qdm2_parse_config", "code_snippet": "qdm->block_size = AV_RB32(p + 26);", "note": "The packet-controlled 32-bit size is stored without a lower bound."},
+          {"file": "libavformat/rtpdec_qdm2.c", "line": 199, "function": "qdm2_restore_block", "code_snippet": "if ((res = av_new_packet(pkt, qdm->block_size)) < 0)", "note": "The unchecked value becomes the exact destination allocation size."},
+          {"file": "libavformat/rtpdec_qdm2.c", "line": 211, "function": "qdm2_restore_block", "code_snippet": "*p++ = qdm->block_type; *p++ = qdm->len[n];", "note": "At least two header bytes are written even when block_size is zero or one."},
+          {"file": "libavformat/rtpdec_qdm2.c", "line": 220, "function": "qdm2_restore_block", "code_snippet": "to_copy = FFMIN(qdm->len[n], pkt->size - (p - pkt->data));", "note": "For block_size 1 after the two-byte header, the computed copy length is -1."},
+          {"file": "libavformat/rtpdec_qdm2.c", "line": 221, "function": "qdm2_restore_block", "code_snippet": "memcpy(p, qdm->buf[n], to_copy);", "note": "The negative int is converted to a huge unsigned copy size; ASan aborts deterministically."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/rtpdec_qdm2.c", "start": 76, "end": 129},
+      {"path": "libavformat/rtpdec_qdm2.c", "start": 153, "end": 235},
+      {"path": "libavformat/rtpdec_qdm2.c", "start": 238, "end": 308}
+    ]
+  },
+  {
+    "case_id": "ahistogram-log-sign-positive-endpoint-overflow",
+    "finding": {
+      "id": "ffmpeg-ahistogram-log-sign-positive-endpoint-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/avf_ahistogram.c",
+      "line_number": 260,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "In signed logarithmic mode, get_log_bin_sign maps a positive full-scale sample of exactly 1.0 to bin w rather than the last valid bin w - 1: log10(1.0) is zero, the clipped magnitude is one, and both half-width terms sum to w for even widths. filter_frame uses that result directly to increment a w-element uint64_t histogram. A constant 1.0 audio source with ahistogram=ascale=log:hmode=sign:size=1280x720 deterministically aborts under ASan on an 8-byte heap-buffer-overflow exactly past the 10,240-byte allocation.",
+      "code_snippet": "bin = s->get_bin(src[n], w); achistogram[bin]++;",
+      "poc": "Run an ASan FFmpeg build with `-f lavfi -i aevalsrc=1:s=48000:d=0.1 -filter_complex '[0:a]ahistogram=ascale=log:hmode=sign:size=1280x720[outv]' -map '[outv]' -frames:v 1 -f null -`.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a valid positive full-scale float sample reaches an endpoint calculation that returns the histogram width, then directly indexes one element beyond a heap allocation",
+        "steps": [
+          {"file": "libavfilter/avf_ahistogram.c", "line": 129, "function": "config_input", "code_snippet": "s->achistogram = av_calloc(s->w, s->dchannels * sizeof(*s->achistogram));", "note": "Each histogram contains exactly w uint64_t elements, with valid indices 0 through w - 1."},
+          {"file": "libavfilter/avf_ahistogram.c", "line": 150, "function": "get_log_bin_sign", "code_snippet": "return (w / 2) + FFSIGN(in) * lrintf(av_clipf(1.f + log10f(fabsf(in)) / 6.f, 0.f, 1.f) * (w / 2));", "note": "For in = +1.0 and even w, the expression returns w / 2 + w / 2 = w."},
+          {"file": "libavfilter/avf_ahistogram.c", "line": 179, "function": "config_output", "code_snippet": "case SIGN: s->get_bin = get_log_bin_sign; break;", "note": "The vulnerable mapper is selected by the public ascale=log and hmode=sign options."},
+          {"file": "libavfilter/avf_ahistogram.c", "line": 258, "function": "filter_frame", "code_snippet": "bin = s->get_bin(src[n], w);", "note": "A float audio sample controls the returned bin without a postcondition check."},
+          {"file": "libavfilter/avf_ahistogram.c", "line": 260, "function": "filter_frame", "code_snippet": "achistogram[bin]++;", "note": "bin == w reads and writes one uint64_t beyond the allocation; ASan aborts on the read portion of the increment."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/avf_ahistogram.c", "start": 112, "end": 187},
+      {"path": "libavfilter/avf_ahistogram.c", "start": 220, "end": 289}
+    ]
+  },
+  {
+    "case_id": "xpsnr-odd-frame-highpass-oob-read",
+    "finding": {
+      "id": "ffmpeg-xpsnr-odd-frame-highpass-oob-read",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavfilter/vf_xpsnr.c",
+      "line_number": 105,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "For images above the high-pass threshold, XPSNR processes luma in an even-step 2x2 downsampled loop. On a truncated final block whose active width or height is odd, highds still runs its last iteration and reads through x + 3 and y + 3. A 2049x1153 yuv444p frame makes the final block active width odd and reaches one element beyond the tightly allocated 16-bit source plane. Two identical valid frames deterministically abort under ASan on a two-byte heap-buffer-overflow read two bytes beyond the 4,724,994-byte allocation.",
+      "code_snippet": "for (int y = y_act; y < h_act; y += 2) { for (int x = x_act; x < w_act; x += 2) { ... o_m0[(y+3)*o + x+3] ... } }",
+      "poc": "Pass two 2049x1153 yuv444p frames to an ASan FFmpeg build through `[0:v][1:v]xpsnr[outv]`; evaluations/run_ffmpeg_xpsnr_reproducer.py records the full command and sanitizer boundary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "odd active dimensions enter an even-step high-pass loop whose stencil reads three columns and rows ahead, escaping the tightly allocated source plane at the final block",
+        "steps": [
+          {"file": "libavfilter/vf_xpsnr.c", "line": 96, "function": "highds", "code_snippet": "for (int y = y_act; y < h_act; y += 2)", "note": "The downsampled loop does not round an odd h_act down before its final iteration."},
+          {"file": "libavfilter/vf_xpsnr.c", "line": 97, "function": "highds", "code_snippet": "for (int x = x_act; x < w_act; x += 2)", "note": "Likewise, an odd w_act allows a final iteration at w_act - 1."},
+          {"file": "libavfilter/vf_xpsnr.c", "line": 105, "function": "highds", "code_snippet": "(int)o_m0[(y+3)*o + x+3]", "note": "The stencil reads beyond the active block; at the lower-right picture boundary this escapes the plane allocation."},
+          {"file": "libavfilter/vf_xpsnr.c", "line": 181, "function": "calc_squared_error_and_weight", "code_snippet": "const int w_act = ... block_width - b_val;", "note": "The boundary margin is subtracted but its parity is not normalized for the step-two loop."},
+          {"file": "libavfilter/vf_xpsnr.c", "line": 195, "function": "calc_squared_error_and_weight", "code_snippet": "sa_act = s->dsp.highds_func(x_act, y_act, w_act, h_act, o_m0, o);", "note": "Large frames dispatch the malformed active dimensions into the vulnerable stencil."},
+          {"file": "libavfilter/vf_xpsnr.c", "line": 442, "function": "do_xpsnr", "code_snippet": "s->buf_org[c] = av_calloc(s->plane_width[c], s->plane_height[c] * sizeof(int16_t));", "note": "The 8-bit conversion plane is tightly allocated at width times height times two bytes, making the boundary read visible to ASan."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_xpsnr.c", "start": 92, "end": 145},
+      {"path": "libavfilter/vf_xpsnr.c", "start": 164, "end": 240},
+      {"path": "libavfilter/vf_xpsnr.c", "start": 269, "end": 378},
+      {"path": "libavfilter/vf_xpsnr.c", "start": 396, "end": 465}
+    ]
+  },
+  {
+    "case_id": "rdt-zero-length-status-packet-loop",
+    "finding": {
+      "id": "ffmpeg-rdt-zero-length-status-packet-loop",
+      "finding_type": "infinite_loop",
+      "cwe": "CWE-835",
+      "file": "libavformat/rdt.c",
+      "line_number": 202,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "ff_rdt_parse_header skips leading RDT status packets while at least five bytes remain. It reads a packet-controlled 16-bit pkt_len and rejects only values greater than the remaining input. A zero length therefore passes validation, after which both buf and len are advanced by zero and the status-packet condition remains unchanged forever. A direct 16-byte header with the followed-by-data flag, status marker, and zero packet length deterministically consumes CPU until externally terminated.",
+      "code_snippet": "while (len >= 5 && buf[1] == 0xFF) { pkt_len = AV_RB16(buf + 3); if (pkt_len > len) return AVERROR_INVALIDDATA; buf += pkt_len; len -= pkt_len; }",
+      "poc": "Build evaluations/ffmpeg_rdt_reproducer.c against FFmpeg and run it with a one-second timeout; evaluations/run_ffmpeg_rdt_reproducer.py records the deterministic timeout result.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an RDT status-packet length of zero passes the sole upper-bound check and causes a packet-skipping loop to make no progress",
+        "steps": [
+          {"file": "libavformat/rdt.c", "line": 202, "function": "ff_rdt_parse_header", "code_snippet": "while (len >= 5 && buf[1] == 0xFF /* status packet */)", "note": "An attacker-controlled status marker enters the packet-skipping loop while input remains."},
+          {"file": "libavformat/rdt.c", "line": 205, "function": "ff_rdt_parse_header", "code_snippet": "if (!(buf[0] & 0x80)) return -1;", "note": "Setting the followed-by-data flag passes the only status-type gate."},
+          {"file": "libavformat/rdt.c", "line": 208, "function": "ff_rdt_parse_header", "code_snippet": "pkt_len = AV_RB16(buf + 3);", "note": "The network packet supplies a zero 16-bit length."},
+          {"file": "libavformat/rdt.c", "line": 209, "function": "ff_rdt_parse_header", "code_snippet": "if (pkt_len > len) return AVERROR_INVALIDDATA;", "note": "The check enforces only an upper bound; zero is accepted."},
+          {"file": "libavformat/rdt.c", "line": 211, "function": "ff_rdt_parse_header", "code_snippet": "buf += pkt_len; len -= pkt_len; consumed += pkt_len;", "note": "All loop state changes by zero, so the next iteration observes the identical condition indefinitely."},
+          {"file": "libavformat/rdt.c", "line": 361, "function": "ff_rdt_parse_packet", "code_snippet": "rv = ff_rdt_parse_header(buf, len, &set_id, &seq_no, &stream_id, &is_keyframe, &timestamp);", "note": "The public RDT packet parser calls the header routine on received packet bytes after only requiring len >= 12."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/rdt.c", "start": 187, "end": 294},
+      {"path": "libavformat/rdt.c", "start": 338, "end": 385}
+    ]
+  },
+  {
+    "case_id": "rdt-aac-cache-buffer-overflow",
+    "finding": {
+      "id": "ffmpeg-rdt-aac-cache-buffer-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-122",
+      "file": "libavformat/rdt.c",
+      "line_number": 317,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The RDT AAC cache path copies every unconsumed byte of a received record into a fixed RTP_MAX_PACKET_LENGTH plus padding buffer without checking the remaining length. RTSP allocates and passes a receive buffer ten times that nominal packet length, and TCP interleaving can carry a 16-bit record length. An AAC VBR packet declaring one cached subpacket consumes only its four-byte count and length table, then returns a positive cache count. A 9216-byte record therefore makes production rdt_parse_packet copy 9212 bytes into the 8256-byte payload buffer. The direct production-parser harness deterministically aborts under ASan on a heap-buffer-overflow write in that memcpy on both sealed snapshots.",
+      "code_snippet": "memcpy(rdt->buffer, buf + pos, len - pos);",
+      "poc": "Build evaluations/ffmpeg_rdt_aac_reproducer.c against the sanitizer-instrumented FFmpeg static libraries and run it with ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0; evaluations/run_ffmpeg_rdt_aac_reproducer.py records the exact 9212-byte overflow copy.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an oversized RTSP/RDT record enters the AAC VBR cache path, whose small length table leaves nearly the entire record unconsumed before an unchecked copy into a fixed 8256-byte payload buffer",
+        "steps": [
+          {"file": "libavformat/rtsp.c", "line": 63, "function": "file scope", "code_snippet": "#define RECVBUF_SIZE 10 * RTP_MAX_PACKET_LENGTH", "note": "The network receive allocation and read bound permit records substantially larger than the RDT payload cache."},
+          {"file": "libavformat/rtsp.c", "line": 2462, "function": "ff_rtsp_fetch_packet", "code_snippet": "ret = ff_rdt_parse_packet(rtsp_st->transport_priv, pkt, &rt->recvbuf, len);", "note": "The received length is forwarded to the RDT parser without reducing it to RTP_MAX_PACKET_LENGTH."},
+          {"file": "libavformat/rmdec.c", "line": 967, "function": "ff_rm_parse_packet", "code_snippet": "ast->sub_packet_cnt = (avio_rb16(pb) & 0xf0) >> 4;", "note": "A VBR AAC packet can declare one cached subpacket in its first two bytes."},
+          {"file": "libavformat/rmdec.c", "line": 970, "function": "ff_rm_parse_packet", "code_snippet": "ast->sub_packet_lengths[x] = avio_rb16(pb);", "note": "With one subpacket, parsing consumes only one additional two-byte length before returning a positive cache count."},
+          {"file": "libavformat/rdt.c", "line": 91, "function": "PayloadContext", "code_snippet": "char buffer[RTP_MAX_PACKET_LENGTH + AV_INPUT_BUFFER_PADDING_SIZE];", "note": "The persistent cache destination has only 8192 bytes plus 64 padding bytes."},
+          {"file": "libavformat/rdt.c", "line": 317, "function": "rdt_parse_packet", "code_snippet": "memcpy(rdt->buffer, buf + pos, len - pos);", "note": "No destination bound is enforced; the reproduced record copies 9212 bytes and overwrites the heap beyond PayloadContext."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/rdt.c", "start": 85, "end": 93},
+      {"path": "libavformat/rdt.c", "start": 298, "end": 334},
+      {"path": "libavformat/rmdec.c", "start": 909, "end": 1025},
+      {"path": "libavformat/rtsp.c", "start": 61, "end": 64},
+      {"path": "libavformat/rtsp.c", "start": 2347, "end": 2464}
+    ]
+  },
+  {
+    "case_id": "ismindex-zero-sized-tfra-loop",
+    "finding": {
+      "id": "ffmpeg-ismindex-zero-sized-tfra-loop",
+      "finding_type": "infinite_loop",
+      "cwe": "CWE-835",
+      "file": "tools/ismindex.c",
+      "line_number": 436,
+      "severity": "low",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The ismindex MFRA parser repeatedly calls read_tfra until it returns a nonzero result. read_tfra trusts the atom's 32-bit size and, for a syntactically tagged tfra whose track ID is not present in the parsed track list, returns zero after seeking to pos + size. A zero-sized tfra therefore seeks back to the same input offset and makes the outer loop parse the identical atom forever. A direct harness around the production functions deterministically times out on both sealed snapshots.",
+      "code_snippet": "while (!read_tfra(tracks, start_index, f)) { }",
+      "poc": "Build evaluations/ffmpeg_ismindex_reproducer.c against FFmpeg and run it with a one-second timeout; evaluations/run_ffmpeg_ismindex_reproducer.py records the deterministic timeout.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a zero atom size combines with the unknown-track continue result so the MFRA parser's loop performs no forward progress",
+        "steps": [
+          {"file": "tools/ismindex.c", "line": 325, "function": "read_tfra", "code_snippet": "int64_t pos = avio_tell(f);", "note": "The reader records the starting offset of the attacker-controlled atom."},
+          {"file": "tools/ismindex.c", "line": 326, "function": "read_tfra", "code_snippet": "uint32_t size = avio_rb32(f);", "note": "The atom's 32-bit size is accepted without a minimum header-size check."},
+          {"file": "tools/ismindex.c", "line": 337, "function": "read_tfra", "code_snippet": "if (!track) { ret = 0; goto fail; }", "note": "An unknown track is treated as a successful request to continue with the next atom."},
+          {"file": "tools/ismindex.c", "line": 408, "function": "read_tfra", "code_snippet": "avio_seek(f, pos + size, SEEK_SET);", "note": "For size zero, the next position is exactly the starting offset."},
+          {"file": "tools/ismindex.c", "line": 436, "function": "read_mfra", "code_snippet": "while (!read_tfra(tracks, start_index, f))", "note": "The zero return repeats the same read forever because no loop state advanced."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "tools/ismindex.c", "start": 321, "end": 410},
+      {"path": "tools/ismindex.c", "start": 412, "end": 445}
+    ]
+  },
+  {
+    "case_id": "entropy-high-bit-depth-histogram-oob",
+    "finding": {
+      "id": "ffmpeg-entropy-high-bit-depth-histogram-oob",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/vf_entropy.c",
+      "line_number": 130,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The entropy filter allocates exactly 1 << depth signed 64-bit histogram entries, then uses every raw 16-bit sample as an index without masking or range validation. A high-bit-depth frame can therefore carry a stored sample at or above its declared range and access beyond the heap allocation. A gray10le sample of 1024 addresses exactly one element beyond the 1024-entry allocation. The production ffmpeg filter graph deterministically aborts under ASan on an eight-byte heap-buffer-overflow access in filter_frame on both sealed snapshots.",
+      "code_snippet": "s->histogram[src16[x]]++;",
+      "poc": "Run evaluations/run_ffmpeg_entropy_reproducer.py against the sanitizer-instrumented ffmpeg binary; it supplies a 4x4 gray10le raw frame whose samples are 1024 and records the production filter's ASan heap-buffer-overflow.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a stored high-bit-depth sample is not constrained to its declared bit depth before indexing a histogram sized only for the declared range",
+        "steps": [
+          {"file": "libavfilter/vf_entropy.c", "line": 73, "function": "config_input", "code_snippet": "s->depth = desc->comp[0].depth;", "note": "The negotiated pixel format supplies the declared component depth used to size the histogram."},
+          {"file": "libavfilter/vf_entropy.c", "line": 94, "function": "config_input", "code_snippet": "s->histogram = av_malloc_array(1 << s->depth, sizeof(*s->histogram));", "note": "For gray10le, the heap allocation contains exactly 1024 eight-byte entries."},
+          {"file": "libavfilter/vf_entropy.c", "line": 121, "function": "filter_frame", "code_snippet": "const uint16_t *src16 = (const uint16_t *)in->data[plane];", "note": "The stored sample is read as the full host-endian 16-bit value."},
+          {"file": "libavfilter/vf_entropy.c", "line": 130, "function": "filter_frame", "code_snippet": "s->histogram[src16[x]]++;", "note": "No mask or upper-bound check precedes the index; sample 1024 accesses the first eight bytes beyond the allocation."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_entropy.c", "start": 35, "end": 105},
+      {"path": "libavfilter/vf_entropy.c", "start": 101, "end": 160}
+    ]
+  },
+  {
+    "case_id": "caf-out-of-range-seek-index-underflow",
+    "finding": {
+      "id": "ffmpeg-caf-out-of-range-seek-index-underflow",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavformat/cafdec.c",
+      "line_number": 569,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "CAF's format-specific seek callback assumes that a nonempty variable-packet index guarantees a successful timestamp lookup. A forward seek beyond the last indexed timestamp instead makes av_index_search_timestamp return -1, which is used immediately as index_entries[-1] to load the frame timestamp and file position. A syntactically parsed one-packet CAF with a valid packet table followed by av_seek_frame past its last timestamp deterministically produces an ASan heap-buffer-overflow read in the production read_seek callback on both sealed snapshots.",
+      "code_snippet": "packet_cnt = av_index_search_timestamp(st, timestamp, flags); frame_cnt = sti->index_entries[packet_cnt].timestamp;",
+      "poc": "Build evaluations/ffmpeg_caf_seek_reproducer.c against the sanitizer-instrumented FFmpeg static libraries. The harness writes and parses a 107-byte variable-packet CAF, then calls public av_seek_frame for timestamp 1 after its only index entry at timestamp 0; evaluations/run_ffmpeg_caf_seek_reproducer.py records the ASan heap-buffer-overflow.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an out-of-range public seek returns the documented negative lookup result, but the CAF callback treats it as a valid packet-table index",
+        "steps": [
+          {"file": "libavformat/cafdec.c", "line": 301, "function": "read_pakt_chunk", "code_snippet": "ret = av_add_index_entry(s->streams[0], pos, st->duration, 0, 0, AVINDEX_KEYFRAME);", "note": "A variable-packet CAF packet table creates attacker-shaped index entries during normal header parsing."},
+          {"file": "libavformat/seek.c", "line": 161, "function": "ff_index_search_timestamp", "code_snippet": "if (m == nb_entries) return -1;", "note": "A forward lookup strictly beyond the final indexed timestamp has no matching entry and returns -1 by contract."},
+          {"file": "libavformat/cafdec.c", "line": 568, "function": "read_seek", "code_snippet": "packet_cnt = av_index_search_timestamp(st, timestamp, flags);", "note": "The format-specific callback receives the negative lookup result through public av_seek_frame."},
+          {"file": "libavformat/cafdec.c", "line": 569, "function": "read_seek", "code_snippet": "frame_cnt = sti->index_entries[packet_cnt].timestamp;", "note": "No packet_cnt < 0 check precedes the dereference; ASan observes an eight-byte read before the heap index allocation."},
+          {"file": "libavformat/cafdec.c", "line": 570, "function": "read_seek", "code_snippet": "pos = sti->index_entries[packet_cnt].pos;", "note": "The same invalid entry would also supply the subsequent seek position."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/cafdec.c", "start": 270, "end": 320},
+      {"path": "libavformat/cafdec.c", "start": 550, "end": 585},
+      {"path": "libavformat/seek.c", "start": 132, "end": 170},
+      {"path": "libavformat/seek.c", "start": 606, "end": 640}
+    ]
+  },
+  {
+    "case_id": "dovi-rpu-generator-coefficient-abort",
+    "finding": {
+      "id": "ffmpeg-dovi-rpu-generator-coefficient-abort",
+      "finding_type": "denial_of_service",
+      "cwe": "CWE-400",
+      "file": "libavcodec/dovi_rpuenc.c",
+      "line_number": 359,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The Dolby Vision RPU parser accepts signed fixed-point coefficients through get_se_golomb_long with a fractional denominator up to 32 bits, but the generator passes each recovered integer component to set_se_golomb, whose documented domain is only 16 bits and whose range assertions are disabled in ordinary builds. A parsed integer component of 100,000,000 makes the writer request a code wider than put_bits supports and corrupts its bit_left state. Repeating the parser-valid value across 24 maximum-order MMR pieces also exceeds the generator's constant 177-byte-per-piece allocation estimate, after which the always-on flush assertion aborts. A production parser-to-metadata-to-generator harness deterministically reproduces the undefined shifts and abort on both sealed snapshots.",
+      "code_snippet": "set_se_golomb(pb, coef >> hdr->coef_log2_denom);",
+      "poc": "Build evaluations/ffmpeg_dovi_rpu_reproducer.c against the sanitizer-instrumented FFmpeg libraries and run it with ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0; evaluations/run_ffmpeg_dovi_rpu_reproducer.py records the parser acceptance, UBSan writer failures, and terminating assertion.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "parser-accepted long signed coefficients cross into a smaller signed-Golomb writer domain and a constant-size output estimate, corrupting bit-writer state until an always-on flush assertion aborts",
+        "steps": [
+          {"file": "libavcodec/dovi_rpudec.c", "line": 435, "function": "ff_dovi_rpu_parse", "code_snippet": "hdr->coef_log2_denom = get_ue_golomb(gb);", "note": "The parser accepts fixed-point denominators from 13 through 32."},
+          {"file": "libavcodec/dovi_rpudec.c", "line": 116, "function": "get_se_coef", "code_snippet": "ipart = get_se_golomb_long(gb);", "note": "The bitstream supplies a signed integer component through the long Exp-Golomb reader without the generator's 16-bit restriction."},
+          {"file": "libavcodec/dovi_rpudec.c", "line": 619, "function": "ff_dovi_rpu_parse", "code_snippet": "curve->mmr_coef[i][j][k] = get_se_coef(gb, hdr);", "note": "A maximum-order MMR piece stores 22 attacker-selected coefficients, and three curves permit 24 pieces."},
+          {"file": "libavcodec/dovi_rpuenc.c", "line": 359, "function": "put_se_coef", "code_snippet": "set_se_golomb(pb, coef >> hdr->coef_log2_denom);", "note": "The generator narrows the recovered integer component into the signed Golomb writer whose documented maximum is 16 bits."},
+          {"file": "libavcodec/put_golomb.h", "line": 86, "function": "set_se_golomb", "code_snippet": "i = 2 * i - 1; ... set_ue_golomb(pb, i);", "note": "Large parser-accepted values exceed the helper's documented domain; its range protection is av_assert2 and absent in ordinary builds."},
+          {"file": "libavcodec/dovi_rpuenc.c", "line": 694, "function": "ff_dovi_rpu_generate", "code_snippet": "case AV_DOVI_MAPPING_MMR: buffer_size += 177;", "note": "Allocation uses a fixed estimate although signed Exp-Golomb code length grows with coefficient magnitude."},
+          {"file": "libavcodec/put_bits.h", "line": 160, "function": "flush_put_bits", "code_snippet": "av_assert0(s->buf_ptr < s->buf_end);", "note": "After writer-state corruption and exhausted capacity, the always-enabled boundary assertion terminates the process."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/dovi_rpudec.c", "start": 90, "end": 125},
+      {"path": "libavcodec/dovi_rpudec.c", "start": 425, "end": 445},
+      {"path": "libavcodec/dovi_rpudec.c", "start": 585, "end": 625},
+      {"path": "libavcodec/dovi_rpuenc.c", "start": 334, "end": 368},
+      {"path": "libavcodec/dovi_rpuenc.c", "start": 680, "end": 705},
+      {"path": "libavcodec/dovi_rpuenc.c", "start": 755, "end": 785},
+      {"path": "libavcodec/put_golomb.h", "start": 35, "end": 92},
+      {"path": "libavcodec/put_bits.h", "start": 145, "end": 165}
+    ]
+  },
+  {
+    "case_id": "showfreqs-delay-negative-bin-oob-read",
+    "finding": {
+      "id": "ffmpeg-showfreqs-delay-negative-bin-oob-read",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavfilter/avf_showfreqs.c",
+      "line_number": 455,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The showfreqs filter's public data=delay mode computes group delay from the current and previous FFT bins, but its frequency loop starts at zero. On the first iteration, both RE(f-1, ch) and IM(f-1, ch) index fft_data[ch][-1]. Each per-channel FFT array starts at its heap allocation, so every produced frame in delay mode reads the AVComplexFloat immediately before that allocation. A production ffmpeg filter graph deterministically aborts under ASan on a four-byte heap-buffer-overflow read eight bytes before the FFT buffer on both sealed snapshots.",
+      "code_snippet": "for (f = 0; f < s->nb_freq; f++) { a = av_clipd((M_PI - P(IM(f, ch) * RE(f-1, ch) - IM(f-1, ch) * RE(f, ch), ...",
+      "poc": "Run `ffmpeg -f lavfi -i anoisesrc=r=48000:d=0.2 -filter_complex '[0:a]showfreqs=data=delay[outv]' -map '[outv]' -frames:v 1 -f null -` using the sanitizer-instrumented binary; evaluations/run_ffmpeg_showfreqs_reproducer.py records the ASan under-read.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "the user-selectable delay visualization starts its previous-bin calculation at bin zero, turning f - 1 into a negative heap index",
+        "steps": [
+          {"file": "libavfilter/avf_showfreqs.c", "line": 109, "function": "file scope", "code_snippet": "{ \"data\", \"set data mode\", OFFSET(data_mode), AV_OPT_TYPE_INT, {.i64=MAGNITUDE}, 0, NB_DATA-1, FLAGS, .unit = \"data\" },", "note": "The filter exposes data_mode as a public video-filter option."},
+          {"file": "libavfilter/avf_showfreqs.c", "line": 112, "function": "file scope", "code_snippet": "{ \"delay\", \"show group delay\",0, AV_OPT_TYPE_CONST, {.i64=DELAY}, 0, 0, FLAGS, .unit = \"data\" },", "note": "Selecting data=delay reaches the vulnerable branch through ordinary filter configuration."},
+          {"file": "libavfilter/avf_showfreqs.c", "line": 188, "function": "config_output", "code_snippet": "s->fft_data[i] = av_calloc(FFALIGN(s->win_size, 512), sizeof(**s->fft_data));", "note": "Each channel's FFT data begins at a separately allocated heap buffer with no valid preceding element."},
+          {"file": "libavfilter/avf_showfreqs.c", "line": 408, "function": "plot_freqs", "code_snippet": "#define RE(x, ch) s->fft_data[ch][x].re\n#define IM(x, ch) s->fft_data[ch][x].im", "note": "The access macros apply the supplied signed index directly to the heap array."},
+          {"file": "libavfilter/avf_showfreqs.c", "line": 454, "function": "plot_freqs", "code_snippet": "for (f = 0; f < s->nb_freq; f++)", "note": "The delay calculation begins with f equal to zero."},
+          {"file": "libavfilter/avf_showfreqs.c", "line": 455, "function": "plot_freqs", "code_snippet": "a = av_clipd((M_PI - P(IM(f, ch) * RE(f-1, ch) - IM(f-1, ch) * RE(f, ch),", "note": "At f == 0, the previous-bin terms perform the reproduced reads from fft_data[ch][-1]."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/avf_showfreqs.c", "start": 79, "end": 115},
+      {"path": "libavfilter/avf_showfreqs.c", "start": 141, "end": 193},
+      {"path": "libavfilter/avf_showfreqs.c", "start": 395, "end": 462}
+    ]
+  },
+  {
+    "case_id": "hls-sample-aes-adts-length-overflow",
+    "finding": {
+      "id": "ffmpeg-hls-sample-aes-adts-length-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavformat/hls_sample_encryption.c",
+      "line_number": 356,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The HLS SAMPLE-AES AAC path trusts the ADTS header's 13-bit frame_length after parsing only the bytes actually remaining in the packet. It never verifies that the declared frame fits those remaining bytes. decrypt_sync_frame consequently derives its AES block count from the attacker-declared length and decrypts in place through the AVPacket allocation. A 64-byte packet declaring an 8191-byte ADTS frame deterministically aborts under ASan when the production AES routine reads beyond the packet buffer on both sealed snapshots; the same loop also writes every decrypted block back through the out-of-range destination.",
+      "code_snippet": "num_of_encrypted_blocks = (frame->length - frame->header_length - 16)/16; av_aes_crypt(crypto_ctx->aes_ctx, data, data, num_of_encrypted_blocks, crypto_ctx->iv, 1);",
+      "poc": "Build evaluations/ffmpeg_hls_sample_aes_reproducer.c against the sanitizer-instrumented FFmpeg static libraries and run it with ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0; evaluations/run_ffmpeg_hls_sample_aes_reproducer.py records the production AES out-of-bounds access.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an ADTS frame length that exceeds the remaining HLS packet becomes an in-place AES loop bound with no intervening packet-size validation",
+        "steps": [
+          {"file": "libavformat/hls.c", "line": 2558, "function": "read_from_playlist", "code_snippet": "if (seg && seg->key_type == KEY_SAMPLE_AES && !strstr(pls->ctx->iformat->name, \"mov\"))", "note": "An HLS segment marked SAMPLE-AES enters the elementary-stream decryption path."},
+          {"file": "libavformat/hls.c", "line": 2562, "function": "read_from_playlist", "code_snippet": "ff_hls_senc_decrypt_frame(codec_id, &c->crypto_ctx, pls->pkt);", "note": "The demuxed AAC AVPacket and its actual size are passed to the decrypter."},
+          {"file": "libavcodec/adts_header.c", "line": 56, "function": "ff_adts_header_parse", "code_snippet": "size = get_bits(gbc, 13);    /* aac_frame_length */", "note": "The AAC frame length is a 13-bit field controlled by the segment bytes."},
+          {"file": "libavcodec/adts_header.c", "line": 57, "function": "ff_adts_header_parse", "code_snippet": "if (size < AV_AAC_ADTS_HEADER_SIZE)", "note": "The shared ADTS parser enforces a minimum but does not require the declared frame to fit the supplied buffer."},
+          {"file": "libavformat/hls_sample_encryption.c", "line": 288, "function": "get_next_adts_frame", "code_snippet": "ret = avpriv_adts_header_parse (&adts_hdr, frame->data, ctx->buf_end - frame->data);", "note": "The HLS parser knows the exact number of remaining packet bytes when it parses the header."},
+          {"file": "libavformat/hls_sample_encryption.c", "line": 293, "function": "get_next_adts_frame", "code_snippet": "frame->length = adts_hdr->frame_length;", "note": "The header's declared length is retained without comparing it to ctx->buf_end - frame->data."},
+          {"file": "libavformat/hls_sample_encryption.c", "line": 354, "function": "decrypt_sync_frame", "code_snippet": "num_of_encrypted_blocks = (frame->length - frame->header_length - 16)/16;", "note": "The unbounded length controls how many 16-byte blocks the AES implementation processes."},
+          {"file": "libavformat/hls_sample_encryption.c", "line": 356, "function": "decrypt_sync_frame", "code_snippet": "av_aes_crypt(crypto_ctx->aes_ctx, data, data, num_of_encrypted_blocks, crypto_ctx->iv, 1);", "note": "In-place decryption reads and writes beyond the AVPacket when the declared frame is larger than the remaining bytes; ASan catches the first out-of-range read."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/hls.c", "start": 2540, "end": 2565},
+      {"path": "libavcodec/adts_header.c", "start": 30, "end": 74},
+      {"path": "libavformat/hls_sample_encryption.c", "start": 41, "end": 58},
+      {"path": "libavformat/hls_sample_encryption.c", "start": 270, "end": 298},
+      {"path": "libavformat/hls_sample_encryption.c", "start": 332, "end": 384},
+      {"path": "libavutil/aes.c", "start": 155, "end": 175}
+    ]
+  },
+  {
+    "case_id": "mpc7-last-frame-sample-count-overread",
+    "finding": {
+      "id": "ffmpeg-mpc7-last-frame-sample-count-overread",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavcodec/mpc7.c",
+      "line_number": 281,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The Musepack SV7 decoder reads an 11-bit last-frame sample count from demuxer-provided extradata without constraining it to the format's fixed 1,152 samples per frame. mpc7_decode_frame requests a planar S16 buffer with nb_samples equal to 1,152, synthesizes that fixed amount, and then, for a packet whose last-frame byte is nonzero, publishes the attacker-selected count of up to 2,047. Any consumer that processes the public AVFrame contract therefore reads beyond each 2,304-byte channel allocation. A public avcodec_send_packet/avcodec_receive_frame harness with lastframelen 2,047 deterministically aborts under ASan on the first two-byte read past the plane on both sealed snapshots.",
+      "code_snippet": "if(last_frame) frame->nb_samples = c->lastframelen;",
+      "poc": "Build evaluations/ffmpeg_mpc7_lastframelen_reproducer.c against the sanitizer-instrumented FFmpeg libraries and run it with ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0; evaluations/run_ffmpeg_mpc7_lastframelen_reproducer.py records the public decoder returning 2,047 samples over a 1,152-sample allocation and the ensuing ASan read.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an 11-bit container field survives decoder initialization and replaces the public sample count after allocation and synthesis used the fixed 1,152-sample frame size",
+        "steps": [
+          {"file": "libavformat/mpc.c", "line": 103, "function": "mpc_read_header", "code_snippet": "if ((ret = ff_get_extradata(s, st->codecpar, s->pb, 16)) < 0)", "note": "The Musepack file supplies the 16-byte codec extradata through the normal demuxer path."},
+          {"file": "libavcodec/mpc7.c", "line": 111, "function": "mpc7_decode_init", "code_snippet": "c->lastframelen = get_bits(&gb, 11);", "note": "The decoder accepts the full 0 through 2,047 field range without comparing it to MPC_FRAME_SIZE."},
+          {"file": "libavcodec/mpc.h", "line": 43, "function": "file scope", "code_snippet": "#define MPC_FRAME_SIZE   (BANDS * SAMPLES_PER_BAND)", "note": "With 32 bands and 36 samples per band, every decoded Musepack frame contains 1,152 samples."},
+          {"file": "libavcodec/mpc7.c", "line": 210, "function": "mpc7_decode_frame", "code_snippet": "frame->nb_samples = MPC_FRAME_SIZE;", "note": "The frame initially requests storage for exactly the fixed 1,152 samples per channel."},
+          {"file": "libavcodec/mpc7.c", "line": 211, "function": "mpc7_decode_frame", "code_snippet": "if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)", "note": "For planar S16 audio this produces a 2,304-byte allocation for each channel."},
+          {"file": "libavcodec/mpc7.c", "line": 279, "function": "mpc7_decode_frame", "code_snippet": "ff_mpc_dequantize_and_synth(c, mb, (int16_t **)frame->extended_data, 2);", "note": "Synthesis fills the fixed frame before the published length is changed."},
+          {"file": "libavcodec/mpc7.c", "line": 281, "function": "mpc7_decode_frame", "code_snippet": "frame->nb_samples = c->lastframelen;", "note": "A nonzero packet last-frame marker publishes up to 2,047 valid-looking samples, causing ordinary consumers to read past both channel planes."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/mpc.c", "start": 58, "end": 110},
+      {"path": "libavcodec/mpc.h", "start": 29, "end": 66},
+      {"path": "libavcodec/mpc7.c", "start": 78, "end": 123},
+      {"path": "libavcodec/mpc7.c", "start": 178, "end": 221},
+      {"path": "libavcodec/mpc7.c", "start": 272, "end": 298}
+    ]
+  },
+  {
+    "case_id": "lcl-zlib-multithread-short-output-disclosure",
+    "finding": {
+      "id": "ffmpeg-lcl-zlib-multithread-short-output-disclosure",
+      "finding_type": "information_disclosure",
+      "cwe": "CWE-200",
+      "file": "libavcodec/lcldec.c",
+      "line_number": 286,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "The LCL/ZLIB decoder's FLAG_MULTITHREAD path accepts each zlib stream when its actual output is shorter than the attacker-claimed half size. zlib_decomp returns the short count as success, both calls ignore that count, and decode_frame then sets len to the full image size before copying the whole decompression allocation into the output AVFrame. A public decoder harness whose two valid zlib streams expand to three bytes each is accepted as a 768-byte RGB24 frame and exposes the other 762 bytes of the uninitialized decompression buffer. ASan malloc-fill instrumentation deterministically marks and observes all 762 disclosed bytes on both sealed snapshots.",
+      "code_snippet": "ret = zlib_decomp(...); if (ret < 0) return ret; ... len = c->decomp_size;",
+      "poc": "Build evaluations/ffmpeg_lcl_multithread_reproducer.c against either sanitizer-instrumented FFmpeg snapshot and run with ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0:malloc_fill_byte=165:max_malloc_fill_size=1048576; evaluations/run_ffmpeg_lcl_multithread_reproducer.py records six attacker-supplied bytes and 762 allocator-fill bytes in the returned frame.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "two short but valid compressed streams are accepted against attacker-claimed expected lengths, their actual lengths are discarded, and the full decompression allocation is published as decoded pixels",
+        "steps": [
+          {"file": "libavcodec/lcldec.c", "line": 179, "function": "decode_frame", "code_snippet": "unsigned int mthread_inlen, mthread_outlen;", "note": "The packet supplies both the compressed first-stream length and a claimed decompressed half length."},
+          {"file": "libavcodec/lcldec.c", "line": 279, "function": "decode_frame", "code_snippet": "mthread_outlen = AV_RL32(buf + 4);", "note": "The attacker-controlled claimed half length becomes the expected count and the second stream's output offset."},
+          {"file": "libavcodec/lcldec.c", "line": 155, "function": "zlib_decomp", "code_snippet": "if (expected > (unsigned int)zstream->total_out) return (unsigned int)zstream->total_out;", "note": "A valid stream that expands to fewer bytes than claimed returns its short positive count instead of invalid data."},
+          {"file": "libavcodec/lcldec.c", "line": 281, "function": "decode_frame", "code_snippet": "ret = zlib_decomp(avctx, buf + 8, mthread_inlen, 0, mthread_outlen); if (ret < 0) return ret;", "note": "The first short positive count is accepted and discarded."},
+          {"file": "libavcodec/lcldec.c", "line": 283, "function": "decode_frame", "code_snippet": "ret = zlib_decomp(avctx, buf + 8 + mthread_inlen, len - 8 - mthread_inlen, mthread_outlen, mthread_outlen);", "note": "The second short stream writes only a few bytes at the claimed offset; its short count is also discarded."},
+          {"file": "libavcodec/lcldec.c", "line": 286, "function": "decode_frame", "code_snippet": "len = c->decomp_size;", "note": "The decoder falsely marks the entire decompression allocation as valid image data."},
+          {"file": "libavcodec/lcldec.c", "line": 428, "function": "decode_frame", "code_snippet": "memcpy(outptr + pixel_ptr, encoded, 3 * width);", "note": "RGB conversion copies every claimed image byte into the public frame, including the reproduced uninitialized remainder."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/lcldec.c", "start": 125, "end": 160},
+      {"path": "libavcodec/lcldec.c", "start": 164, "end": 185},
+      {"path": "libavcodec/lcldec.c", "start": 263, "end": 293},
+      {"path": "libavcodec/lcldec.c", "start": 418, "end": 433},
+      {"path": "libavcodec/lcldec.c", "start": 540, "end": 625}
+    ]
+  },
+  {
+    "case_id": "af-join-duplicate-map-use-after-free",
+    "finding": {
+      "id": "ffmpeg-af-join-duplicate-map-use-after-free",
+      "finding_type": "use_after_free",
+      "cwe": "CWE-416",
+      "file": "libavfilter/af_join.c",
+      "line_number": 472,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The join filter deduplicates plane buffers by scanning only nb_buffers entries but decides whether the buffer was new with j == i, where i is the output-channel index. A valid map that duplicates one input plane into two early output channels and maps a different input plane later makes i diverge from nb_buffers, so the later unique plane is omitted from the output frame's AVBufferRef list. try_push_frame then frees both input frames after delivering the output, leaving that plane dangling. A public two-input libavfilter graph returns a three-channel frame whose third plane has no owner; an ordinary downstream read deterministically produces an ASan heap-use-after-free on both sealed snapshots.",
+      "code_snippet": "for (j = 0; j < nb_buffers; j++) if (s->buffers[j]->buffer == buf->buffer) break; if (j == i) s->buffers[nb_buffers++] = buf;",
+      "poc": "Build and run evaluations/ffmpeg_af_join_uaf_reproducer.c with evaluations/run_ffmpeg_af_join_uaf_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a duplicate early output mapping desynchronizes the output-channel index from the unique-buffer count, causing a later plane to be published without an owning reference",
+        "steps": [
+          {"file": "libavfilter/af_join.c", "line": 454, "function": "try_push_frame", "code_snippet": "for (i = 0; i < s->ch_layout.nb_channels; i++)", "note": "The loop visits output mappings, so i counts output channels rather than unique buffers."},
+          {"file": "libavfilter/af_join.c", "line": 469, "function": "try_push_frame", "code_snippet": "for (j = 0; j < nb_buffers; j++)", "note": "The duplicate search correctly ranges over only the unique buffers accumulated so far."},
+          {"file": "libavfilter/af_join.c", "line": 472, "function": "try_push_frame", "code_snippet": "if (j == i)", "note": "After an earlier duplicate mapping, i exceeds nb_buffers and a genuinely new later plane is not retained."},
+          {"file": "libavfilter/af_join.c", "line": 487, "function": "try_push_frame", "code_snippet": "frame->buf[i] = av_buffer_ref(s->buffers[i]);", "note": "Only the incorrectly accumulated buffer list contributes ownership references to the output frame."},
+          {"file": "libavfilter/af_join.c", "line": 522, "function": "try_push_frame", "code_snippet": "ret = ff_filter_frame(outlink, frame);", "note": "The output containing the unowned plane is delivered downstream."},
+          {"file": "libavfilter/af_join.c", "line": 525, "function": "try_push_frame", "code_snippet": "av_frame_free(&s->input_frames[i]);", "note": "The input frame that owns the omitted plane is freed, leaving the published pointer dangling."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/af_join.c", "start": 419, "end": 525},
+      {"path": "libavfilter/af_join.c", "start": 282, "end": 417}
+    ]
+  },
+  {
+    "case_id": "drawgraph-missing-primary-metadata-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-drawgraph-missing-primary-metadata-heap-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/f_drawgraph.c",
+      "line_number": 159,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The drawgraph filter checks and resets its horizontal output coordinate only inside the first metadata series' successful parse path. If m1 is absent or unparsable while any later configured series is present, the first loop iteration continues before that bound check, but s->x still increments after every frame. A later series then passes the unbounded x coordinate to draw_dot. A public libavfilter graph with a two-pixel-wide output, missing primary metadata, and present secondary metadata produces an ASan heap-buffer-overflow write in draw_dot on the third frame on both sealed snapshots.",
+      "code_snippet": "if (!e || !e->value) continue; ... if (i == 0 && s->x >= outlink->w) s->x = 0; ... draw_dot(fg, x, y, out); ... s->x++;",
+      "poc": "Build and run evaluations/ffmpeg_drawgraph_missing_primary_reproducer.c with evaluations/run_ffmpeg_drawgraph_missing_primary_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "missing metadata for the first graph series skips the only horizontal bound reset, while a later series writes at the unbounded per-frame coordinate",
+        "steps": [
+          {"file": "libavfilter/f_drawgraph.c", "line": 225, "function": "filter_frame", "code_snippet": "e = av_dict_get(metadata, s->key[i], NULL, 0); if (!e || !e->value) continue;", "note": "Missing primary metadata exits the i == 0 iteration before coordinate maintenance."},
+          {"file": "libavfilter/f_drawgraph.c", "line": 246, "function": "filter_frame", "code_snippet": "if (i == 0 && (s->x >= outlink->w || s->slide == 3))", "note": "The only reset or scrolling bound for s->x is nested inside the metadata-present path for the first series."},
+          {"file": "libavfilter/f_drawgraph.c", "line": 269, "function": "filter_frame", "code_snippet": "x = s->x;", "note": "A present later series receives the unbounded shared coordinate."},
+          {"file": "libavfilter/f_drawgraph.c", "line": 293, "function": "filter_frame", "code_snippet": "draw_dot(fg, x, y, out);", "note": "Dot mode reaches the raw four-byte output write with x at or beyond the output width."},
+          {"file": "libavfilter/f_drawgraph.c", "line": 320, "function": "filter_frame", "code_snippet": "s->x++;", "note": "Every input frame advances the coordinate even when the first metadata series was absent."},
+          {"file": "libavfilter/f_drawgraph.c", "line": 159, "function": "draw_dot", "code_snippet": "AV_WN32(out->data[0] + y * out->linesize[0] + x * 4, fg);", "note": "ASan observes the four-byte heap-buffer-overflow at this unchecked pixel address."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/f_drawgraph.c", "start": 147, "end": 160},
+      {"path": "libavfilter/f_drawgraph.c", "start": 162, "end": 341}
+    ]
+  },
+  {
+    "case_id": "dnn-four-output-name-parser-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-dnn-four-output-name-parser-heap-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/dnn_filter_common.c",
+      "line_number": 50,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The shared DNN output-name parser allocates MAX_SUPPORTED_OUTPUTS_NB, exactly four, pointer slots and writes every parsed token into that array without reserving a terminator slot or enforcing the maximum. It then unconditionally stores a NULL terminator at parsed_vals[val_num]. TensorFlow detection explicitly requires four output names, so its intended count writes the terminator into a fifth pointer slot. A production ff_dnn_init harness with four generic output names produces an ASan heap-buffer-overflow before backend lookup or model loading on both snapshots.",
+      "code_snippet": "parsed_vals = av_calloc(MAX_SUPPORTED_OUTPUTS_NB, sizeof(*parsed_vals)); ... parsed_vals[val_num++] = val; ... parsed_vals[val_num] = NULL;",
+      "poc": "Build and run evaluations/ffmpeg_dnn_output_names_reproducer.c with evaluations/run_ffmpeg_dnn_output_names_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "the intended four-output TensorFlow detector configuration fills a four-pointer allocation and then writes its required NULL terminator into a fifth slot",
+        "steps": [
+          {"file": "libavfilter/vf_dnn_detect.c", "line": 630, "function": "check_output_nb", "code_snippet": "if (output_nb != 4) return AVERROR(EINVAL);", "note": "The TensorFlow detection filter requires exactly four named outputs."},
+          {"file": "libavfilter/dnn_filter_common.c", "line": 24, "function": "file scope", "code_snippet": "#define MAX_SUPPORTED_OUTPUTS_NB 4", "note": "Four is also the complete pointer capacity allocated by the parser."},
+          {"file": "libavfilter/dnn_filter_common.c", "line": 34, "function": "separate_output_names", "code_snippet": "parsed_vals = av_calloc(MAX_SUPPORTED_OUTPUTS_NB, sizeof(*parsed_vals));", "note": "No fifth slot is reserved for a NULL terminator."},
+          {"file": "libavfilter/dnn_filter_common.c", "line": 42, "function": "separate_output_names", "code_snippet": "parsed_vals[val_num] = val; val_num++;", "note": "Four valid names consume all four allocated pointer slots; the loop also lacks a maximum-count check."},
+          {"file": "libavfilter/dnn_filter_common.c", "line": 50, "function": "separate_output_names", "code_snippet": "parsed_vals[val_num] = NULL;", "note": "ASan observes an eight-byte heap-buffer-overflow when val_num is four."},
+          {"file": "libavfilter/dnn_filter_common.c", "line": 95, "function": "ff_dnn_init", "code_snippet": "ctx->model_outputnames = separate_output_names(...);", "note": "The overflow occurs during normal filter initialization before backend lookup or model loading."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/dnn_filter_common.c", "start": 24, "end": 53},
+      {"path": "libavfilter/dnn_filter_common.c", "start": 73, "end": 102},
+      {"path": "libavfilter/vf_dnn_detect.c", "start": 630, "end": 672}
+    ]
+  },
+  {
+    "case_id": "tensorflow-multi-output-tensor-leak",
+    "finding": {
+      "id": "ffmpeg-tensorflow-multi-output-tensor-leak",
+      "finding_type": "resource_leak",
+      "cwe": "CWE-772",
+      "file": "libavfilter/dnn/dnn_backend_tf.c",
+      "line_number": 102,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "TensorFlow inference allocates and returns task->nb_output tensors, and the registered TensorFlow detection path requires four outputs. Cleanup attempts to derive that runtime count with sizeof(*output_tensors) divided by sizeof(output_tensors[0]); both operands describe one pointer, so the result is always one. Only the first TensorFlow output tensor is deleted before the pointer array is freed. Every processed detection frame therefore leaks three complete model output tensors, allowing sustained valid use to exhaust memory. The sealed builds omit TensorFlow, so this remains source-confirmed rather than dynamically reproduced.",
+      "code_snippet": "int nb_output = sizeof(*request->output_tensors)/sizeof(request->output_tensors[0]); for (i = 0; i < nb_output; ++i) TF_DeleteTensor(...);",
+      "poc": "Configure vf_dnn_detect with its required four-output TensorFlow model and process frames while monitoring output-tensor allocations; three of four tensors per request are not passed to TF_DeleteTensor.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "four TensorFlow outputs are produced per detection frame, but pointer-type sizeof arithmetic hard-codes cleanup to one tensor",
+        "steps": [
+          {"file": "libavfilter/vf_dnn_detect.c", "line": 634, "function": "check_output_nb", "code_snippet": "if (output_nb != 4)", "note": "The registered TensorFlow detector accepts only four-output configurations."},
+          {"file": "libavfilter/dnn/dnn_backend_tf.c", "line": 669, "function": "fill_model_input_tf", "code_snippet": "output_tensors = av_calloc(task->nb_output, sizeof(*output_tensors));", "note": "The request allocates pointer storage for all four outputs."},
+          {"file": "libavfilter/dnn/dnn_backend_tf.c", "line": 153, "function": "tf_start_inference", "code_snippet": "TF_SessionRun(... output_tensors, task->nb_output, ...);", "note": "TensorFlow populates all runtime output tensors."},
+          {"file": "libavfilter/dnn/dnn_backend_tf.c", "line": 102, "function": "tf_free_request", "code_snippet": "int nb_output = sizeof(*request->output_tensors)/sizeof(request->output_tensors[0]);", "note": "Both sizeof operands are one pointer, making nb_output equal one regardless of the task."},
+          {"file": "libavfilter/dnn/dnn_backend_tf.c", "line": 103, "function": "tf_free_request", "code_snippet": "for (uint32_t i = 0; i < nb_output; ++i)", "note": "Only output_tensors[0] is deleted; the other three TensorFlow tensor allocations are leaked each frame."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/dnn/dnn_backend_tf.c", "start": 84, "end": 111},
+      {"path": "libavfilter/dnn/dnn_backend_tf.c", "start": 140, "end": 162},
+      {"path": "libavfilter/dnn/dnn_backend_tf.c", "start": 662, "end": 717},
+      {"path": "libavfilter/vf_dnn_detect.c", "start": 630, "end": 672}
+    ]
+  },
+  {
+    "case_id": "dnn-nchw-output-shape-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-dnn-nchw-output-shape-heap-overflow",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavfilter/dnn/dnn_io_proc.c",
+      "line_number": 93,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The generic DNN RGB postprocessor allocates its NCHW intermediary as frame width times height times the model-declared output channel count, but unconditionally asks swscale to process frame width times three elements per row and later addresses three planes. The TensorFlow and OpenVINO backends pass model-declared output shapes here without validating the output channel count against RGB24/BGR24. A one-channel NCHW tensor for a 4x4 RGB24 output produces an ASan heap-buffer-overflow in the production postprocessor on both sealed snapshots. The same path also passes a one-pointer object to swscale's four-plane array API, an independent stack-object contract violation that an entirely instrumented build observes first.",
+      "code_snippet": "middle_data = av_malloc(plane_size * output->dims[1]); ... sws_scale(... frame->width * 3 * src_datatype_size ...)",
+      "poc": "Build and run evaluations/ffmpeg_dnn_output_shape_reproducer.c with evaluations/run_ffmpeg_dnn_output_shape_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a model-declared NCHW output channel count sizes an intermediary allocation, while RGB conversion ignores that shape and processes and addresses three channels",
+        "steps": [
+          {"file": "libavfilter/dnn/dnn_backend_openvino.c", "line": 387, "function": "infer_completion_callback", "code_snippet": "outputs[i].dims[1] = output_shape.rank > 2 ? dims[output_shape.rank - 3] : 1;", "note": "The loaded model's output shape populates DNNData."},
+          {"file": "libavfilter/dnn/dnn_backend_openvino.c", "line": 448, "function": "infer_completion_callback", "code_snippet": "ff_proc_from_dnn_to_frame(task->out_frame, outputs, ctx);", "note": "No output-channel/format validation intervenes before generic postprocessing."},
+          {"file": "libavfilter/dnn/dnn_io_proc.c", "line": 74, "function": "ff_proc_from_dnn_to_frame", "code_snippet": "middle_data = av_malloc(plane_size * output->dims[1]);", "note": "The model-controlled channel count sizes the NCHW byte intermediary."},
+          {"file": "libavfilter/dnn/dnn_io_proc.c", "line": 93, "function": "ff_proc_from_dnn_to_frame", "code_snippet": "sws_scale(... frame->width * 3 * src_datatype_size ...)", "note": "RGB conversion always consumes and writes three channels per row; ASan catches the undersized intermediary access."},
+          {"file": "libavfilter/dnn/dnn_io_proc.c", "line": 119, "function": "ff_proc_from_dnn_to_frame", "code_snippet": "planar_data[1] = (uint8_t *)middle_data + plane_size * 2;", "note": "The second conversion also unconditionally constructs three plane pointers."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/dnn/dnn_io_proc.c", "start": 38, "end": 145},
+      {"path": "libavfilter/dnn/dnn_backend_openvino.c", "start": 370, "end": 460},
+      {"path": "libavfilter/dnn/dnn_backend_tf.c", "start": 697, "end": 735},
+      {"path": "libavfilter/vf_dnn_processing.c", "start": 83, "end": 135}
+    ]
+  },
+  {
+    "case_id": "nellymoser-trellis-off-by-one-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-nellymoser-trellis-off-by-one-heap-overflow",
+      "finding_type": "out_of_bounds_read_write",
+      "cwe": "CWE-193",
+      "file": "libavcodec/nellymoserenc.c",
+      "line_number": 272,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The NellyMoser encoder's optional trellis search caps idx_max with OPT_SIZE but rejects a candidate only when idx is greater than that inclusive cap. An exactly-OPT_SIZE transition therefore indexes one element beyond a trellis row. Those transitions are reachable from ordinary audio samples, and repeated row-edge writes can corrupt the following row; at the final band the corresponding read crosses the end of the complete allocation. A short public white-noise encode with volume 10 and trellis enabled produces UBSan reports for opt and path at index 35768 followed by an ASan heap-buffer-overflow read exactly after the 3,290,656-byte opt allocation on both sealed snapshots.",
+      "code_snippet": "idx_max = FFMIN(OPT_SIZE, cand[band - 1] + q); ... if (idx > idx_max) break; ... opt[band][idx]",
+      "poc": "Run evaluations/run_ffmpeg_nellymoser_trellis_reproducer.py against either sealed sanitizer-instrumented FFmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an inclusive upper bound admits trellis state OPT_SIZE even though every row's final legal state is OPT_SIZE minus one",
+        "steps": [
+          {"file": "libavcodec/nellymoserenc.c", "line": 57, "function": "file scope", "code_snippet": "#define OPT_SIZE ((1<<15) + 3000)", "note": "Each trellis row has exactly 35,768 elements indexed from zero through 35,767."},
+          {"file": "libavcodec/nellymoserenc.c", "line": 262, "function": "get_exponent_dynamic", "code_snippet": "idx_max = FFMIN(OPT_SIZE, cand[band - 1] + q);", "note": "The computed maximum may be the element count rather than the final valid index."},
+          {"file": "libavcodec/nellymoserenc.c", "line": 267, "function": "get_exponent_dynamic", "code_snippet": "idx = i + ff_nelly_delta_table[j];", "note": "Reachable predecessor states and valid delta-table values produce idx equal to exactly 35,768."},
+          {"file": "libavcodec/nellymoserenc.c", "line": 268, "function": "get_exponent_dynamic", "code_snippet": "if (idx > idx_max) break;", "note": "Equality is accepted, so the invalid one-past state reaches both trellis arrays."},
+          {"file": "libavcodec/nellymoserenc.c", "line": 272, "function": "get_exponent_dynamic", "code_snippet": "if (opt[band][idx] > tmp)", "note": "UBSan identifies index 35,768, and ASan observes a four-byte read exactly after the complete opt allocation at the final row."},
+          {"file": "libavcodec/nellymoserenc.c", "line": 274, "function": "get_exponent_dynamic", "code_snippet": "path[band][idx] = j;", "note": "The same off-by-one also writes through the one-past path index; earlier row-edge accesses corrupt the first element of the following row."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/nellymoserenc.c", "start": 55, "end": 71},
+      {"path": "libavcodec/nellymoserenc.c", "start": 238, "end": 299},
+      {"path": "libavcodec/nellymoserenc.c", "start": 307, "end": 375}
+    ]
+  },
+  {
+    "case_id": "magicyuv-truncated-slice-prior-frame-disclosure",
+    "finding": {
+      "id": "ffmpeg-magicyuv-truncated-slice-prior-frame-disclosure",
+      "finding_type": "information_disclosure",
+      "cwe": "CWE-200",
+      "file": "libavcodec/magicyuv.c",
+      "line_number": 123,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "MagicYUV's compressed-slice macro stops each output row when the slice bitstream has no bits left but never requires the decoded pixel count to equal the declared row width. The slice callback then applies prediction to the untouched frame-pool bytes, the decoder ignores slice callback returns, and it publishes the whole frame. A public libavcodec harness decodes and unreferences a raw 16x16 gray frame, then supplies a 300-byte frame with a valid table and a two-byte compressed slice containing no samples. FFmpeg returns a second frame whose 256 bytes are a reversible transformation of the entire prior pooled frame on both sealed snapshots.",
+      "code_snippet": "for (; x < width && get_bits_left(&gb) > 0; x++) dst[x] = get_vlc2(...); dst += stride;",
+      "poc": "Build and run evaluations/ffmpeg_magicyuv_truncated_slice_reproducer.c with evaluations/run_ffmpeg_magicyuv_truncated_slice_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an exhausted compressed slice is accepted without filling its declared rows, after which prediction and the public decoded-frame contract expose stale frame-pool contents",
+        "steps": [
+          {"file": "libavcodec/magicyuv.c", "line": 123, "function": "READ_PLANE", "code_snippet": "for (; x < width && get_bits_left(&gb) > 0; x++)", "note": "Bitstream exhaustion ends decoding without requiring x to reach width."},
+          {"file": "libavcodec/magicyuv.c", "line": 303, "function": "magy_decode_slice", "code_snippet": "for (k = 0; k < height; k++) READ_PLANE(dst, i, 1, 7)", "note": "Every declared row advances even when zero pixels were decoded."},
+          {"file": "libavcodec/magicyuv.c", "line": 308, "function": "magy_decode_slice", "code_snippet": "s->llviddsp.add_left_pred(dst, dst, width, 0);", "note": "Prediction transforms the untouched pooled bytes reversibly rather than initializing them."},
+          {"file": "libavcodec/magicyuv.c", "line": 632, "function": "magy_decode_frame", "code_snippet": "avctx->execute2(avctx, s->magy_decode_slice, NULL, NULL, s->nb_slices);", "note": "Slice return values are not collected or checked."},
+          {"file": "libavcodec/magicyuv.c", "line": 658, "function": "magy_decode_frame", "code_snippet": "*got_frame = 1;", "note": "The incomplete frame is returned as fully decoded."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/magicyuv.c", "start": 118, "end": 145},
+      {"path": "libavcodec/magicyuv.c", "start": 263, "end": 360},
+      {"path": "libavcodec/magicyuv.c", "start": 540, "end": 665},
+      {"path": "libavcodec/lossless_videodsp.c", "start": 60, "end": 85}
+    ]
+  },
+  {
+    "case_id": "rtp-av1-ignored-obu-output-cursor-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-rtp-av1-ignored-obu-output-cursor-heap-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavformat/rtpdec_av1.c",
+      "line_number": 252,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The RTP/AV1 depacketizer intentionally discards temporal-delimiter and tile-list OBUs, but that branch advances the output packet cursor and remaining input length without advancing the input cursor. The next loop iteration therefore parses bytes inside the ignored OBU as a new element while retaining an output cursor displaced by the complete ignored size. Packet growth accounts only for the newly parsed element, so its header or payload write begins beyond the allocated packet. A direct production-handler harness with a 100-byte temporal delimiter followed by 17 bytes produces an ASan heap-buffer-overflow write 19 bytes beyond an 81-byte allocation on both sealed snapshots.",
+      "code_snippet": "if (obu_type == AV1_OBU_TEMPORAL_DELIMITER || obu_type == AV1_OBU_TILE_LIST) { pktpos += obu_size; rem_pkt_size -= obu_size; ... continue; }",
+      "poc": "Build and run evaluations/ffmpeg_rtp_av1_ignored_obu_reproducer.c with evaluations/run_ffmpeg_rtp_av1_ignored_obu_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "discarding an ignored OBU advances only the logical output cursor and remaining length, so a following parser iteration grows a small packet and writes through a large unallocated gap",
+        "steps": [
+          {"file": "libavformat/rtpdec_av1.c", "line": 224, "function": "av1_handle_packet", "code_snippet": "num_lebs = parse_leb(ctx, buf_ptr, rem_pkt_size, &obu_size);", "note": "An RTP-controlled LEB declares the size of a temporal-delimiter or tile-list OBU."},
+          {"file": "libavformat/rtpdec_av1.c", "line": 246, "function": "av1_handle_packet", "code_snippet": "if ((obu_type == AV1_OBU_TEMPORAL_DELIMITER) || (obu_type == AV1_OBU_TILE_LIST))", "note": "These two OBU types enter the discard path."},
+          {"file": "libavformat/rtpdec_av1.c", "line": 249, "function": "av1_handle_packet", "code_snippet": "pktpos += obu_size; rem_pkt_size -= obu_size;", "note": "The branch moves the output cursor and consumes the declared remaining length but never performs buf_ptr += obu_size."},
+          {"file": "libavformat/rtpdec_av1.c", "line": 289, "function": "av1_handle_packet", "code_snippet": "av_grow_packet(pkt, output_size)", "note": "The next iteration grows storage only for the bytes parsed from inside the ignored OBU, not for the gap already added to pktpos."},
+          {"file": "libavformat/rtpdec_av1.c", "line": 305, "function": "av1_handle_packet", "code_snippet": "pkt->data[pktpos++] = *buf_ptr++ | AV1F_OBU_HAS_SIZE_FIELD;", "note": "ASan observes the resulting write beyond the heap packet allocation before payload copying."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/rtpdec_av1.c", "start": 120, "end": 210},
+      {"path": "libavformat/rtpdec_av1.c", "start": 211, "end": 375},
+      {"path": "libavformat/rtp_av1.h", "start": 55, "end": 125}
+    ]
+  },
+  {
+    "case_id": "shufflepixels-inverse-partial-block-map-overflow",
+    "finding": {
+      "id": "ffmpeg-shufflepixels-inverse-partial-block-map-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/vf_shufflepixels.c",
+      "line_number": 95,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "Horizontal and vertical inverse shuffling divide the plane into a ceiling number of blocks but allocate the map for only the exact plane area. The number of entries written to a randomly selected destination block is derived from the remaining input position, not the selected destination block. When a full-width input chunk is assigned to the final partial destination block, the map write crosses the allocation. A public filter invocation with width 10, block width 4, and seed 1 produces an ASan four-byte write exactly after the 40-byte map allocation on both sealed snapshots; the analogous vertical configuration also reproduces.",
+      "code_snippet": "width = FFMIN(s->block_w, s->planewidth[0] - x); map[rand * s->block_w + i] = map[rand * s->block_w] + i;",
+      "poc": "Run evaluations/run_ffmpeg_shufflepixels_inverse_reproducer.py against either sealed ASan ffmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "ceiling block count admits a partial final destination, but inverse-map initialization writes a full input-chunk width at that destination",
+        "steps": [
+          {"file": "libavfilter/vf_shufflepixels.c", "line": 322, "function": "config_output", "code_snippet": "s->map = av_calloc(inlink->w * inlink->h, sizeof(*s->map));", "note": "Horizontal map storage contains exactly one int32 entry per luma pixel."},
+          {"file": "libavfilter/vf_shufflepixels.c", "line": 329, "function": "config_output", "code_snippet": "s->nb_blocks = (s->planewidth[0] + s->block_w - 1) / s->block_w;", "note": "A non-divisible width creates a ceiling-counted final partial block."},
+          {"file": "libavfilter/vf_shufflepixels.c", "line": 85, "function": "make_horizontal_map", "code_snippet": "width = FFMIN(s->block_w, s->planewidth[0] - x);", "note": "Inverse mode sizes the copy from the sequential input cursor rather than from the randomly selected destination block."},
+          {"file": "libavfilter/vf_shufflepixels.c", "line": 95, "function": "make_horizontal_map", "code_snippet": "map[rand * s->block_w + i] = map[rand * s->block_w] + i;", "note": "Selecting the last partial destination for an earlier full chunk writes beyond the exact-width map allocation."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_shufflepixels.c", "start": 35, "end": 145},
+      {"path": "libavfilter/vf_shufflepixels.c", "start": 300, "end": 365},
+      {"path": "libavfilter/vf_shufflepixels.c", "start": 400, "end": 430}
+    ]
+  },
+  {
+    "case_id": "vif-small-frame-reflection-oob-read",
+    "finding": {
+      "id": "ffmpeg-vif-small-frame-reflection-oob-read",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavfilter/vf_vif.c",
+      "line_number": 241,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "VIF's one-step symmetric boundary reflection assumes each plane dimension is large enough for half of the active filter. For a small frame, a tap can lie beyond twice the dimension; applying 2 * dimension - index - 1 once then produces a negative index. The horizontal and vertical passes dereference that result without a minimum-dimension guard. A public VIF graph comparing two 2x2 gray frames produces an ASan four-byte read exactly after a 16-byte allocation in vif_filter1d on both sealed snapshots.",
+      "code_snippet": "jj = jj < 0 ? -jj : (jj >= w ? 2 * w - jj - 1 : jj); img_coeff = temp[jj];",
+      "poc": "Run evaluations/run_ffmpeg_vif_small_frame_reproducer.py against either sealed ASan ffmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a 17-tap filter reaches beyond twice a small image dimension, and single reflection turns the tap into an out-of-range negative or positive buffer index",
+        "steps": [
+          {"file": "libavfilter/vf_vif.c", "line": 47, "function": "file scope", "code_snippet": "static const uint8_t vif_filter1d_width1[4] = { 17, 9, 5, 3 };", "note": "Scale zero applies a 17-tap filter with radius eight."},
+          {"file": "libavfilter/vf_vif.c", "line": 503, "function": "config_input_ref", "code_snippet": "s->data_buf[i] = av_calloc(s->width, s->height * sizeof(float));", "note": "Internal source and result storage contains exactly width times height floats, with no minimum frame-size validation."},
+          {"file": "libavfilter/vf_vif.c", "line": 241, "function": "vif_filter1d", "code_snippet": "ii = ii < 0 ? -ii : (ii >= h ? 2 * h - ii - 1 : ii);", "note": "One reflection is insufficient when a filter tap lies more than one image extent beyond the boundary."},
+          {"file": "libavfilter/vf_vif.c", "line": 270, "function": "vif_filter1d", "code_snippet": "jj = jj < 0 ? -jj : (jj >= w ? 2 * w - jj - 1 : jj);", "note": "The horizontal path produces the same invalid index."},
+          {"file": "libavfilter/vf_vif.c", "line": 272, "function": "vif_filter1d", "code_snippet": "img_coeff = temp[jj];", "note": "ASan observes the resulting out-of-bounds float read through the public filter graph."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_vif.c", "start": 35, "end": 105},
+      {"path": "libavfilter/vf_vif.c", "start": 205, "end": 270},
+      {"path": "libavfilter/vf_vif.c", "start": 284, "end": 380},
+      {"path": "libavfilter/vf_vif.c", "start": 475, "end": 545}
+    ]
+  },
+  {
+    "case_id": "ratecontrol-pass2-picture-type-oob-read",
+    "finding": {
+      "id": "ffmpeg-ratecontrol-pass2-picture-type-oob-read",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavcodec/ratecontrol.c",
+      "line_number": 357,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The MPEG-family two-pass encoder parses picture type as an unrestricted signed integer from the passlog and stores it in RateControlEntry. Initialization then uses it directly as the index for multiple five-entry statistics arrays. Changing a valid first-pass record from type 1 to type 99 and running the ordinary second-pass CLI path produces a UBSan index-99 report followed by an ASan eight-byte heap-buffer-overflow read in ff_rate_control_init on both sealed snapshots.",
+      "code_snippet": "sscanf(..., \"type:%d ...\", &rce->pict_type, ...); rcc->i_cplx_sum[rce->pict_type] += ...;",
+      "poc": "Run evaluations/run_ffmpeg_ratecontrol_stats_reproducer.py against either sealed ASan ffmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a local passlog controls an unchecked picture-type integer that immediately indexes fixed five-entry rate-control arrays",
+        "steps": [
+          {"file": "libavcodec/ratecontrol.c", "line": 552, "function": "ff_rate_control_init", "code_snippet": "for (i = 0; i < 5; i++)", "note": "The affected predictor and accumulated-statistic arrays have five initialized entries."},
+          {"file": "libavcodec/ratecontrol.c", "line": 615, "function": "ff_rate_control_init", "code_snippet": "sscanf(p, \" in:%*d out:%*d type:%d ...\", &rce->pict_type, ...)", "note": "The passlog parser validates field count but imposes no AVPictureType range."},
+          {"file": "libavcodec/ratecontrol.c", "line": 356, "function": "init_pass2", "code_snippet": "rce->new_pict_type = rce->pict_type;", "note": "The unchecked value is propagated unchanged during second-pass initialization."},
+          {"file": "libavcodec/ratecontrol.c", "line": 357, "function": "init_pass2", "code_snippet": "rcc->i_cplx_sum[rce->pict_type] += rce->i_tex_bits * rce->qscale;", "note": "UBSan reports index 99 and ASan reports the subsequent out-of-allocation read."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/ratecontrol.c", "start": 330, "end": 375},
+      {"path": "libavcodec/ratecontrol.c", "start": 540, "end": 640},
+      {"path": "libavcodec/ratecontrol.h", "start": 35, "end": 130}
+    ]
+  },
+  {
+    "case_id": "decimate-subsampled-chroma-block-metric-overflow",
+    "finding": {
+      "id": "ffmpeg-decimate-subsampled-chroma-block-metric-overflow",
+      "finding_type": "out_of_bounds_read_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/vf_decimate.c",
+      "line_number": 123,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "Decimate allocates its block-difference grid from luma dimensions and half of the configured block size, then further right-shifts those half-block dimensions for chroma. The public minimum block size is four, so YUV411P's horizontal subsampling reduces blockx/2 from two to zero. The chroma metric loop consequently never advances x while xdest increases without bound, indexing beyond the luma-sized bdiffs allocation. A public 16x16 YUV411P graph with blockx=4 produces an ASan eight-byte access exactly after the 64-byte metric allocation on both sealed snapshots.",
+      "code_snippet": "hblockx = dm->blockx / 2; if (plane) hblockx >>= dm->hsub; for (x = 0; x < width; x += hblockx) bdiffs[ydest * dm->nxblocks + xdest++] += acc;",
+      "poc": "Run evaluations/run_ffmpeg_decimate_subsampled_block_reproducer.py against either sealed ASan ffmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "subsampling reduces a permitted half-block dimension to zero, so the chroma metric loop repeatedly indexes beyond its luma-sized destination grid",
+        "steps": [
+          {"file": "libavfilter/vf_decimate.c", "line": 77, "function": "file scope", "code_snippet": "{ \"blockx\", ... {.i64 = 32}, 4, 1<<9, FLAGS }", "note": "The public option permits a four-pixel horizontal block."},
+          {"file": "libavfilter/vf_decimate.c", "line": 373, "function": "file scope", "code_snippet": "AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P", "note": "The advertised input formats include chroma subsampling factors large enough to erase a half-block dimension."},
+          {"file": "libavfilter/vf_decimate.c", "line": 400, "function": "config_output", "code_snippet": "dm->nxblocks = (w + dm->blockx/2 - 1) / (dm->blockx/2);", "note": "The metric allocation is sized from valid luma half-block dimensions."},
+          {"file": "libavfilter/vf_decimate.c", "line": 104, "function": "calc_diffs", "code_snippet": "int hblockx = dm->blockx / 2; ... hblockx >>= dm->hsub;", "note": "For blockx=4 and YUV411P hsub=2, the chroma horizontal step becomes zero."},
+          {"file": "libavfilter/vf_decimate.c", "line": 117, "function": "calc_diffs", "code_snippet": "for (x = 0; x < width; x += hblockx)", "note": "x remains zero indefinitely while each iteration advances xdest."},
+          {"file": "libavfilter/vf_decimate.c", "line": 123, "function": "calc_diffs", "code_snippet": "bdiffs[ydest * dm->nxblocks + xdest] += acc;", "note": "ASan observes the resulting eight-byte access immediately beyond the 64-byte metric allocation."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_decimate.c", "start": 70, "end": 145},
+      {"path": "libavfilter/vf_decimate.c", "start": 320, "end": 430}
+    ]
+  },
+  {
+    "case_id": "whisper-oversized-audio-frame-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-whisper-oversized-audio-frame-heap-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/af_whisper.c",
+      "line_number": 315,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "Whisper allocates its audio queue from the queue duration, whose public minimum is 20 ms or 320 samples. It consumes complete upstream AVFrames without imposing a sample maximum. When one frame contains more samples than the queue, the capacity guard first transcribes at most the existing fill, then unconditionally copies the entire oversized frame into the fixed queue. FFmpeg's public asetnsamples filter can produce frames up to INT_MAX samples, establishing that no framework contract restricts an audio frame to the Whisper queue capacity. The sealed builds omit the optional Whisper dependency, so this remains source-confirmed rather than dynamically reproduced.",
+      "code_snippet": "if (fill + samples > queue_size) run_transcription(ctx, frame, fill); memcpy(audio_buffer + fill, input_data, samples * sizeof(*audio_buffer));",
+      "poc": "Build FFmpeg with whisper.cpp, then pass asetnsamples=n=1024 into whisper=model=<valid-model>:queue=20000; the filter allocates 320 floats and copies a 1024-sample frame.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "the filter's duration-sized queue can be smaller than one valid upstream audio frame, but its overflow guard drains only prior contents before copying that whole frame",
+        "steps": [
+          {"file": "libavfilter/af_whisper.c", "line": 446, "function": "file scope", "code_snippet": "{ \"queue\", ... AV_OPT_TYPE_DURATION, ... 20000, HOURS, ... }", "note": "A valid queue may be only 20 ms."},
+          {"file": "libavfilter/af_whisper.c", "line": 115, "function": "init", "code_snippet": "audio_buffer_queue_size = av_rescale(queue, 16000, AV_TIME_BASE);", "note": "The minimum queue allocates exactly 320 float samples."},
+          {"file": "libavfilter/af_asetnsamples.c", "line": 43, "function": "file scope", "code_snippet": "{ \"nb_out_samples\", ... 1, INT_MAX, FLAGS }", "note": "A standard upstream FFmpeg filter may validly emit a frame much larger than that queue."},
+          {"file": "libavfilter/af_whisper.c", "line": 397, "function": "activate", "code_snippet": "ret = ff_inlink_consume_frame(inlink, &frame);", "note": "Whisper consumes the entire frame rather than requesting a queue-bounded sample slice."},
+          {"file": "libavfilter/af_whisper.c", "line": 307, "function": "filter_frame", "code_snippet": "if (audio_buffer_fill_size + samples > audio_buffer_queue_size) run_transcription(... audio_buffer_fill_size);", "note": "The guard can remove only existing queued samples; it neither splits nor rejects an individually oversized frame."},
+          {"file": "libavfilter/af_whisper.c", "line": 315, "function": "filter_frame", "code_snippet": "memcpy(audio_buffer + audio_buffer_fill_size, input_data, samples * sizeof(*audio_buffer));", "note": "The complete oversized frame is copied into the smaller fixed allocation."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/af_whisper.c", "start": 95, "end": 135},
+      {"path": "libavfilter/af_whisper.c", "start": 186, "end": 320},
+      {"path": "libavfilter/af_whisper.c", "start": 383, "end": 475},
+      {"path": "libavfilter/af_asetnsamples.c", "start": 35, "end": 75},
+      {"path": "libavfilter/avfilter.c", "start": 1510, "end": 1535}
+    ]
+  },
+  {
+    "case_id": "dnn-classify-output-count-heap-overflow",
+    "finding": {
+      "id": "ffmpeg-dnn-classify-output-count-heap-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavfilter/vf_dnn_classify.c",
+      "line_number": 102,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "Each detection bounding box has fixed storage for four classification labels and confidences, but dnn_classify_post_proc writes at bbox->classify_count and increments that count without enforcing the four-entry limit. OpenVINO may derive its output count directly from the loaded model without a corresponding cap, and its inference-completion loop invokes the classifier callback once for every output. A production-source harness invokes that same callback five times on one production-allocated bounding-box side-data object; the fifth callback produces an ASan eight-byte write exactly after the 660-byte allocation on both sealed snapshots.",
+      "code_snippet": "bbox->classify_confidences[bbox->classify_count] = ...; ... bbox->classify_count++;",
+      "poc": "Build and run evaluations/ffmpeg_dnn_classify_count_reproducer.c with evaluations/run_ffmpeg_dnn_classify_count_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a model-derived OpenVINO output count drives repeated classification callbacks, while each bounding box contains only four classification slots and the callback never checks its monotonically increasing index",
+        "steps": [
+          {"file": "libavutil/detection_bbox.h", "line": 50, "function": "file scope", "code_snippet": "#define AV_NUM_DETECTION_BBOX_CLASSIFY 4", "note": "Each bounding box has exactly four label and confidence entries."},
+          {"file": "libavfilter/dnn/dnn_backend_openvino.c", "line": 683, "function": "init_model_ov", "code_snippet": "nb_outputs = output_size;", "note": "When no names are supplied, the loaded OpenVINO model's output count is accepted without the bounding-box classification cap."},
+          {"file": "libavfilter/dnn/dnn_backend_openvino.c", "line": 473, "function": "infer_completion_callback", "code_snippet": "for (int output_i = 0; output_i < ov_model->nb_outputs; output_i++)", "note": "Inference completion invokes the classification postprocessor once per model output."},
+          {"file": "libavfilter/vf_dnn_classify.c", "line": 102, "function": "dnn_classify_post_proc", "code_snippet": "bbox->classify_confidences[bbox->classify_count] = av_make_q(...);", "note": "The current count indexes the fixed array without checking it against four; ASan catches the fifth write immediately after the complete side-data allocation."},
+          {"file": "libavfilter/vf_dnn_classify.c", "line": 110, "function": "dnn_classify_post_proc", "code_snippet": "bbox->classify_count++;", "note": "Every accepted callback advances the unbounded index."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_dnn_classify.c", "start": 35, "end": 115},
+      {"path": "libavfilter/dnn/dnn_backend_openvino.c", "start": 334, "end": 490},
+      {"path": "libavfilter/dnn/dnn_backend_openvino.c", "start": 575, "end": 705},
+      {"path": "libavutil/detection_bbox.h", "start": 25, "end": 90},
+      {"path": "libavutil/detection_bbox.c", "start": 20, "end": 75}
+    ]
+  },
+  {
+    "case_id": "pan-named-input-channel-oob",
+    "finding": {
+      "id": "ffmpeg-pan-named-input-channel-oob",
+      "finding_type": "out_of_bounds_read_write",
+      "cwe": "CWE-129",
+      "file": "libavfilter/af_pan.c",
+      "line_number": 214,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The pan expression parser bounds numbered channel references to its 64-column matrix, but returns named AVChannel identifiers without the same bound. Public names include UNK at 768 and AMBI0 at 1024. During filter initialization, AMBI0 first indexes the 64-entry used_in_ch stack array and then indexes the corresponding gain-matrix column. A public ffmpeg filter graph with FL=AMBI0 produces a UBSan index-1024 violation on the used_in_ch read followed by an ASan invalid stack read on both sealed snapshots; if execution continues, the assignments use the same out-of-range index for writes.",
+      "code_snippet": "if (used_in_ch[in_ch_id]) ... used_in_ch[in_ch_id] = 1; pan->gain[out_ch_id][in_ch_id] = sign * gain;",
+      "poc": "Run evaluations/run_ffmpeg_pan_named_channel_reproducer.py against either sealed sanitizer-instrumented ffmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a public named channel is represented by an enum value far above the pan filter's 64-channel storage limit, but only the numbered parser branch enforces that limit before the value is used as an array index",
+        "steps": [
+          {"file": "libavutil/channel_layout.h", "line": 108, "function": "file scope", "code_snippet": "AV_CHAN_AMBISONIC_BASE = 0x400", "note": "AMBI0 is the public name for numeric channel identifier 1024."},
+          {"file": "libavfilter/af_pan.c", "line": 74, "function": "parse_channel_name", "code_snippet": "channel_id = av_channel_from_string(buf); ... *rchannel = channel_id;", "note": "The named branch accepts the library channel identifier without checking it against MAX_CHANNELS."},
+          {"file": "libavfilter/af_pan.c", "line": 84, "function": "parse_channel_name", "code_snippet": "channel_id >= 0 && channel_id < MAX_CHANNELS", "note": "The corresponding numbered cN branch does enforce the 64-channel storage bound."},
+          {"file": "libavfilter/af_pan.c", "line": 214, "function": "init", "code_snippet": "if (used_in_ch[in_ch_id])", "note": "With FL=AMBI0, UBSan observes the first invalid operation as a read of used_in_ch[1024]."},
+          {"file": "libavfilter/af_pan.c", "line": 220, "function": "init", "code_snippet": "used_in_ch[in_ch_id] = 1;", "note": "If execution continues after the invalid read, this assignment writes through the same out-of-range stack index."},
+          {"file": "libavfilter/af_pan.c", "line": 221, "function": "init", "code_snippet": "pan->gain[out_ch_id][in_ch_id] = sign * gain;", "note": "The persistent gain matrix is also indexed by the unbounded named channel identifier."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/af_pan.c", "start": 35, "end": 95},
+      {"path": "libavfilter/af_pan.c", "start": 116, "end": 230},
+      {"path": "libavutil/channel_layout.h", "start": 65, "end": 120}
+    ]
+  },
+  {
+    "case_id": "rtp-latm-payload-length-header-overflow",
+    "finding": {
+      "id": "ffmpeg-rtp-latm-payload-length-header-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavformat/rtpenc_latm.c",
+      "line_number": 44,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "RTP/LATM encodes an AAC access unit's size as one length byte per 255 payload bytes, but never ensures that this variable-length header fits the fixed RTP packet buffer before writing it. The public RTP muxer accepts AVPackets independently of the output packet size. With a normal 1,472-byte packet sink, a 382,500-byte AAC packet creates a 1,501-byte header; memset writes 1,500 bytes into the 1,472-byte allocation and ASan reports a heap-buffer-overflow on both sealed snapshots. The following fragmentation arithmetic would also become negative once the header exceeds max_payload_size.",
+      "code_snippet": "header_size = size/0xFF + 1; memset(s->buf, 0xFF, header_size - 1);",
+      "poc": "Build and run evaluations/ffmpeg_rtp_latm_header_reproducer.c with evaluations/run_ffmpeg_rtp_latm_header_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an unbounded AAC packet size expands into a LATM length header larger than the fixed RTP packet buffer, which is written in full before payload fragmentation",
+        "steps": [
+          {"file": "libavformat/rtpenc.c", "line": 159, "function": "rtp_write_header", "code_snippet": "s->buf = av_malloc(s1->packet_size);", "note": "The RTP staging allocation is fixed by the packet sink; the public reproducer uses 1,472 bytes."},
+          {"file": "libavformat/rtpenc.c", "line": 599, "function": "rtp_write_packet", "code_snippet": "case AV_CODEC_ID_AAC: if (s->flags & FF_RTP_FLAG_MP4A_LATM) ff_rtp_send_latm(s1, pkt->data, size);", "note": "LATM dispatch passes the complete AVPacket size without capping it to the RTP payload size."},
+          {"file": "libavformat/rtpenc_latm.c", "line": 43, "function": "ff_rtp_send_latm", "code_snippet": "header_size = size/0xFF + 1;", "note": "A 382,500-byte access unit produces a 1,501-byte PayloadLengthInfo header."},
+          {"file": "libavformat/rtpenc_latm.c", "line": 44, "function": "ff_rtp_send_latm", "code_snippet": "memset(s->buf, 0xFF, header_size - 1);", "note": "ASan observes the 1,500-byte write crossing the complete 1,472-byte RTP allocation on both snapshots."},
+          {"file": "libavformat/rtpenc_latm.c", "line": 51, "function": "ff_rtp_send_latm", "code_snippet": "len = FFMIN(size, s->max_payload_size - (!offset ? header_size : 0));", "note": "Once the header exceeds max_payload_size, the first fragment length is negative and later copy arithmetic is invalid as well."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/rtpenc_latm.c", "start": 20, "end": 62},
+      {"path": "libavformat/rtpenc.c", "start": 135, "end": 170},
+      {"path": "libavformat/rtpenc.c", "start": 550, "end": 610},
+      {"path": "libavformat/rtpenc.h", "start": 25, "end": 95}
+    ]
+  },
+  {
+    "case_id": "rtp-h263-rfc2190-small-packet-negative-copy",
+    "finding": {
+      "id": "ffmpeg-rtp-h263-rfc2190-small-packet-negative-copy",
+      "finding_type": "out_of_bounds_read_write",
+      "cwe": "CWE-195",
+      "file": "libavformat/rtpenc_h263_rfc2190.c",
+      "line_number": 96,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The RTP muxer accepts every packet sink larger than its 12-byte common header, but RFC2190 H.263 reserves another eight bytes and subtracts them from the remaining payload capacity without checking a codec-specific minimum. A public muxer configured with a valid 13-byte packet sink therefore has one payload byte and derives a fragment length of -7. The resynchronization search preserves that negative length, and mode-B packetization passes it to memcpy, where ASan reports negative-size-param on both sealed snapshots.",
+      "code_snippet": "len = FFMIN(s->max_payload_size - 8, size); ... memcpy(s->buf + 8, buf, len);",
+      "poc": "Build and run evaluations/ffmpeg_rtp_h263_small_packet_reproducer.c with evaluations/run_ffmpeg_rtp_h263_small_packet_reproducer.py against either sealed snapshot.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a packet size valid under RTP's common-header check is smaller than the RFC2190 payload header, so subtracting the codec header creates a negative fragment length that reaches memcpy",
+        "steps": [
+          {"file": "libavformat/rtpenc.c", "line": 155, "function": "rtp_write_header", "code_snippet": "if (s1->packet_size <= 12) return AVERROR(EIO);", "note": "A 13-byte packet sink is explicitly accepted by the common RTP initialization check."},
+          {"file": "libavformat/rtpenc.c", "line": 163, "function": "rtp_write_header", "code_snippet": "s->max_payload_size = s1->packet_size - 12;", "note": "The accepted sink leaves max_payload_size equal to one."},
+          {"file": "libavformat/rtpenc_h263_rfc2190.c", "line": 129, "function": "ff_rtp_send_h263_rfc2190", "code_snippet": "len = FFMIN(s->max_payload_size - 8, size);", "note": "Subtracting the eight-byte mode-B header produces a fragment length of -7."},
+          {"file": "libavformat/rtpenc_h263.c", "line": 28, "function": "ff_h263_find_resync_marker_reverse", "code_snippet": "const uint8_t *p = end - 1; ... return end;", "note": "With a negative end pointer, the resynchronization loop does not recover a nonnegative fragment length."},
+          {"file": "libavformat/rtpenc_h263_rfc2190.c", "line": 96, "function": "send_mode_b", "code_snippet": "memcpy(s->buf + 8, buf, len);", "note": "ASan reports negative-size-param with size -7 through the public muxer on both snapshots."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavformat/rtpenc_h263_rfc2190.c", "start": 40, "end": 195},
+      {"path": "libavformat/rtpenc_h263.c", "start": 20, "end": 42},
+      {"path": "libavformat/rtpenc.c", "start": 135, "end": 170},
+      {"path": "libavformat/rtpenc.c", "start": 615, "end": 640}
+    ]
+  },
+  {
+    "case_id": "ffv1-remap-table-symbol-oob-read",
+    "finding": {
+      "id": "ffmpeg-ffv1-remap-table-symbol-oob-read",
+      "finding_type": "out_of_bounds_read",
+      "cwe": "CWE-125",
+      "file": "libavcodec/ffv1dec.c",
+      "line_number": 150,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "FFV1 level-4 remapping allocates each decoded lookup table for exactly slice_width times slice_height entries and records the number of populated entries, but entropy symbols are decoded in a ceil(log2(remap_count))-bit space. For a non-power-of-two remap count, the mask therefore admits unused indices; when pixel_num is below that power-of-two ceiling, those indices are also outside the physical table. A valid 513x1 yuv444p16le remapped FFV1 packet has this shape. Flipping one entropy bit at packet byte 18 makes decode_line produce an out-of-range masked symbol, and decode_plane performs a two-byte heap-buffer-overflow read on both sealed snapshots.",
+      "code_snippet": "((uint16_t*)(src + stride*y))[x*pixel_stride] = sc->fltmap[remap_index][sample[1][x] & mask];",
+      "poc": "Run evaluations/run_ffmpeg_ffv1_remap_reproducer.py against either sealed sanitizer-instrumented FFmpeg checkout. The recorder creates a valid remapped sample, confirms the unmodified sample decodes, and applies only the deterministic byte-18 bit-0 mutation.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a bitstream-defined non-power-of-two remap count is represented by a wider power-of-two symbol alphabet, and an unused entropy symbol indexes beyond the pixel-count-sized lookup table",
+        "steps": [
+          {"file": "libavcodec/ffv1dec.c", "line": 402, "function": "decode_slice", "code_snippet": "const int pixel_num = sc->slice_width * sc->slice_height;", "note": "The decoder derives the physical remap-table capacity from the number of pixels in the slice."},
+          {"file": "libavcodec/ffv1dec.c", "line": 411, "function": "decode_slice", "code_snippet": "av_fast_malloc(&sc->fltmap[p], &sc->fltmap_size[p], pixel_num * sizeof(*sc->fltmap[p]));", "note": "Each 16-bit lookup table is allocated for exactly pixel_num entries."},
+          {"file": "libavcodec/ffv1dec.c", "line": 355, "function": "decode_remap", "code_snippet": "sc->remap_count[p] = j;", "note": "The attacker-controlled remap syntax records a populated count that need not be a power of two."},
+          {"file": "libavcodec/ffv1dec.c", "line": 111, "function": "decode_plane", "code_snippet": "bits = av_ceil_log2(sc->remap_count[remap_index]); mask = (1<<bits)-1;", "note": "The entropy alphabet and mask round that count up to the next power of two without constraining unused symbols."},
+          {"file": "libavcodec/ffv1dec_template.c", "line": 123, "function": "decode_line", "code_snippet": "sample[1][x] = av_zero_extend(predict(...) + (SUINT)diff, bits);", "note": "Packet-controlled entropy data can produce any symbol in the rounded bit-width; the reproducer's single-bit mutation reaches an unused one."},
+          {"file": "libavcodec/ffv1dec.c", "line": 150, "function": "decode_plane", "code_snippet": "sc->fltmap[remap_index][sample[1][x] & mask]", "note": "The unused symbol is used directly as a lookup index; ASan reports a two-byte heap-buffer-overflow read in decode_plane on both snapshots."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/ffv1.c", "start": 218, "end": 257},
+      {"path": "libavcodec/ffv1dec.c", "start": 96, "end": 162},
+      {"path": "libavcodec/ffv1dec.c", "start": 238, "end": 273},
+      {"path": "libavcodec/ffv1dec.c", "start": 298, "end": 424},
+      {"path": "libavcodec/ffv1dec_template.c", "start": 34, "end": 130}
+    ]
+  },
+  {
+    "case_id": "framepack-alpha-plane-uninitialized-destination",
+    "finding": {
+      "id": "ffmpeg-framepack-alpha-plane-uninitialized-destination",
+      "finding_type": "invalid_pointer_write",
+      "cwe": "CWE-457",
+      "file": "libavfilter/vf_framepack.c",
+      "line_number": 248,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The framepack filter explicitly negotiates alpha-bearing planar formats, but its side-by-side helper initializes only destination planes zero through two before passing the four-entry destination array to av_image_copy2. For YUVA input, the generic copy helper visits plane three and writes the alpha plane through the uninitialized dst[3] pointer. The top/bottom helper independently leaves both dst[3] and linesizes[3] uninitialized. A public two-source yuva420p framepack graph produces an AddressSanitizer invalid write through image_copy_plane on both sealed snapshots.",
+      "code_snippet": "uint8_t *dst[4]; ... dst[0] = ...; dst[1] = ...; dst[2] = ...; av_image_copy2(dst, ...);",
+      "poc": "Run evaluations/run_ffmpeg_framepack_alpha_reproducer.py against either sealed sanitizer-instrumented ffmpeg binary.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "an advertised four-plane pixel format reaches a packing helper that initializes only three destination-plane entries, after which the generic image copier writes the alpha plane through the unset fourth pointer",
+        "steps": [
+          {"file": "libavfilter/vf_framepack.c", "line": 67, "function": "file scope", "code_snippet": "AV_PIX_FMT_YUVA420P, AV_PIX_FMT_YUVA422P, AV_PIX_FMT_YUVA444P", "note": "The filter explicitly advertises alpha-bearing four-plane formats."},
+          {"file": "libavfilter/vf_framepack.c", "line": 241, "function": "horizontal_frame_pack", "code_snippet": "uint8_t *dst[4];", "note": "The destination-plane array has automatic storage and no initializer."},
+          {"file": "libavfilter/vf_framepack.c", "line": 244, "function": "horizontal_frame_pack", "code_snippet": "dst[0] = ...; dst[1] = ...; dst[2] = ...;", "note": "Only the luma and two chroma entries are assigned; dst[3] remains indeterminate."},
+          {"file": "libavutil/imgutils.c", "line": 402, "function": "image_copy", "code_snippet": "planes_nb = FFMAX(planes_nb, desc->comp[i].plane + 1);", "note": "For YUVA420P, the generic copier derives four planes from the pixel descriptor."},
+          {"file": "libavutil/imgutils.c", "line": 415, "function": "image_copy", "code_snippet": "copy_plane(dst_data[i], dst_linesizes[i], src_data[i], src_linesizes[i], bwidth, h);", "note": "The plane-three copy writes through dst[3]; ASan observes the resulting invalid write on both snapshots."},
+          {"file": "libavfilter/vf_framepack.c", "line": 267, "function": "vertical_frame_pack", "code_snippet": "uint8_t *dst[4]; int linesizes[4];", "note": "The vertical helper has the same missing destination pointer and also omits the fourth stride."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_framepack.c", "start": 35, "end": 80},
+      {"path": "libavfilter/vf_framepack.c", "start": 230, "end": 295},
+      {"path": "libavutil/imgutils.c", "start": 375, "end": 425}
+    ]
+  },
+  {
+    "case_id": "yuvcmp-partial-macroblock-overflow",
+    "finding": {
+      "id": "ffmpeg-yuvcmp-partial-macroblock-overflow",
+      "finding_type": "out_of_bounds_read_write",
+      "cwe": "CWE-122",
+      "file": "tools/yuvcmp.c",
+      "line_number": 106,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "yuvcmp allocates its macroblock-error bitmap for floor(width / 16) times floor(height / 16) entries, but maps every active luma and chroma sample to a macroblock. For a partial right or bottom macroblock, x / 16 or y / 16 reaches the excluded rounded-up coordinate and indexes outside that allocation. Two valid 17x16 YUV420P inputs that differ only at luma pixel (16,0) select index one in a one-byte allocation. ASan reports a one-byte heap-buffer-overflow read-modify-write on both sealed snapshots.",
+      "code_snippet": "mb = x / 16 + (y / 16) * mb_x; ... mberrors[mb] |= 1;",
+      "poc": "Run evaluations/run_ffmpeg_yuvcmp_partial_mb_reproducer.py against either sealed sanitizer-instrumented FFmpeg checkout.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "floor-rounded macroblock dimensions size the error bitmap, while full active-plane coordinates produce rounded-up partial-block indices that directly control a read-modify-write",
+        "steps": [
+          {"file": "tools/yuvcmp.c", "line": 71, "function": "main", "code_snippet": "mb_x = width / 16; mb_y = height / 16;", "note": "User-supplied dimensions are rounded down when computing the macroblock grid."},
+          {"file": "tools/yuvcmp.c", "line": 74, "function": "main", "code_snippet": "mberrors = malloc(mb_x * mb_y);", "note": "The bitmap has no entries for partial macroblocks."},
+          {"file": "tools/yuvcmp.c", "line": 90, "function": "main", "code_snippet": "for(c = 0; c < lsiz; c++)", "note": "The comparison still visits every active luma sample, including partial right and bottom blocks."},
+          {"file": "tools/yuvcmp.c", "line": 95, "function": "main", "code_snippet": "mb = x / 16 + (y / 16) * mb_x;", "note": "For width 17, sample x=16 maps to macroblock column one although mb_x is one."},
+          {"file": "tools/yuvcmp.c", "line": 106, "function": "main", "code_snippet": "mberrors[mb] |= 1;", "note": "The read-modify-write accesses index one of a one-byte allocation; ASan confirms the overflow on both snapshots."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "tools/yuvcmp.c", "start": 45, "end": 145}
+    ]
+  },
+  {
+    "case_id": "dvdsub-odd-width-rle-overflow",
+    "finding": {
+      "id": "ffmpeg-dvdsub-odd-width-rle-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavcodec/dvdsubenc.c",
+      "line_number": 42,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The DVD subtitle encoder budgets floor(width times height / 2) output bytes for a one-nibble-per-pixel RLE worst case. It encodes even and odd fields separately, however, and pads every odd-width row to a complete byte. The required minimum for that case is ceil(width / 2) times height. A public 1x200 bitmap subtitle and a 142-byte caller buffer pass the 100-byte RLE budget check but require 200 RLE bytes; ASan reports a stack-buffer-overflow in dvd_encode_rle on both sealed snapshots.",
+      "code_snippet": "if ((q - outbuf) + vrect.w * vrect.h / 2 + 17 + 21 > outbuf_size) ... dvd_encode_rle(&q, ...);",
+      "poc": "Run evaluations/run_ffmpeg_dvdsub_odd_width_reproducer.py against either sealed sanitizer-instrumented FFmpeg checkout.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a floor-rounded whole-image RLE budget omits per-row nibble padding, after which the field-separated encoder writes the missing byte for every odd-width row",
+        "steps": [
+          {"file": "libavcodec/dvdsubenc.c", "line": 344, "function": "dvdsub_encode", "code_snippet": "vrect.w * vrect.h / 2", "note": "The output-capacity check rounds the aggregate pixel count down to bytes."},
+          {"file": "libavcodec/dvdsubenc.c", "line": 349, "function": "dvdsub_encode", "code_snippet": "dvd_encode_rle(&q, vrect.data[0], vrect.w * 2, vrect.w, (vrect.h + 1) >> 1, cmap);", "note": "Even rows are encoded as an independent field."},
+          {"file": "libavcodec/dvdsubenc.c", "line": 352, "function": "dvdsub_encode", "code_snippet": "dvd_encode_rle(&q, vrect.data[0] + vrect.w, vrect.w * 2, vrect.w, vrect.h >> 1, cmap);", "note": "Odd rows form the second field, preserving one row-padding boundary per source row."},
+          {"file": "libavcodec/dvdsubenc.c", "line": 92, "function": "dvd_encode_rle", "code_snippet": "if (ncnt & 1) PUTNIBBLE(0);", "note": "Every odd-width row is padded to a full byte, so width one consumes one byte rather than one half-byte."},
+          {"file": "libavcodec/dvdsubenc.c", "line": 42, "function": "dvd_encode_rle", "code_snippet": "*q++ = bitbuf | ((val) & 0x0f);", "note": "The omitted padding bytes cross the caller's buffer; ASan confirms the write on both snapshots."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/dvdsubenc.c", "start": 35, "end": 100},
+      {"path": "libavcodec/dvdsubenc.c", "start": 270, "end": 405}
+    ]
+  },
+  {
+    "case_id": "rav1e-twopass-remaining-length-ffi-ub",
+    "finding": {
+      "id": "ffmpeg-rav1e-twopass-remaining-length-ffi-ub",
+      "finding_type": "ffi_undefined_behavior",
+      "cwe": "CWE-125",
+      "file": "libavcodec/librav1e.c",
+      "line_number": 164,
+      "severity": "medium",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "FFmpeg's rav1e pass-two feeder advances pass_data by pass_pos after each partial consumption but continues declaring the original total pass_size to rav1e_twopass_in. The decoded allocation contains only pass_size bytes, so every call after pass_pos becomes nonzero describes a byte range extending pass_pos bytes beyond the allocation. A real 156-byte legacy two-pass stream generated with rav1e 0.7.1 was accepted by the exact unmodified FFmpeg pass-two wrapper, and rav1e's C API immediately constructs a Rust slice from the supplied pointer and length, violating from_raw_parts' allocation-bound precondition. Current rav1e consumed only the next required bytes, so this is retained as real FFI undefined behavior, not as a sanitizer- or Valgrind-observed physical out-of-bounds read.",
+      "code_snippet": "rav1e_twopass_in(ctx->ctx, ctx->pass_data + ctx->pass_pos, ctx->pass_size);",
+      "poc": "Generate a complete legacy two-pass stats stream with rav1e 0.7.1 and feed it through unmodified FFmpeg pass two; after a partial consumption, inspect the advanced pointer and unchanged total length passed to rav1e_twopass_in.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a correctly allocated decoded stats buffer is partially consumed, but an advanced pointer is paired with the original total length and crosses the Rust FFI boundary as an invalid slice range",
+        "steps": [
+          {"file": "libavcodec/librav1e.c", "line": 351, "function": "librav1e_encode_init", "code_snippet": "ctx->pass_size = av_base64_decode(ctx->pass_data, avctx->stats_in, ctx->pass_size);", "note": "Pass-two stats are decoded into an allocation sized for the complete decoded stream."},
+          {"file": "libavcodec/librav1e.c", "line": 163, "function": "set_stats", "code_snippet": "while (ret > 0 && ctx->pass_size - ctx->pass_pos > 0)", "note": "A positive return advances pass_pos and permits another partial-feed call."},
+          {"file": "libavcodec/librav1e.c", "line": 164, "function": "set_stats", "code_snippet": "rav1e_twopass_in(ctx->ctx, ctx->pass_data + ctx->pass_pos, ctx->pass_size)", "note": "The pointer advances, but the length remains the original total instead of pass_size minus pass_pos."},
+          {"file": "libavcodec/librav1e.c", "line": 167, "function": "set_stats", "code_snippet": "ctx->pass_pos += ret;", "note": "Real rav1e stats produce positive partial consumption, making the invalid pointer-length pair reachable on a subsequent call."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/librav1e.c", "start": 119, "end": 171},
+      {"path": "libavcodec/librav1e.c", "start": 330, "end": 365},
+      {"path": "libavcodec/librav1e.c", "start": 525, "end": 565}
+    ]
+  },
+  {
+    "case_id": "d3d12va-h264-hevc-upload-capacity-overflow",
+    "finding": {
+      "id": "ffmpeg-d3d12va-h264-hevc-upload-capacity-overflow",
+      "finding_type": "out_of_bounds_write",
+      "cwe": "CWE-787",
+      "file": "libavcodec/d3d12va_h264.c",
+      "line_number": 133,
+      "severity": "high",
+      "confidence": "high",
+      "evidence_level": "root_cause_explained",
+      "description": "The common D3D12VA decoder allocates its fixed upload resource from the decoded frame's raw-image buffer size, but the H.264 and HEVC backends copy every accepted VCL NAL into that mapped resource and prepend three bytes per slice without checking the resulting byte count. Compressed-picture size is not bounded by decoded-image size. The durable proof generates a standards-valid, normally decodable 16x5400 yuv420p H.264 Baseline stream whose slice bytes plus inserted prefixes exceed both the resource's 129,600-byte declared width and its 131,072-byte 64 KiB-aligned allocation floor. A valid 16x16 HEVC Main stream independently exceeds its 384-byte declared resource width. The exact byte counts are deterministically recorded by the proof script and can vary slightly with the installed encoder build. The duplicated write paths and resource-size policy are byte-identical in both sealed snapshots; no Windows D3D12 runtime was available, so the overflow is retained as source- and producer-confirmed rather than sanitizer-observed.",
+      "code_snippet": "*(uint32_t *)mapped_ptr = START_CODE; mapped_ptr += START_CODE_SIZE; memcpy(mapped_ptr, &ctx_pic->bitstream[position], size);",
+      "poc": "Run evaluations/run_ffmpeg_d3d12va_upload_capacity_proof.py for either sealed checkout. It creates valid H.264 and HEVC streams, confirms software decoding, and records the exact VCL bytes that the D3D12 callbacks copy versus the common upload-resource capacity.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "valid H.264 or HEVC slice NALs can exceed a raw-image-sized upload allocation, after which the D3D12 backend adds per-slice start codes and performs unchecked mapped writes",
+        "steps": [
+          {"file": "libavcodec/d3d12va_decode.c", "line": 141, "function": "ff_d3d12va_get_suitable_max_bitstream_size", "code_snippet": "return av_image_get_buffer_size(frames_ctx->sw_format, avctx->coded_width, avctx->coded_height, 1);", "note": "Upload capacity is derived from decoded pixel storage, not from the actual compressed access-unit size."},
+          {"file": "libavcodec/d3d12va_decode.c", "line": 192, "function": "d3d12va_get_valid_helper_objects", "code_snippet": ".Width = ctx->bitstream_size", "note": "Every helper upload resource has exactly that fixed capacity."},
+          {"file": "libavcodec/h264dec.c", "line": 673, "function": "decode_nal_units", "code_snippet": "FF_HW_CALL(avctx, decode_slice, nal->raw_data, nal->raw_size)", "note": "Accepted packet-controlled H.264 VCL NAL bytes reach the hardware callback unchanged; the valid proof stream exceeds the 129,600-byte resource width and the 131,072-byte allocation-alignment floor."},
+          {"file": "libavcodec/hevc/hevcdec.c", "line": 3049, "function": "decode_slice_data", "code_snippet": "FF_HW_CALL(s->avctx, decode_slice, nal->raw_data, nal->raw_size)", "note": "The HEVC hardware path has the same producer chain; the valid 16x16 proof stream exceeds the 384-byte declared resource width."},
+          {"file": "libavcodec/d3d12va_h264.c", "line": 133, "function": "update_input_arguments", "code_snippet": "*(uint32_t *)mapped_ptr = START_CODE; mapped_ptr += 3; memcpy(mapped_ptr, &ctx_pic->bitstream[position], size);", "note": "H.264 writes three new prefix bytes per slice plus every slice byte without comparing mapped_ptr against resource capacity; the durable record preserves the exact excess for the local encoder build."},
+          {"file": "libavcodec/d3d12va_hevc.c", "line": 129, "function": "update_input_arguments", "code_snippet": "*(uint32_t *)mapped_ptr = START_CODE; mapped_ptr += 3; memcpy(mapped_ptr, &ctx_pic->bitstream[position], size);", "note": "The independently duplicated HEVC loop performs the same unchecked mapped write."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavcodec/d3d12va_decode.c", "start": 132, "end": 205},
+      {"path": "libavcodec/d3d12va_decode.c", "start": 405, "end": 432},
+      {"path": "libavcodec/d3d12va_h264.c", "start": 75, "end": 155},
+      {"path": "libavcodec/d3d12va_hevc.c", "start": 74, "end": 150},
+      {"path": "libavcodec/h264dec.c", "start": 645, "end": 680},
+      {"path": "libavcodec/hevc/hevcdec.c", "start": 3032, "end": 3053}
+    ]
+  },
+  {
+    "case_id": "mestimate-int-max-mb-size-signed-shift-ub",
+    "finding": {
+      "id": "ffmpeg-mestimate-int-max-mb-size-signed-shift-ub",
+      "finding_type": "denial_of_service",
+      "cwe": "CWE-190",
+      "file": "libavfilter/vf_mestimate.c",
+      "line_number": 86,
+      "severity": "low",
+      "confidence": "high",
+      "evidence_level": "crash_reproduced",
+      "description": "The public mestimate mb_size option accepts values through INT_MAX. For INT_MAX, av_ceil_log2_c returns 31 and config_input evaluates signed 1 << 31 before its later zero-block check rejects the impossible geometry. That shift is undefined behavior in C. Running the production filter with mb_size=2147483647 makes UBSan report the signed-shift violation at vf_mestimate.c:86 and abort on both sealed snapshots. This requires an explicitly supplied extreme filter option and is therefore classified as a low-severity configuration-triggered denial of service rather than a media-only vulnerability.",
+      "code_snippet": "s->log2_mb_size = av_ceil_log2_c(s->mb_size); s->mb_size = 1 << s->log2_mb_size;",
+      "poc": "Run evaluations/run_ffmpeg_mestimate_mb_size_reproducer.py against either sealed UBSan-instrumented checkout.",
+      "discovered_by": "sourcehunt:deepseek-v4-flash-0731",
+      "vulnerability_trace": {
+        "summary": "a public integer option admits INT_MAX, whose rounded power-of-two conversion evaluates an undefined signed shift before validation can return an error",
+        "steps": [
+          {"file": "libavfilter/vf_mestimate.c", "line": 61, "function": "mestimate_options", "code_snippet": "{ \"mb_size\", ... 8, INT_MAX, FLAGS }", "note": "The public filtering option explicitly admits INT_MAX."},
+          {"file": "libavutil/common.h", "line": 436, "function": "av_ceil_log2_c", "code_snippet": "return av_log2((x - 1U) << 1);", "note": "For INT_MAX, the helper returns 31."},
+          {"file": "libavfilter/vf_mestimate.c", "line": 86, "function": "config_input", "code_snippet": "s->mb_size = 1 << s->log2_mb_size;", "note": "Signed one shifted into bit 31 is undefined; UBSan reports and aborts here on both snapshots."},
+          {"file": "libavfilter/vf_mestimate.c", "line": 92, "function": "config_input", "code_snippet": "if (s->b_count == 0) return AVERROR(EINVAL);", "note": "The intended invalid-geometry rejection occurs only after the undefined operation."}
+        ]
+      }
+    },
+    "windows": [
+      {"path": "libavfilter/vf_mestimate.c", "start": 45, "end": 105},
+      {"path": "libavutil/common.h", "start": 425, "end": 445}
+    ]
+  }
+]

@@ -1,0 +1,15 @@
+[
+  "libavcodec/motion_est.c",
+  "libavfilter/vf_idet.c",
+  "libavfilter/vaf_spectrumsynth.c",
+  "libavfilter/vf_unsharp.c",
+  "libswscale/x86/ops.c",
+  "libavfilter/vf_pp7.c",
+  "libavcodec/h261enc.c",
+  "libavformat/rtmphttp.c",
+  "libavfilter/vsrc_testsrc.c",
+  "libavcodec/hevc/refs.c",
+  "libswscale/swscale_unscaled.c",
+  "libavcodec/vulkan_encode_h265.c",
+  "libavcodec/dxva2.c"
+]

@@ -17,6 +17,7 @@ from clearwing.eval.sourcehunt import (
     aggregate_baseline,
     build_ablation_plan,
     execute_sourcehunt_run,
+    include_fixed_negative_cases,
     inspect_ablation_session,
     run_ablation_campaign,
 )
@@ -54,6 +55,9 @@ def _observation(run, *, found: bool) -> RunObservation:
         flow=run.flow,
         model_tier=run.model_tier,
         model=run.model,
+        prompt_bundle=run.prompt_bundle,
+        scaffold_profile=run.scaffold_profile,
+        context_profile=run.context_profile,
         level=run.level,
         replicate=run.replicate,
         session_dir=f"sessions/{run.id}",
@@ -89,6 +93,20 @@ def test_representative_manifest_has_full_intermediate_ground_truth(
         plans = [registry.get(plan_id) for plan_id in truth.expected_proof_plans]
         predicates = {obligation.predicate for plan in plans for obligation in plan.obligations}
         assert set(truth.expected_predicates) <= predicates
+
+
+def test_fixed_commits_expand_into_clean_negative_controls(
+    manifest: GroundTruthManifest,
+) -> None:
+    expanded = include_fixed_negative_cases(manifest)
+    original = next(case for case in manifest.cases if case.fixed_commit)
+    negative = expanded.case(f"{original.id}-fixed-negative")
+
+    assert len(expanded.cases) == len(manifest.cases) + 1
+    assert negative.vulnerable_commit == original.fixed_commit
+    assert negative.fixed_commit is None
+    assert negative.cves == []
+    assert negative.ground_truth.expected_decision == "disproven"
 
 
 def test_ablation_levels_never_leak_later_hints(
@@ -134,6 +152,35 @@ def test_local_and_frontier_arms_receive_identical_contexts(
     for run in assisted_runs:
         packets_by_cell.setdefault((run.case_id, run.replicate), set()).add(run.campaign_hint())
     assert all(len(packets) == 1 for packets in packets_by_cell.values())
+
+
+def test_prompt_and_scaffold_profiles_are_independent_ablation_cells(
+    manifest: GroundTruthManifest,
+) -> None:
+    arms = [
+        AblationArm(
+            flow="legacy",
+            model_tier=tier,
+            model=f"{tier}-model",
+            prompt_bundle="generic-security-v1",
+            scaffold_profile=scaffold,
+        )
+        for scaffold in ("native-v1", "minimal-linear-v1")
+        for tier in ("local", "frontier")
+    ]
+
+    plan = build_ablation_plan(
+        GroundTruthManifest(cases=[manifest.cases[0]]),
+        arms,
+        levels=[AblationLevel.REPOSITORY],
+    )
+
+    assert len(plan.runs) == 4
+    assert {run.scaffold_profile for run in plan.runs} == {
+        "native-v1",
+        "minimal-linear-v1",
+    }
+    assert len({run.id for run in plan.runs}) == 4
 
 
 def test_baseline_requires_complete_matrix_and_reports_failure_stage(
@@ -283,6 +330,15 @@ async def test_concrete_executor_pins_checkout_and_wires_exact_hint_packet(
         output_dir=tmp_path / "results",
         provider_manager=object(),
         budget_usd=1.0,
+        input_price_per_million=0.0,
+        output_price_per_million=0.0,
+        max_hunt_files=24,
+        max_hunter_steps=40,
+        ranker_chunk_size=25,
+        ranker_max_inflight_chunks=1,
+        ranker_chunk_max_retries=1,
+        depth="standard",
+        no_rank=True,
     )
 
     assert observation.run_id == spec.id
@@ -290,6 +346,20 @@ async def test_concrete_executor_pins_checkout_and_wires_exact_hint_packet(
     assert captured["campaign_hint"] == spec.campaign_hint()
     assert captured["flow"] == "proof"
     assert captured["model_override"] == spec.model
+    assert captured["input_price_per_million"] == 0.0
+    assert captured["output_price_per_million"] == 0.0
+    assert captured["max_hunt_files"] == 24
+    assert captured["max_hunter_steps"] == 40
+    assert captured["ranker_chunk_size"] == 25
+    assert captured["ranker_max_inflight_chunks"] == 1
+    assert captured["ranker_chunk_max_retries"] == 1
+    assert captured["max_parallel"] == 4
+    assert captured["starting_band"] == "fast"
+    assert captured["redundancy_override"] == 1
+    assert captured["depth"] == "standard"
+    assert captured["no_rank"] is True
+    assert captured["prompt_bundle"] == spec.prompt_bundle
+    assert captured["scaffold_profile"] == spec.scaffold_profile
 
     (checkout / "app.py").write_text("print('changed')\n", encoding="utf-8")
     with pytest.raises(ValueError, match="tracked modifications"):
@@ -458,7 +528,23 @@ def test_legacy_session_scorer_uses_instrumented_working_set(
                     "file": case.ground_truth.target_files[0],
                     "cwe": case.ground_truth.expected_cwes[0],
                     "evidence_level": "root_cause_explained",
-                    "vulnerability_trace": {"steps": [{"file": "target.c"}]},
+                    "description": (
+                        f"{case.ground_truth.target_functions[0]} propagates "
+                        f"{case.ground_truth.expected_fact_symbols[0]} into "
+                        f"{case.ground_truth.expected_fact_symbols[1]}"
+                    ),
+                    "vulnerability_trace": {
+                        "steps": [
+                            {
+                                "file": case.ground_truth.target_files[0],
+                                "note": "ENTRY: attacker-controlled state enters",
+                            },
+                            {
+                                "file": case.ground_truth.target_files[0],
+                                "note": "SINK: the violated state reaches a memory access",
+                            },
+                        ]
+                    },
                     "poc": "trigger",
                 }
             ]
@@ -487,3 +573,38 @@ def test_legacy_session_scorer_uses_instrumented_working_set(
     assert observation.report_failures == 1
     assert observation.input_tokens == 40
     assert observation.output_tokens == 10
+
+
+def test_legacy_session_scorer_rejects_file_and_cwe_only_match(
+    manifest: GroundTruthManifest,
+    tmp_path,
+) -> None:
+    case = manifest.cases[0]
+    spec = build_ablation_plan(
+        GroundTruthManifest(cases=[case]),
+        _arms(flow="legacy"),
+        levels=[AblationLevel.REPOSITORY],
+    ).runs[0]
+    session = tmp_path / spec.id
+    (session / "instrumentation").mkdir(parents=True)
+    (session / "instrumentation" / "summary.json").write_text("{}", encoding="utf-8")
+    (session / "findings.json").write_text(
+        json.dumps(
+            [
+                {
+                    "file": case.ground_truth.target_files[0],
+                    "cwe": case.ground_truth.expected_cwes[0],
+                    "evidence_level": "suspicion",
+                    "description": "generic warning with no mechanism",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (session / "manifest.json").write_text('{"status":"completed"}', encoding="utf-8")
+
+    observation = inspect_ablation_session(spec, case, session)
+
+    assert observation.true_positives == 0
+    assert observation.false_positives == 1
+    assert observation.false_negatives == 1

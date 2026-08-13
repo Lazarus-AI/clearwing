@@ -28,6 +28,16 @@ from .config import (
     SourceHuntConfig,
     TargetConfig,
 )
+from .optimization import (
+    CONTEXT_PROFILES,
+    PROMPT_BUNDLES,
+    SCAFFOLD_PROFILES,
+    ContextProfile,
+    PromptBundle,
+    ScaffoldProfile,
+    lint_prompt_candidate,
+    require_generic_prompt,
+)
 from .runner import SourceHuntProgress, SourceHuntProgressCallback, SourceHuntRunner
 from .state import (
     EVIDENCE_LEVELS,
@@ -42,6 +52,8 @@ from .state import (
 
 __all__ = [
     "BudgetConfig",
+    "CONTEXT_PROFILES",
+    "ContextProfile",
     "EvidenceLevel",
     "FeatureFlags",
     "FileTag",
@@ -49,7 +61,11 @@ __all__ = [
     "Finding",
     "HuntTuning",
     "OutputConfig",
+    "PROMPT_BUNDLES",
     "ProofConfig",
+    "PromptBundle",
+    "SCAFFOLD_PROFILES",
+    "ScaffoldProfile",
     "SourceHuntConfig",
     "SourceHuntProgress",
     "SourceHuntProgressCallback",
@@ -60,4 +76,6 @@ __all__ = [
     "evidence_at_or_above",
     "evidence_compare",
     "filter_by_evidence",
+    "lint_prompt_candidate",
+    "require_generic_prompt",
 ]

@@ -85,6 +85,9 @@ class FileTarget(TypedDict, total=False):
     reachability: int  # 1-5 — attacker-reachability through callgraph
     # v0.1: defaults to 3 (unknown); v0.2: real propagation
     priority: float  # surface*0.5 + influence*0.2 + reachability*0.3
+    security_signal_score: float  # target-blind static source evidence
+    deterministic_rank_score: float  # signal score + legacy priority tie-break
+    security_signal_counts: dict[str, int]
     tier: Literal["A", "B", "C"]
     tags: list[FileTag]  # v0.1: heuristic tagger; v0.2: + LLM polish
     language: str

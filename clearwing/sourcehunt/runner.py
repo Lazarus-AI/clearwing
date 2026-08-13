@@ -299,9 +299,23 @@ class SourceHuntRunner:
         parent_session_id: str | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
+        prompt_bundle: str = "legacy-v1",
+        scaffold_profile: str = "native-v1",
+        context_profile: str = "legacy-context-v1",
+        prompt_candidate: str | None = None,
         campaign_hint: str | None = None,
         exploit_mode: bool = False,
         starting_band: str | None = None,  # "fast" | "standard" | "deep" | None (auto)
+        max_hunt_files: int | None = None,
+        hunt_file_offset: int = 0,
+        hunt_file_offsets: list[int] | None = None,
+        hunt_file_paths: list[str] | None = None,
+        max_hunter_steps: int | None = None,
+        hunter_temperature: float | None = None,
+        hunter_max_output_tokens: int | None = None,
+        ranker_chunk_size: int | None = None,
+        ranker_max_inflight_chunks: int | None = None,
+        ranker_chunk_max_retries: int | None = None,
         redundancy_override: int | None = None,
         shard_entry_points: bool | None = None,  # None = auto (deep depth)
         min_shard_rank: int = 4,
@@ -427,6 +441,17 @@ class SourceHuntRunner:
             exploit_mode = exploit_mode or f.exploit_mode
             agent_mode = agent_mode if agent_mode != "auto" else f.agent_mode
             prompt_mode = prompt_mode if prompt_mode != "unconstrained" else f.prompt_mode
+            prompt_bundle = (
+                prompt_bundle if prompt_bundle != "legacy-v1" else f.prompt_bundle
+            )
+            scaffold_profile = (
+                scaffold_profile if scaffold_profile != "native-v1" else f.scaffold_profile
+            )
+            context_profile = (
+                context_profile
+                if context_profile != "legacy-context-v1"
+                else f.context_profile
+            )
             # Hunt tuning
             starting_band = starting_band if starting_band is not None else h.starting_band
             redundancy_override = (
@@ -515,6 +540,57 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
+        if max_hunt_files is not None and max_hunt_files < 1:
+            raise ValueError("max_hunt_files must be positive when provided")
+        if hunt_file_offset < 0:
+            raise ValueError("hunt_file_offset cannot be negative")
+        if hunt_file_offsets is not None:
+            if not hunt_file_offsets:
+                raise ValueError("hunt_file_offsets cannot be empty when provided")
+            if any(offset < 0 for offset in hunt_file_offsets):
+                raise ValueError("hunt_file_offsets cannot contain negative offsets")
+            if len(set(hunt_file_offsets)) != len(hunt_file_offsets):
+                raise ValueError("hunt_file_offsets cannot contain duplicates")
+            if hunt_file_offset or max_hunt_files is not None:
+                raise ValueError(
+                    "hunt_file_offsets cannot be combined with hunt_file_offset "
+                    "or max_hunt_files"
+                )
+        if hunt_file_paths is not None:
+            if not hunt_file_paths:
+                raise ValueError("hunt_file_paths cannot be empty when provided")
+            if any(not path for path in hunt_file_paths):
+                raise ValueError("hunt_file_paths cannot contain empty paths")
+            if len(set(hunt_file_paths)) != len(hunt_file_paths):
+                raise ValueError("hunt_file_paths cannot contain duplicates")
+            if (
+                hunt_file_offset
+                or max_hunt_files is not None
+                or hunt_file_offsets is not None
+            ):
+                raise ValueError(
+                    "hunt_file_paths cannot be combined with rank window options"
+                )
+        if max_hunter_steps is not None and max_hunter_steps < 1:
+            raise ValueError("max_hunter_steps must be positive when provided")
+        if hunter_temperature is not None and not 0.0 <= hunter_temperature <= 2.0:
+            raise ValueError("hunter_temperature must be between 0 and 2")
+        if hunter_max_output_tokens is not None and hunter_max_output_tokens < 1:
+            raise ValueError("hunter_max_output_tokens must be positive when provided")
+        for name, value, minimum in (
+            ("ranker_chunk_size", ranker_chunk_size, 1),
+            ("ranker_max_inflight_chunks", ranker_max_inflight_chunks, 1),
+            ("ranker_chunk_max_retries", ranker_chunk_max_retries, 0),
+        ):
+            if value is not None and value < minimum:
+                raise ValueError(f"{name} must be at least {minimum} when provided")
+        from .optimization import get_context_profile, get_prompt_bundle, get_scaffold_profile
+
+        get_prompt_bundle(prompt_bundle)
+        get_scaffold_profile(scaffold_profile)
+        get_context_profile(context_profile)
+        if prompt_candidate is not None and prompt_bundle == "legacy-v1":
+            raise ValueError("prompt_candidate requires a generic prompt bundle")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -588,9 +664,25 @@ class SourceHuntRunner:
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
+        self._prompt_bundle = prompt_bundle
+        self._scaffold_profile = scaffold_profile
+        self._context_profile = context_profile
+        self._prompt_candidate = prompt_candidate
         self._campaign_hint = campaign_hint
         self._exploit_mode = exploit_mode
         self._starting_band_override = starting_band
+        self._max_hunt_files = max_hunt_files
+        self._hunt_file_offset = hunt_file_offset
+        self._hunt_file_offsets = (
+            sorted(hunt_file_offsets) if hunt_file_offsets is not None else None
+        )
+        self._hunt_file_paths = list(hunt_file_paths) if hunt_file_paths is not None else None
+        self._max_hunter_steps = max_hunter_steps
+        self._hunter_temperature = hunter_temperature
+        self._hunter_max_output_tokens = hunter_max_output_tokens
+        self._ranker_chunk_size = ranker_chunk_size
+        self._ranker_max_inflight_chunks = ranker_max_inflight_chunks
+        self._ranker_chunk_max_retries = ranker_chunk_max_retries
         self._redundancy_override = redundancy_override
         self._shard_entry_points_override = shard_entry_points
         self._min_shard_rank = min_shard_rank
@@ -1208,22 +1300,16 @@ class SourceHuntRunner:
             if rank_complete:
                 logger.info("Ranker skipped; restored complete ranked target plan")
             elif self._no_rank:
-                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
-                for ft in files:
-                    ft["surface"] = ft.get("surface") or 3
-                    ft["influence"] = ft.get("influence") or 2
-                    ft["reachability"] = ft.get("reachability") or 3
-                    ft["priority"] = (
-                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                    )
+                logger.info("Ranker LLM skipped (--no-rank); using deterministic static ranking")
+                Ranker(None).rank_heuristically(files)
                 pipeline_status.record_degraded(
                     "ranker",
-                    "All files assigned default priority scores (--no-rank)",
+                    "LLM ranking skipped; deterministic static ranking used (--no-rank)",
                 )
                 self._emit_stage(
                     "rank",
                     "degraded",
-                    detail="Skipped (--no-rank)",
+                    detail="Deterministic static ranking (--no-rank)",
                     files=stage_files,
                 )
                 rank_plan_ready = True
@@ -1232,6 +1318,12 @@ class SourceHuntRunner:
                 unranked_files = [dict(target) for target in files]
                 try:
                     ranker_config = RankerConfig()
+                    if self._ranker_chunk_size is not None:
+                        ranker_config.chunk_size = self._ranker_chunk_size
+                    if self._ranker_max_inflight_chunks is not None:
+                        ranker_config.max_inflight_chunks = self._ranker_max_inflight_chunks
+                    if self._ranker_chunk_max_retries is not None:
+                        ranker_config.chunk_max_retries = self._ranker_chunk_max_retries
                     if not self._preprocessing:
                         ranker_config.include_static_hints = False
                         ranker_config.include_imports_by = False
@@ -1325,6 +1417,81 @@ class SourceHuntRunner:
             if self._completion_store is not None and not rank_complete and rank_plan_ready:
                 self._completion_store.save_rank_plan(self._ranked_targets(files))
 
+            if (
+                self._hunt_file_offset
+                or self._max_hunt_files is not None
+                or self._hunt_file_offsets is not None
+                or self._hunt_file_paths is not None
+            ):
+                rank_field = "deterministic_rank_score" if self._no_rank else "priority"
+                ranked_files = sorted(
+                    files,
+                    key=lambda item: (
+                        -float(item.get(rank_field, item.get("priority", 0.0))),
+                        str(item.get("path") or ""),
+                    ),
+                )
+                if self._hunt_file_paths is not None:
+                    ranked_by_path = {
+                        str(item.get("path") or ""): item for item in ranked_files
+                    }
+                    missing_paths = [
+                        path for path in self._hunt_file_paths if path not in ranked_by_path
+                    ]
+                    if missing_paths:
+                        raise ValueError(
+                            "requested hunt_file_paths are absent from ranked source: "
+                            + ", ".join(missing_paths)
+                        )
+                    files = [ranked_by_path[path] for path in self._hunt_file_paths]
+                    logger.info(
+                        "Selecting %d exact hunter paths by sealed manifest",
+                        len(files),
+                    )
+                    selection_detail = (
+                        f"Selected {len(files)} exact files from a sealed path manifest"
+                    )
+                elif self._hunt_file_offsets is not None:
+                    files = [
+                        ranked_files[offset]
+                        for offset in self._hunt_file_offsets
+                        if offset < len(ranked_files)
+                    ]
+                    logger.info(
+                        "Selecting hunter rank offsets %s by %s (%d files)",
+                        self._hunt_file_offsets,
+                        rank_field,
+                        len(files),
+                    )
+                    selection_detail = (
+                        f"Selected {len(files)} files from exact rank offsets "
+                        f"{self._hunt_file_offsets} by {rank_field}"
+                    )
+                else:
+                    stop = (
+                        None
+                        if self._max_hunt_files is None
+                        else self._hunt_file_offset + self._max_hunt_files
+                    )
+                    files = ranked_files[self._hunt_file_offset : stop]
+                    logger.info(
+                        "Selecting hunter rank window [%d, %s) by %s (%d files)",
+                        self._hunt_file_offset,
+                        stop if stop is not None else "end",
+                        rank_field,
+                        len(files),
+                    )
+                    selection_detail = (
+                        f"Selected {len(files)} files from rank offset "
+                        f"{self._hunt_file_offset} by {rank_field}"
+                    )
+                selected_files = [str(item.get("path") or "") for item in files]
+                self._emit_stage(
+                    "rank",
+                    "bounded",
+                    detail=selection_detail,
+                    files=selected_files,
+                )
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
                 return self._build_quick_result(
@@ -1523,12 +1690,21 @@ class SourceHuntRunner:
                         llm=hunter_llm,
                         max_parallel=self.max_parallel,
                         budget_usd=self.budget_usd,
+                        input_price_per_million=self.input_price_per_million,
+                        output_price_per_million=self.output_price_per_million,
                         tier_budget=self.tier_budget,
                         session_id_prefix=self._session_id,
                         seeded_crashes_by_file=seeded_by_file,
                         semgrep_hints_by_file=semgrep_hints_by_file,
                         agent_mode=self._effective_agent_mode,
                         prompt_mode=self._prompt_mode,
+                        prompt_bundle=self._prompt_bundle,
+                        scaffold_profile=self._scaffold_profile,
+                        context_profile=self._context_profile,
+                        prompt_candidate=self._prompt_candidate,
+                        max_hunter_steps=self._max_hunter_steps,
+                        hunter_temperature=self._hunter_temperature,
+                        hunter_max_output_tokens=self._hunter_max_output_tokens,
                         campaign_hint=self._campaign_hint,
                         exploit_mode=self._exploit_mode,
                         starting_band=self._starting_band,
@@ -3195,6 +3371,48 @@ class SourceHuntRunner:
 
     # --- Reporting ----------------------------------------------------------
 
+    def _context_metrics(self) -> dict[str, Any]:
+        """Aggregate per-hunter context events already persisted in trajectories."""
+
+        trajectory_root = Path(self.output_dir) / self._session_id / "trajectories"
+        metrics = {
+            "context_profile": self._context_profile,
+            "model_calls": 0,
+            "compaction_count": 0,
+            "peak_context_tokens_estimate": 0,
+            "peak_input_tokens": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+        }
+        if not trajectory_root.is_dir():
+            return metrics
+        for transcript in trajectory_root.rglob("transcript.jsonl"):
+            try:
+                lines = transcript.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event") == "context_compaction":
+                    metrics["compaction_count"] += 1
+                if event.get("event") != "message" or "usage" not in event:
+                    continue
+                usage = event.get("usage") or {}
+                input_tokens = int(usage.get("input_tokens", 0) or 0)
+                output_tokens = int(usage.get("output_tokens", 0) or 0)
+                metrics["model_calls"] += 1
+                metrics["total_input_tokens"] += input_tokens
+                metrics["total_output_tokens"] += output_tokens
+                metrics["peak_input_tokens"] = max(metrics["peak_input_tokens"], input_tokens)
+                metrics["peak_context_tokens_estimate"] = max(
+                    metrics["peak_context_tokens_estimate"],
+                    int(event.get("estimated_context_tokens", 0) or 0),
+                )
+        return metrics
+
     def _record_reporting_failure(
         self,
         exc: Exception,
@@ -3239,6 +3457,9 @@ class SourceHuntRunner:
             self._record_reporting_failure(exc, findings)
             return {}
         try:
+            report_budget_summary = dict(budget_summary or {})
+            report_budget_summary["context_profile"] = self._context_profile
+            report_budget_summary["context_metrics"] = self._context_metrics()
             return write_sourcehunt_report(
                 output_dir=self.output_dir,
                 session_id=self._session_id,
@@ -3251,7 +3472,7 @@ class SourceHuntRunner:
                 pool_stats=pool_stats,
                 subsystem_stats=subsystem_stats,
                 pipeline_status=pipeline_status,
-                budget_summary=budget_summary,
+                budget_summary=report_budget_summary,
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)

@@ -1,0 +1,6 @@
+[
+  "libavcodec/hnm4video.c",
+  "libavcodec/pngenc.c",
+  "libavcodec/vulkan_encode_av1.c",
+  "libavformat/id3v2.c"
+]

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -25,6 +26,7 @@ from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
 
 from .state import FileTarget
+from .static_signals import is_production_source_path, score_source_security_signals
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +135,18 @@ class Ranker:
 
     def __init__(
         self,
-        llm: AsyncLLMClient,
+        llm: AsyncLLMClient | None,
         config: RankerConfig | None = None,
     ):
         self.llm = llm
         self.config = config or RankerConfig()
         self.completed_successfully = False
+
+    def rank_heuristically(self, files: list[FileTarget]) -> list[FileTarget]:
+        """Apply only deterministic static ranking, without an LLM call."""
+
+        self._apply_heuristic_baseline(files)
+        return files
 
     def rank(self, files: list[FileTarget]) -> list[FileTarget]:
         return asyncio.run(self.arank(files))
@@ -156,6 +164,8 @@ class Ranker:
 
         llm_candidates = self._select_llm_candidates(files)
         if llm_candidates:
+            if self.llm is None:
+                raise ValueError("LLM candidates require a configured ranker client")
             chunks = self._chunk(llm_candidates, self.config.chunk_size)
             scores_by_chunk = await self._rank_chunks_bounded(chunks)
             chunks_complete = all(
@@ -234,6 +244,35 @@ class Ranker:
             self._apply_floors(ft)
             ft["priority"] = self._compute_priority(ft)
             self._apply_fuzzable_boost(ft)
+            self._apply_source_signal_score(ft)
+
+    @staticmethod
+    def _apply_source_signal_score(ft: FileTarget) -> None:
+        """Attach an auditable, target-blind source score for deterministic ranking."""
+
+        path = str(ft.get("path") or "")
+        absolute_path = str(ft.get("absolute_path") or "")
+        supported_language = ft.get("language") in {"c", "cpp", "rust"}
+        if not absolute_path or not supported_language or not is_production_source_path(path):
+            ft["security_signal_score"] = 0.0
+            ft["deterministic_rank_score"] = float(ft.get("priority", 0.0))
+            ft["security_signal_counts"] = {}
+            return
+
+        try:
+            source = Path(absolute_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            ft["security_signal_score"] = 0.0
+            ft["deterministic_rank_score"] = float(ft.get("priority", 0.0))
+            ft["security_signal_counts"] = {}
+            return
+
+        evidence = score_source_security_signals(source)
+        ft["security_signal_score"] = evidence.score
+        # Preserve tier/band semantics while ranking a bounded no-LLM run by
+        # source evidence instead of filename-derived ties.
+        ft["deterministic_rank_score"] = evidence.score + float(ft.get("priority", 0.0))
+        ft["security_signal_counts"] = evidence.counts
 
     def _select_llm_candidates(self, files: list[FileTarget]) -> list[FileTarget]:
         if len(files) <= self.config.large_repo_file_threshold:
