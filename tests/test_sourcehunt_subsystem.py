@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.llm import ProviderExhaustedError, ProviderExhaustionState
 from clearwing.sourcehunt.state import FileTarget, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
     SubsystemHuntConfig,
@@ -430,3 +430,32 @@ async def test_subsystem_hunt_runner_no_subsystems():
     ))
     result = await runner.arun()
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_subsystem_hunt_stops_after_provider_exhaustion():
+    state = ProviderExhaustionState()
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[
+                SubsystemTarget(name="first", root_path="first", files=[]),
+                SubsystemTarget(name="second", root_path="second", files=[]),
+            ],
+            repo_path="/tmp",
+            llm=MagicMock(),
+            max_parallel=1,
+            provider_exhaustion_state=state,
+        )
+    )
+    calls: list[str] = []
+
+    async def fail_first(subsystem, *_args, **_kwargs):
+        calls.append(subsystem.name)
+        raise state.mark(RuntimeError("provider quota exhausted"))
+
+    runner._run_one_subsystem = fail_first
+
+    with pytest.raises(ProviderExhaustedError):
+        await runner.arun()
+
+    assert calls == ["first"]

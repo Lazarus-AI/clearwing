@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from clearwing.llm.budget import BudgetExceeded, spend_metadata
+from clearwing.llm.errors import ProviderExhaustedError, ProviderExhaustionState
 from clearwing.sourcehunt.state import FileTarget, Finding, SubsystemTarget
 
 from .instrumentation import stable_run_id
@@ -172,6 +173,7 @@ class SubsystemHuntConfig:
     project_name: str = "target"
     trajectory_root: str | Path | None = None
     instrumentation: Any = None
+    provider_exhaustion_state: ProviderExhaustionState | None = None
 
 
 class SubsystemHuntRunner:
@@ -200,6 +202,8 @@ class SubsystemHuntRunner:
 
         async def _guarded_run(subsystem: SubsystemTarget) -> list[Finding]:
             async with sem:
+                if self.config.provider_exhaustion_state is not None:
+                    self.config.provider_exhaustion_state.raise_if_exhausted()
                 if self.config.total_budget_usd > 0 and self._spent >= self.config.total_budget_usd:
                     logger.info(
                         "Subsystem %s skipped: total budget exhausted",
@@ -242,21 +246,34 @@ class SubsystemHuntRunner:
 
         tasks = [asyncio.create_task(_guarded_run(s)) for s in self.config.subsystems]
 
+        try:
+            await self._collect_tasks(tasks, all_findings)
+        except ProviderExhaustedError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        return all_findings
+
+    @staticmethod
+    async def _collect_tasks(
+        tasks: list[asyncio.Task[list[Finding]]],
+        all_findings: list[Finding],
+    ) -> None:
         for coro in asyncio.as_completed(tasks):
             try:
-                findings = await coro
-                all_findings.extend(findings)
+                all_findings.extend(await coro)
             except BudgetExceeded:
                 logger.info("Subsystem hunt stopped because the run budget is exhausted")
                 for task in tasks:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-                break
+                return
             except Exception:
                 logger.warning("Subsystem hunt task failed", exc_info=True)
-
-        return all_findings
 
     async def _run_one_subsystem(
         self,

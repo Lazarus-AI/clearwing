@@ -245,6 +245,61 @@ class TestChunking:
         Ranker(llm, RankerConfig(chunk_size=100)).rank(files)
         assert llm.aask_json.call_count == 3
 
+    def test_one_failed_chunk_discards_all_partial_llm_scores(self):
+        llm = AsyncMock()
+        llm.aask_json.side_effect = [
+            (
+                {
+                    "results": [
+                        {
+                            "path": "a.c",
+                            "surface": 5,
+                            "influence": 5,
+                            "surface_rationale": "LLM score",
+                            "influence_rationale": "LLM score",
+                        }
+                    ]
+                },
+                ChatResponse(),
+            ),
+            ({"results": []}, ChatResponse()),
+        ]
+        files = [_make_file("a.c"), _make_file("b.c")]
+
+        ranker = Ranker(
+            llm,
+            RankerConfig(chunk_size=1, max_inflight_chunks=1),
+        )
+        ranker.rank(files)
+
+        assert llm.aask_json.call_count == 2
+        assert ranker.completed_successfully is False
+        assert all(file["surface_rationale"] == "fallback (LLM did not score)" for file in files)
+        assert files[0]["surface"] != 5
+        assert files[0]["influence"] != 5
+
+    def test_partial_chunk_response_discards_all_llm_scores(self):
+        llm = _mock_llm_returning(
+            [
+                {
+                    "path": "a.c",
+                    "surface": 5,
+                    "influence": 5,
+                    "surface_rationale": "LLM score",
+                    "influence_rationale": "LLM score",
+                }
+            ]
+        )
+        files = [_make_file("a.c"), _make_file("b.c")]
+
+        ranker = Ranker(llm, RankerConfig(chunk_size=2))
+        ranker.rank(files)
+
+        assert ranker.completed_successfully is False
+        assert all(file["surface_rationale"] == "fallback (LLM did not score)" for file in files)
+        assert files[0]["surface"] != 5
+        assert files[0]["influence"] != 5
+
     def test_large_repo_reranks_only_top_heuristic_candidates(self):
         llm = _mock_llm_returning([])
         files = [

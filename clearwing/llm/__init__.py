@@ -6,6 +6,11 @@ from .budget import (
     SpendLedger,
     spend_metadata,
 )
+from .errors import (
+    ProviderExhaustedError,
+    ProviderExhaustionState,
+    is_provider_exhausted_error,
+)
 from .messages import (
     AIMessage,
     BaseMessage,
@@ -35,11 +40,14 @@ __all__ = [
     "ChatResponse",
     "ToolCall",
     "NativeToolSpec",
+    "ProviderExhaustedError",
+    "ProviderExhaustionState",
     "ToolInputModel",
     "SpendLedger",
     "Usage",
     "extract_json_array",
     "extract_json_object",
     "extract_text_content",
+    "is_provider_exhausted_error",
     "spend_metadata",
 ]

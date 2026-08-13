@@ -138,12 +138,15 @@ class Ranker:
     ):
         self.llm = llm
         self.config = config or RankerConfig()
+        self.completed_successfully = False
 
     def rank(self, files: list[FileTarget]) -> list[FileTarget]:
         return asyncio.run(self.arank(files))
 
     async def arank(self, files: list[FileTarget]) -> list[FileTarget]:
+        self.completed_successfully = False
         if not files:
+            self.completed_successfully = True
             return files
 
         # Seed the whole corpus with cheap heuristic scores first so large
@@ -155,19 +158,24 @@ class Ranker:
         if llm_candidates:
             chunks = self._chunk(llm_candidates, self.config.chunk_size)
             scores_by_chunk = await self._rank_chunks_bounded(chunks)
+            chunks_complete = all(
+                set(scores) == {str(target.get("path") or "") for target in chunk}
+                for chunk, scores in zip(chunks, scores_by_chunk, strict=True)
+            )
+            if not chunks_complete:
+                logger.warning(
+                    "At least one rank chunk was incomplete; discarding partial LLM ranks "
+                    "and using the heuristic plan for every file"
+                )
+                scores_by_chunk = [{} for _ in chunks]
             for chunk, scores in zip(chunks, scores_by_chunk, strict=False):
                 self._apply_scores(chunk, scores)
 
         # Apply floors and compute priority for every file
         for ft in files:
-            self._apply_floors(ft)
-            ft["priority"] = self._compute_priority(ft)
-            # v0.4 fuzz-harness rank boost: back-propagate the harness
-            # generator's selection criteria into the priority score so
-            # fuzzable parsers outrank non-fuzzable code at the same
-            # surface+influence+reachability level.
-            self._apply_fuzzable_boost(ft)
+            self._finalize_scores(ft)
 
+        self.completed_successfully = not llm_candidates or chunks_complete
         return files
 
     async def _rank_chunks_bounded(
@@ -201,13 +209,20 @@ class Ranker:
                     completed,
                     total_chunks,
                 )
-        except BudgetExceeded:
+        except BaseException:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         return scores_by_chunk
+
+    def _finalize_scores(self, file_target: FileTarget) -> None:
+        """Apply score floors, priority, and the one-time fuzzable boost."""
+
+        self._apply_floors(file_target)
+        file_target["priority"] = self._compute_priority(file_target)
+        self._apply_fuzzable_boost(file_target)
 
     def _apply_heuristic_baseline(self, files: list[FileTarget]) -> None:
         """Populate cheap baseline scores before any LLM reranking."""
@@ -337,7 +352,7 @@ class Ranker:
                     return {}
                 last_exc = exc
                 if attempt < max_attempts - 1:
-                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2 ** attempt)
+                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2**attempt)
                     logger.warning(
                         "Ranker chunk %d/%d attempt %d failed; retrying in %.1fs",
                         idx,
@@ -361,9 +376,8 @@ class Ranker:
     def _is_retryable_structured_output_error(exc: Exception) -> bool:
         if isinstance(exc, (json.JSONDecodeError, ValidationError)):
             return True
-        return (
-            isinstance(exc, ValueError)
-            and str(exc).startswith("LLM returned empty response; expected JSON matching")
+        return isinstance(exc, ValueError) and str(exc).startswith(
+            "LLM returned empty response; expected JSON matching"
         )
 
     def _build_user_message(self, chunk: list[FileTarget]) -> str:

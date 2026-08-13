@@ -35,6 +35,11 @@ from .budget import (
     SpendLedger,
     current_spend_metadata,
 )
+from .errors import (
+    ProviderExhaustedError,
+    ProviderExhaustionState,
+    is_provider_exhausted_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -382,8 +387,15 @@ class AsyncLLMClient:
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self._spend_ledger: SpendLedger | None = None
         self._spend_stage = "llm"
+        self._provider_exhaustion_state: ProviderExhaustionState | None = None
 
-    def with_spend_ledger(self, ledger: SpendLedger, *, stage: str) -> AsyncLLMClient:
+    def with_spend_ledger(
+        self,
+        ledger: SpendLedger,
+        *,
+        stage: str,
+        provider_exhaustion_state: ProviderExhaustionState | None = None,
+    ) -> AsyncLLMClient:
         """Return a run-bound view that shares this client's transport limits.
 
         ProviderManager caches native clients process-wide.  A shallow view
@@ -399,6 +411,7 @@ class AsyncLLMClient:
         bound = copy.copy(self)
         bound._spend_ledger = ledger
         bound._spend_stage = stage
+        bound._provider_exhaustion_state = provider_exhaustion_state
         return bound
 
     @property
@@ -415,6 +428,8 @@ class AsyncLLMClient:
         tools: list[NativeToolSpec] | None,
         max_tokens: int | None,
     ) -> BudgetReservation | None:
+        if self._provider_exhaustion_state is not None:
+            self._provider_exhaustion_state.raise_if_exhausted()
         if self._spend_ledger is None:
             return None
         return self._spend_ledger.reserve_call(
@@ -526,6 +541,8 @@ class AsyncLLMClient:
 
         if isinstance(exc, Exception) and self._is_rate_limit_error(exc):
             return True
+        if is_provider_exhausted_error(exc):
+            return True
         if self._is_unsupported_reasoning_effort_error(exc):
             return True
         if isinstance(exc, Exception) and self._is_definitely_unbilled_transport_error(exc):
@@ -617,6 +634,8 @@ class AsyncLLMClient:
             )
 
             async with self._semaphore:
+                if self._provider_exhaustion_state is not None:
+                    self._provider_exhaustion_state.raise_if_exhausted()
                 client = self._build_client(Client)
                 dispatched = True
                 try:
@@ -759,6 +778,8 @@ class AsyncLLMClient:
                 reasoning_effort=self.reasoning_effort,
             )
             async with self._semaphore:
+                if self._provider_exhaustion_state is not None:
+                    self._provider_exhaustion_state.raise_if_exhausted()
                 client = self._build_client(Client)
 
                 async def _consume(opts: ChatOptions) -> ChatResponse | None:
@@ -1493,6 +1514,10 @@ class AsyncLLMClient:
             try:
                 return await op()
             except Exception as exc:
+                if is_provider_exhausted_error(exc):
+                    if self._provider_exhaustion_state is not None:
+                        raise self._provider_exhaustion_state.mark(exc) from exc
+                    raise ProviderExhaustedError(str(exc)) from exc
                 is_rate_limit = self._is_rate_limit_error(exc)
                 is_transport = self._is_transient_transport_error(exc)
                 if (not is_rate_limit and not is_transport) or attempt >= self.rate_limit_max_retries:
