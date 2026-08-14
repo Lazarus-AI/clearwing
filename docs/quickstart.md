@@ -100,9 +100,26 @@ clearwing sourcehunt https://github.com/example/project \
 # and auto-patch validation (recompile + rerun PoC). The most
 # rigorous mode; expects real build deps in the sandbox.
 clearwing sourcehunt /path/to/repo \
-    --depth deep --max-parallel 8 \
-    --auto-patch
+  --depth deep --max-parallel 8 \
+  --auto-patch
 ```
+
+To use the optional minimal Pi harness for per-file discovery:
+
+```bash
+clearwing cyberpi install       # one-time pinned runtime install
+clearwing cyberpi doctor        # Node/Pi/Docker preflight
+clearwing cyberpi smoke         # bounded provider test; Docker not required
+
+clearwing sourcehunt /path/to/repo \
+  --depth deep \
+  --hunt-engine cyberpi
+```
+
+Run `clearwing cyberpi benchmark --runs 3` for a paired native-vs-CyberPi
+micro-benchmark with JSON, Markdown, and complete JSONL trajectories. See the
+[CyberPi guide](cyberpi.md) for provider configuration, interpretation, and
+limitations.
 
 Output lives in `./results/sourcehunt/<session_id>/` (dev checkout) or
 `~/.clearwing/results/sourcehunt/<session_id>/` (PyPI install) — SARIF for

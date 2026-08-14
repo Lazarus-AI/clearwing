@@ -233,6 +233,7 @@ class HunterTrajectoryLogger:
         prompt: str,
         initial_messages: list[ChatMessage],
         tools: list[NativeToolSpec],
+        engine: str = "native",
     ) -> HunterTrajectoryLogger:
         path = _trajectory_path(ctx)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,6 +250,7 @@ class HunterTrajectoryLogger:
                 "session_id": ctx.session_id,
                 "file_path": ctx.file_path,
                 "specialist": ctx.specialist,
+                "engine": engine,
                 "prompt": prompt,
                 "tools": [tool.name for tool in tools],
                 "seeded_crash": ctx.seeded_crash,
@@ -1381,6 +1383,7 @@ class NativeHunter:
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
     summarizer: ContextSummarizer | None = field(default=None)
+    max_output_tokens: int | None = None  # None preserves the provider/native default
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
         """Return a stop reason string, or None to continue."""
@@ -1456,11 +1459,19 @@ class NativeHunter:
                     messages = await self.summarizer.summarize(messages, self.llm)
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
-                response = await self.llm.achat(
-                    messages=messages,
-                    system=self.prompt,
-                    tools=self.tools,
-                )
+                if self.max_output_tokens is None:
+                    response = await self.llm.achat(
+                        messages=messages,
+                        system=self.prompt,
+                        tools=self.tools,
+                    )
+                else:
+                    response = await self.llm.achat(
+                        messages=messages,
+                        system=self.prompt,
+                        tools=self.tools,
+                        max_tokens=self.max_output_tokens,
+                    )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate

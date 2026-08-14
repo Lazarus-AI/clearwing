@@ -38,6 +38,7 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - LLM providers: providers.md
+  - CyberPi harness: cyberpi.md
   - FFmpeg case study: FFmpeg.md
   - Sourcehunt evaluation and rollout: eval_rollout.md
   - Architecture: architecture.md

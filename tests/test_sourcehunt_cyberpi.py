@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.findings.types import Finding
 from clearwing.llm import AsyncLLMClient, NativeToolSpec
 from clearwing.llm.budget import BudgetExceeded, SpendLedger
@@ -95,6 +97,19 @@ send({"type": "model_result", "id": "model-1", "ok": mode != "model_error", "err
 ack = read()
 assert ack == {"type": "model_result_ack", "id": "model-1"}
 send({
+    "type": "trajectory",
+    "step": 1,
+    "message": {
+        "role": "assistant",
+        "content": "I inspected the bounded fixture.",
+        "tool_calls": [],
+        "tool_response_call_id": None,
+    },
+    "reasoning_content": "The length reaches memcpy without a bound.",
+    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    "model": start["model"]["id"],
+})
+send({
     "type": "complete",
     "stop_reason": "stop",
     "turns": 1,
@@ -128,7 +143,14 @@ def _runtime(tmp_path: Path, *, mode: str = "happy", ledger: SpendLedger | None 
 
     script = tmp_path / "fake_sidecar.py"
     script.write_text(_FAKE_SIDECAR, encoding="utf-8")
-    context = SimpleNamespace(findings=[], cleanup_variants=MagicMock())
+    context = HunterContext(
+        repo_path="/repo",
+        file_path="src/app.c",
+        session_id="cyberpi-test",
+        trajectory_dir=tmp_path / "trajectory",
+        work_item_id="work-1",
+    )
+    context.cleanup_variants = MagicMock()
 
     async def text_result(**_kwargs):
         return "source"
@@ -226,6 +248,25 @@ async def test_sidecar_routes_tools_and_accepts_findings_only_from_context(tmp_p
     assert outcome.cost_usd == pytest.approx(0.01)
     assert outcome.tokens_used == 2
     context.cleanup_variants.assert_called_once_with()
+    records = [
+        json.loads(line)
+        for line in (Path(context.trajectory_dir) / "transcript.jsonl").read_text().splitlines()
+    ]
+    assert [record["event"] for record in records] == [
+        "start",
+        "message",
+        "tool_call",
+        "tool_result",
+        "message",
+        "tool_call",
+        "tool_result",
+        "message",
+        "message",
+        "finish",
+    ]
+    assistant = records[-2]
+    assert assistant["reasoning_content"] == "The length reaches memcpy without a bound."
+    assert assistant["usage"]["total_tokens"] == 2
 
 
 @pytest.mark.asyncio

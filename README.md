@@ -123,12 +123,16 @@ clearwing scan 192.168.1.10 -p 22,80,443 --detect-services
 clearwing sourcehunt https://github.com/example/project \
     --depth standard
 
-# CyberPi — minimal Pi harness for sandboxed per-file discovery.
-# Requires Node.js 22.19+ and the one-time sidecar install shown below.
-(cd clearwing/sourcehunt/cyberpi_sidecar && npm ci --omit=dev)
+# CyberPi — install, diagnose, and smoke-test the pinned Pi harness.
+clearwing cyberpi install
+clearwing cyberpi doctor
+clearwing cyberpi smoke
 clearwing sourcehunt https://github.com/example/project \
     --depth deep \
     --hunt-engine cyberpi
+
+# Paired native-vs-CyberPi harness benchmark with JSONL trajectories
+clearwing cyberpi benchmark --runs 3
 
 # Proof-carrying hunt — typed facts, obligations, evidence, falsification,
 # and auditable finding/rejection/incomplete certificates

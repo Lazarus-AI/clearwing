@@ -144,6 +144,44 @@ function errorMessage(model, error) {
   };
 }
 
+function trajectoryMessage(message) {
+  const content = Array.isArray(message.content) ? message.content : [];
+  const text = content
+    .filter((part) => part?.type === "text")
+    .map((part) => String(part.text || ""))
+    .join("");
+  const reasoning = content
+    .filter((part) => part?.type === "thinking")
+    .map((part) => String(part.thinking || ""))
+    .join("");
+  const toolCalls = content
+    .filter((part) => part?.type === "toolCall")
+    .map((part) => ({
+      call_id: String(part.id || ""),
+      fn_name: String(part.name || ""),
+      fn_arguments: part.arguments || {},
+      fn_arguments_json: JSON.stringify(part.arguments || {}),
+    }));
+  return {
+    message: {
+      role: "assistant",
+      content: text,
+      tool_calls: toolCalls,
+      tool_response_call_id: null,
+    },
+    reasoning_content: reasoning,
+    usage: {
+      input_tokens:
+        Number(message.usage?.input || 0) +
+        Number(message.usage?.cacheRead || 0) +
+        Number(message.usage?.cacheWrite || 0),
+      output_tokens: Number(message.usage?.output || 0),
+      total_tokens: Number(message.usage?.totalTokens || 0),
+    },
+    model: String(message.model || ""),
+  };
+}
+
 function meteredStream(originalStream, protocol, request, meter) {
   return async (model, context, options = {}) => {
     const id = randomUUID();
@@ -289,6 +327,7 @@ async function run() {
       if (event.type !== "message_end" || event.message?.role !== "assistant") return;
       turns += 1;
       lastStopReason = event.message.stopReason || lastStopReason;
+      send({ type: "trajectory", step: turns, ...trajectoryMessage(event.message) });
     });
 
     const originalStream = session.agent.streamFunction;

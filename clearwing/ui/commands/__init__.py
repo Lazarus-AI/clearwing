@@ -5,6 +5,7 @@ from . import (
     campaign,
     ci,
     config,
+    cyberpi,
     disclose,
     doctor,
     eval,
@@ -26,6 +27,7 @@ from . import (
 ALL_COMMANDS = [
     setup,
     doctor,
+    cyberpi,
     scan,
     report,
     history,

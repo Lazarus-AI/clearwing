@@ -3,7 +3,7 @@
 ```
 clearwing [-h] {scan,report,history,config,interactive,graph,sessions,
                 ci,parallel,mcp,operate,webui,sourcehunt,disclose,
-                campaign,bench,eval} ...
+                campaign,bench,eval,cyberpi} ...
 ```
 
 Every subcommand supports `-h` / `--help` for flag-level details.
@@ -458,6 +458,22 @@ glyphs plus a totals panel at the bottom.
 
 Exit code is 0 when every check is ok/warn and 1 when any check is
 in error state — useful in CI pipelines (`clearwing doctor || exit 1`).
+
+## `cyberpi` — minimal harness workflow
+
+```bash
+clearwing cyberpi install                  # install pinned Pi 0.84.1
+clearwing cyberpi doctor [--json]          # Node/Pi/Docker preflight
+clearwing cyberpi smoke [provider flags]   # one bounded live integration test
+clearwing cyberpi benchmark --runs 3       # paired native/CyberPi fixtures
+```
+
+`smoke` and `benchmark` accept `--model`, `--base-url`, `--api-key`,
+`--max-turns`, `--max-output-tokens`, and `--output-dir`; normal Clearwing
+config/environment resolution also applies. Prefer config or environment credentials so secrets
+do not enter shell history. The benchmark writes JSON, Markdown, and complete
+JSONL trajectories. See the [CyberPi guide](cyberpi.md) for the full workflow
+and the repository-hunt command.
 
 ## `config` — show/edit config
 

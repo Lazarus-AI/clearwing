@@ -10,14 +10,14 @@ import os
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from clearwing.llm import AsyncLLMClient, NativeToolSpec
+from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec
 from clearwing.llm.budget import BudgetReservation, current_spend_metadata
 
 from .hunt_engine import HuntAssignment, HuntOutcome
+from .hunter import HunterTrajectoryLogger
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,9 @@ class CyberPiHuntEngine:
 
     @staticmethod
     def default_command() -> tuple[str, ...]:
-        sidecar = files("clearwing.sourcehunt.cyberpi_sidecar").joinpath("index.mjs")
-        return (os.environ.get("CLEARWING_CYBERPI_NODE", "node"), str(sidecar))
+        from .cyberpi_runtime import CyberPiRuntime
+
+        return CyberPiRuntime().command()
 
     async def hunt(self, assignment: HuntAssignment, sandbox: Any) -> HuntOutcome:
         if sandbox is None:
@@ -75,6 +76,8 @@ class CyberPiHuntEngine:
         active_reservations: dict[str, BudgetReservation] = {}
         active_calls: set[str] = set()
         stderr_task: asyncio.Task[None] | None = None
+        trajectory: HunterTrajectoryLogger | None = None
+        trajectory_finished = False
         runtime_dir = tempfile.TemporaryDirectory(prefix="clearwing-cyberpi-")
         try:
             model = self._model_from_client(native_hunter.llm)
@@ -87,6 +90,15 @@ class CyberPiHuntEngine:
                     "CyberPi requires Clearwing's deep hunt tools; missing "
                     + ", ".join(sorted(missing_tools))
                 )
+            trajectory = HunterTrajectoryLogger.for_hunter(
+                context,
+                prompt=native_hunter.prompt,
+                initial_messages=[
+                    ChatMessage("user", self._initial_user_message(native_hunter, assignment))
+                ],
+                tools=tools,
+                engine="cyberpi",
+            )
             process = await self._start_process(model.api_key, cwd=runtime_dir.name)
             assert process.stdin is not None
             assert process.stdout is not None
@@ -114,7 +126,7 @@ class CyberPiHuntEngine:
                         "temperature": 1.0,
                         "top_p": 0.95,
                         "cost": model.cost,
-                        "max_output_tokens": self._max_output_tokens(native_hunter.llm),
+                        "max_output_tokens": self._max_output_tokens(native_hunter),
                     },
                     "system_prompt": native_hunter.prompt,
                     "user_message": self._initial_user_message(native_hunter, assignment),
@@ -130,7 +142,9 @@ class CyberPiHuntEngine:
                 process=process,
                 active_reservations=active_reservations,
                 active_calls=active_calls,
+                trajectory=trajectory,
             )
+            trajectory_finished = True
 
             try:
                 process.stdin.close()
@@ -145,6 +159,18 @@ class CyberPiHuntEngine:
             return outcome
         except BaseException as exc:
             self._fail_active_reservations(native_hunter.llm, active_reservations, exc)
+            if trajectory is not None and not trajectory_finished:
+                trajectory.log(
+                    "finish",
+                    {
+                        "step": 0,
+                        "status": "error",
+                        "error_type": type(exc).__name__,
+                        "findings": [
+                            self._serialize_finding(finding) for finding in context.findings
+                        ],
+                    },
+                )
             raise
         finally:
             if process is not None and process.returncode is None:
@@ -170,18 +196,52 @@ class CyberPiHuntEngine:
         process: asyncio.subprocess.Process,
         active_reservations: dict[str, BudgetReservation],
         active_calls: set[str],
+        trajectory: HunterTrajectoryLogger,
     ) -> HuntOutcome:
         assert process.stdin is not None
         assert process.stdout is not None
 
         usage = self._empty_usage()
+        step = 0
         while True:
             message = await self._read_message(process.stdout)
             message_type = message.get("type")
             if message_type == "tool_call":
-                await self._write_message(process.stdin, await self._invoke_tool(tools, message))
+                tool_call = self._trajectory_tool_call(message)
+                trajectory.log("tool_call", {"step": step, "tool_call": tool_call})
+                result = await self._invoke_tool(tools, message)
+                tool_output = result.get("result")
+                tool_summary = (
+                    tool_output
+                    if isinstance(tool_output, str)
+                    else json.dumps(tool_output, sort_keys=True, default=str)
+                )
+                trajectory.log(
+                    "tool_result",
+                    {
+                        "step": step,
+                        "tool_call": tool_call,
+                        "tool_output": tool_output,
+                        "tool_summary": tool_summary,
+                        "repeated_skip": False,
+                    },
+                )
+                trajectory.log(
+                    "message",
+                    {
+                        "step": step,
+                        "message": {
+                            "role": "tool",
+                            "content": tool_summary,
+                            "tool_calls": [],
+                            "tool_response_call_id": tool_call["call_id"],
+                        },
+                    },
+                )
+                await self._write_message(process.stdin, result)
                 continue
             if message_type == "model_call":
+                step += 1
                 request_id = self._message_id(message, "model call")
                 if request_id in active_calls:
                     raise CyberPiError(f"Duplicate CyberPi model call id: {request_id}")
@@ -217,6 +277,9 @@ class CyberPiHuntEngine:
                     detail = str(message.get("error") or "provider request failed")
                     raise CyberPiError(f"CyberPi model call failed: {detail[:2000]}")
                 continue
+            if message_type == "trajectory":
+                self._log_assistant_trajectory(trajectory, message, step)
+                continue
             if message_type == "complete":
                 if active_calls:
                     raise CyberPiError("CyberPi completed with an unsettled model call")
@@ -227,12 +290,24 @@ class CyberPiHuntEngine:
                     or model_calls < 1
                 ):
                     raise CyberPiError("CyberPi completed without a model call")
-                return HuntOutcome(
+                outcome = HuntOutcome(
                     findings=tuple(context.findings),
                     cost_usd=float(usage["cost_usd"]),
                     tokens_used=int(usage["total_tokens"]),
                     stop_reason=self._stop_reason(message, native_hunter.max_steps),
                 )
+                trajectory.log(
+                    "finish",
+                    {
+                        "step": step,
+                        "status": outcome.stop_reason,
+                        "findings": [self._serialize_finding(finding) for finding in context.findings],
+                        "total_input_tokens": int(usage["input_tokens"]),
+                        "total_output_tokens": int(usage["output_tokens"]),
+                        "total_cost_usd": float(usage["cost_usd"]),
+                    },
+                )
+                return outcome
             if message_type == "error":
                 detail = str(message.get("message") or "CyberPi sidecar failed")
                 raise CyberPiError(detail[:2000])
@@ -270,8 +345,8 @@ class CyberPiHuntEngine:
             )
         except FileNotFoundError as exc:
             raise CyberPiError(
-                "CyberPi runtime is not installed. Run `npm ci --omit=dev` in "
-                "clearwing/sourcehunt/cyberpi_sidecar."
+                "CyberPi runtime is not available. Run `clearwing cyberpi install`, "
+                "then verify it with `clearwing cyberpi doctor`."
             ) from exc
 
     def _check_runtime_installed(self) -> None:
@@ -280,9 +355,16 @@ class CyberPiHuntEngine:
         package_dir = Path(self._command[1]).parent
         dependency = package_dir / "node_modules" / "@earendil-works" / "pi-coding-agent"
         if dependency.is_dir():
+            from .cyberpi_runtime import CyberPiRuntime, CyberPiRuntimeError
+
+            try:
+                CyberPiRuntime(runtime_dir=package_dir).require_ready(include_docker=False)
+            except CyberPiRuntimeError as exc:
+                raise CyberPiError(str(exc)) from exc
             return
         raise CyberPiError(
-            f"CyberPi runtime is not installed. Run `npm ci --omit=dev` in {package_dir}."
+            "CyberPi runtime is not installed. Run `clearwing cyberpi install`, "
+            "then verify it with `clearwing cyberpi doctor`."
         )
 
     @staticmethod
@@ -362,11 +444,14 @@ class CyberPiHuntEngine:
         )
 
     @staticmethod
-    def _max_output_tokens(client: AsyncLLMClient) -> int | None:
+    def _max_output_tokens(native_hunter: Any) -> int:
+        client = native_hunter.llm
+        requested = getattr(native_hunter, "max_output_tokens", None)
         ledger = client.spend_ledger
         if ledger is not None and ledger.enforcing:
-            return int(ledger.default_max_output_tokens)
-        return None
+            ledger_cap = int(ledger.default_max_output_tokens)
+            return min(ledger_cap, requested) if requested else ledger_cap
+        return int(requested or 8192)
 
     @staticmethod
     def _initial_user_message(native_hunter: Any, assignment: HuntAssignment) -> str:
@@ -486,6 +571,66 @@ class CyberPiHuntEngine:
             and ".." not in path.parts
             and (path == scratch or scratch in path.parents)
         )
+
+    @staticmethod
+    def _trajectory_tool_call(message: dict[str, Any]) -> dict[str, Any]:
+        request_id = CyberPiHuntEngine._message_id(message, "tool call")
+        name = message.get("name")
+        if not isinstance(name, str) or not name:
+            raise CyberPiError("CyberPi tool call is missing a valid name")
+        arguments = message.get("arguments")
+        return {
+            "call_id": request_id,
+            "fn_name": name,
+            "fn_arguments": arguments,
+            "fn_arguments_json": json.dumps(arguments, sort_keys=True, default=str),
+        }
+
+    @staticmethod
+    def _log_assistant_trajectory(
+        trajectory: HunterTrajectoryLogger,
+        message: dict[str, Any],
+        current_step: int,
+    ) -> None:
+        step = message.get("step")
+        assistant = message.get("message")
+        reasoning = message.get("reasoning_content", "")
+        usage = message.get("usage")
+        model = message.get("model")
+        if (
+            not isinstance(step, int)
+            or isinstance(step, bool)
+            or step < 1
+            or step > current_step
+            or not isinstance(assistant, dict)
+            or assistant.get("role") != "assistant"
+            or not isinstance(reasoning, str)
+            or not isinstance(usage, dict)
+            or not isinstance(model, str)
+        ):
+            raise CyberPiError("CyberPi emitted an invalid trajectory event")
+        trajectory.log(
+            "message",
+            {
+                "step": step,
+                "message": assistant,
+                "reasoning_content": reasoning,
+                "usage": usage,
+                "model": model,
+            },
+        )
+
+    @staticmethod
+    def _serialize_finding(finding: Any) -> dict[str, Any]:
+        return {
+            "id": finding.get("id"),
+            "file": finding.get("file"),
+            "line_number": finding.get("line_number"),
+            "severity": finding.get("severity"),
+            "cwe": finding.get("cwe"),
+            "description": finding.get("description"),
+            "evidence_level": finding.get("evidence_level"),
+        }
 
     @staticmethod
     async def _write_message(writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:

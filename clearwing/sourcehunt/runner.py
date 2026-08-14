@@ -1027,6 +1027,10 @@ class SourceHuntRunner:
             metadata={"flow": self._flow, "repository": self.repo_url},
         )
         try:
+            if self._hunt_engine == "cyberpi":
+                from .cyberpi_runtime import CyberPiRuntime
+
+                CyberPiRuntime().require_ready(include_docker=self.sandbox_factory is None)
             self._preflight_budget_clients()
             # 1. Preprocess
             self._emit_stage("preprocess", "started")
