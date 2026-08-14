@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "name": "tuning-cves",
+  "role": "tuning",
+  "minimum_runs": 3,
+  "cases": [
+    {
+      "id": "archive-separator-confinement",
+      "cve": "CVE-2026-28208",
+      "repository": "https://github.com/junrar/junrar.git",
+      "vulnerable_commit": "c7041fc07df2cc397ea46ba516933ee9725af250",
+      "fixed_commit": "947ff1d33f00f940aa68ae2593500291d799d954",
+      "target_file": "src/main/java/com/github/junrar/LocalFolderExtractor.java",
+      "context_roots": [
+        "src/main/java/com/github/junrar"
+      ],
+      "language": "java",
+      "oracle": {
+        "accepted_cwes": ["CWE-22"],
+        "locations": [
+          {
+            "file": "src/main/java/com/github/junrar/LocalFolderExtractor.java",
+            "line": 58,
+            "function": "createFile",
+            "tolerance": 5
+          }
+        ],
+        "evidence_groups": [
+          ["getfilename", "archive entry", "entry name"],
+          ["backslash", "separator"],
+          ["canonical", "normalize"],
+          ["outside", "destination", "path traversal"]
+        ]
+      },
+      "references": [
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-28208",
+        "https://github.com/junrar/junrar/commit/947ff1d33f00f940aa68ae2593500291d799d954"
+      ]
+    },
+    {
+      "id": "agent-calculator-interpreter-boundary",
+      "cve": "CVE-2026-47391",
+      "repository": "https://github.com/MervinPraison/PraisonAI.git",
+      "vulnerable_commit": "bc73dd1db9089ea93648c5266b2d6ad9dcf85484",
+      "fixed_commit": "e0fb8e7dd1ee6759c18ed07f436c21dbd9c20747",
+      "target_file": "examples/python/a2a/a2a-server.py",
+      "context_roots": [
+        "examples/python/a2a"
+      ],
+      "language": "python",
+      "oracle": {
+        "accepted_cwes": ["CWE-95", "CWE-306"],
+        "locations": [
+          {
+            "file": "examples/python/a2a/a2a-server.py",
+            "line": 26,
+            "function": "calculate",
+            "tolerance": 3
+          }
+        ],
+        "evidence_groups": [
+          ["expression", "request", "message/send"],
+          ["eval"],
+          ["unauthenticated", "remote", "a2a"],
+          ["code execution", "python execution", "arbitrary code"]
+        ]
+      },
+      "references": [
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-47391",
+        "https://github.com/MervinPraison/PraisonAI/commit/e0fb8e7dd1ee6759c18ed07f436c21dbd9c20747"
+      ]
+    }
+  ]
+}

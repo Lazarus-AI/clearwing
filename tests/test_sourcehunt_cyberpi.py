@@ -264,6 +264,18 @@ async def test_sidecar_routes_tools_and_accepts_findings_only_from_context(tmp_p
         "message",
         "finish",
     ]
+    assert records[0]["tools"] == [
+        "execute",
+        "read_file",
+        "write_file",
+        "record_trace_step",
+        "record_finding",
+    ]
+    assert records[0]["tool_definitions"][1] == {
+        "name": "read_file",
+        "description": "read",
+        "schema": _schema({"path": {"type": "string"}}, ["path"]),
+    }
     assistant = records[-2]
     assert assistant["reasoning_content"] == "The length reaches memcpy without a bound."
     assert assistant["usage"]["total_tokens"] == 2

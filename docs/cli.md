@@ -466,14 +466,22 @@ clearwing cyberpi install                  # install pinned Pi 0.84.1
 clearwing cyberpi doctor [--json]          # Node/Pi/Docker preflight
 clearwing cyberpi smoke [provider flags]   # one bounded live integration test
 clearwing cyberpi benchmark --runs 3       # paired native/CyberPi fixtures
+clearwing cyberpi benchmark --suite tuning-cves --runs 3 --max-turns 8
+clearwing cyberpi benchmark --suite held-out-cves --runs 5 --max-turns 8
 ```
 
 `smoke` and `benchmark` accept `--model`, `--base-url`, `--api-key`,
-`--max-turns`, `--max-output-tokens`, and `--output-dir`; normal Clearwing
+`--max-turns`, `--max-output-tokens`, and `--output-dir`; `benchmark` also
+accepts `--suite` and `--repository-cache`. Normal Clearwing
 config/environment resolution also applies. Prefer config or environment credentials so secrets
 do not enter shell history. The benchmark writes JSON, Markdown, and complete
 JSONL trajectories. See the [CyberPi guide](cyberpi.md) for the full workflow
 and the repository-hunt command.
+
+`benchmark --suite` accepts `micro` (the default), `tuning-cves`,
+`held-out-cves`, or a declarative suite JSON path. CVE suites use pinned,
+source-only vulnerable/fixed snapshots and require at least three runs. Use
+`--repository-cache` to choose the private git/snapshot cache location.
 
 ## `config` — show/edit config
 

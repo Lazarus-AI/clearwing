@@ -497,6 +497,7 @@ class TestHunterTrajectoryLogging:
 
         assert start["prompt"] == "system prompt"
         assert start["tools"] == []
+        assert start["tool_definitions"] == []
         assert len(messages) == 2
         assert messages[0]["step"] == 0
         assert messages[0]["message"]["role"] == "user"

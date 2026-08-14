@@ -253,6 +253,14 @@ class HunterTrajectoryLogger:
                 "engine": engine,
                 "prompt": prompt,
                 "tools": [tool.name for tool in tools],
+                "tool_definitions": [
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "schema": tool.schema,
+                    }
+                    for tool in tools
+                ],
                 "seeded_crash": ctx.seeded_crash,
             },
         )

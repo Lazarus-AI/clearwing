@@ -119,6 +119,7 @@ clearwing = [
     "ui/web/static/**/*",
     "sourcehunt/cyberpi_sidecar/*.mjs",
     "sourcehunt/cyberpi_sidecar/package*.json",
+    "bench/cyberpi_suites/*.json",
 ]
 
 [tool.pytest.ini_options]

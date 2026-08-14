@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "name": "held-out-cves",
+  "role": "held_out",
+  "minimum_runs": 3,
+  "cases": [
+    {
+      "id": "multi-ref-authorization-cache",
+      "cve": "CVE-2026-27775",
+      "repository": "https://github.com/go-gitea/gitea.git",
+      "vulnerable_commit": "f6e2ca4388a531c4a5996fc8043c38f1cf57897f",
+      "fixed_commit": "99f8b3d9a1d32f4c39828e07971455a18191e0b9",
+      "target_file": "routers/private/hook_pre_receive.go",
+      "context_roots": [
+        "routers/private"
+      ],
+      "language": "go",
+      "oracle": {
+        "accepted_cwes": ["CWE-863", "CWE-862"],
+        "locations": [
+          {
+            "file": "routers/private/hook_pre_receive.go",
+            "line": 62,
+            "function": "CanWriteCode",
+            "tolerance": 8
+          }
+        ],
+        "evidence_groups": [
+          ["canwritecode", "checkedcanwritecode", "permission"],
+          ["branchname", "branch name", "ref"],
+          ["cache", "cached", "reuse"],
+          ["multiple refs", "each ref", "same push", "batched"],
+          ["unauthorized", "escalat", "write access"]
+        ]
+      },
+      "references": [
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-27775",
+        "https://github.com/go-gitea/gitea/pull/38151"
+      ]
+    },
+    {
+      "id": "graphics-cache-copy-extent",
+      "cve": "CVE-2026-40033",
+      "repository": "https://github.com/FreeRDP/FreeRDP.git",
+      "vulnerable_commit": "1d67eeb902638ecf1ed6e30e01f4e02e68e396c4",
+      "fixed_commit": "d7508ebcd82842a691ae4941e5104d14240a89ae",
+      "target_file": "libfreerdp/gdi/gfx.c",
+      "context_roots": [
+        "libfreerdp/gdi"
+      ],
+      "language": "c",
+      "oracle": {
+        "accepted_cwes": ["CWE-787", "CWE-122"],
+        "locations": [
+          {
+            "file": "libfreerdp/gdi/gfx.c",
+            "line": 1663,
+            "function": "gdi_CacheToSurface",
+            "tolerance": 8
+          }
+        ],
+        "evidence_groups": [
+          ["cacheentry->width", "cacheentry width", "cache dimensions"],
+          ["rect", "clamp", "uint16_max"],
+          ["freerdp_image_copy", "image copy", "copy"],
+          ["surface", "out-of-bounds", "heap"]
+        ]
+      },
+      "references": [
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-40033",
+        "https://github.com/FreeRDP/FreeRDP/commit/d7508ebcd82842a691ae4941e5104d14240a89ae"
+      ]
+    }
+  ]
+}

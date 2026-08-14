@@ -67,6 +67,44 @@ Use several runs, inspect trajectories, and evaluate on a held-out vulnerability
 corpus before promoting a prompt or CyberPi change. The JSONL records are also
 the input artifact to retain for GEPA-style prompt optimization.
 
+### Blind CVE suites
+
+CyberPi also ships repository-disjoint tuning and held-out suites made from
+real vulnerable commits and their reviewed fixed commits:
+
+```bash
+clearwing cyberpi benchmark \
+  --suite tuning-cves \
+  --runs 3 \
+  --max-turns 8
+
+# Run only after selecting a candidate from the tuning suite.
+clearwing cyberpi benchmark \
+  --suite held-out-cves \
+  --runs 5 \
+  --max-turns 8
+```
+
+The runner fetches pinned public commits into a private cache and exports only
+the declared source subtree, without `.git`. The model sees the assigned file
+and source-root inventory but not the CVE, vulnerable/fixed label, commit,
+advisory, patch, suite role, case ID, or scoring oracle. The source-only tools
+cannot leave that export, and `execute` is disabled. Both engines receive the
+same prompt, tool definitions, snapshot, model, and limits; engine, snapshot,
+and case order alternate across replicates.
+
+Reports score vulnerable recall, fixed-snapshot false positives, CWE and
+source-location accuracy, causal-evidence coverage, tokens, latency, errors,
+and decision/finding stability. Suites require at least three runs. Complete
+JSONL trajectories include the prompt, tool schemas, reasoning/text, tool
+calls/results, usage, and findings. They are sanitized in place and hashed
+before publication. See `evaluations/cyberpi/README.md` in a source checkout
+for the frozen corpus, evidence rubric, and promotion policy.
+
+Use tuning results only to select a candidate. Do not add or promote a
+CyberPi profile until repeated held-out runs demonstrate a real improvement
+without an unacceptable false-positive, stability, or efficiency regression.
+
 The native arm's dollar value uses Clearwing's built-in price estimate, while
 CyberPi reports Pi's provider/model cost. Compare token counts unless both arms
 have the same explicit endpoint pricing; the report records each cost basis.

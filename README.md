@@ -134,6 +134,9 @@ clearwing sourcehunt https://github.com/example/project \
 # Paired native-vs-CyberPi harness benchmark with JSONL trajectories
 clearwing cyberpi benchmark --runs 3
 
+# Blind real-CVE tuning; reserve held-out-cves for the final comparison
+clearwing cyberpi benchmark --suite tuning-cves --runs 3 --max-turns 8
+
 # Proof-carrying hunt — typed facts, obligations, evidence, falsification,
 # and auditable finding/rejection/incomplete certificates
 clearwing sourcehunt /path/to/project \

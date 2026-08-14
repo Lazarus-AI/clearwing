@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-08-13T20:41:22-07:00",
+  "method": "git archive of declared context roots; sorted path/content SHA-256",
+  "suites": {
+    "tuning-cves": [
+      {
+        "case_id": "archive-separator-confinement",
+        "variant": "vulnerable",
+        "commit": "c7041fc07df2cc397ea46ba516933ee9725af250",
+        "snapshot_sha256": "5b35275000bb5effa43dcf41e5bd7827b33d609d7dd44b76d3a39ab885bf1436",
+        "target_sha256": "a7a6083492c461d06623cdc84cedd18ec0c8c72915265cfe177638b270005103",
+        "files": 94
+      },
+      {
+        "case_id": "archive-separator-confinement",
+        "variant": "fixed",
+        "commit": "947ff1d33f00f940aa68ae2593500291d799d954",
+        "snapshot_sha256": "86bc6392e167cba994fd4e01979ddee5f17ae8a975cb85cf69595b87fd16e70e",
+        "target_sha256": "32db1f6a9b3a66a03937209128e6506ef896142ae3665997ebb88a14f53b91e4",
+        "files": 94
+      },
+      {
+        "case_id": "agent-calculator-interpreter-boundary",
+        "variant": "vulnerable",
+        "commit": "bc73dd1db9089ea93648c5266b2d6ad9dcf85484",
+        "snapshot_sha256": "282ce1095972b0765c2d0aedb56155c92527a34ec6b7b85081f8f165fe3a7323",
+        "target_sha256": "898febdc8d7878a002d241cab7842b7b8bfc4899b2f43d5f22721daf8ed3b587",
+        "files": 1
+      },
+      {
+        "case_id": "agent-calculator-interpreter-boundary",
+        "variant": "fixed",
+        "commit": "e0fb8e7dd1ee6759c18ed07f436c21dbd9c20747",
+        "snapshot_sha256": "2c4d6059d00d1b5691fabd50cd42ee58f3bf540dbf756973364f6c0e845efa24",
+        "target_sha256": "8eb21c4542a834e34b7e0e49d9a8ec44b7c232d5182b2266f3f30d92da66e289",
+        "files": 1
+      }
+    ],
+    "held-out-cves": [
+      {
+        "case_id": "multi-ref-authorization-cache",
+        "variant": "vulnerable",
+        "commit": "f6e2ca4388a531c4a5996fc8043c38f1cf57897f",
+        "snapshot_sha256": "57b1c6237160def988cf2f41dcddb07bc619546973d30dfe4a68d3402ce03543",
+        "target_sha256": "d03e4def2e1b55b7e5211b54eb6bc3e602901f5e2d4cbda88eb01e4b7000cc1d",
+        "files": 57
+      },
+      {
+        "case_id": "multi-ref-authorization-cache",
+        "variant": "fixed",
+        "commit": "99f8b3d9a1d32f4c39828e07971455a18191e0b9",
+        "snapshot_sha256": "682805a72569e9f41d710cb2f4dc73f62d3c2121731b1cbf5f83120837dc65ff",
+        "target_sha256": "5b46e8d97f057a1f10f3e4136a3bd198a580fe6b07e1347c2af7baf8ffdc0102",
+        "files": 58
+      },
+      {
+        "case_id": "graphics-cache-copy-extent",
+        "variant": "vulnerable",
+        "commit": "1d67eeb902638ecf1ed6e30e01f4e02e68e396c4",
+        "snapshot_sha256": "6426d343980c34e38cb36f992da7b144e2dcc139faf48c3f3658aab531d2883c",
+        "target_sha256": "e981629390050bee21a1dcb03084d32f0e3c886b2bd7b41948f6698242276c84",
+        "files": 31
+      },
+      {
+        "case_id": "graphics-cache-copy-extent",
+        "variant": "fixed",
+        "commit": "d7508ebcd82842a691ae4941e5104d14240a89ae",
+        "snapshot_sha256": "33b3dc834dcf13b07b831d782f56e31e24586c8532e40b98bc6e659b3d7d5830",
+        "target_sha256": "80323771abb7209668e78750620a413c253a92a3d1dd11f52951bdea89656a94",
+        "files": 31
+      }
+    ]
+  }
+}

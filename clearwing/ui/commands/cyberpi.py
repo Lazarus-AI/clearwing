@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from rich.table import Table
 
@@ -47,6 +48,16 @@ def add_parser(subparsers):
     _provider_arguments(benchmark)
     benchmark.add_argument(
         "--output-dir", default=None, help="Directory for JSON, Markdown, and trajectories"
+    )
+    benchmark.add_argument(
+        "--suite",
+        default="micro",
+        help="Benchmark suite: micro, tuning-cves, held-out-cves, or a suite JSON path",
+    )
+    benchmark.add_argument(
+        "--repository-cache",
+        default=None,
+        help="Private cache for pinned CVE repository snapshots",
     )
     benchmark.add_argument(
         "--runs", type=_positive_int, default=1, help="Replicates per fixture (default: 1)"
@@ -143,37 +154,78 @@ def _handle_smoke(cli, args) -> None:
 
 
 def _handle_benchmark(cli, args) -> None:
-    from clearwing.bench.cyberpi import CyberPiBenchmark
-
     llm, endpoint, output_dir = _evaluation_context(cli, args)
     cli.console.print(
-        f"CyberPi paired benchmark: [cyan]{endpoint.describe()}[/cyan], runs={args.runs}"
+        f"CyberPi paired benchmark: [cyan]{endpoint.describe()}[/cyan], "
+        f"suite={args.suite}, runs={args.runs}"
     )
-    report = asyncio.run(
-        CyberPiBenchmark(
-            llm,
-            output_dir=output_dir,
-            max_turns=args.max_turns,
-            max_output_tokens=args.max_output_tokens,
-        ).arun(
-            replicates=args.runs
+    report: Any
+    if args.suite == "micro":
+        from clearwing.bench.cyberpi import CyberPiBenchmark
+
+        report = asyncio.run(
+            CyberPiBenchmark(
+                llm,
+                output_dir=output_dir,
+                max_turns=args.max_turns,
+                max_output_tokens=args.max_output_tokens,
+            ).arun(replicates=args.runs)
         )
-    )
+    else:
+        from clearwing.bench.cyberpi_cves import (
+            CyberPiCVEBenchmark,
+            CyberPiCVESuite,
+            CyberPiSuiteError,
+        )
+
+        try:
+            suite = CyberPiCVESuite.load(args.suite)
+            report = asyncio.run(
+                CyberPiCVEBenchmark(
+                    llm,
+                    suite,
+                    output_dir=output_dir,
+                    repository_cache=args.repository_cache,
+                    max_turns=args.max_turns,
+                    max_output_tokens=args.max_output_tokens,
+                ).arun(replicates=args.runs)
+            )
+        except CyberPiSuiteError as exc:
+            cli.console.print(f"[red]Error: {exc}[/red]")
+            sys.exit(1)
     json_path, markdown_path = report.write(output_dir)
     table = Table(show_header=True, header_style="bold")
     table.add_column("Engine")
-    table.add_column("Passed", justify="right")
-    table.add_column("Tokens", justify="right")
-    table.add_column("Reported cost*", justify="right")
-    table.add_column("Errors", justify="right")
-    for engine, values in report.metrics().items():
-        table.add_row(
-            engine,
-            f"{values['passed']}/{values['cases']}",
-            str(values["tokens"]),
-            f"${float(values['cost_usd']):.4f}",
-            str(values["errors"]),
-        )
+    if args.suite == "micro":
+        table.add_column("Passed", justify="right")
+        table.add_column("Tokens", justify="right")
+        table.add_column("Reported cost*", justify="right")
+        table.add_column("Errors", justify="right")
+        for engine, values in report.metrics().items():
+            table.add_row(
+                engine,
+                f"{values['passed']}/{values['cases']}",
+                str(values["tokens"]),
+                f"${float(values['cost_usd']):.4f}",
+                str(values["errors"]),
+            )
+    else:
+        table.add_column("Recall", justify="right")
+        table.add_column("Fixed FPR", justify="right")
+        table.add_column("CWE", justify="right")
+        table.add_column("Evidence", justify="right")
+        table.add_column("Mean tokens", justify="right")
+        table.add_column("Errors", justify="right")
+        for engine, values in report.metrics().items():
+            table.add_row(
+                engine,
+                f"{float(values['vulnerable_recall']):.0%}",
+                f"{float(values['fixed_false_positive_rate']):.0%}",
+                f"{float(values['cwe_accuracy']):.0%}",
+                f"{float(values['evidence_quality']):.0%}",
+                f"{float(values['tokens_mean']):.0f}",
+                str(values["errors"]),
+            )
     cli.console.print(table)
     cli.console.print(
         "[dim]* Native uses Clearwing's estimate; CyberPi uses the provider/model report. "

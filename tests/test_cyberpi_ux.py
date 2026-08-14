@@ -30,6 +30,21 @@ def test_cyberpi_command_is_registered_with_cohesive_actions():
     )
     assert benchmark.runs == 3
     assert benchmark.model == "Exact-Model-Alias"
+    cve_benchmark = parser.parse_args(
+        [
+            "cyberpi",
+            "benchmark",
+            "--suite",
+            "held-out-cves",
+            "--runs",
+            "5",
+            "--repository-cache",
+            "/private/cache",
+        ]
+    )
+    assert cve_benchmark.suite == "held-out-cves"
+    assert cve_benchmark.runs == 5
+    assert cve_benchmark.repository_cache == "/private/cache"
 
 
 def test_managed_install_uses_packaged_lockfile_and_atomic_destination(tmp_path, monkeypatch):
