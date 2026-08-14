@@ -192,6 +192,13 @@ def add_parser(subparsers):
         "9-tool hunter, 'deep' forces full-shell agent (default: auto)",
     )
     parser.add_argument(
+        "--hunt-engine",
+        choices=["native", "cyberpi"],
+        default="native",
+        dest="hunt_engine",
+        help="Per-file hunt harness (default: native)",
+    )
+    parser.add_argument(
         "--prompt-mode",
         choices=["unconstrained", "specialist"],
         default="unconstrained",
@@ -1164,6 +1171,7 @@ def handle(cli, args):
         model_override=args.model,
         provider_manager=provider_manager,
         agent_mode=args.agent_mode,
+        hunt_engine=args.hunt_engine,
         prompt_mode=args.prompt_mode,
         campaign_hint=args.campaign_hint,
         exploit_mode=args.exploit_mode,
@@ -1304,6 +1312,7 @@ def _handle_machine(descriptor: int) -> int:
                 no_exploit=not parsed["exploit"],
                 flow=parsed["flow"],
                 agent_mode=parsed["agent_mode"],
+                hunt_engine=parsed["hunt_engine"],
                 no_rank=parsed["no_rank"],
                 no_per_file_hunt=parsed["no_per_file_hunt"],
                 enable_subsystem_hunt=parsed["subsystem_hunt"]
@@ -1336,6 +1345,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "exploit",
         "flow",
         "agent_mode",
+        "hunt_engine",
         "no_rank",
         "format",
         "subsystem_hunt",
@@ -1353,6 +1363,9 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
     agent_mode = _choice(
         value.get("agent_mode", "auto"), "agent_mode", {"auto", "constrained", "deep"}
     )
+    hunt_engine = _choice(
+        value.get("hunt_engine", "native"), "hunt_engine", {"native", "cyberpi"}
+    )
     parsed = {
         "repo_url": repo_url,
         "branch": _bounded_text(value.get("branch", "main"), "branch", 256),
@@ -1365,6 +1378,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "exploit": _boolean(value.get("exploit", True), "exploit"),
         "flow": flow,
         "agent_mode": agent_mode,
+        "hunt_engine": hunt_engine,
         "no_rank": _boolean(value.get("no_rank", False), "no_rank"),
         "no_per_file_hunt": _boolean(value.get("no_per_file_hunt", False), "no_per_file_hunt"),
         "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),

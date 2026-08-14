@@ -35,7 +35,9 @@ from clearwing.runners.parallel.executor import (
     TierBudget as _ExecutorTierBudget,
 )
 
+from .hunt_engine import HuntAssignment, HuntEngine
 from .instrumentation import stable_run_id
+from .native_hunt_engine import NativeHuntEngine
 from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
@@ -184,6 +186,8 @@ class HuntPoolConfig:
     # If None, the pool will import build_hunter_agent
     # at run time and require an llm in the config.
     llm: object | None = None  # Required if hunter_factory is None
+    hunt_engine: HuntEngine | None = None
+    hunt_engine_name: str = "native"  # "native" | "cyberpi"
     max_parallel: int = 8
     budget_usd: float = 0.0
     tier_budget: TierBudget = field(default_factory=TierBudget)
@@ -271,6 +275,9 @@ class HunterPool:
 
     def __init__(self, config: HuntPoolConfig):
         self.config = config
+        if config.hunt_engine is not None and config.hunter_factory is not None:
+            raise ValueError("hunt_engine and hunter_factory cannot both be supplied")
+        self._hunt_engine = config.hunt_engine or self._build_hunt_engine(config.hunt_engine_name)
         for ft in self.config.files:
             ft["tier"] = assign_tier(ft)
         self._results: dict[str, TargetResult] = {}
@@ -280,6 +287,15 @@ class HunterPool:
         self._promotion_counts: dict[str, int] = {"fast→standard": 0, "standard→deep": 0}
         self._state_lock = asyncio.Lock()
         self._cancelled = False
+
+    def _build_hunt_engine(self, name: str) -> HuntEngine:
+        if name == "native":
+            return NativeHuntEngine(self._build_hunter_for_assignment)
+        if name == "cyberpi":
+            from .cyberpi import CyberPiHuntEngine
+
+            return CyberPiHuntEngine(self._build_hunter_for_assignment)
+        raise ValueError(f"Unknown hunt engine: {name!r}")
 
     def run(self) -> list[Finding]:
         return asyncio.run(self.arun())
@@ -745,41 +761,50 @@ class HunterPool:
                 logger.warning("sandbox_factory failed for %s: %s", file_target.get("path"), e)
 
         try:
-            hunter, ctx = self._build_hunter_for_file(
-                file_target,
-                sandbox,
+            assignment = HuntAssignment(
+                file_target=file_target,
+                session_id=f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}",
+                work_item_id=work_item_id,
                 budget_usd=cost_limit,
                 seed_transcript=seed_transcript,
                 entry_point=entry_point,
                 seed_context=seed_context,
-                work_item_id=work_item_id,
             )
-            run_result = await hunter.arun()
+            outcome = await self._hunt_engine.hunt(assignment, sandbox)
 
             logger.info(
                 "Hunter completed for %s findings=%d cost=%.4f stop=%s",
                 file_target.get("path"),
-                len(run_result.findings),
-                run_result.cost_usd,
-                run_result.stop_reason,
+                len(outcome.findings),
+                outcome.cost_usd,
+                outcome.stop_reason,
             )
             return (
-                list(run_result.findings),
-                run_result.cost_usd,
-                run_result.tokens_used,
-                run_result.stop_reason,
+                list(outcome.findings),
+                outcome.cost_usd,
+                outcome.tokens_used,
+                outcome.stop_reason,
             )
         finally:
-            try:
-                if "ctx" in locals():
-                    ctx.cleanup_variants()
-            except Exception:
-                logger.debug("Variant sandbox cleanup failed", exc_info=True)
             if sandbox is not None:
                 try:
                     await asyncio.to_thread(sandbox.stop)
                 except Exception:
                     pass
+
+    def _build_hunter_for_assignment(
+        self, assignment: HuntAssignment, sandbox: Any
+    ) -> Any:
+        return self._build_hunter_for_file(
+            assignment.file_target,
+            sandbox,
+            budget_usd=assignment.budget_usd,
+            seed_transcript=assignment.seed_transcript,
+            entry_point=assignment.entry_point,
+            seed_context=assignment.seed_context,
+            work_item_id=assignment.work_item_id,
+            session_id=assignment.session_id,
+        )
 
     def _build_hunter_for_file(
         self,
@@ -790,6 +815,7 @@ class HunterPool:
         entry_point: Any = None,
         seed_context: str | None = None,
         work_item_id: str = "",
+        session_id: str = "",
     ) -> Any:
         """Either invoke the user-supplied hunter_factory or import build_hunter_agent."""
         if not work_item_id:
@@ -803,7 +829,7 @@ class HunterPool:
                     ),
                 },
             )
-        session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
+        session_id = session_id or f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
 
         if self.config.hunter_factory is not None:
             result = self.config.hunter_factory(file_target, sandbox, session_id)

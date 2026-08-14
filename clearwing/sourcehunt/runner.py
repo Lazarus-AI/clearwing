@@ -259,6 +259,7 @@ class SourceHuntRunner:
         sandbox_cpus: float | None = None,
         *,
         config: SourceHuntConfig | None = None,
+        hunt_engine: str = "native",  # "native" | "cyberpi"
         flow: str = "legacy",
         proof_compile_commands: str | None = None,
         proof_validation_manifest: str | None = None,
@@ -361,6 +362,7 @@ class SourceHuntRunner:
             exploit_mode = exploit_mode or f.exploit_mode
             agent_mode = agent_mode if agent_mode != "auto" else f.agent_mode
             prompt_mode = prompt_mode if prompt_mode != "unconstrained" else f.prompt_mode
+            hunt_engine = hunt_engine if hunt_engine != "native" else f.hunt_engine
             # Hunt tuning
             starting_band = starting_band if starting_band is not None else h.starting_band
             redundancy_override = (
@@ -442,6 +444,10 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
+        if hunt_engine not in {"native", "cyberpi"}:
+            raise ValueError("hunt_engine must be 'native' or 'cyberpi'")
+        if hunt_engine == "cyberpi" and flow != "legacy":
+            raise ValueError("CyberPi is only available with the legacy Sourcehunt flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -514,6 +520,7 @@ class SourceHuntRunner:
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
+        self._hunt_engine = hunt_engine
         self._campaign_hint = campaign_hint
         self._exploit_mode = exploit_mode
         self._starting_band_override = starting_band
@@ -1036,6 +1043,13 @@ class SourceHuntRunner:
                 files=stage_files,
             )
             self._ensure_sandbox_factory(repo_path, files)
+            if self._hunt_engine == "cyberpi" and (
+                self.sandbox_factory is None or self._effective_agent_mode != "deep"
+            ):
+                raise RuntimeError(
+                    "CyberPi requires --depth standard/deep (or --agent-mode deep) "
+                    "and an available isolated HunterSandbox"
+                )
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = (
@@ -1339,6 +1353,7 @@ class SourceHuntRunner:
                         sandbox_manager=self._sandbox_manager,
                         hunter_factory=None,
                         llm=hunter_llm,
+                        hunt_engine_name=self._hunt_engine,
                         max_parallel=self.max_parallel,
                         budget_usd=self.budget_usd,
                         tier_budget=self.tier_budget,

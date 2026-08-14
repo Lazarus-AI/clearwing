@@ -117,6 +117,8 @@ clearwing = [
     "core/config_data/*.yaml",
     "core/skills/vulnerabilities/*.md",
     "ui/web/static/**/*",
+    "sourcehunt/cyberpi_sidecar/*.mjs",
+    "sourcehunt/cyberpi_sidecar/package*.json",
 ]
 
 [tool.pytest.ini_options]

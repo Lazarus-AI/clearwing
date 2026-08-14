@@ -78,6 +78,7 @@ class FeatureFlags:
     exploit_mode: bool = False
     agent_mode: str = "auto"  # "auto" | "constrained" | "deep"
     prompt_mode: str = "unconstrained"  # "unconstrained" | "specialist"
+    hunt_engine: str = "native"  # "native" | "cyberpi"
 
 
 @dataclass(frozen=True)
