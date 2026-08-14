@@ -132,6 +132,16 @@ input for the next:
     writes pre-filled MITRE CVE-request and HackerOne templates for
     every verified finding `>= root_cause_explained`.
 
+Standalone legacy-flow resume is deliberately a memoization boundary, not a
+second workflow: `HunterPool` maps a deterministic `WorkItem` to an immutable
+completed `TargetResult`. Preprocessing runs normally, a valid complete rank
+plan keeps scheduling stable, and missing/corrupt work is simply a cache miss.
+Cached findings re-enter the ordinary findings pool and promotion logic; all
+verification, exploitation, enrichment, and reporting stages run normally.
+The append-only spend ledger supplies the lifetime session total and a session
+lock prevents concurrent writers. Campaign and proof flows retain their own
+orchestration and do not use this mechanism.
+
 ## The shared Finding type
 
 `clearwing.findings.Finding` is the single canonical finding

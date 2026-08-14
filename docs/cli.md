@@ -30,6 +30,7 @@ with `clearwing report` or `clearwing history`.
 
 ```bash
 clearwing sourcehunt <repo_url_or_path>
+  [--resume SESSION_ID]       # reuse completed hunter work from this session
   [--branch BRANCH]           # default: main
   [--depth quick|standard|deep]
   [--budget USD]              # default: unlimited; 0 = unlimited
@@ -52,6 +53,21 @@ clearwing sourcehunt <repo_url_or_path>
 
 See [LLM providers](providers.md) for the full precedence rules and
 provider-specific snippets.
+
+To continue an interrupted standalone legacy run, use the same output directory,
+repeat the original repository and hunt options, and add its session ID:
+
+```bash
+clearwing sourcehunt <repo_url_or_path> --resume sh-deadbeef [original hunt options]
+```
+
+Preprocessing reruns and rejects changed source files or hunt behavior. Completed
+file/band work (including zero-finding work) is reused; corrupt or unfinished work
+runs again. Ranking is reused only when its complete checkpoint is valid, while
+verification, exploitation, enrichment, and reports run normally. The original
+budget remains the lifetime session cap. Provider credentials, endpoint, model,
+and later-stage switches such as `--no-verify` and `--no-exploit` may change.
+Resume is not available for proof-flow, campaign-owned, or alternate-mode runs.
 
 Depths:
 - **`quick`** — preprocessor + ranker + static findings. No LLM

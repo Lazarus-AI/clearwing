@@ -53,6 +53,13 @@ from .poc_runner import build_rerun_poc_callback
 from .pool import HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
+from .resume import (
+    SourceHuntCheckpoint,
+    SourceHuntSessionLock,
+    fingerprint_invocation,
+    fingerprint_source,
+    session_directory,
+)
 from .state import (
     EvidenceLevel,
     FileTarget,
@@ -231,6 +238,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
+        resume_session_id: str | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
@@ -442,6 +450,10 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
+        if resume_session_id is not None and parent_session_id is not None:
+            raise ValueError("resume_session_id cannot be combined with parent_session_id")
+        if resume_session_id is not None and flow != "legacy":
+            raise ValueError("Sourcehunt resume currently supports only the legacy flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -511,7 +523,20 @@ class SourceHuntRunner:
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
-        self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._session_id = resume_session_id or parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._resume_session_id = resume_session_id
+        self._checkpoint: SourceHuntCheckpoint | None = None
+        self._session_lock: SourceHuntSessionLock | None = None
+        self._session_lock_held = False
+        if parent_session_id is None and flow == "legacy":
+            session_dir = session_directory(self.output_dir, self._session_id)
+            if resume_session_id is not None and not session_dir.is_dir():
+                raise ValueError(f"Sourcehunt session {resume_session_id!r} does not exist")
+            self._checkpoint = SourceHuntCheckpoint(
+                session_dir,
+                resuming=resume_session_id is not None,
+            )
+            self._session_lock = SourceHuntSessionLock(session_dir)
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -558,13 +583,69 @@ class SourceHuntRunner:
         self._retain_incomplete_certificates = retain_incomplete_certificates
         self._emit_rejection_certificates = emit_rejection_certificates
         self._falsify = falsify
-        self._instrumentation = SourceHuntInstrumentation(
-            Path(self.output_dir) / self._session_id,
-            self._session_id,
-        )
+        self.__instrumentation: SourceHuntInstrumentation | None = None
         self._instrumentation_finalized = False
         self._last_reporting_error: dict[str, str] | None = None
         self._on_progress = on_progress
+
+    @property
+    def _instrumentation(self) -> SourceHuntInstrumentation:
+        if self.__instrumentation is None:
+            self.__instrumentation = SourceHuntInstrumentation(
+                Path(self.output_dir) / self._session_id,
+                self._session_id,
+            )
+        return self.__instrumentation
+
+    def _acquire_session_lock(self) -> bool:
+        if self._session_lock is None or self._session_lock_held:
+            return False
+        self._session_lock.acquire()
+        self._session_lock_held = True
+        return True
+
+    def _release_session_lock(self) -> None:
+        if self._session_lock is not None and self._session_lock_held:
+            self._session_lock.release()
+            self._session_lock_held = False
+
+    def _invocation_fingerprint(self) -> str:
+        local_path = str(Path(self.local_path).resolve()) if self.local_path else None
+        return fingerprint_invocation(
+            {
+                "repo_url": self.repo_url,
+                "branch": self.branch,
+                "local_path": local_path,
+                "depth": self.depth,
+                "budget_usd": self.budget_usd,
+                "max_parallel": self.max_parallel,
+                "tier_budget": {
+                    "a": self.tier_budget.tier_a_fraction,
+                    "b": self.tier_budget.tier_b_fraction,
+                    "c": self.tier_budget.tier_c_fraction,
+                },
+                "agent_mode": self._agent_mode_override,
+                "prompt_mode": self._prompt_mode,
+                "campaign_hint": self._campaign_hint,
+                "exploit_mode": self._exploit_mode,
+                "starting_band": self._starting_band,
+                "max_band": self._max_band,
+                "redundancy": self._redundancy_override,
+                "shard_entry_points": self._shard_entry_points,
+                "min_shard_rank": self._min_shard_rank,
+                "min_project_loc": self._min_project_loc,
+                "seed_corpus_sources": self._seed_corpus_sources,
+                "seed_harness_crashes": self._seed_harness_crashes,
+                "preprocessing": self._preprocessing,
+                "respect_gitignore": self._respect_gitignore,
+                "no_rank": self._no_rank,
+                "no_per_file_hunt": self._no_per_file_hunt,
+                "findings_pool": self._enable_findings_pool,
+                "mechanism_memory": self.enable_mechanism_memory,
+                "gvisor_runtime": self._gvisor_runtime,
+                "sandbox_cpus": self._sandbox_cpus,
+            }
+        )
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -730,6 +811,7 @@ class SourceHuntRunner:
                 manifest_filename=(
                     "spend-summary.json" if self._flow == "proof" else "manifest.json"
                 ),
+                resume=self._resume_session_id is not None,
             )
         return self._spend_ledger
 
@@ -769,13 +851,18 @@ class SourceHuntRunner:
     def run(self) -> SourceHuntResult:
         from clearwing.ui.llm_activity import llm_activity_panel
 
-        self._ensure_spend_ledger()
-        with llm_activity_panel(
-            live=self._live,
-            budget_usd=self.budget_usd or None,
-            spend_ledger=self._spend_ledger,
-        ):
-            return asyncio.run(self.arun())
+        acquired = self._acquire_session_lock()
+        try:
+            self._ensure_spend_ledger()
+            with llm_activity_panel(
+                live=self._live,
+                budget_usd=self.budget_usd or None,
+                spend_ledger=self._spend_ledger,
+            ):
+                return asyncio.run(self.arun())
+        finally:
+            if acquired:
+                self._release_session_lock()
 
     async def _arun_proof_flow(self) -> SourceHuntResult:
         """Run the proof-carrying engine and adapt its typed output."""
@@ -1003,6 +1090,15 @@ class SourceHuntRunner:
         proof_result.output_paths.update(outputs)
 
     async def arun(self) -> SourceHuntResult:
+        acquired = self._acquire_session_lock()
+        try:
+            self._ensure_spend_ledger()
+            return await self._arun()
+        finally:
+            if acquired:
+                self._release_session_lock()
+
+    async def _arun(self) -> SourceHuntResult:
         if self._flow == "proof":
             try:
                 return await self._arun_proof_flow()
@@ -1035,12 +1131,20 @@ class SourceHuntRunner:
                 detail=f"Enumerated {files_ranked} files",
                 files=stage_files,
             )
+            rank_plan: list[dict[str, Any]] | None = None
+            if self._checkpoint is not None:
+                source_fingerprint = fingerprint_source(repo_path, files)
+                rank_plan = self._checkpoint.prepare(
+                    invocation_fingerprint=self._invocation_fingerprint(),
+                    source_fingerprint=source_fingerprint,
+                    source_paths=stage_files,
+                )
             self._ensure_sandbox_factory(repo_path, files)
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = (
                 None
-                if self._no_rank
+                if self._no_rank or rank_plan is not None
                 else self._get_native_client(
                     "ranker",
                     self.ranker_llm,
@@ -1053,7 +1157,17 @@ class SourceHuntRunner:
                 detail=f"{len(files)} files",
                 files=stage_files,
             )
-            if self._no_rank:
+            if rank_plan is not None:
+                self._checkpoint.apply_rank_plan(files, rank_plan)
+                logger.info("Restored complete rank plan from session checkpoint")
+                pipeline_status.record_succeeded("ranker")
+                self._emit_stage(
+                    "rank",
+                    "completed",
+                    detail=f"Restored ranks for {len(files)} files",
+                    files=stage_files,
+                )
+            elif self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
                 for ft in files:
                     ft["surface"] = ft.get("surface") or 3
@@ -1152,6 +1266,8 @@ class SourceHuntRunner:
                 ft["priority"] = ft.get("priority") or (
                     ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                 )
+            if self._checkpoint is not None and rank_plan is None:
+                self._checkpoint.save_rank_plan(files)
 
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
@@ -1284,7 +1400,11 @@ class SourceHuntRunner:
                 from .historical_findings_db import HistoricalFindingsDB
 
                 checkpoint_path = Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
-                findings_pool = FindingsPool(checkpoint_path=checkpoint_path)
+                findings_pool = (
+                    FindingsPool.from_checkpoint(checkpoint_path)
+                    if self._resume_session_id is not None
+                    else FindingsPool(checkpoint_path=checkpoint_path)
+                )
                 try:
                     historical_db = HistoricalFindingsDB(path=self._historical_db_path)
                     prior = historical_db.query_prior(repo_url=self.repo_url)
@@ -1358,6 +1478,7 @@ class SourceHuntRunner:
                         findings_pool=findings_pool,
                         trajectory_root=(Path(self.output_dir) / self._session_id / "trajectories"),
                         instrumentation=self._instrumentation,
+                        checkpoint=self._checkpoint,
                     )
                 )
                 try:

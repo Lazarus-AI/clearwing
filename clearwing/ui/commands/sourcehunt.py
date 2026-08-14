@@ -40,6 +40,12 @@ def add_parser(subparsers):
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", nargs="?", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        default=None,
+        help="Reuse completed hunter work from an existing standalone session",
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -672,6 +678,21 @@ def handle(cli, args):
         raise SystemExit(_handle_machine(args.machine_fd))
     if not args.repo:
         args._command_parser.error("the following arguments are required: repo")
+    if args.resume and args.flow != "legacy":
+        args._command_parser.error("--resume currently supports only --flow legacy")
+    if args.resume and any(
+        (
+            args.retro_hunt,
+            args.nday,
+            getattr(args, "reveng", False),
+            args.elaborate,
+            args.elaborate_auto,
+            args.calibrate,
+            args.webhook,
+            args.watch,
+        )
+    ):
+        args._command_parser.error("--resume cannot be combined with an alternate sourcehunt mode")
 
     from ...core.config import default_results_dir
     from ...providers import ProviderManager, resolve_llm_endpoint
@@ -1163,6 +1184,7 @@ def handle(cli, args):
         disclosure_reporter_email=args.reporter_email,
         model_override=args.model,
         provider_manager=provider_manager,
+        resume_session_id=args.resume,
         agent_mode=args.agent_mode,
         prompt_mode=args.prompt_mode,
         campaign_hint=args.campaign_hint,

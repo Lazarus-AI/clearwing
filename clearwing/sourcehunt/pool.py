@@ -72,19 +72,33 @@ class WorkItem:
     seed_transcript: str | None = None
     entry_point: Any = None  # EntryPoint | None — spec 004
     seed_context: str | None = None  # spec 004 seed corpus
+    context_id: str = ""  # hash of per-file seeded-crash/static prompt inputs
 
-    def stable_identifier(self, run_id: str) -> str:
+    def stable_identifier(self, run_id: str, tier: str = "") -> str:
         entry_point = self.entry_point
+        entry_point_id = (
+            {
+                "file": getattr(entry_point, "file_path", ""),
+                "function": getattr(entry_point, "function_name", ""),
+                "start": getattr(entry_point, "start_line", 0),
+                "end": getattr(entry_point, "end_line", 0),
+                "type": getattr(entry_point, "entry_type", ""),
+            }
+            if entry_point is not None
+            else None
+        )
         return stable_run_id(
             "work",
             {
                 "run_id": run_id,
                 "file": self.file_target.get("path", ""),
+                "tier": tier,
                 "band": self.band,
                 "attempt": self.attempt,
-                "entry_point": (
-                    getattr(entry_point, "function_name", "") if entry_point is not None else ""
-                ),
+                "entry_point": entry_point_id,
+                "seed_context": self.seed_context,
+                "seed_transcript": self.seed_transcript,
+                "context_id": self.context_id,
             },
         )
 
@@ -212,6 +226,7 @@ class HuntPoolConfig:
     findings_pool: Any = None  # FindingsPool | None — spec 005
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
+    checkpoint: Any = None  # SourceHuntCheckpoint | None
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -297,6 +312,11 @@ class HunterPool:
                 else []
             )
             seed_entries = self.config.seed_corpus_by_file.get(file_path, [])
+            context = {
+                "seeded_crash": self.config.seeded_crashes_by_file.get(file_path),
+                "static_hints": self.config.semgrep_hints_by_file.get(file_path, []),
+            }
+            context_id = stable_run_id("context", context) if any(context.values()) else ""
 
             if entry_points:
                 for ep in entry_points:
@@ -314,6 +334,7 @@ class HunterPool:
                                 attempt=attempt,
                                 entry_point=ep,
                                 seed_context=seed_ctx,
+                                context_id=context_id,
                             )
                         )
             else:
@@ -325,6 +346,7 @@ class HunterPool:
                             band=band,
                             attempt=attempt,
                             seed_context=seed_ctx,
+                            context_id=context_id,
                         )
                     )
         return items
@@ -448,7 +470,7 @@ class HunterPool:
             else None
         )
         spent = 0.0
-        in_flight: dict[asyncio.Task[TargetResult], WorkItem] = {}
+        in_flight: dict[asyncio.Future[TargetResult], tuple[WorkItem, str, bool]] = {}
         item_iter = iter(work_items)
         promotion_queue: list[WorkItem] = []
 
@@ -465,20 +487,35 @@ class HunterPool:
             if wi is None:
                 return False
             band_cost = self.config.band_budget.for_band(wi.band)
-            work_item_id = wi.stable_identifier(self.config.session_id_prefix)
-            task = asyncio.create_task(
-                self._run_file_task(
-                    wi.file_target,
-                    cost_limit=band_cost,
-                    tier=tier,
-                    band=wi.band,
-                    seed_transcript=wi.seed_transcript,
-                    entry_point=wi.entry_point,
-                    seed_context=wi.seed_context,
-                    work_item_id=work_item_id,
+            work_item_id = wi.stable_identifier(self.config.session_id_prefix, tier)
+            cached = self.config.checkpoint.load(work_item_id) if self.config.checkpoint else None
+            if cached is not None and (
+                cached.target != wi.file_target.get("path", "")
+                or cached.tier != tier
+                or cached.band != wi.band
+            ):
+                logger.warning("Ignoring mismatched cached hunter work %s", work_item_id)
+                cached = None
+            if cached is not None:
+                logger.info("Reusing completed hunter work for %s", wi.file_target.get("path", ""))
+                task = asyncio.get_running_loop().create_future()
+                task.set_result(cached)
+                from_cache = True
+            else:
+                task = asyncio.create_task(
+                    self._run_file_task(
+                        wi.file_target,
+                        cost_limit=band_cost,
+                        tier=tier,
+                        band=wi.band,
+                        seed_transcript=wi.seed_transcript,
+                        entry_point=wi.entry_point,
+                        seed_context=wi.seed_context,
+                        work_item_id=work_item_id,
+                    )
                 )
-            )
-            in_flight[task] = wi
+                from_cache = False
+            in_flight[task] = (wi, work_item_id, from_cache)
             return True
 
         for _ in range(max(1, self.config.max_parallel)):
@@ -498,7 +535,7 @@ class HunterPool:
                     timeout,
                     len(in_flight),
                 )
-                for task, wi in list(in_flight.items()):
+                for task, (wi, _work_item_id, _from_cache) in list(in_flight.items()):
                     task.cancel()
                     key = wi.file_target.get("path", "")
                     async with self._state_lock:
@@ -513,7 +550,7 @@ class HunterPool:
                 return spent
 
             for task in done:
-                wi = in_flight.pop(task)
+                wi, work_item_id, from_cache = in_flight.pop(task)
                 key = wi.file_target.get("path", "")
                 try:
                     result = await task
@@ -544,6 +581,19 @@ class HunterPool:
                         tier=tier,
                         band=wi.band,
                     )
+                if (
+                    result.status == "completed"
+                    and not from_cache
+                    and self.config.checkpoint is not None
+                ):
+                    try:
+                        self.config.checkpoint.save(work_item_id, result)
+                    except Exception:
+                        logger.warning(
+                            "Could not checkpoint completed work %s",
+                            work_item_id,
+                            exc_info=True,
+                        )
                 ep_suffix = f":{wi.entry_point.function_name}" if wi.entry_point else ""
                 async with self._state_lock:
                     self._results[f"{key}{ep_suffix}:{wi.band}:{wi.attempt}"] = result
@@ -624,6 +674,7 @@ class HunterPool:
                                 band=next_band,
                                 attempt=wi.attempt,
                                 seed_transcript=_extract_transcript(result),
+                                context_id=wi.context_id,
                             )
                         )
 

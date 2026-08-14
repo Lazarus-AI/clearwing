@@ -130,6 +130,7 @@ class SpendLedger:
         default_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         manifest_filename: str = "manifest.json",
         endpoint: LLMEndpoint | None = None,
+        resume: bool = False,
     ) -> None:
         if not math.isfinite(limit_usd) or limit_usd < 0:
             raise BudgetConfigurationError("LLM budget must be a finite value >= 0")
@@ -188,15 +189,132 @@ class SpendLedger:
         self.ledger_path = session_dir / "spend-ledger.jsonl"
         self.manifest_path = session_dir / manifest_filename
         with self._lock:
+            if resume:
+                self._restore_history_locked()
             self._persist_event_locked(
                 {
-                    "event": "run_started",
+                    "event": "run_resumed" if resume else "run_started",
                     "session_id": self.session_id,
                     "budget_usd": self.limit_usd,
+                    "carried_forward_usd": self._spent_usd,
                     "timestamp": self._timestamp(),
                 }
             )
             self._persist_snapshot_locked()
+
+    def _restore_history_locked(self) -> None:
+        """Restore settled calls and conservatively close interrupted reservations."""
+
+        if not self.ledger_path.is_file():
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is missing"
+            )
+        try:
+            lines = self.ledger_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is unreadable"
+            ) from exc
+
+        reservations: dict[str, dict[str, Any]] = {}
+        settlements: dict[str, dict[str, Any]] = {}
+        has_run_header = False
+        for index, line in enumerate(lines):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if index == len(lines) - 1:
+                    break
+                raise BudgetConfigurationError(
+                    f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+                ) from exc
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") in {"run_started", "run_resumed"}:
+                has_run_header = has_run_header or event.get("session_id") == self.session_id
+            call_id = str(event.get("call_id") or "")
+            if not call_id:
+                continue
+            if event.get("event") == "call_reserved":
+                reservations.setdefault(call_id, event)
+            elif event.get("event") == "call_settled":
+                settlements.setdefault(call_id, event)
+
+        if not has_run_header:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            )
+
+        for call_id in reservations.keys() | settlements.keys():
+            if call_id in settlements:
+                self._restore_settlement_locked(settlements[call_id])
+            else:
+                self._recover_reservation_locked(call_id, reservations[call_id])
+        if self.enforcing and self._spent_usd >= self.limit_usd - self._EPSILON:
+            self._exhausted = True
+            self._status = "budget_exhausted"
+
+    def _restore_settlement_locked(self, event: dict[str, Any]) -> None:
+        try:
+            cost = float(event["cost_usd"])
+            input_tokens = int(event.get("input_tokens", 0))
+            output_tokens = int(event.get("output_tokens", 0))
+            cached_tokens = int(event.get("cached_input_tokens", 0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            ) from exc
+        if (
+            not math.isfinite(cost)
+            or min(cost, input_tokens, output_tokens, cached_tokens) < 0
+        ):
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            )
+        if not isinstance(event.get("metadata"), dict):
+            event = {**event, "metadata": {}}
+        self._records.append(event)
+        self._spent_usd += cost
+        self._input_tokens += input_tokens
+        self._output_tokens += output_tokens
+        self._cached_input_tokens += cached_tokens
+
+    def _recover_reservation_locked(
+        self, call_id: str, reservation: dict[str, Any]
+    ) -> None:
+        try:
+            reserved_usd = float(reservation["reserved_usd"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            ) from exc
+        if not math.isfinite(reserved_usd) or reserved_usd < 0:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            )
+        charged = reserved_usd if reservation.get("budget_enforcing", reserved_usd > 0) else 0.0
+        event = {
+            "event": "call_settled",
+            "call_id": call_id,
+            "timestamp": self._timestamp(),
+            "stage": reservation.get("stage"),
+            "model": reservation.get("model"),
+            "provider": reservation.get("provider"),
+            "status": "recovered_ambiguous_failure",
+            "reserved_usd": reserved_usd,
+            "cost_usd": charged,
+            "cost_source": "reservation" if charged else "none",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "metadata": (
+                reservation["metadata"] if isinstance(reservation.get("metadata"), dict) else {}
+            ),
+            "error": "Process exited before spend settlement; charged on resume",
+        }
+        self._records.append(event)
+        self._spent_usd += charged
+        self._persist_event_locked(event)
 
     @property
     def enforcing(self) -> bool:
@@ -349,6 +467,7 @@ class SpendLedger:
                     "stage": stage,
                     "model": model,
                     "provider": provider,
+                    "budget_enforcing": self.enforcing,
                     "reserved_usd": reserved_usd,
                     "input_token_upper_bound": input_token_upper_bound,
                     "max_output_tokens": effective_max_tokens,
