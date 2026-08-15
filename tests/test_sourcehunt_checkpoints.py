@@ -3,8 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from clearwing.analysis.source_analyzer import AnalyzerFinding
+from clearwing.findings.types import Finding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
-from clearwing.sourcehunt.checkpoints import PreprocessCheckpointStore, RankCheckpointStore
+from clearwing.sourcehunt.checkpoints import (
+    HuntCheckpointStore,
+    HuntResult,
+    PreprocessCheckpointStore,
+    RankCheckpointStore,
+    ranked_targets_digest,
+)
+from clearwing.sourcehunt.findings_pool import FindingsPool
 from clearwing.sourcehunt.preprocessor import PreprocessResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.taint import TaintPath
@@ -109,6 +117,112 @@ def test_rank_checkpoint_round_trips_exact_ranked_targets(tmp_path: Path):
     ) is None
 
 
+def test_hunt_checkpoint_round_trips_completed_result(tmp_path: Path):
+    store = HuntCheckpointStore(tmp_path / "sh-test", "sh-test")
+    finding = Finding(
+        id="f-test",
+        file="sample.c",
+        line_number=2,
+        finding_type="command_injection",
+        severity="high",
+        evidence_level="static_corroboration",
+        primitive_type="command_execution",
+        cluster_id="cluster-1",
+    )
+    result = HuntResult(
+        findings=[finding],
+        files_hunted=3,
+        spent_per_tier={"A": 1.25, "B": 0.0, "C": 0.0},
+        band_stats={"fast_runs": 3},
+        subsystems_hunted=1,
+        subsystem_spent_usd=0.5,
+    )
+    options = {"depth": "standard", "model": "test-model"}
+
+    store.save(
+        result,
+        status="completed",
+        ranked_targets_digest="ranked-sha",
+        options=options,
+    )
+    restored = store.load(
+        ranked_targets_digest="ranked-sha",
+        options=options,
+    )
+
+    assert restored is not None
+    assert isinstance(restored.findings[0], Finding)
+    assert restored.findings[0].id == "f-test"
+    assert restored.files_hunted == 3
+    assert store.last_status == "completed"
+
+
+def test_hunt_checkpoint_restores_budget_exhausted_terminal_state(tmp_path: Path):
+    store = HuntCheckpointStore(tmp_path / "sh-test", "sh-test")
+    result = HuntResult(
+        findings=[Finding(id="f-partial", file="sample.c")],
+        files_hunted=1,
+        spent_per_tier={"A": 2.0, "B": 0.0, "C": 0.0},
+    )
+
+    store.save(
+        result,
+        status="budget_exhausted",
+        ranked_targets_digest="ranked-sha",
+        options={},
+    )
+
+    assert store.load(ranked_targets_digest="ranked-sha", options={}) is not None
+    assert store.last_status == "budget_exhausted"
+
+
+def test_hunt_checkpoint_rejects_changed_rank_or_options(tmp_path: Path):
+    store = HuntCheckpointStore(tmp_path / "sh-test", "sh-test")
+    result = HuntResult(
+        findings=[],
+        spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+    )
+    store.save(
+        result,
+        status="completed",
+        ranked_targets_digest="ranked-sha",
+        options={"depth": "standard"},
+    )
+
+    assert (
+        store.load(
+            ranked_targets_digest="changed",
+            options={"depth": "standard"},
+        )
+        is None
+    )
+    assert (
+        store.load(
+            ranked_targets_digest="ranked-sha",
+            options={"depth": "deep"},
+        )
+        is None
+    )
+
+
+def test_findings_pool_restore_completed_does_not_append_checkpoint(tmp_path: Path):
+    checkpoint = tmp_path / "findings.jsonl"
+    pool = FindingsPool(checkpoint_path=checkpoint)
+    finding = Finding(
+        id="f-test",
+        file="sample.c",
+        description="restored",
+        primitive_type="memory_corruption",
+        cluster_id="cluster-1",
+    )
+
+    pool.restore_completed([finding])
+
+    assert pool.all_findings() == [finding]
+    assert pool.clusters()[0].finding_ids == ["f-test"]
+    assert not checkpoint.exists()
+
+
 def test_runner_uses_resume_session_id(tmp_path: Path):
     (tmp_path / "sh-existing").mkdir()
     runner = SourceHuntRunner(
@@ -179,3 +293,57 @@ def test_runner_rejects_missing_resume_session(tmp_path: Path):
         assert "does not exist" in str(exc)
     else:
         raise AssertionError("missing resume session was accepted")
+
+
+def test_runner_resumes_at_end_of_hunt_without_starting_hunters(
+    tmp_path: Path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    output = tmp_path / "results"
+    common = {
+        "repo_url": str(repo),
+        "local_path": str(repo),
+        "output_dir": str(output),
+        "depth": "standard",
+        "no_rank": True,
+        "no_verify": True,
+        "no_exploit": True,
+        "enable_findings_pool": False,
+        "enable_mechanism_memory": False,
+        "enable_calibration": False,
+        "enable_behavior_monitor": False,
+        "enable_variant_loop": False,
+        "enable_knowledge_graph": False,
+    }
+    first = SourceHuntRunner(parent_session_id="sh-resume-hunt", **common)
+    preprocessed = first._preprocess()
+    for target in preprocessed.file_targets:
+        target["surface"] = 3
+        target["influence"] = 2
+        target["reachability"] = 3
+        target["priority"] = 2.8
+    HuntCheckpointStore(
+        output / "sh-resume-hunt", "sh-resume-hunt"
+    ).save(
+        HuntResult(
+            findings=[Finding(id="f-restored", file="sample.c")],
+            files_hunted=1,
+            spent_per_tier={"A": 1.0, "B": 0.0, "C": 0.0},
+        ),
+        status="budget_exhausted",
+        ranked_targets_digest=ranked_targets_digest(preprocessed.file_targets),
+        options=first._hunt_checkpoint_options(),
+    )
+
+    resumed = SourceHuntRunner(resume_session_id="sh-resume-hunt", **common)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("hunt setup ran instead of restoring its checkpoint")
+
+    monkeypatch.setattr(resumed, "_ensure_sandbox_factory", fail_if_called)
+    result = resumed.run()
+
+    assert [finding.id for finding in result.findings] == ["f-restored"]
+    assert result.files_hunted == 1

@@ -11,12 +11,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from clearwing.findings.types import Finding
+
 from .preprocessor import PreprocessResult
 
 PREPROCESS_CHECKPOINT_SCHEMA_VERSION = 1
 PREPROCESSOR_VERSION = 1
 RANK_CHECKPOINT_SCHEMA_VERSION = 1
 RANKER_VERSION = 1
+HUNT_CHECKPOINT_SCHEMA_VERSION = 1
+HUNTER_VERSION = 1
 
 
 class PreprocessFingerprint(BaseModel):
@@ -227,6 +231,118 @@ class RankCheckpointStore:
             metrics={"files": len(files)},
         )
         PreprocessCheckpointStore._atomic_write(self.result_path, payload)
+        PreprocessCheckpointStore._atomic_write(
+            self.envelope_path,
+            envelope.model_dump_json(indent=2).encode("utf-8"),
+        )
+
+
+def ranked_targets_digest(files: list[dict]) -> str:
+    payload = json.dumps(files, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class HuntResult(BaseModel):
+    """Complete hand-off from the hunt stage to verification."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    findings: list[Finding]
+    files_hunted: int = 0
+    spent_per_tier: dict[str, float]
+    band_stats: dict[str, Any] | None = None
+    subsystems_hunted: int = 0
+    subsystem_spent_usd: float = 0.0
+
+
+class HuntFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ranked_targets_digest: str
+    options: dict[str, Any]
+    hunter_version: Literal[1] = HUNTER_VERSION
+
+
+class HuntCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = HUNT_CHECKPOINT_SCHEMA_VERSION
+    stage: Literal["hunt"] = "hunt"
+    status: Literal["completed", "budget_exhausted"]
+    session_id: str
+    fingerprint: HuntFingerprint
+    result_path: Literal["result.json"] = "result.json"
+    result_sha256: str
+    metrics: dict[str, int | float]
+
+
+class HuntCheckpointStore:
+    """Persist and restore a terminal hunt result.
+
+    Both a normally completed hunt and a hunt stopped by the run budget are
+    terminal, restorable states. Mid-hunt state is deliberately not modeled.
+    """
+
+    def __init__(self, session_dir: Path, session_id: str):
+        self.directory = session_dir / "checkpoints" / "hunt"
+        self.session_id = session_id
+        self.envelope_path = self.directory / "checkpoint.json"
+        self.result_path = self.directory / "result.json"
+        self.last_status: Literal["completed", "budget_exhausted"] | None = None
+
+    def load(
+        self,
+        *,
+        ranked_targets_digest: str,
+        options: dict[str, Any],
+    ) -> HuntResult | None:
+        self.last_status = None
+        try:
+            envelope = HuntCheckpoint.model_validate_json(
+                self.envelope_path.read_text(encoding="utf-8")
+            )
+            if envelope.session_id != self.session_id:
+                return None
+            if envelope.fingerprint.ranked_targets_digest != ranked_targets_digest:
+                return None
+            if envelope.fingerprint.options != options:
+                return None
+            payload = (self.directory / envelope.result_path).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
+                return None
+            result = HuntResult.model_validate_json(payload)
+            self.last_status = envelope.status
+            return result
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def save(
+        self,
+        result: HuntResult,
+        *,
+        status: Literal["completed", "budget_exhausted"],
+        ranked_targets_digest: str,
+        options: dict[str, Any],
+    ) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        payload = result.model_dump_json(indent=2).encode("utf-8")
+        envelope = HuntCheckpoint(
+            status=status,
+            session_id=self.session_id,
+            fingerprint=HuntFingerprint(
+                ranked_targets_digest=ranked_targets_digest,
+                options=options,
+            ),
+            result_sha256=hashlib.sha256(payload).hexdigest(),
+            metrics={
+                "findings": len(result.findings),
+                "files_hunted": result.files_hunted,
+                "subsystems_hunted": result.subsystems_hunted,
+                "subsystem_spent_usd": result.subsystem_spent_usd,
+            },
+        )
+        PreprocessCheckpointStore._atomic_write(self.result_path, payload)
+        # The envelope is written last and acts as the completed-stage marker.
         PreprocessCheckpointStore._atomic_write(
             self.envelope_path,
             envelope.model_dump_json(indent=2).encode("utf-8"),

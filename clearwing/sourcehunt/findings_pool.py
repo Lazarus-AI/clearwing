@@ -227,6 +227,32 @@ class FindingsPool:
     def all_findings(self) -> list[Finding]:
         return list(self._findings.values())
 
+    def restore_completed(self, findings: list[Finding]) -> None:
+        """Hydrate a completed hunt without replaying live add side effects.
+
+        The end-of-hunt checkpoint is already deduplicated and classified, so
+        restoring it must not append duplicate JSONL entries or invoke the LLM.
+        """
+
+        self._findings = {finding.id: finding for finding in findings}
+        self._clusters = {}
+        for finding in findings:
+            cluster_id = finding.cluster_id
+            if not cluster_id:
+                continue
+            cluster = self._clusters.get(cluster_id)
+            if cluster is None:
+                cluster = FindingCluster(
+                    cluster_id=cluster_id,
+                    root_cause_summary=finding.description,
+                    primitive_type=finding.primitive_type,
+                    cwe=finding.cwe,
+                )
+                self._clusters[cluster_id] = cluster
+            cluster.finding_ids.append(finding.id)
+            if finding.file:
+                cluster.file_paths.add(finding.file)
+
     def clusters(self) -> list[FindingCluster]:
         return list(self._clusters.values())
 

@@ -35,7 +35,13 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
-from .checkpoints import PreprocessCheckpointStore, RankCheckpointStore
+from .checkpoints import (
+    HuntCheckpointStore,
+    HuntResult,
+    PreprocessCheckpointStore,
+    RankCheckpointStore,
+    ranked_targets_digest,
+)
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -1068,10 +1074,6 @@ class SourceHuntRunner:
                 ),
                 files=stage_files,
             )
-            _t = time.monotonic()
-            self._ensure_sandbox_factory(repo_path, files)
-            logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
-
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = (
                 None
@@ -1236,6 +1238,32 @@ class SourceHuntRunner:
                     ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                 )
 
+            hunt_options = self._hunt_checkpoint_options()
+            ranked_digest = ranked_targets_digest(files)
+            hunt_store = HuntCheckpointStore(
+                Path(self.output_dir) / self._session_id,
+                self._session_id,
+            )
+            restored_hunt = None
+            if self._resume_session_id and self.depth != "quick":
+                restored_hunt = hunt_store.load(
+                    ranked_targets_digest=ranked_digest,
+                    options=hunt_options,
+                )
+                if restored_hunt is not None:
+                    logger.info(
+                        "Restored %s hunt result from session %s",
+                        hunt_store.last_status,
+                        self._session_id,
+                    )
+
+            # Hunt needs a sandbox; a restored hunt only needs one when a
+            # downstream verification or exploitation phase will use it.
+            if restored_hunt is None or not self.no_verify or not self.no_exploit:
+                _t = time.monotonic()
+                self._ensure_sandbox_factory(repo_path, files)
+                logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
+
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
                 return self._build_quick_result(
@@ -1251,7 +1279,7 @@ class SourceHuntRunner:
             seeded_crashes: list[SeededCrash] = []
             if (
                 self.depth == "deep" or self._seed_harness_crashes
-            ) and not self._budget_exhausted():
+            ) and restored_hunt is None and not self._budget_exhausted():
                 harness_llm = self._get_native_client(
                     "hunter",
                     self.hunter_llm,
@@ -1304,7 +1332,7 @@ class SourceHuntRunner:
             # v0.3: Recall cross-run mechanisms and inject them into every hunter's
             # hint list as a synthetic entry. The hunter's prompt wraps these in
             # "static analysis hints — NOT ground truth" framing.
-            if self._mechanism_store is not None:
+            if restored_hunt is None and self._mechanism_store is not None:
                 mechanism_hints = self._recalled_mechanism_hints(files)
                 if mechanism_hints:
                     for ft in files:
@@ -1313,7 +1341,11 @@ class SourceHuntRunner:
 
             # 2.7. Entry-point extraction (spec 004)
             entry_points_by_file: dict = {}
-            if self._shard_entry_points and preprocess_result.callgraph is not None:
+            if (
+                restored_hunt is None
+                and self._shard_entry_points
+                and preprocess_result.callgraph is not None
+            ):
                 total_loc = sum(ft.get("loc", 0) for ft in files)
                 if total_loc >= self._min_project_loc:
                     try:
@@ -1334,7 +1366,7 @@ class SourceHuntRunner:
 
             # 2.8. Seed corpus ingestion (spec 004)
             seed_corpus_by_file: dict = {}
-            if self._seed_corpus_sources:
+            if restored_hunt is None and self._seed_corpus_sources:
                 try:
                     from .seed_corpus import ingest_seed_corpus
 
@@ -1368,25 +1400,39 @@ class SourceHuntRunner:
 
                 checkpoint_path = Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
                 findings_pool = FindingsPool(checkpoint_path=checkpoint_path)
-                try:
-                    historical_db = HistoricalFindingsDB(path=self._historical_db_path)
-                    prior = historical_db.query_prior(repo_url=self.repo_url)
-                    if prior:
-                        logger.info("Loaded %d historical findings for dedup", len(prior))
-                except Exception:
-                    logger.warning("Historical findings DB load failed", exc_info=True)
-                    historical_db = None
+                if restored_hunt is None:
+                    try:
+                        historical_db = HistoricalFindingsDB(path=self._historical_db_path)
+                        prior = historical_db.query_prior(repo_url=self.repo_url)
+                        if prior:
+                            logger.info("Loaded %d historical findings for dedup", len(prior))
+                    except Exception:
+                        logger.warning("Historical findings DB load failed", exc_info=True)
+                        historical_db = None
 
             # 3. Tiered hunt
-            hunter_llm = self._get_native_client(
-                "hunter",
-                self.hunter_llm,
-                budget_stage="hunt",
+            hunter_llm = (
+                None
+                if restored_hunt is not None
+                else self._get_native_client(
+                    "hunter",
+                    self.hunter_llm,
+                    budget_stage="hunt",
+                )
             )
             all_findings: list[Finding] = []
             files_hunted = 0
             spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
             band_stats: dict | None = None
+            hunt_failed = False
+            hunt_budget_exhausted = False
+            if restored_hunt is not None:
+                all_findings = list(restored_hunt.findings)
+                files_hunted = restored_hunt.files_hunted
+                spent_per_tier = dict(restored_hunt.spent_per_tier)
+                band_stats = restored_hunt.band_stats
+                if findings_pool is not None:
+                    findings_pool.restore_completed(all_findings)
             hunt_symbols = sorted(
                 {
                     str(getattr(entry_point, "function_name", "") or "")
@@ -1396,7 +1442,28 @@ class SourceHuntRunner:
                 }
             )
 
-            if self._no_per_file_hunt:
+            if restored_hunt is not None:
+                restored_status = hunt_store.last_status or "completed"
+                if restored_status == "budget_exhausted":
+                    pipeline_status.record(
+                        "hunter_pool",
+                        StageOutcome.SKIPPED,
+                        fallback_description=(
+                            "Restored partial hunter results saved at budget exhaustion"
+                        ),
+                    )
+                else:
+                    pipeline_status.record_succeeded("hunter_pool")
+                self._emit_stage(
+                    "hunt",
+                    restored_status,
+                    findings_so_far=len(all_findings),
+                    detail=f"Restored {len(all_findings)} findings from checkpoint",
+                    files=[str(finding.file or "") for finding in all_findings],
+                    symbols=self._finding_symbols(all_findings),
+                    finding_ids=[finding.id for finding in all_findings],
+                )
+            elif self._no_per_file_hunt:
                 logger.info("Per-file hunt skipped (--no-per-file-hunt)")
                 self._emit_stage(
                     "hunt",
@@ -1447,6 +1514,7 @@ class SourceHuntRunner:
                     all_findings = await pool.arun()
                     logger.info("HunterPool completed with %d findings", len(all_findings))
                     if pool.budget_exhausted or self._budget_exhausted():
+                        hunt_budget_exhausted = True
                         pipeline_status.record(
                             "hunter_pool",
                             StageOutcome.SKIPPED,
@@ -1475,6 +1543,7 @@ class SourceHuntRunner:
                             finding_ids=[finding.id for finding in all_findings],
                         )
                 except BudgetExceeded:
+                    hunt_budget_exhausted = True
                     logger.info("HunterPool stopped because the run budget is exhausted")
                     pipeline_status.record(
                         "hunter_pool",
@@ -1490,6 +1559,7 @@ class SourceHuntRunner:
                         finding_ids=[finding.id for finding in all_findings],
                     )
                 except Exception as exc:
+                    hunt_failed = True
                     logger.warning("HunterPool run failed", exc_info=True)
                     pipeline_status.record_degraded(
                         "hunter_pool",
@@ -1521,11 +1591,13 @@ class SourceHuntRunner:
                     hunt_status = "skipped"
                     hunt_detail = "No source files were available"
                 elif self._budget_exhausted():
+                    hunt_budget_exhausted = True
                     hunt_status = "budget_exhausted"
                     hunt_detail = "Run budget was exhausted before hunting"
                 else:
                     hunt_status = "degraded"
                     hunt_detail = "No hunter model was available"
+                    hunt_failed = True
                 self._emit_stage(
                     "hunt",
                     hunt_status,
@@ -1535,7 +1607,7 @@ class SourceHuntRunner:
                 )
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
-            if self._enable_behavior_monitor and all_findings:
+            if restored_hunt is None and self._enable_behavior_monitor and all_findings:
                 try:
                     from .behavior_monitor import BehaviorMonitor
 
@@ -1557,11 +1629,17 @@ class SourceHuntRunner:
 
             # Promote static findings into the all_findings list so depth=quick
             # output is still useful when no hunter llm is available
-            all_findings = self._merge_static_findings(all_findings, preprocess_result)
+            if restored_hunt is None:
+                all_findings = self._merge_static_findings(all_findings, preprocess_result)
 
             # 3.5. Persist findings to historical DB (spec 005)
             # Skip when running under campaign — campaign handles bulk ingestion.
-            if historical_db is not None and all_findings and self._injected_findings_pool is None:
+            if (
+                restored_hunt is None
+                and historical_db is not None
+                and all_findings
+                and self._injected_findings_pool is None
+            ):
                 try:
                     count = historical_db.ingest_campaign(
                         all_findings,
@@ -1575,9 +1653,15 @@ class SourceHuntRunner:
                     historical_db.close()
 
             # 3.7. Subsystem hunt (spec 006)
-            subsystems_hunted = 0
-            subsystem_spent = 0.0
-            if self._enable_subsystem_hunt and hunter_llm is not None and self._budget_exhausted():
+            subsystems_hunted = (
+                restored_hunt.subsystems_hunted if restored_hunt is not None else 0
+            )
+            subsystem_spent = (
+                restored_hunt.subsystem_spent_usd if restored_hunt is not None else 0.0
+            )
+            if restored_hunt is not None:
+                pass
+            elif self._enable_subsystem_hunt and hunter_llm is not None and self._budget_exhausted():
                 logger.info(
                     "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
                     self.budget_usd,
@@ -1719,6 +1803,7 @@ class SourceHuntRunner:
                             finding_ids=[finding.id for finding in subsys_findings],
                         )
                     except Exception as exc:
+                        hunt_failed = True
                         logger.warning("Subsystem hunt failed", exc_info=True)
                         pipeline_status.record_degraded(
                             "subsystem_hunt",
@@ -1731,6 +1816,30 @@ class SourceHuntRunner:
                             symbols=subsystem_symbols,
                             error={"type": type(exc).__name__, "message": str(exc)},
                         )
+
+            if restored_hunt is None and not hunt_failed:
+                hunt_status = (
+                    "budget_exhausted"
+                    if hunt_budget_exhausted or self._budget_exhausted()
+                    else "completed"
+                )
+                hunt_result = HuntResult(
+                    findings=all_findings,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                )
+                try:
+                    hunt_store.save(
+                        hunt_result,
+                        status=hunt_status,
+                        ranked_targets_digest=ranked_digest,
+                        options=hunt_options,
+                    )
+                except Exception:
+                    logger.warning("Could not persist hunt checkpoint", exc_info=True)
 
             # 4. Verify (unless --no-verify)
             verified: list[Finding] = []
@@ -2751,6 +2860,33 @@ class SourceHuntRunner:
         except Exception:
             logger.warning("Could not persist preprocess checkpoint", exc_info=True)
         return result
+
+    def _hunt_checkpoint_options(self) -> dict[str, Any]:
+        """Return every configured input that can change hunt output."""
+
+        return {
+            "depth": self.depth,
+            "agent_mode": self._effective_agent_mode,
+            "prompt_mode": self._prompt_mode,
+            "model": self.model_override or "",
+            "max_parallel": self.max_parallel,
+            "tier_budget": vars(self.tier_budget),
+            "starting_band": self._starting_band,
+            "max_band": self._max_band,
+            "redundancy_override": self._redundancy_override,
+            "no_per_file_hunt": self._no_per_file_hunt,
+            "enable_subsystem_hunt": self._enable_subsystem_hunt,
+            "subsystem_paths": sorted(self._subsystem_paths or []),
+            "subsystem_max_files": self._subsystem_max_files,
+            "subsystem_max_parallel": self._subsystem_max_parallel,
+            "shard_entry_points": self._shard_entry_points,
+            "min_shard_rank": self._min_shard_rank,
+            "min_project_loc": self._min_project_loc,
+            "seed_corpus_sources": sorted(self._seed_corpus_sources or []),
+            "seed_harness_crashes": self._seed_harness_crashes,
+            "campaign_hint": self._campaign_hint or "",
+            "exploit_mode": self._exploit_mode,
+        }
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
