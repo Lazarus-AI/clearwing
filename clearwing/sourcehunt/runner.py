@@ -36,11 +36,17 @@ from clearwing.providers import (
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
+    ExploitationCheckpointStore,
+    ExploitationResult,
     HuntCheckpointStore,
     HuntResult,
     PreprocessCheckpointStore,
     RankCheckpointStore,
+    VerificationCheckpointStore,
+    VerificationResult,
+    findings_digest,
     ranked_targets_digest,
+    verification_result_digest,
 )
 from .config import SourceHuntConfig
 from .disclosure import (
@@ -1842,19 +1848,59 @@ class SourceHuntRunner:
                     logger.warning("Could not persist hunt checkpoint", exc_info=True)
 
             # 4. Verify (unless --no-verify)
+            verify_input_digest = findings_digest(all_findings)
+            verify_options = self._verification_checkpoint_options()
+            verify_store = VerificationCheckpointStore(
+                Path(self.output_dir) / self._session_id,
+                self._session_id,
+            )
+            restored_verification = None
+            if self._resume_session_id:
+                restored_verification = verify_store.load(
+                    hunt_findings_digest=verify_input_digest,
+                    options=verify_options,
+                )
             verified: list[Finding] = []
             rejected: list[Finding] = []
             verify_status = "completed"
-            self._emit_stage(
-                "verify",
-                "started",
-                findings_so_far=len(all_findings),
-                detail=f"{len(all_findings)} findings to verify",
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-            )
-            if not self.no_verify:
+            if restored_verification is not None:
+                all_findings = list(restored_verification.findings)
+                verified = self._canonical_finding_subset(
+                    all_findings, restored_verification.verified_findings
+                )
+                rejected = self._canonical_finding_subset(
+                    all_findings, restored_verification.rejected_findings
+                )
+                verify_status = verify_store.last_status or "completed"
+                logger.info(
+                    "Restored %s verification result from session %s",
+                    verify_status,
+                    self._session_id,
+                )
+            else:
+                self._emit_stage(
+                    "verify",
+                    "started",
+                    findings_so_far=len(all_findings),
+                    detail=f"{len(all_findings)} findings to verify",
+                    files=[str(finding.file or "") for finding in all_findings],
+                    symbols=self._finding_symbols(all_findings),
+                    finding_ids=[finding.id for finding in all_findings],
+                )
+            if restored_verification is not None:
+                if verify_status == "degraded":
+                    pipeline_status.record_degraded(
+                        "verifier", "Restored degraded verification result"
+                    )
+                elif verify_status in {"skipped", "budget_exhausted"}:
+                    pipeline_status.record(
+                        "verifier",
+                        StageOutcome.SKIPPED,
+                        fallback_description=f"Restored {verify_status} verification result",
+                    )
+                else:
+                    pipeline_status.record_succeeded("verifier")
+            elif not self.no_verify:
                 if self._budget_exhausted():
                     verify_status = "budget_exhausted"
                     pipeline_status.record(
@@ -1901,7 +1947,9 @@ class SourceHuntRunner:
                 )
 
             verify_detail = (
-                "Verification skipped (--no-verify)"
+                f"Restored {len(verified)} verified and {len(rejected)} rejected from checkpoint"
+                if restored_verification is not None
+                else "Verification skipped (--no-verify)"
                 if self.no_verify
                 else f"{len(verified)} verified, {len(rejected)} rejected"
             )
@@ -1914,12 +1962,17 @@ class SourceHuntRunner:
                 symbols=self._finding_symbols(all_findings),
                 finding_ids=[finding.id for finding in all_findings],
             )
-            if rejected:
+            if rejected and restored_verification is None:
                 self._write_rejected_findings(rejected)
 
             # 4.5. v0.3: Extract mechanisms from verified findings and persist them
             #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
-            if self._mechanism_store is not None and verified and not self._budget_exhausted():
+            if (
+                restored_verification is None
+                and self._mechanism_store is not None
+                and verified
+                and not self._budget_exhausted()
+            ):
                 verifier_llm_for_extract = self._get_native_client(
                     "verifier",
                     self.verifier_llm,
@@ -1947,7 +2000,12 @@ class SourceHuntRunner:
             #       match as a new suspicion-level finding linked back to the
             #       original. v0.3 scope: we surface the matches in the report;
             #       we don't re-spawn hunters on each match (that's a v1.0 pass).
-            if self.enable_variant_loop and verified and not self._budget_exhausted():
+            if (
+                restored_verification is None
+                and self.enable_variant_loop
+                and verified
+                and not self._budget_exhausted()
+            ):
                 variant_llm = self._get_native_client(
                     "verifier",
                     self.verifier_llm,
@@ -2022,7 +2080,8 @@ class SourceHuntRunner:
             # 4.9. Stage 2.5: PoC stability verification (spec 010).
             # Rerun PoCs in fresh containers to measure reliability.
             if (
-                self.enable_stability_verification
+                restored_verification is None
+                and self.enable_stability_verification
                 and verified
                 and self._sandbox_manager is not None
                 and not self._budget_exhausted()
@@ -2074,20 +2133,69 @@ class SourceHuntRunner:
                 non_poc = [f for f in verified if f not in stability_eligible]
                 verified = stable_verified + non_poc
 
-            # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
-            self._emit_stage(
-                "exploit",
-                "started",
-                findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in verified],
-                symbols=self._finding_symbols(verified),
-                finding_ids=[finding.id for finding in verified],
+            verification_result = VerificationResult(
+                findings=all_findings,
+                verified_findings=verified,
+                rejected_findings=rejected,
             )
+            if restored_verification is None:
+                verify_checkpoint_status = (
+                    "skipped" if self.no_verify else verify_status
+                )
+                try:
+                    verify_store.save(
+                        verification_result,
+                        status=verify_checkpoint_status,
+                        hunt_findings_digest=verify_input_digest,
+                        options=verify_options,
+                    )
+                except Exception:
+                    logger.warning("Could not persist verification checkpoint", exc_info=True)
+
+            # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
+            exploit_input_digest = verification_result_digest(verification_result)
+            exploit_options = self._exploitation_checkpoint_options()
+            exploit_store = ExploitationCheckpointStore(
+                Path(self.output_dir) / self._session_id,
+                self._session_id,
+            )
+            restored_exploitation = None
+            if self._resume_session_id:
+                restored_exploitation = exploit_store.load(
+                    verification_result_digest=exploit_input_digest,
+                    options=exploit_options,
+                )
             exploited: list[Finding] = []
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
             patched: list[Finding] = []
-            if not self.no_exploit and not self._budget_exhausted():
+            if restored_exploitation is not None:
+                all_findings = list(restored_exploitation.findings)
+                verified = self._canonical_finding_subset(
+                    all_findings, restored_exploitation.verified_findings
+                )
+                exploited = self._canonical_finding_subset(
+                    all_findings, restored_exploitation.exploited_findings
+                )
+                logger.info(
+                    "Restored %s exploitation result from session %s",
+                    exploit_store.last_status or "completed",
+                    self._session_id,
+                )
+            else:
+                self._emit_stage(
+                    "exploit",
+                    "started",
+                    findings_so_far=len(all_findings),
+                    files=[str(finding.file or "") for finding in verified],
+                    symbols=self._finding_symbols(verified),
+                    finding_ids=[finding.id for finding in verified],
+                )
+            if (
+                restored_exploitation is None
+                and not self.no_exploit
+                and not self._budget_exhausted()
+            ):
                 exploiter_llm = self._get_native_client(
                     "sourcehunt_exploit",
                     self.exploiter_llm,
@@ -2154,7 +2262,12 @@ class SourceHuntRunner:
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
-            if self.enable_elaboration and exploited and not self._budget_exhausted():
+            if (
+                restored_exploitation is None
+                and self.enable_elaboration
+                and exploited
+                and not self._budget_exhausted()
+            ):
                 from .elaboration import (
                     ElaborationAgent,
                     prioritize_for_elaboration,
@@ -2212,7 +2325,12 @@ class SourceHuntRunner:
             # 5.5. v0.3: Auto-patch mode (opt-in).
             # The verify-by-recompile gate is MANDATORY — a patch is only marked
             # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
-            if self.enable_auto_patch and verified and not self._budget_exhausted():
+            if (
+                restored_exploitation is None
+                and self.enable_auto_patch
+                and verified
+                and not self._budget_exhausted()
+            ):
                 patcher_llm = self._get_native_client(
                     "sourcehunt_exploit",
                     self.exploiter_llm,
@@ -2263,13 +2381,17 @@ class SourceHuntRunner:
             # 5.75. v0.3: Populate the cross-run knowledge graph with source
             #       findings. Best-effort — never blocks the run.
             try:
-                if self.enable_knowledge_graph and all_findings:
+                if (
+                    restored_exploitation is None
+                    and self.enable_knowledge_graph
+                    and all_findings
+                ):
                     self._populate_knowledge_graph_source(repo_path, all_findings)
             except Exception:
                 logger.warning("Knowledge graph population failed", exc_info=True)
 
             # 5.85. v0.4: Coordinated-disclosure templates (opt-in).
-            if self.export_disclosures and verified:
+            if restored_exploitation is None and self.export_disclosures and verified:
                 try:
                     self._export_disclosure_bundle(verified)
                 except Exception:
@@ -2292,7 +2414,7 @@ class SourceHuntRunner:
                     logger.warning("Disclosure DB queue failed", exc_info=True)
 
             # 5.87. v0.6: Store exploits in encrypted artifact store (spec 013).
-            if self._enable_artifact_store and exploited:
+            if restored_exploitation is None and self._enable_artifact_store and exploited:
                 try:
                     from .artifact_store import ArtifactStore
 
@@ -2311,32 +2433,55 @@ class SourceHuntRunner:
                     logger.warning("Artifact store failed", exc_info=True)
 
             # 5.88. v0.6: Auto-commit findings with root_cause_explained (spec 014).
-            try:
-                from .commitment import CommitmentLog
+            if restored_exploitation is None:
+                try:
+                    from .commitment import CommitmentLog
 
-                committable = filter_by_evidence(verified, "root_cause_explained")
-                if committable:
-                    commitment_log = CommitmentLog()
-                    for f in committable:
-                        commitment_log.commit_finding(f, project=self.repo_url)
-                    logger.info(
-                        "Committed %d findings to commitment log",
-                        len(committable),
+                    committable = filter_by_evidence(verified, "root_cause_explained")
+                    if committable:
+                        commitment_log = CommitmentLog()
+                        for f in committable:
+                            commitment_log.commit_finding(f, project=self.repo_url)
+                        logger.info(
+                            "Committed %d findings to commitment log",
+                            len(committable),
+                        )
+                except Exception:
+                    logger.warning("Auto-commitment failed", exc_info=True)
+
+            exploit_status = (
+                exploit_store.last_status or "completed"
+                if restored_exploitation is not None
+                else "skipped"
+                if self.no_exploit
+                else "budget_exhausted"
+                if self._budget_exhausted()
+                else "completed"
+            )
+            if restored_exploitation is None:
+                try:
+                    exploit_store.save(
+                        ExploitationResult(
+                            findings=all_findings,
+                            verified_findings=verified,
+                            exploited_findings=exploited,
+                        ),
+                        status=exploit_status,
+                        verification_result_digest=exploit_input_digest,
+                        options=exploit_options,
                     )
-            except Exception:
-                logger.warning("Auto-commitment failed", exc_info=True)
+                except Exception:
+                    logger.warning("Could not persist exploitation checkpoint", exc_info=True)
 
             self._emit_stage(
                 "exploit",
-                (
-                    "skipped"
-                    if self.no_exploit
-                    else "budget_exhausted"
-                    if self._budget_exhausted()
-                    else "completed"
-                ),
+                exploit_status,
                 findings_so_far=len(all_findings),
-                detail=f"{len(exploited)} exploited",
+                detail=(
+                    f"Restored {len(exploited)} exploited findings from checkpoint"
+                    if restored_exploitation is not None
+                    else f"{len(exploited)} exploited"
+                ),
                 files=[str(finding.file or "") for finding in all_findings],
                 symbols=self._finding_symbols(all_findings),
                 finding_ids=[finding.id for finding in all_findings],
@@ -2886,6 +3031,51 @@ class SourceHuntRunner:
             "seed_harness_crashes": self._seed_harness_crashes,
             "campaign_hint": self._campaign_hint or "",
             "exploit_mode": self._exploit_mode,
+        }
+
+    def _verification_checkpoint_options(self) -> dict[str, Any]:
+        """Return configured inputs that can change verification output."""
+
+        return {
+            "no_verify": self.no_verify,
+            "validator_mode": self.validator_mode,
+            "model": self.model_override or "",
+            "adversarial_verifier": self.adversarial_verifier,
+            "adversarial_threshold": self.adversarial_threshold,
+            "enable_patch_oracle": self.enable_patch_oracle,
+            "enable_calibration": self._calibration_store is not None,
+            "enable_mechanism_memory": self._mechanism_store is not None,
+            "enable_variant_loop": self.enable_variant_loop,
+            "enable_stability_verification": self.enable_stability_verification,
+        }
+
+    @staticmethod
+    def _canonical_finding_subset(
+        findings: list[Finding], subset: list[Finding]
+    ) -> list[Finding]:
+        """Re-link a deserialized subset to the canonical full finding objects."""
+
+        by_id = {finding.id: finding for finding in findings}
+        return [by_id.get(finding.id, finding) for finding in subset]
+
+    def _exploitation_checkpoint_options(self) -> dict[str, Any]:
+        """Return configured inputs that can change exploitation output."""
+
+        return {
+            "no_exploit": self.no_exploit,
+            "model": self.model_override or "",
+            "exploit_mode": self._exploit_mode,
+            "exploit_budget_band": self._exploit_budget_band,
+            "enable_elaboration": self.enable_elaboration,
+            "elaboration_cap": self._elaboration_cap,
+            "enable_auto_patch": self.enable_auto_patch,
+            "auto_pr": self.auto_pr,
+            "enable_knowledge_graph": self.enable_knowledge_graph,
+            "export_disclosures": self.export_disclosures,
+            "disclosure_reporter_name": self.disclosure_reporter_name,
+            "disclosure_reporter_affiliation": self.disclosure_reporter_affiliation,
+            "disclosure_reporter_email": self.disclosure_reporter_email,
+            "enable_artifact_store": self._enable_artifact_store,
         }
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:

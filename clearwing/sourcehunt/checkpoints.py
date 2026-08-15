@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from clearwing.findings.types import Finding
 
@@ -21,6 +21,10 @@ RANK_CHECKPOINT_SCHEMA_VERSION = 1
 RANKER_VERSION = 1
 HUNT_CHECKPOINT_SCHEMA_VERSION = 1
 HUNTER_VERSION = 1
+VERIFY_CHECKPOINT_SCHEMA_VERSION = 1
+VERIFIER_VERSION = 1
+EXPLOIT_CHECKPOINT_SCHEMA_VERSION = 1
+EXPLOITER_VERSION = 1
 
 
 class PreprocessFingerprint(BaseModel):
@@ -343,6 +347,209 @@ class HuntCheckpointStore:
         )
         PreprocessCheckpointStore._atomic_write(self.result_path, payload)
         # The envelope is written last and acts as the completed-stage marker.
+        PreprocessCheckpointStore._atomic_write(
+            self.envelope_path,
+            envelope.model_dump_json(indent=2).encode("utf-8"),
+        )
+
+
+def findings_digest(findings: list[Finding]) -> str:
+    payload = json.dumps(
+        TypeAdapter(list[Finding]).dump_python(findings, mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class VerificationResult(BaseModel):
+    """Complete hand-off from verification to exploitation."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    findings: list[Finding]
+    verified_findings: list[Finding]
+    rejected_findings: list[Finding]
+
+
+class VerificationFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    hunt_findings_digest: str
+    options: dict[str, Any]
+    verifier_version: Literal[1] = VERIFIER_VERSION
+
+
+class VerificationCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = VERIFY_CHECKPOINT_SCHEMA_VERSION
+    stage: Literal["verify"] = "verify"
+    status: Literal["completed", "degraded", "skipped", "budget_exhausted"]
+    session_id: str
+    fingerprint: VerificationFingerprint
+    result_path: Literal["result.json"] = "result.json"
+    result_sha256: str
+    metrics: dict[str, int]
+
+
+class VerificationCheckpointStore:
+    def __init__(self, session_dir: Path, session_id: str):
+        self.directory = session_dir / "checkpoints" / "verify"
+        self.session_id = session_id
+        self.envelope_path = self.directory / "checkpoint.json"
+        self.result_path = self.directory / "result.json"
+        self.last_status: str | None = None
+
+    def load(
+        self, *, hunt_findings_digest: str, options: dict[str, Any]
+    ) -> VerificationResult | None:
+        self.last_status = None
+        try:
+            envelope = VerificationCheckpoint.model_validate_json(
+                self.envelope_path.read_text(encoding="utf-8")
+            )
+            if envelope.session_id != self.session_id:
+                return None
+            if envelope.fingerprint.hunt_findings_digest != hunt_findings_digest:
+                return None
+            if envelope.fingerprint.options != options:
+                return None
+            payload = (self.directory / envelope.result_path).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
+                return None
+            result = VerificationResult.model_validate_json(payload)
+            self.last_status = envelope.status
+            return result
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def save(
+        self,
+        result: VerificationResult,
+        *,
+        status: Literal["completed", "degraded", "skipped", "budget_exhausted"],
+        hunt_findings_digest: str,
+        options: dict[str, Any],
+    ) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        payload = result.model_dump_json(indent=2).encode("utf-8")
+        envelope = VerificationCheckpoint(
+            status=status,
+            session_id=self.session_id,
+            fingerprint=VerificationFingerprint(
+                hunt_findings_digest=hunt_findings_digest,
+                options=options,
+            ),
+            result_sha256=hashlib.sha256(payload).hexdigest(),
+            metrics={
+                "findings": len(result.findings),
+                "verified": len(result.verified_findings),
+                "rejected": len(result.rejected_findings),
+            },
+        )
+        PreprocessCheckpointStore._atomic_write(self.result_path, payload)
+        PreprocessCheckpointStore._atomic_write(
+            self.envelope_path,
+            envelope.model_dump_json(indent=2).encode("utf-8"),
+        )
+
+
+def verification_result_digest(result: VerificationResult) -> str:
+    payload = json.dumps(
+        result.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class ExploitationResult(BaseModel):
+    """Complete hand-off from exploitation to reporting."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    findings: list[Finding]
+    verified_findings: list[Finding]
+    exploited_findings: list[Finding]
+
+
+class ExploitationFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verification_result_digest: str
+    options: dict[str, Any]
+    exploiter_version: Literal[1] = EXPLOITER_VERSION
+
+
+class ExploitationCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = EXPLOIT_CHECKPOINT_SCHEMA_VERSION
+    stage: Literal["exploit"] = "exploit"
+    status: Literal["completed", "skipped", "budget_exhausted"]
+    session_id: str
+    fingerprint: ExploitationFingerprint
+    result_path: Literal["result.json"] = "result.json"
+    result_sha256: str
+    metrics: dict[str, int]
+
+
+class ExploitationCheckpointStore:
+    def __init__(self, session_dir: Path, session_id: str):
+        self.directory = session_dir / "checkpoints" / "exploit"
+        self.session_id = session_id
+        self.envelope_path = self.directory / "checkpoint.json"
+        self.result_path = self.directory / "result.json"
+        self.last_status: str | None = None
+
+    def load(
+        self, *, verification_result_digest: str, options: dict[str, Any]
+    ) -> ExploitationResult | None:
+        self.last_status = None
+        try:
+            envelope = ExploitationCheckpoint.model_validate_json(
+                self.envelope_path.read_text(encoding="utf-8")
+            )
+            if envelope.session_id != self.session_id:
+                return None
+            if envelope.fingerprint.verification_result_digest != verification_result_digest:
+                return None
+            if envelope.fingerprint.options != options:
+                return None
+            payload = (self.directory / envelope.result_path).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
+                return None
+            result = ExploitationResult.model_validate_json(payload)
+            self.last_status = envelope.status
+            return result
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def save(
+        self,
+        result: ExploitationResult,
+        *,
+        status: Literal["completed", "skipped", "budget_exhausted"],
+        verification_result_digest: str,
+        options: dict[str, Any],
+    ) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        payload = result.model_dump_json(indent=2).encode("utf-8")
+        envelope = ExploitationCheckpoint(
+            status=status,
+            session_id=self.session_id,
+            fingerprint=ExploitationFingerprint(
+                verification_result_digest=verification_result_digest,
+                options=options,
+            ),
+            result_sha256=hashlib.sha256(payload).hexdigest(),
+            metrics={
+                "findings": len(result.findings),
+                "verified": len(result.verified_findings),
+                "exploited": len(result.exploited_findings),
+            },
+        )
+        PreprocessCheckpointStore._atomic_write(self.result_path, payload)
         PreprocessCheckpointStore._atomic_write(
             self.envelope_path,
             envelope.model_dump_json(indent=2).encode("utf-8"),

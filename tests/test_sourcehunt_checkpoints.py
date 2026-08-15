@@ -6,11 +6,17 @@ from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.findings.types import Finding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
+    ExploitationCheckpointStore,
+    ExploitationResult,
     HuntCheckpointStore,
     HuntResult,
     PreprocessCheckpointStore,
     RankCheckpointStore,
+    VerificationCheckpointStore,
+    VerificationResult,
+    findings_digest,
     ranked_targets_digest,
+    verification_result_digest,
 )
 from clearwing.sourcehunt.findings_pool import FindingsPool
 from clearwing.sourcehunt.preprocessor import PreprocessResult
@@ -205,6 +211,94 @@ def test_hunt_checkpoint_rejects_changed_rank_or_options(tmp_path: Path):
     )
 
 
+def test_verification_checkpoint_round_trips_complete_handoff(tmp_path: Path):
+    store = VerificationCheckpointStore(tmp_path / "sh-test", "sh-test")
+    accepted = Finding(id="f-accepted", file="accepted.c", verified=True)
+    rejected = Finding(id="f-rejected", file="rejected.c", verified=False)
+    result = VerificationResult(
+        findings=[accepted, rejected],
+        verified_findings=[accepted],
+        rejected_findings=[rejected],
+    )
+    options = {"validator_mode": "v2", "enable_patch_oracle": True}
+
+    store.save(
+        result,
+        status="completed",
+        hunt_findings_digest="hunt-sha",
+        options=options,
+    )
+    restored = store.load(hunt_findings_digest="hunt-sha", options=options)
+
+    assert restored is not None
+    assert [finding.id for finding in restored.verified_findings] == ["f-accepted"]
+    assert [finding.id for finding in restored.rejected_findings] == ["f-rejected"]
+    assert store.last_status == "completed"
+    assert store.load(hunt_findings_digest="changed", options=options) is None
+
+
+def test_exploitation_checkpoint_round_trips_complete_handoff(tmp_path: Path):
+    store = ExploitationCheckpointStore(tmp_path / "sh-test", "sh-test")
+    exploited = Finding(
+        id="f-exploited",
+        file="sample.c",
+        verified=True,
+        exploit="proof-of-concept",
+        exploit_success=True,
+    )
+    result = ExploitationResult(
+        findings=[exploited],
+        verified_findings=[exploited],
+        exploited_findings=[exploited],
+    )
+    options = {"exploit_mode": "standard", "enable_auto_patch": False}
+
+    store.save(
+        result,
+        status="completed",
+        verification_result_digest="verify-sha",
+        options=options,
+    )
+    restored = store.load(
+        verification_result_digest="verify-sha",
+        options=options,
+    )
+
+    assert restored is not None
+    assert restored.exploited_findings[0].exploit == "proof-of-concept"
+    assert store.last_status == "completed"
+    assert (
+        store.load(
+            verification_result_digest="verify-sha",
+            options={**options, "enable_auto_patch": True},
+        )
+        is None
+    )
+
+
+def test_findings_and_verification_digests_change_with_handoff():
+    finding = Finding(id="f-test", severity="medium")
+    original_findings_digest = findings_digest([finding])
+    original_verification_digest = verification_result_digest(
+        VerificationResult(
+            findings=[finding],
+            verified_findings=[],
+            rejected_findings=[],
+        )
+    )
+
+    finding.severity = "high"
+
+    assert findings_digest([finding]) != original_findings_digest
+    assert verification_result_digest(
+        VerificationResult(
+            findings=[finding],
+            verified_findings=[finding],
+            rejected_findings=[],
+        )
+    ) != original_verification_digest
+
+
 def test_findings_pool_restore_completed_does_not_append_checkpoint(tmp_path: Path):
     checkpoint = tmp_path / "findings.jsonl"
     pool = FindingsPool(checkpoint_path=checkpoint)
@@ -347,3 +441,98 @@ def test_runner_resumes_at_end_of_hunt_without_starting_hunters(
 
     assert [finding.id for finding in result.findings] == ["f-restored"]
     assert result.files_hunted == 1
+
+
+def test_runner_restores_verification_and_exploitation_handoffs(
+    tmp_path: Path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    output = tmp_path / "results"
+    common = {
+        "repo_url": str(repo),
+        "local_path": str(repo),
+        "output_dir": str(output),
+        "depth": "standard",
+        "no_rank": True,
+        "no_verify": True,
+        "no_exploit": True,
+        "enable_findings_pool": False,
+        "enable_mechanism_memory": False,
+        "enable_calibration": False,
+        "enable_behavior_monitor": False,
+        "enable_variant_loop": False,
+        "enable_knowledge_graph": False,
+    }
+    first = SourceHuntRunner(parent_session_id="sh-resume-late", **common)
+    preprocessed = first._preprocess()
+    for target in preprocessed.file_targets:
+        target["surface"] = 3
+        target["influence"] = 2
+        target["reachability"] = 3
+        target["priority"] = 2.8
+
+    hunted = Finding(id="f-restored", file="sample.c")
+    HuntCheckpointStore(output / "sh-resume-late", "sh-resume-late").save(
+        HuntResult(
+            findings=[hunted],
+            files_hunted=1,
+            spent_per_tier={"A": 1.0, "B": 0.0, "C": 0.0},
+        ),
+        status="completed",
+        ranked_targets_digest=ranked_targets_digest(preprocessed.file_targets),
+        options=first._hunt_checkpoint_options(),
+    )
+
+    verified_finding = Finding(
+        id="f-restored", file="sample.c", verified=True, evidence_level="crash_reproduced"
+    )
+    verification = VerificationResult(
+        findings=[verified_finding],
+        verified_findings=[verified_finding],
+        rejected_findings=[],
+    )
+    VerificationCheckpointStore(
+        output / "sh-resume-late", "sh-resume-late"
+    ).save(
+        verification,
+        status="completed",
+        hunt_findings_digest=findings_digest([hunted]),
+        options=first._verification_checkpoint_options(),
+    )
+
+    exploited_finding = Finding(
+        id="f-restored",
+        file="sample.c",
+        verified=True,
+        evidence_level="exploit_demonstrated",
+        exploit="proof-of-concept",
+        exploit_success=True,
+    )
+    ExploitationCheckpointStore(
+        output / "sh-resume-late", "sh-resume-late"
+    ).save(
+        ExploitationResult(
+            findings=[exploited_finding],
+            verified_findings=[exploited_finding],
+            exploited_findings=[exploited_finding],
+        ),
+        status="completed",
+        verification_result_digest=verification_result_digest(verification),
+        options=first._exploitation_checkpoint_options(),
+    )
+
+    resumed = SourceHuntRunner(resume_session_id="sh-resume-late", **common)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("sandbox setup ran despite terminal stage checkpoints")
+
+    monkeypatch.setattr(resumed, "_ensure_sandbox_factory", fail_if_called)
+    result = resumed.run()
+
+    assert [finding.id for finding in result.verified_findings] == ["f-restored"]
+    assert [finding.id for finding in result.exploited_findings] == ["f-restored"]
+    assert result.findings[0] is result.verified_findings[0]
+    assert result.findings[0] is result.exploited_findings[0]
+    assert result.exploited_findings[0].exploit == "proof-of-concept"
