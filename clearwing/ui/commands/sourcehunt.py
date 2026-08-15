@@ -40,6 +40,11 @@ def add_parser(subparsers):
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", nargs="?", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Resume a legacy sourcehunt session from its completed checkpoints",
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -1142,6 +1147,7 @@ def handle(cli, args):
 
     runner = SourceHuntRunner(
         repo_url=args.repo,
+        resume_session_id=args.resume,
         branch=args.branch,
         local_path=args.local_path,
         depth=args.depth,

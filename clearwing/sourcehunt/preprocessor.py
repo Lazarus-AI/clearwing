@@ -13,8 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
@@ -29,17 +30,18 @@ from .taint import TaintAnalyzer, TaintPath
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PreprocessResult:
+class PreprocessResult(BaseModel):
     """Output of the preprocessor — fed into the Ranker."""
+
+    model_config = ConfigDict(extra="forbid")
 
     repo_path: str
     file_targets: list[FileTarget]
     static_findings: list[StaticFinding]
-    semgrep_findings: list[dict] = field(default_factory=list)  # v0.2
+    semgrep_findings: list[dict] = Field(default_factory=list)  # v0.2
     callgraph: CallGraph | None = None  # v0.2
-    fuzz_corpora: list[dict] = field(default_factory=list)  # v0.2
-    taint_paths: list[TaintPath] = field(default_factory=list)  # v0.4
+    fuzz_corpora: list[dict] = Field(default_factory=list)  # v0.2
+    taint_paths: list[TaintPath] = Field(default_factory=list)  # v0.4
 
     @property
     def file_count(self) -> int:

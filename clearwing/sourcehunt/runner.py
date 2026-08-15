@@ -10,10 +10,12 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -33,6 +35,7 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
+from .checkpoints import PreprocessCheckpointStore, RankCheckpointStore
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -231,6 +234,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
+        resume_session_id: str | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
@@ -448,6 +452,14 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
+        if resume_session_id and parent_session_id:
+            raise ValueError("resume_session_id and parent_session_id are mutually exclusive")
+        if resume_session_id and flow != "legacy":
+            raise ValueError("--resume is currently supported only for the legacy flow")
+        if resume_session_id and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", resume_session_id
+        ):
+            raise ValueError("resume_session_id contains invalid characters")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -517,7 +529,12 @@ class SourceHuntRunner:
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
-        self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._resume_session_id = resume_session_id
+        self._session_id = resume_session_id or parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        if resume_session_id:
+            resume_dir = Path(self.output_dir) / resume_session_id
+            if not resume_dir.is_dir() or resume_dir.is_symlink():
+                raise ValueError(f"resume session does not exist: {resume_session_id}")
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -1044,7 +1061,11 @@ class SourceHuntRunner:
             self._emit_stage(
                 "preprocess",
                 "completed",
-                detail=f"Enumerated {files_ranked} files",
+                detail=(
+                    f"Restored {files_ranked} files from checkpoint"
+                    if self._preprocess_restored
+                    else f"Enumerated {files_ranked} files"
+                ),
                 files=stage_files,
             )
             _t = time.monotonic()
@@ -1061,13 +1082,50 @@ class SourceHuntRunner:
                     budget_stage="rank",
                 )
             )
+            rank_options = {
+                "no_rank": self._no_rank,
+                "preprocessing": self._preprocessing,
+                "model": self.model_override or "",
+                "max_parallel": self.max_parallel,
+            }
+            preprocess_checkpoint_payload = (
+                Path(self.output_dir)
+                / self._session_id
+                / "checkpoints"
+                / "preprocess"
+                / "result.json"
+            ).read_bytes()
+            rank_input_digest = hashlib.sha256(preprocess_checkpoint_payload).hexdigest()
+            rank_store = RankCheckpointStore(
+                Path(self.output_dir) / self._session_id,
+                self._session_id,
+            )
+            rank_restored = False
+            if self._resume_session_id and not self._no_rank:
+                restored_files = rank_store.load(
+                    preprocess_digest=rank_input_digest,
+                    options=rank_options,
+                )
+                if restored_files is not None:
+                    files = restored_files
+                    preprocess_result.file_targets = files
+                    rank_restored = True
+                    logger.info("Restored rank result from session %s", self._session_id)
             self._emit_stage(
                 "rank",
                 "started",
                 detail=f"{len(files)} files",
                 files=stage_files,
             )
-            if self._no_rank:
+            if rank_restored:
+                pipeline_status.record_succeeded("ranker")
+                self._emit_stage(
+                    "rank",
+                    "completed",
+                    detail=f"Restored {len(files)} ranked files from checkpoint",
+                    files=stage_files,
+                )
+            elif self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
                 for ft in files:
                     ft["surface"] = ft.get("surface") or 3
@@ -1109,6 +1167,11 @@ class SourceHuntRunner:
                             ranker_config.max_inflight_chunks,
                         )
                     await Ranker(ranker_llm, ranker_config).arank(files)
+                    rank_store.save(
+                        files,
+                        preprocess_digest=rank_input_digest,
+                        options=rank_options,
+                    )
                     logger.info("Ranker completed")
                     pipeline_status.record_succeeded("ranker")
                     self._emit_stage(
@@ -2638,19 +2701,56 @@ class SourceHuntRunner:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
+        options = {
+            "tag_files": True,
+            "build_callgraph": self.depth != "quick" and self._preprocessing,
+            "propagate_reachability": self.depth != "quick" and self._preprocessing,
+            "run_semgrep": self.depth != "quick" and self._preprocessing,
+            "run_taint": (
+                self.depth != "quick" and self._preprocessing and not self._no_rank
+            ),
+            "respect_gitignore": self._respect_gitignore,
+            "subsystem_paths": sorted(self._subsystem_paths or []),
+        }
+        checkpoint_store = PreprocessCheckpointStore(
+            Path(self.output_dir) / self._session_id,
+            self._session_id,
+        )
+        self._preprocess_restored = False
+        if self._resume_session_id:
+            restored = checkpoint_store.load(
+                repo_url=self.repo_url,
+                branch=self.branch,
+                options=options,
+            )
+            if restored is not None:
+                self._preprocess_restored = True
+                logger.info("Restored preprocess result from session %s", self._session_id)
+                return restored
+
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
-            tag_files=True,
-            build_callgraph=(self.depth != "quick" and self._preprocessing),
-            propagate_reachability=(self.depth != "quick" and self._preprocessing),
-            run_semgrep=(self.depth != "quick" and self._preprocessing),
-            run_taint=(self.depth != "quick" and self._preprocessing and not self._no_rank),
+            tag_files=options["tag_files"],
+            build_callgraph=options["build_callgraph"],
+            propagate_reachability=options["propagate_reachability"],
+            run_semgrep=options["run_semgrep"],
+            run_taint=options["run_taint"],
             respect_gitignore=self._respect_gitignore,
             subsystem_paths=self._subsystem_paths,
         )
-        return self._preprocessor.run()
+        result = self._preprocessor.run()
+        try:
+            checkpoint_store.save(
+                result,
+                repo_url=self.repo_url,
+                branch=self.branch,
+                options=options,
+            )
+        except Exception:
+            logger.warning("Could not persist preprocess checkpoint", exc_info=True)
+        return result
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
