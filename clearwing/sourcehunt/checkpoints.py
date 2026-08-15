@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from clearwing.findings.types import Finding
 
@@ -27,13 +27,145 @@ EXPLOIT_CHECKPOINT_SCHEMA_VERSION = 1
 EXPLOITER_VERSION = 1
 
 
+class CheckpointOptions(BaseModel):
+    """Strict, immutable compatibility inputs for a stage checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class PreprocessCheckpointOptions(CheckpointOptions):
+    tag_files: bool = True
+    build_callgraph: bool = False
+    propagate_reachability: bool = False
+    run_semgrep: bool = False
+    run_taint: bool = False
+    respect_gitignore: bool = True
+    subsystem_paths: list[str] = Field(default_factory=list)
+
+
+class RankCheckpointOptions(CheckpointOptions):
+    no_rank: bool = False
+    preprocessing: bool = True
+    model: str = ""
+    max_parallel: int = 4
+
+
+class HuntCheckpointOptions(CheckpointOptions):
+    depth: str = "standard"
+    agent_mode: str = "auto"
+    prompt_mode: str = "unconstrained"
+    model: str = ""
+    max_parallel: int = 4
+    tier_budget: dict[str, Any] = Field(default_factory=dict)
+    starting_band: str | None = None
+    max_band: str | None = None
+    redundancy_override: int | None = None
+    no_per_file_hunt: bool = False
+    enable_subsystem_hunt: bool = False
+    subsystem_paths: list[str] = Field(default_factory=list)
+    subsystem_max_files: int | None = None
+    subsystem_max_parallel: int = 4
+    shard_entry_points: bool = False
+    min_shard_rank: int = 4
+    min_project_loc: int = 0
+    seed_corpus_sources: list[str] = Field(default_factory=list)
+    seed_harness_crashes: bool = False
+    campaign_hint: str = ""
+    exploit_mode: str | bool = False
+
+
+class VerificationCheckpointOptions(CheckpointOptions):
+    no_verify: bool = False
+    validator_mode: str = "v1"
+    model: str = ""
+    adversarial_verifier: bool = False
+    adversarial_threshold: str | None = "static_corroboration"
+    enable_patch_oracle: bool = False
+    enable_calibration: bool = False
+    enable_mechanism_memory: bool = False
+    enable_variant_loop: bool = False
+    enable_stability_verification: bool = False
+
+
+class ExploitationCheckpointOptions(CheckpointOptions):
+    no_exploit: bool = False
+    model: str = ""
+    exploit_mode: str | bool = False
+    exploit_budget_band: str = "standard"
+    enable_elaboration: bool = False
+    elaboration_cap: int | str = 0
+    enable_auto_patch: bool = False
+    auto_pr: bool = False
+    enable_knowledge_graph: bool = False
+    export_disclosures: bool = False
+    disclosure_reporter_name: str = ""
+    disclosure_reporter_affiliation: str = ""
+    disclosure_reporter_email: str = ""
+    enable_artifact_store: bool = False
+
+
+def preprocess_checkpoint_options(
+    *,
+    depth: str,
+    preprocessing: bool,
+    no_rank: bool,
+    respect_gitignore: bool,
+    subsystem_paths: list[str] | None,
+) -> PreprocessCheckpointOptions:
+    enabled = depth != "quick" and preprocessing
+    return PreprocessCheckpointOptions(
+        build_callgraph=enabled,
+        propagate_reachability=enabled,
+        run_semgrep=enabled,
+        run_taint=enabled and not no_rank,
+        respect_gitignore=respect_gitignore,
+        subsystem_paths=sorted(subsystem_paths or []),
+    )
+
+
+def rank_checkpoint_options(
+    *, no_rank: bool, preprocessing: bool, model: str | None, max_parallel: int
+) -> RankCheckpointOptions:
+    return RankCheckpointOptions(
+        no_rank=no_rank,
+        preprocessing=preprocessing,
+        model=model or "",
+        max_parallel=max_parallel,
+    )
+
+
+def hunt_checkpoint_options(**values: Any) -> HuntCheckpointOptions:
+    values["model"] = values.get("model") or ""
+    values["campaign_hint"] = values.get("campaign_hint") or ""
+    values["subsystem_paths"] = sorted(values.get("subsystem_paths") or [])
+    values["seed_corpus_sources"] = sorted(values.get("seed_corpus_sources") or [])
+    return HuntCheckpointOptions.model_validate(values)
+
+
+def verification_checkpoint_options(**values: Any) -> VerificationCheckpointOptions:
+    values["model"] = values.get("model") or ""
+    return VerificationCheckpointOptions.model_validate(values)
+
+
+def exploitation_checkpoint_options(**values: Any) -> ExploitationCheckpointOptions:
+    values["model"] = values.get("model") or ""
+    return ExploitationCheckpointOptions.model_validate(values)
+
+
+def _options_match(saved: CheckpointOptions, supplied: CheckpointOptions | dict[str, Any]) -> bool:
+    try:
+        return saved == type(saved).model_validate(supplied)
+    except (ValueError, TypeError):
+        return False
+
+
 class PreprocessFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repo_url: str
     branch: str
     source_digest: str
-    options: dict[str, Any]
+    options: PreprocessCheckpointOptions
     preprocessor_version: Literal[1] = PREPROCESSOR_VERSION
 
 
@@ -95,7 +227,7 @@ class PreprocessCheckpointStore:
         *,
         repo_url: str,
         branch: str,
-        options: dict[str, Any],
+        options: PreprocessCheckpointOptions | dict[str, Any],
     ) -> PreprocessResult | None:
         try:
             envelope = PreprocessCheckpoint.model_validate_json(
@@ -105,7 +237,9 @@ class PreprocessCheckpointStore:
                 return None
             if envelope.fingerprint.repo_url != repo_url:
                 return None
-            if envelope.fingerprint.branch != branch or envelope.fingerprint.options != options:
+            if envelope.fingerprint.branch != branch or not _options_match(
+                envelope.fingerprint.options, options
+            ):
                 return None
             payload = (self.directory / envelope.result_path).read_bytes()
             if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
@@ -127,7 +261,7 @@ class PreprocessCheckpointStore:
         *,
         repo_url: str,
         branch: str,
-        options: dict[str, Any],
+        options: PreprocessCheckpointOptions | dict[str, Any],
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         payload = result.model_dump_json(indent=2).encode("utf-8")
@@ -178,7 +312,7 @@ def preprocess_result_digest(result: PreprocessResult) -> str:
 class RankFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
     preprocess_digest: str
-    options: dict[str, Any]
+    options: RankCheckpointOptions
     ranker_version: Literal[1] = RANKER_VERSION
 
 
@@ -201,7 +335,12 @@ class RankCheckpointStore:
         self.envelope_path = self.directory / "checkpoint.json"
         self.result_path = self.directory / "result.json"
 
-    def load(self, *, preprocess_digest: str, options: dict[str, Any]) -> list[dict] | None:
+    def load(
+        self,
+        *,
+        preprocess_digest: str,
+        options: RankCheckpointOptions | dict[str, Any],
+    ) -> list[dict] | None:
         try:
             envelope = RankCheckpoint.model_validate_json(
                 self.envelope_path.read_text(encoding="utf-8")
@@ -210,7 +349,7 @@ class RankCheckpointStore:
                 return None
             if envelope.fingerprint.preprocess_digest != preprocess_digest:
                 return None
-            if envelope.fingerprint.options != options:
+            if not _options_match(envelope.fingerprint.options, options):
                 return None
             payload = (self.directory / envelope.result_path).read_bytes()
             if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
@@ -222,7 +361,13 @@ class RankCheckpointStore:
         except (OSError, ValueError, TypeError):
             return None
 
-    def save(self, files: list[dict], *, preprocess_digest: str, options: dict[str, Any]) -> None:
+    def save(
+        self,
+        files: list[dict],
+        *,
+        preprocess_digest: str,
+        options: RankCheckpointOptions | dict[str, Any],
+    ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(files, indent=2, sort_keys=True).encode("utf-8")
         envelope = RankCheckpoint(
@@ -263,7 +408,7 @@ class HuntFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ranked_targets_digest: str
-    options: dict[str, Any]
+    options: HuntCheckpointOptions
     hunter_version: Literal[1] = HUNTER_VERSION
 
 
@@ -298,7 +443,7 @@ class HuntCheckpointStore:
         self,
         *,
         ranked_targets_digest: str,
-        options: dict[str, Any],
+        options: HuntCheckpointOptions | dict[str, Any],
     ) -> HuntResult | None:
         self.last_status = None
         try:
@@ -309,7 +454,7 @@ class HuntCheckpointStore:
                 return None
             if envelope.fingerprint.ranked_targets_digest != ranked_targets_digest:
                 return None
-            if envelope.fingerprint.options != options:
+            if not _options_match(envelope.fingerprint.options, options):
                 return None
             payload = (self.directory / envelope.result_path).read_bytes()
             if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
@@ -326,7 +471,7 @@ class HuntCheckpointStore:
         *,
         status: Literal["completed", "budget_exhausted"],
         ranked_targets_digest: str,
-        options: dict[str, Any],
+        options: HuntCheckpointOptions | dict[str, Any],
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         payload = result.model_dump_json(indent=2).encode("utf-8")
@@ -377,7 +522,7 @@ class VerificationFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     hunt_findings_digest: str
-    options: dict[str, Any]
+    options: VerificationCheckpointOptions
     verifier_version: Literal[1] = VERIFIER_VERSION
 
 
@@ -403,7 +548,10 @@ class VerificationCheckpointStore:
         self.last_status: str | None = None
 
     def load(
-        self, *, hunt_findings_digest: str, options: dict[str, Any]
+        self,
+        *,
+        hunt_findings_digest: str,
+        options: VerificationCheckpointOptions | dict[str, Any],
     ) -> VerificationResult | None:
         self.last_status = None
         try:
@@ -414,7 +562,7 @@ class VerificationCheckpointStore:
                 return None
             if envelope.fingerprint.hunt_findings_digest != hunt_findings_digest:
                 return None
-            if envelope.fingerprint.options != options:
+            if not _options_match(envelope.fingerprint.options, options):
                 return None
             payload = (self.directory / envelope.result_path).read_bytes()
             if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
@@ -431,7 +579,7 @@ class VerificationCheckpointStore:
         *,
         status: Literal["completed", "degraded", "skipped", "budget_exhausted"],
         hunt_findings_digest: str,
-        options: dict[str, Any],
+        options: VerificationCheckpointOptions | dict[str, Any],
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         payload = result.model_dump_json(indent=2).encode("utf-8")
@@ -477,7 +625,7 @@ class ExploitationFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     verification_result_digest: str
-    options: dict[str, Any]
+    options: ExploitationCheckpointOptions
     exploiter_version: Literal[1] = EXPLOITER_VERSION
 
 
@@ -503,7 +651,10 @@ class ExploitationCheckpointStore:
         self.last_status: str | None = None
 
     def load(
-        self, *, verification_result_digest: str, options: dict[str, Any]
+        self,
+        *,
+        verification_result_digest: str,
+        options: ExploitationCheckpointOptions | dict[str, Any],
     ) -> ExploitationResult | None:
         self.last_status = None
         try:
@@ -514,7 +665,7 @@ class ExploitationCheckpointStore:
                 return None
             if envelope.fingerprint.verification_result_digest != verification_result_digest:
                 return None
-            if envelope.fingerprint.options != options:
+            if not _options_match(envelope.fingerprint.options, options):
                 return None
             payload = (self.directory / envelope.result_path).read_bytes()
             if hashlib.sha256(payload).hexdigest() != envelope.result_sha256:
@@ -531,7 +682,7 @@ class ExploitationCheckpointStore:
         *,
         status: Literal["completed", "skipped", "budget_exhausted"],
         verification_result_digest: str,
-        options: dict[str, Any],
+        options: ExploitationCheckpointOptions | dict[str, Any],
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         payload = result.model_dump_json(indent=2).encode("utf-8")

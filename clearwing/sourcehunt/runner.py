@@ -44,8 +44,13 @@ from .checkpoints import (
     RankCheckpointStore,
     VerificationCheckpointStore,
     VerificationResult,
+    exploitation_checkpoint_options,
     findings_digest,
+    hunt_checkpoint_options,
+    preprocess_checkpoint_options,
+    rank_checkpoint_options,
     ranked_targets_digest,
+    verification_checkpoint_options,
     verification_result_digest,
 )
 from .config import SourceHuntConfig
@@ -1090,12 +1095,12 @@ class SourceHuntRunner:
                     budget_stage="rank",
                 )
             )
-            rank_options = {
-                "no_rank": self._no_rank,
-                "preprocessing": self._preprocessing,
-                "model": self.model_override or "",
-                "max_parallel": self.max_parallel,
-            }
+            rank_options = rank_checkpoint_options(
+                no_rank=self._no_rank,
+                preprocessing=self._preprocessing,
+                model=self.model_override,
+                max_parallel=self.max_parallel,
+            )
             preprocess_checkpoint_payload = (
                 Path(self.output_dir)
                 / self._session_id
@@ -1244,7 +1249,29 @@ class SourceHuntRunner:
                     ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
                 )
 
-            hunt_options = self._hunt_checkpoint_options()
+            hunt_options = hunt_checkpoint_options(
+                depth=self.depth,
+                agent_mode=self._effective_agent_mode,
+                prompt_mode=self._prompt_mode,
+                model=self.model_override,
+                max_parallel=self.max_parallel,
+                tier_budget=vars(self.tier_budget),
+                starting_band=self._starting_band,
+                max_band=self._max_band,
+                redundancy_override=self._redundancy_override,
+                no_per_file_hunt=self._no_per_file_hunt,
+                enable_subsystem_hunt=self._enable_subsystem_hunt,
+                subsystem_paths=self._subsystem_paths,
+                subsystem_max_files=self._subsystem_max_files,
+                subsystem_max_parallel=self._subsystem_max_parallel,
+                shard_entry_points=self._shard_entry_points,
+                min_shard_rank=self._min_shard_rank,
+                min_project_loc=self._min_project_loc,
+                seed_corpus_sources=self._seed_corpus_sources,
+                seed_harness_crashes=self._seed_harness_crashes,
+                campaign_hint=self._campaign_hint,
+                exploit_mode=self._exploit_mode,
+            )
             ranked_digest = ranked_targets_digest(files)
             hunt_store = HuntCheckpointStore(
                 Path(self.output_dir) / self._session_id,
@@ -1263,9 +1290,10 @@ class SourceHuntRunner:
                         self._session_id,
                     )
 
-            # Hunt needs a sandbox; a restored hunt only needs one when a
-            # downstream verification or exploitation phase will use it.
-            if restored_hunt is None or not self.no_verify or not self.no_exploit:
+            # Do not initialize Docker merely because a downstream stage is
+            # enabled: its checkpoint may also restore. A downstream miss
+            # initializes the sandbox immediately before that stage runs.
+            if restored_hunt is None:
                 _t = time.monotonic()
                 self._ensure_sandbox_factory(repo_path, files)
                 logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
@@ -1849,7 +1877,18 @@ class SourceHuntRunner:
 
             # 4. Verify (unless --no-verify)
             verify_input_digest = findings_digest(all_findings)
-            verify_options = self._verification_checkpoint_options()
+            verify_options = verification_checkpoint_options(
+                no_verify=self.no_verify,
+                validator_mode=self.validator_mode,
+                model=self.model_override,
+                adversarial_verifier=self.adversarial_verifier,
+                adversarial_threshold=self.adversarial_threshold,
+                enable_patch_oracle=self.enable_patch_oracle,
+                enable_calibration=self._calibration_store is not None,
+                enable_mechanism_memory=self._mechanism_store is not None,
+                enable_variant_loop=self.enable_variant_loop,
+                enable_stability_verification=self.enable_stability_verification,
+            )
             verify_store = VerificationCheckpointStore(
                 Path(self.output_dir) / self._session_id,
                 self._session_id,
@@ -1860,6 +1899,8 @@ class SourceHuntRunner:
                     hunt_findings_digest=verify_input_digest,
                     options=verify_options,
                 )
+            if restored_verification is None and not self.no_verify:
+                self._ensure_sandbox_factory(repo_path, files)
             verified: list[Finding] = []
             rejected: list[Finding] = []
             verify_status = "completed"
@@ -2154,7 +2195,22 @@ class SourceHuntRunner:
 
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
             exploit_input_digest = verification_result_digest(verification_result)
-            exploit_options = self._exploitation_checkpoint_options()
+            exploit_options = exploitation_checkpoint_options(
+                no_exploit=self.no_exploit,
+                model=self.model_override,
+                exploit_mode=self._exploit_mode,
+                exploit_budget_band=self._exploit_budget_band,
+                enable_elaboration=self.enable_elaboration,
+                elaboration_cap=self._elaboration_cap,
+                enable_auto_patch=self.enable_auto_patch,
+                auto_pr=self.auto_pr,
+                enable_knowledge_graph=self.enable_knowledge_graph,
+                export_disclosures=self.export_disclosures,
+                disclosure_reporter_name=self.disclosure_reporter_name,
+                disclosure_reporter_affiliation=self.disclosure_reporter_affiliation,
+                disclosure_reporter_email=self.disclosure_reporter_email,
+                enable_artifact_store=self._enable_artifact_store,
+            )
             exploit_store = ExploitationCheckpointStore(
                 Path(self.output_dir) / self._session_id,
                 self._session_id,
@@ -2165,6 +2221,8 @@ class SourceHuntRunner:
                     verification_result_digest=exploit_input_digest,
                     options=exploit_options,
                 )
+            if restored_exploitation is None and not self.no_exploit:
+                self._ensure_sandbox_factory(repo_path, files)
             exploited: list[Finding] = []
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
@@ -2955,17 +3013,13 @@ class SourceHuntRunner:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
-        options = {
-            "tag_files": True,
-            "build_callgraph": self.depth != "quick" and self._preprocessing,
-            "propagate_reachability": self.depth != "quick" and self._preprocessing,
-            "run_semgrep": self.depth != "quick" and self._preprocessing,
-            "run_taint": (
-                self.depth != "quick" and self._preprocessing and not self._no_rank
-            ),
-            "respect_gitignore": self._respect_gitignore,
-            "subsystem_paths": sorted(self._subsystem_paths or []),
-        }
+        options = preprocess_checkpoint_options(
+            depth=self.depth,
+            preprocessing=self._preprocessing,
+            no_rank=self._no_rank,
+            respect_gitignore=self._respect_gitignore,
+            subsystem_paths=self._subsystem_paths,
+        )
         checkpoint_store = PreprocessCheckpointStore(
             Path(self.output_dir) / self._session_id,
             self._session_id,
@@ -2986,11 +3040,11 @@ class SourceHuntRunner:
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
-            tag_files=options["tag_files"],
-            build_callgraph=options["build_callgraph"],
-            propagate_reachability=options["propagate_reachability"],
-            run_semgrep=options["run_semgrep"],
-            run_taint=options["run_taint"],
+            tag_files=options.tag_files,
+            build_callgraph=options.build_callgraph,
+            propagate_reachability=options.propagate_reachability,
+            run_semgrep=options.run_semgrep,
+            run_taint=options.run_taint,
             respect_gitignore=self._respect_gitignore,
             subsystem_paths=self._subsystem_paths,
         )
@@ -3006,49 +3060,6 @@ class SourceHuntRunner:
             logger.warning("Could not persist preprocess checkpoint", exc_info=True)
         return result
 
-    def _hunt_checkpoint_options(self) -> dict[str, Any]:
-        """Return every configured input that can change hunt output."""
-
-        return {
-            "depth": self.depth,
-            "agent_mode": self._effective_agent_mode,
-            "prompt_mode": self._prompt_mode,
-            "model": self.model_override or "",
-            "max_parallel": self.max_parallel,
-            "tier_budget": vars(self.tier_budget),
-            "starting_band": self._starting_band,
-            "max_band": self._max_band,
-            "redundancy_override": self._redundancy_override,
-            "no_per_file_hunt": self._no_per_file_hunt,
-            "enable_subsystem_hunt": self._enable_subsystem_hunt,
-            "subsystem_paths": sorted(self._subsystem_paths or []),
-            "subsystem_max_files": self._subsystem_max_files,
-            "subsystem_max_parallel": self._subsystem_max_parallel,
-            "shard_entry_points": self._shard_entry_points,
-            "min_shard_rank": self._min_shard_rank,
-            "min_project_loc": self._min_project_loc,
-            "seed_corpus_sources": sorted(self._seed_corpus_sources or []),
-            "seed_harness_crashes": self._seed_harness_crashes,
-            "campaign_hint": self._campaign_hint or "",
-            "exploit_mode": self._exploit_mode,
-        }
-
-    def _verification_checkpoint_options(self) -> dict[str, Any]:
-        """Return configured inputs that can change verification output."""
-
-        return {
-            "no_verify": self.no_verify,
-            "validator_mode": self.validator_mode,
-            "model": self.model_override or "",
-            "adversarial_verifier": self.adversarial_verifier,
-            "adversarial_threshold": self.adversarial_threshold,
-            "enable_patch_oracle": self.enable_patch_oracle,
-            "enable_calibration": self._calibration_store is not None,
-            "enable_mechanism_memory": self._mechanism_store is not None,
-            "enable_variant_loop": self.enable_variant_loop,
-            "enable_stability_verification": self.enable_stability_verification,
-        }
-
     @staticmethod
     def _canonical_finding_subset(
         findings: list[Finding], subset: list[Finding]
@@ -3057,26 +3068,6 @@ class SourceHuntRunner:
 
         by_id = {finding.id: finding for finding in findings}
         return [by_id.get(finding.id, finding) for finding in subset]
-
-    def _exploitation_checkpoint_options(self) -> dict[str, Any]:
-        """Return configured inputs that can change exploitation output."""
-
-        return {
-            "no_exploit": self.no_exploit,
-            "model": self.model_override or "",
-            "exploit_mode": self._exploit_mode,
-            "exploit_budget_band": self._exploit_budget_band,
-            "enable_elaboration": self.enable_elaboration,
-            "elaboration_cap": self._elaboration_cap,
-            "enable_auto_patch": self.enable_auto_patch,
-            "auto_pr": self.auto_pr,
-            "enable_knowledge_graph": self.enable_knowledge_graph,
-            "export_disclosures": self.export_disclosures,
-            "disclosure_reporter_name": self.disclosure_reporter_name,
-            "disclosure_reporter_affiliation": self.disclosure_reporter_affiliation,
-            "disclosure_reporter_email": self.disclosure_reporter_email,
-            "enable_artifact_store": self._enable_artifact_store,
-        }
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":

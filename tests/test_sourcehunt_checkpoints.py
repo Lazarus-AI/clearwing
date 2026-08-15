@@ -14,8 +14,11 @@ from clearwing.sourcehunt.checkpoints import (
     RankCheckpointStore,
     VerificationCheckpointStore,
     VerificationResult,
+    exploitation_checkpoint_options,
     findings_digest,
+    hunt_checkpoint_options,
     ranked_targets_digest,
+    verification_checkpoint_options,
     verification_result_digest,
 )
 from clearwing.sourcehunt.findings_pool import FindingsPool
@@ -54,6 +57,66 @@ def _result(repo: Path) -> PreprocessResult:
                 variable="input",
             )
         ],
+    )
+
+
+def _hunt_options(runner: SourceHuntRunner):
+    return hunt_checkpoint_options(
+        depth=runner.depth,
+        agent_mode=runner._effective_agent_mode,
+        prompt_mode=runner._prompt_mode,
+        model=runner.model_override,
+        max_parallel=runner.max_parallel,
+        tier_budget=vars(runner.tier_budget),
+        starting_band=runner._starting_band,
+        max_band=runner._max_band,
+        redundancy_override=runner._redundancy_override,
+        no_per_file_hunt=runner._no_per_file_hunt,
+        enable_subsystem_hunt=runner._enable_subsystem_hunt,
+        subsystem_paths=runner._subsystem_paths,
+        subsystem_max_files=runner._subsystem_max_files,
+        subsystem_max_parallel=runner._subsystem_max_parallel,
+        shard_entry_points=runner._shard_entry_points,
+        min_shard_rank=runner._min_shard_rank,
+        min_project_loc=runner._min_project_loc,
+        seed_corpus_sources=runner._seed_corpus_sources,
+        seed_harness_crashes=runner._seed_harness_crashes,
+        campaign_hint=runner._campaign_hint,
+        exploit_mode=runner._exploit_mode,
+    )
+
+
+def _verification_options(runner: SourceHuntRunner):
+    return verification_checkpoint_options(
+        no_verify=runner.no_verify,
+        validator_mode=runner.validator_mode,
+        model=runner.model_override,
+        adversarial_verifier=runner.adversarial_verifier,
+        adversarial_threshold=runner.adversarial_threshold,
+        enable_patch_oracle=runner.enable_patch_oracle,
+        enable_calibration=runner._calibration_store is not None,
+        enable_mechanism_memory=runner._mechanism_store is not None,
+        enable_variant_loop=runner.enable_variant_loop,
+        enable_stability_verification=runner.enable_stability_verification,
+    )
+
+
+def _exploitation_options(runner: SourceHuntRunner):
+    return exploitation_checkpoint_options(
+        no_exploit=runner.no_exploit,
+        model=runner.model_override,
+        exploit_mode=runner._exploit_mode,
+        exploit_budget_band=runner._exploit_budget_band,
+        enable_elaboration=runner.enable_elaboration,
+        elaboration_cap=runner._elaboration_cap,
+        enable_auto_patch=runner.enable_auto_patch,
+        auto_pr=runner.auto_pr,
+        enable_knowledge_graph=runner.enable_knowledge_graph,
+        export_disclosures=runner.export_disclosures,
+        disclosure_reporter_name=runner.disclosure_reporter_name,
+        disclosure_reporter_affiliation=runner.disclosure_reporter_affiliation,
+        disclosure_reporter_email=runner.disclosure_reporter_email,
+        enable_artifact_store=runner._enable_artifact_store,
     )
 
 
@@ -428,7 +491,7 @@ def test_runner_resumes_at_end_of_hunt_without_starting_hunters(
         ),
         status="budget_exhausted",
         ranked_targets_digest=ranked_targets_digest(preprocessed.file_targets),
-        options=first._hunt_checkpoint_options(),
+        options=_hunt_options(first),
     )
 
     resumed = SourceHuntRunner(resume_session_id="sh-resume-hunt", **common)
@@ -456,7 +519,7 @@ def test_runner_restores_verification_and_exploitation_handoffs(
         "output_dir": str(output),
         "depth": "standard",
         "no_rank": True,
-        "no_verify": True,
+        "no_verify": False,
         "no_exploit": True,
         "enable_findings_pool": False,
         "enable_mechanism_memory": False,
@@ -482,7 +545,7 @@ def test_runner_restores_verification_and_exploitation_handoffs(
         ),
         status="completed",
         ranked_targets_digest=ranked_targets_digest(preprocessed.file_targets),
-        options=first._hunt_checkpoint_options(),
+        options=_hunt_options(first),
     )
 
     verified_finding = Finding(
@@ -499,7 +562,7 @@ def test_runner_restores_verification_and_exploitation_handoffs(
         verification,
         status="completed",
         hunt_findings_digest=findings_digest([hunted]),
-        options=first._verification_checkpoint_options(),
+        options=_verification_options(first),
     )
 
     exploited_finding = Finding(
@@ -520,7 +583,7 @@ def test_runner_restores_verification_and_exploitation_handoffs(
         ),
         status="completed",
         verification_result_digest=verification_result_digest(verification),
-        options=first._exploitation_checkpoint_options(),
+        options=_exploitation_options(first),
     )
 
     resumed = SourceHuntRunner(resume_session_id="sh-resume-late", **common)
