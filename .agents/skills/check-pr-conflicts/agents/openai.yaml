@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check PR Conflicts"
+  short_description: "Detect merge and architecture collisions across PRs"
+  default_prompt: "Use $check-pr-conflicts to check this branch against open PRs and active branches for merge, semantic, and architecture collisions before submission."
