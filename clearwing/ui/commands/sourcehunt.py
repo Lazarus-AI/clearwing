@@ -41,9 +41,9 @@ def add_parser(subparsers):
     )
     parser.add_argument("repo", nargs="?", help="Git URL or local path to a repository")
     parser.add_argument(
-        "--resume",
-        metavar="SESSION_ID",
-        help="Resume a legacy sourcehunt session from its completed checkpoints",
+        "--checkpoint",
+        metavar="JSON",
+        help="Restore a legacy sourcehunt run from a checkpoint JSON blob",
     )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -1147,7 +1147,7 @@ def handle(cli, args):
 
     runner = SourceHuntRunner(
         repo_url=args.repo,
-        resume_session_id=args.resume,
+        checkpoint=args.checkpoint,
         branch=args.branch,
         local_path=args.local_path,
         depth=args.depth,
@@ -1306,7 +1306,10 @@ def _handle_machine(descriptor: int) -> int:
     channel = MachineChannel(descriptor, "sourcehunt")
     try:
         request, routing = channel.read_start()
-        print(f"sourcehunt machine-fd request: {request!r}", file=sys.stderr)
+        print(
+            f"sourcehunt machine-fd request fields: {sorted(request)}",
+            file=sys.stderr,
+        )
         parsed = _machine_request(request)
         install_runtime_routing(routing)
         provider_manager = ProviderManager.from_config(routing)
@@ -1331,6 +1334,7 @@ def _handle_machine(descriptor: int) -> int:
                 subsystem_max_parallel=parsed.get("subsystem_max_parallel", 4),
                 subsystem_max_files=parsed.get("subsystem_max_files") or None,
                 output_formats=parsed.get("format"),
+                checkpoint=parsed.get("checkpoint"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1363,6 +1367,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_max_parallel",
         "subsystem_max_files",
         "no_per_file_hunt",
+        "checkpoint",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -1400,6 +1405,11 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
     if "format" in value:
         fmt = value["format"]
         parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
+    if "checkpoint" in value:
+        checkpoint = value["checkpoint"]
+        if not isinstance(checkpoint, dict):
+            raise ValueError("checkpoint must be a JSON object")
+        parsed["checkpoint"] = checkpoint
     return parsed
 
 
@@ -1426,6 +1436,7 @@ def _public_result(result: Any) -> dict[str, Any]:
         "cost_usd": result.cost_usd,
         "tokens_used": result.tokens_used,
         "budget_usd": result.budget_usd,
+        "checkpoint": result.checkpoint,
         "pipeline": {
             name: {
                 "outcome": stage.outcome.value,

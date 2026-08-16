@@ -263,9 +263,14 @@ class Preprocessor:
         self._analyzer: SourceAnalyzer | None = None
         self._cloner: SourceAnalyzer | None = None
 
-    def run(self) -> PreprocessResult:
+    def resolve_repository(self) -> str:
+        """Materialize the requested repository without analyzing it."""
+
+        return self._clone_or_use_local()
+
+    def run(self, *, repo_path: str | None = None) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
-        repo_path = self._clone_or_use_local()
+        repo_path = repo_path or self.resolve_repository()
 
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")

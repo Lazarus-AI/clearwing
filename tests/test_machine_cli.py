@@ -125,6 +125,20 @@ def test_sourcehunt_request_rejects_paths_credentials_and_provider_fields():
         )
 
 
+def test_sourcehunt_machine_request_accepts_checkpoint_object():
+    checkpoint = {"schema_version": 1, "flow": "legacy", "preprocess": None, "rank": None}
+
+    parsed = sourcehunt._machine_request(
+        {"repo_url": "https://example.test/repo", "checkpoint": checkpoint}
+    )
+
+    assert parsed["checkpoint"] == checkpoint
+    with pytest.raises(ValueError, match="checkpoint must be a JSON object"):
+        sourcehunt._machine_request(
+            {"repo_url": "https://example.test/repo", "checkpoint": "serialized-json"}
+        )
+
+
 def test_operate_machine_uses_host_routing_and_emits_typed_records():
     parent, channel = _channel("operate", {"target": "host", "goals": ["scan"]})
     request, routing = channel.read_start()
@@ -189,6 +203,14 @@ class _SourceResult:
     output_paths: dict = field(default_factory=lambda: {"report": "/private/report"})
     session_id: str = "source-test"
     pipeline_status: _Pipeline = field(default_factory=_Pipeline)
+    checkpoint: dict = field(
+        default_factory=lambda: {
+            "schema_version": 1,
+            "flow": "legacy",
+            "preprocess": None,
+            "rank": None,
+        }
+    )
 
 
 def test_sourcehunt_public_result_removes_host_paths():
@@ -196,6 +218,7 @@ def test_sourcehunt_public_result_removes_host_paths():
     assert result["findings"] == [{"file": "app.py"}]
     assert "repo_path" not in result
     assert "output_paths" not in result
+    assert result["checkpoint"]["schema_version"] == 1
     assert "/private" not in repr(result)
 
 

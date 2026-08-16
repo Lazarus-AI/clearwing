@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
-from clearwing.sourcehunt.checkpoints import PreprocessCheckpointStore, RankCheckpointStore
+from clearwing.sourcehunt.checkpoints import (
+    CheckpointBundle,
+    CheckpointBundleStore,
+    PreprocessCheckpointStore,
+    RankCheckpointStore,
+    parse_checkpoint,
+    preprocess_result_digest,
+)
 from clearwing.sourcehunt.preprocessor import PreprocessResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.taint import TaintPath
@@ -43,6 +51,32 @@ def _result(repo: Path) -> PreprocessResult:
     )
 
 
+def _commit(repo: Path, message: str = "checkpoint test") -> str:
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Clearwing Tests",
+            "-c",
+            "user.email=tests@clearwing.local",
+            "commit",
+            "-qm",
+            message,
+        ],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def test_preprocess_result_round_trips_nested_types(tmp_path: Path):
     result = _result(tmp_path)
 
@@ -54,22 +88,61 @@ def test_preprocess_result_round_trips_nested_types(tmp_path: Path):
     assert isinstance(restored.callgraph.function_info["sample.c"][0], FunctionInfo)
     assert isinstance(restored.taint_paths[0], TaintPath)
     assert restored.callgraph.functions["sample.c"] == {"parse"}
+    assert preprocess_result_digest(restored) == preprocess_result_digest(result)
 
 
-def test_preprocess_checkpoint_rejects_changed_source(tmp_path: Path):
+def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     source = repo / "sample.c"
     source.write_text("int sample(void) { return 1; }\n", encoding="utf-8")
+    commit_sha = _commit(repo)
     session = tmp_path / "results" / "sh-test"
-    store = PreprocessCheckpointStore(session, "sh-test")
+    bundle_store = CheckpointBundleStore(session)
+    store = PreprocessCheckpointStore(bundle_store)
     options = {"run_taint": True}
     store.save(_result(repo), repo_url="repo", branch="main", options=options)
+    assert bundle_store.bundle.preprocess is not None
+    assert bundle_store.bundle.preprocess.commit_sha == commit_sha
 
-    assert store.load(repo_url="repo", branch="main", options=options) is not None
+    restored = store.load(repo_path=str(repo))
+    assert restored is not None
+    assert restored.repo_path == str(repo.resolve())
+    assert restored.file_targets[0]["absolute_path"] == str(source.resolve())
 
     source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
-    assert store.load(repo_url="repo", branch="main", options=options) is None
+    assert store.load(repo_path=str(repo)) is not None
+
+
+def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "sample.c"
+    source.write_text("int sample(void) { return 1; }\n", encoding="utf-8")
+    _commit(repo)
+    bundle_store = CheckpointBundleStore(tmp_path / "results" / "sh-test")
+    store = PreprocessCheckpointStore(bundle_store)
+    store.save(_result(repo), repo_url="repo", branch="main", options={})
+
+    source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "sample.c"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Clearwing Tests",
+            "-c",
+            "user.email=tests@clearwing.local",
+            "commit",
+            "-qm",
+            "source changed",
+        ],
+        check=True,
+    )
+
+    assert store.load(repo_path=str(repo)) is None
 
 
 def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
@@ -77,16 +150,24 @@ def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     session = tmp_path / "results" / "sh-test"
-    store = PreprocessCheckpointStore(session, "sh-test")
+    bundle_store = CheckpointBundleStore(session)
+    store = PreprocessCheckpointStore(bundle_store)
     options = {"run_taint": False}
     store.save(_result(repo), repo_url="repo", branch="main", options=options)
-    store.result_path.write_text("{}", encoding="utf-8")
-
-    assert store.load(repo_url="repo", branch="main", options=options) is None
+    payload = bundle_store.path.read_text(encoding="utf-8").replace(
+        '"schema_version": 1', '"schema_version": 999', 1
+    )
+    try:
+        parse_checkpoint(payload)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid checkpoint schema was accepted")
 
 
 def test_rank_checkpoint_round_trips_exact_ranked_targets(tmp_path: Path):
-    store = RankCheckpointStore(tmp_path / "sh-test", "sh-test")
+    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
+    store = RankCheckpointStore(bundle_store)
     ranked = [
         {
             "path": "sample.c",
@@ -109,17 +190,66 @@ def test_rank_checkpoint_round_trips_exact_ranked_targets(tmp_path: Path):
     ) is None
 
 
-def test_runner_uses_resume_session_id(tmp_path: Path):
-    (tmp_path / "sh-existing").mkdir()
-    runner = SourceHuntRunner(
-        repo_url="repo",
-        output_dir=str(tmp_path),
-        resume_session_id="sh-existing",
-        enable_mechanism_memory=False,
-        enable_calibration=False,
+def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
+    preprocess = PreprocessCheckpointStore(bundle_store)
+    preprocess.save(
+        _result(repo), repo_url="repo", branch="main", options={"run_taint": True}
+    )
+    RankCheckpointStore(bundle_store).save(
+        [{"path": "sample.c", "priority": 4.0}],
+        preprocess_digest=preprocess_result_digest(_result(repo)),
+        options={"model": "test"},
     )
 
-    assert runner.session_id == "sh-existing"
+    assert bundle_store.path == tmp_path / "sh-test" / "checkpoint.json"
+    assert not (tmp_path / "sh-test" / "checkpoints").exists()
+    raw = bundle_store.path.read_text()
+    assert str(repo) not in raw
+    assert "absolute_path" not in raw
+    restored = CheckpointBundle.model_validate_json(bundle_store.path.read_text())
+    assert restored.preprocess is not None
+    assert restored.preprocess.result.file_targets[0]["path"] == "sample.c"
+    assert restored.rank is not None
+    assert restored.rank.result[0]["priority"] == 4.0
+
+
+def test_preprocess_checkpoint_isolated_from_rank_mutation(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    result = _result(repo)
+    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
+    PreprocessCheckpointStore(bundle_store).save(
+        result, repo_url="repo", branch="main", options={}
+    )
+    saved_digest = preprocess_result_digest(result)
+
+    result.file_targets[0]["priority"] = 5.0
+    bundle_store.save()
+    restored = CheckpointBundle.model_validate_json(bundle_store.path.read_text())
+
+    assert "priority" not in restored.preprocess.result.file_targets[0]
+    rebound = restored.preprocess.result.materialize(repo)
+    assert preprocess_result_digest(rebound) == saved_digest
+
+
+def test_preprocess_checkpoint_rejects_path_traversal(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.c"
+    outside.write_text("int outside(void);\n", encoding="utf-8")
+    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
+    result = _result(repo)
+    result.file_targets[0]["path"] = "../outside.c"
+    PreprocessCheckpointStore(bundle_store).save(
+        result, repo_url="repo", branch="main", options={}
+    )
+
+    assert PreprocessCheckpointStore(bundle_store).load(repo_path=str(repo)) is None
 
 
 def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
@@ -136,13 +266,14 @@ def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
         enable_calibration=False,
     )
     original = first._preprocess()
+    checkpoint_blob = first._checkpoint_store.path.read_text(encoding="utf-8")
 
     resumed = SourceHuntRunner(
         repo_url=str(repo),
         local_path=str(repo),
         output_dir=str(tmp_path / "results"),
         depth="quick",
-        resume_session_id="sh-resume",
+        checkpoint=checkpoint_blob,
         enable_mechanism_memory=False,
         enable_calibration=False,
     )
@@ -157,25 +288,61 @@ def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
     assert restored.file_targets == original.file_targets
 
 
-def test_runner_rejects_unsafe_resume_session_id():
-    try:
-        SourceHuntRunner(repo_url="repo", resume_session_id="../outside")
-    except ValueError as exc:
-        assert "invalid characters" in str(exc)
-    else:
-        raise AssertionError("unsafe resume session ID was accepted")
+def test_runner_accepts_checkpoint_as_json_object(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    first = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "first"),
+        depth="quick",
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+    first._preprocess()
+    checkpoint = first._checkpoint_store.bundle.model_dump(mode="json")
+
+    resumed = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "second"),
+        depth="quick",
+        checkpoint=checkpoint,
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+
+    assert resumed._preprocess().file_targets[0]["path"] == "sample.c"
+    assert resumed._preprocess_restored is True
 
 
-def test_runner_rejects_missing_resume_session(tmp_path: Path):
+def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        depth="quick",
+        no_rank=True,
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+        enable_knowledge_graph=False,
+    )
+
+    result = runner.run()
+
+    assert result.checkpoint is not None
+    assert result.checkpoint["preprocess"]["result"]["file_targets"][0]["path"] == "sample.c"
+    assert Path(result.output_paths["checkpoint"]).read_text(encoding="utf-8")
+
+
+def test_runner_rejects_invalid_checkpoint_json():
     try:
-        SourceHuntRunner(
-            repo_url="repo",
-            output_dir=str(tmp_path),
-            resume_session_id="sh-missing",
-            enable_mechanism_memory=False,
-            enable_calibration=False,
-        )
+        SourceHuntRunner(repo_url="repo", checkpoint="not-json")
     except ValueError as exc:
-        assert "does not exist" in str(exc)
+        assert "json" in str(exc).lower()
     else:
-        raise AssertionError("missing resume session was accepted")
+        raise AssertionError("invalid checkpoint JSON was accepted")

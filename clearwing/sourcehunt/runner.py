@@ -10,12 +10,10 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -35,7 +33,13 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
-from .checkpoints import PreprocessCheckpointStore, RankCheckpointStore
+from .checkpoints import (
+    CheckpointBundleStore,
+    CheckpointInput,
+    PreprocessCheckpointStore,
+    RankCheckpointStore,
+    preprocess_result_digest,
+)
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -91,6 +95,7 @@ class SourceHuntResult:
     spent_per_tier: dict[str, float]
     tokens_used: int
     output_paths: dict[str, str] = field(default_factory=dict)
+    checkpoint: dict[str, Any] | None = None
     session_id: str = ""
     subsystems_hunted: int = 0
     subsystem_spent_usd: float = 0.0
@@ -234,7 +239,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
-        resume_session_id: str | None = None,
+        checkpoint: CheckpointInput = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
@@ -442,6 +447,7 @@ class SourceHuntRunner:
                 emit_rejection_certificates and p.emit_rejection_certificates
             )
             falsify = falsify and p.falsify
+            checkpoint = checkpoint if checkpoint is not None else config.checkpoint
 
         if not repo_url:
             raise ValueError(
@@ -452,14 +458,8 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
-        if resume_session_id and parent_session_id:
-            raise ValueError("resume_session_id and parent_session_id are mutually exclusive")
-        if resume_session_id and flow != "legacy":
-            raise ValueError("--resume is currently supported only for the legacy flow")
-        if resume_session_id and not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]*", resume_session_id
-        ):
-            raise ValueError("resume_session_id contains invalid characters")
+        if checkpoint is not None and flow != "legacy":
+            raise ValueError("checkpoint restoration is currently supported only for legacy flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -529,12 +529,11 @@ class SourceHuntRunner:
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
-        self._resume_session_id = resume_session_id
-        self._session_id = resume_session_id or parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
-        if resume_session_id:
-            resume_dir = Path(self.output_dir) / resume_session_id
-            if not resume_dir.is_dir() or resume_dir.is_symlink():
-                raise ValueError(f"resume session does not exist: {resume_session_id}")
+        self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._checkpoint_store = CheckpointBundleStore(
+            Path(self.output_dir) / self._session_id,
+            checkpoint,
+        )
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -1088,20 +1087,10 @@ class SourceHuntRunner:
                 "model": self.model_override or "",
                 "max_parallel": self.max_parallel,
             }
-            preprocess_checkpoint_payload = (
-                Path(self.output_dir)
-                / self._session_id
-                / "checkpoints"
-                / "preprocess"
-                / "result.json"
-            ).read_bytes()
-            rank_input_digest = hashlib.sha256(preprocess_checkpoint_payload).hexdigest()
-            rank_store = RankCheckpointStore(
-                Path(self.output_dir) / self._session_id,
-                self._session_id,
-            )
+            rank_input_digest = preprocess_result_digest(preprocess_result)
+            rank_store = RankCheckpointStore(self._checkpoint_store)
             rank_restored = False
-            if self._resume_session_id and not self._no_rank:
+            if self._checkpoint_store.bundle.rank is not None and not self._no_rank:
                 restored_files = rank_store.load(
                     preprocess_digest=rank_input_digest,
                     options=rank_options,
@@ -2295,6 +2284,7 @@ class SourceHuntRunner:
             self._finalize_instrumentation(run_status)
             output_paths.update(
                 {
+                    "checkpoint": str(self._checkpoint_store.path),
                     "instrumentation": str(self._instrumentation.summary_path),
                     "instrumentation_events": str(self._instrumentation.events_path),
                 }
@@ -2318,6 +2308,7 @@ class SourceHuntRunner:
                 spent_per_tier=spent_per_tier,
                 tokens_used=budget_summary["total_tokens"],
                 output_paths=output_paths,
+                checkpoint=self._checkpoint_store.bundle.model_dump(mode="json"),
                 session_id=self._session_id,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
@@ -2712,22 +2703,8 @@ class SourceHuntRunner:
             "respect_gitignore": self._respect_gitignore,
             "subsystem_paths": sorted(self._subsystem_paths or []),
         }
-        checkpoint_store = PreprocessCheckpointStore(
-            Path(self.output_dir) / self._session_id,
-            self._session_id,
-        )
+        checkpoint_store = PreprocessCheckpointStore(self._checkpoint_store)
         self._preprocess_restored = False
-        if self._resume_session_id:
-            restored = checkpoint_store.load(
-                repo_url=self.repo_url,
-                branch=self.branch,
-                options=options,
-            )
-            if restored is not None:
-                self._preprocess_restored = True
-                logger.info("Restored preprocess result from session %s", self._session_id)
-                return restored
-
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
@@ -2740,7 +2717,18 @@ class SourceHuntRunner:
             respect_gitignore=self._respect_gitignore,
             subsystem_paths=self._subsystem_paths,
         )
-        result = self._preprocessor.run()
+        repo_path: str | None = None
+        if self._checkpoint_store.bundle.preprocess is not None:
+            repo_path = self._preprocessor.resolve_repository()
+            restored = checkpoint_store.load(
+                repo_path=repo_path,
+            )
+            if restored is not None:
+                self._preprocess_restored = True
+                logger.info("Restored preprocess result from session %s", self._session_id)
+                return restored
+
+        result = self._preprocessor.run(repo_path=repo_path)
         try:
             checkpoint_store.save(
                 result,
@@ -2901,6 +2889,7 @@ class SourceHuntRunner:
         self._finalize_instrumentation(run_status)
         output_paths.update(
             {
+                "checkpoint": str(self._checkpoint_store.path),
                 "instrumentation": str(self._instrumentation.summary_path),
                 "instrumentation_events": str(self._instrumentation.events_path),
             }
@@ -2920,6 +2909,7 @@ class SourceHuntRunner:
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
             tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
+            checkpoint=self._checkpoint_store.bundle.model_dump(mode="json"),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
             status=run_status,
