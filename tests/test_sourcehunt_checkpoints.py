@@ -7,8 +7,7 @@ from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
     CheckpointBundle,
-    CheckpointBundleStore,
-    PreprocessCheckpointStore,
+    PreprocessCheckpoint,
     parse_checkpoint,
 )
 from clearwing.sourcehunt.preprocessor import PreprocessResult
@@ -105,20 +104,16 @@ def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path:
     source = repo / "sample.c"
     source.write_text("int sample(void) { return 1; }\n", encoding="utf-8")
     commit_sha = _commit(repo)
-    session = tmp_path / "results" / "sh-test"
-    bundle_store = CheckpointBundleStore(session)
-    store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo), options=OPTIONS)
-    assert bundle_store.bundle.preprocess is not None
-    assert bundle_store.bundle.preprocess.commit_sha == commit_sha
+    checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    assert checkpoint.commit_sha == commit_sha
 
-    restored = store.load(repo_path=str(repo), options=OPTIONS)
+    restored = checkpoint.restore(repo_path=str(repo), options=OPTIONS)
     assert restored is not None
     assert restored.repo_path == str(repo.resolve())
     assert restored.file_targets[0]["absolute_path"] == str(source.resolve())
 
     source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
-    assert store.load(repo_path=str(repo), options=OPTIONS) is not None
+    assert checkpoint.restore(repo_path=str(repo), options=OPTIONS) is not None
 
 
 def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
@@ -127,9 +122,7 @@ def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
     source = repo / "sample.c"
     source.write_text("int sample(void) { return 1; }\n", encoding="utf-8")
     _commit(repo)
-    bundle_store = CheckpointBundleStore(tmp_path / "results" / "sh-test")
-    store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo), options=OPTIONS)
+    checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
 
     source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "sample.c"], check=True)
@@ -149,19 +142,18 @@ def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
         check=True,
     )
 
-    assert store.load(repo_path=str(repo), options=OPTIONS) is None
+    assert checkpoint.restore(repo_path=str(repo), options=OPTIONS) is None
 
 
 def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
-    session = tmp_path / "results" / "sh-test"
-    bundle_store = CheckpointBundleStore(session)
-    store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo), options=OPTIONS)
-    payload = bundle_store.path.read_text(encoding="utf-8").replace(
-        '"schema_version": 1', '"schema_version": 999', 1
+    bundle = CheckpointBundle(
+        preprocess=PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    )
+    payload = bundle.model_dump_json().replace(
+        '"schema_version":1', '"schema_version":999', 1
     )
     try:
         parse_checkpoint(payload)
@@ -175,16 +167,13 @@ def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
-    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
-    preprocess = PreprocessCheckpointStore(bundle_store)
-    preprocess.save(_result(repo), options=OPTIONS)
-
-    assert bundle_store.path == tmp_path / "sh-test" / "checkpoint.json"
-    assert not (tmp_path / "sh-test" / "checkpoints").exists()
-    raw = bundle_store.path.read_text()
+    bundle = CheckpointBundle(
+        preprocess=PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    )
+    raw = bundle.model_dump_json()
     assert str(repo) not in raw
     assert "absolute_path" not in raw
-    restored = CheckpointBundle.model_validate_json(bundle_store.path.read_text())
+    restored = CheckpointBundle.model_validate_json(raw)
     assert restored.preprocess is not None
     assert restored.preprocess.result["file_targets"][0]["path"] == "sample.c"
     assert restored.preprocess.options == OPTIONS
@@ -196,11 +185,9 @@ def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     result = _result(repo)
     _commit(repo)
-    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
-    store = PreprocessCheckpointStore(bundle_store)
-    store.save(result, options=OPTIONS)
+    checkpoint = PreprocessCheckpoint.from_result(result, options=OPTIONS)
 
-    assert store.load(
+    assert checkpoint.restore(
         repo_path=str(repo),
         options={**OPTIONS, "run_semgrep": True},
     ) is None
@@ -213,14 +200,11 @@ def test_preprocess_checkpoint_rejects_path_traversal(tmp_path: Path):
     _commit(repo)
     outside = tmp_path / "outside.c"
     outside.write_text("int outside(void);\n", encoding="utf-8")
-    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
     result = _result(repo)
     result.file_targets[0]["path"] = "../outside.c"
-    PreprocessCheckpointStore(bundle_store).save(result, options=OPTIONS)
+    checkpoint = PreprocessCheckpoint.from_result(result, options=OPTIONS)
 
-    assert PreprocessCheckpointStore(bundle_store).load(
-        repo_path=str(repo), options=OPTIONS
-    ) is None
+    assert checkpoint.restore(repo_path=str(repo), options=OPTIONS) is None
 
 
 def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
@@ -238,7 +222,7 @@ def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
         enable_calibration=False,
     )
     original = first._preprocess()
-    checkpoint_blob = first._checkpoint_store.path.read_text(encoding="utf-8")
+    checkpoint_blob = first._checkpoint.model_dump_json()
 
     resumed = SourceHuntRunner(
         repo_url=str(repo),
@@ -274,7 +258,7 @@ def test_runner_accepts_checkpoint_as_json_object(tmp_path: Path):
         enable_calibration=False,
     )
     first._preprocess()
-    checkpoint = first._checkpoint_store.bundle.model_dump(mode="json")
+    checkpoint = first._checkpoint.model_dump(mode="json")
 
     resumed = SourceHuntRunner(
         repo_url=str(repo),
@@ -309,7 +293,7 @@ def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
 
     assert result.checkpoint is not None
     assert result.checkpoint["preprocess"]["result"]["file_targets"][0]["path"] == "sample.c"
-    assert Path(result.output_paths["checkpoint"]).read_text(encoding="utf-8")
+    assert "checkpoint" not in result.output_paths
 
 
 def test_runner_rejects_invalid_checkpoint_json():

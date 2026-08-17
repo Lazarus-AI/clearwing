@@ -34,8 +34,9 @@ from clearwing.providers import (
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
-    CheckpointBundleStore,
-    PreprocessCheckpointStore,
+    CheckpointBundle,
+    PreprocessCheckpoint,
+    parse_checkpoint,
 )
 from .config import SourceHuntConfig
 from .disclosure import (
@@ -527,10 +528,7 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
-        self._checkpoint_store = CheckpointBundleStore(
-            Path(self.output_dir) / self._session_id,
-            checkpoint,
-        )
+        self._checkpoint = parse_checkpoint(checkpoint) or CheckpointBundle()
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -2249,7 +2247,6 @@ class SourceHuntRunner:
             self._finalize_instrumentation(run_status)
             output_paths.update(
                 {
-                    "checkpoint": str(self._checkpoint_store.path),
                     "instrumentation": str(self._instrumentation.summary_path),
                     "instrumentation_events": str(self._instrumentation.events_path),
                 }
@@ -2273,7 +2270,7 @@ class SourceHuntRunner:
                 spent_per_tier=spent_per_tier,
                 tokens_used=budget_summary["total_tokens"],
                 output_paths=output_paths,
-                checkpoint=self._checkpoint_store.bundle.model_dump(mode="json"),
+                checkpoint=self._checkpoint.model_dump(mode="json"),
                 session_id=self._session_id,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
@@ -2668,7 +2665,6 @@ class SourceHuntRunner:
             "respect_gitignore": self._respect_gitignore,
             "subsystem_paths": sorted(self._subsystem_paths or []),
         }
-        checkpoint_store = PreprocessCheckpointStore(self._checkpoint_store)
         self._preprocess_restored = False
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
@@ -2683,9 +2679,9 @@ class SourceHuntRunner:
             subsystem_paths=self._subsystem_paths,
         )
         repo_path: str | None = None
-        if self._checkpoint_store.bundle.preprocess is not None:
+        if self._checkpoint.preprocess is not None:
             repo_path = self._preprocessor.resolve_repository()
-            restored = checkpoint_store.load(
+            restored = self._checkpoint.preprocess.restore(
                 repo_path=repo_path,
                 options=options,
             )
@@ -2695,10 +2691,10 @@ class SourceHuntRunner:
                 return restored
 
         result = self._preprocessor.run(repo_path=repo_path)
-        try:
-            checkpoint_store.save(result, options=options)
-        except Exception:
-            logger.warning("Could not persist preprocess checkpoint", exc_info=True)
+        self._checkpoint.preprocess = PreprocessCheckpoint.from_result(
+            result,
+            options=options,
+        )
         return result
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
@@ -2850,7 +2846,6 @@ class SourceHuntRunner:
         self._finalize_instrumentation(run_status)
         output_paths.update(
             {
-                "checkpoint": str(self._checkpoint_store.path),
                 "instrumentation": str(self._instrumentation.summary_path),
                 "instrumentation_events": str(self._instrumentation.events_path),
             }
@@ -2870,7 +2865,7 @@ class SourceHuntRunner:
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
             tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
-            checkpoint=self._checkpoint_store.bundle.model_dump(mode="json"),
+            checkpoint=self._checkpoint.model_dump(mode="json"),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
             status=run_status,
