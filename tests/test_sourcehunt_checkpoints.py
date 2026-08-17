@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
@@ -266,6 +268,27 @@ def test_runner_accepts_checkpoint_as_json_object(tmp_path: Path):
 
     assert resumed._preprocess().file_targets[0]["path"] == "sample.c"
     assert resumed._preprocess_restored is True
+
+
+def test_runner_rejects_incompatible_preprocess_checkpoint(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
+    checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    checkpoint.commit_sha = "0" * 40
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        depth="quick",
+        checkpoint=checkpoint.model_dump(mode="json"),
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint is invalid or incompatible"):
+        runner._preprocess()
 
 
 def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):

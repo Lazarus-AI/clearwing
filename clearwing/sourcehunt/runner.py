@@ -2692,6 +2692,7 @@ class SourceHuntRunner:
                 self._preprocess_restored = True
                 logger.info("Restored preprocess result from session %s", self._session_id)
                 return restored
+            raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
 
         result = self._preprocessor.run(repo_path=repo_path)
         self._checkpoint = PreprocessCheckpoint.from_result(

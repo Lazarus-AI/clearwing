@@ -45,18 +45,19 @@ class PreprocessCheckpoint(BaseModel):
     ) -> PreprocessResult | None:
         current_commit = repository_commit_sha(repo_path)
         if current_commit is None or current_commit != self.commit_sha:
-            logger.warning(
+            logger.error(
                 "Preprocess checkpoint commit mismatch (checkpoint=%s, checkout=%s)",
                 self.commit_sha,
                 current_commit,
             )
             return None
         if self.options != options:
-            logger.warning("Preprocess checkpoint options do not match this run")
+            logger.error("Preprocess checkpoint options do not match this run")
             return None
         try:
             return PreprocessResult.from_checkpoint(self.result, repo_path)
         except (OSError, ValueError):
+            logger.error("Preprocess checkpoint result is invalid", exc_info=True)
             return None
 
 
