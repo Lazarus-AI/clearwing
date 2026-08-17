@@ -2730,12 +2730,7 @@ class SourceHuntRunner:
 
         result = self._preprocessor.run(repo_path=repo_path)
         try:
-            checkpoint_store.save(
-                result,
-                repo_url=self.repo_url,
-                branch=self.branch,
-                options=options,
-            )
+            checkpoint_store.save(result)
         except Exception:
             logger.warning("Could not persist preprocess checkpoint", exc_info=True)
         return result

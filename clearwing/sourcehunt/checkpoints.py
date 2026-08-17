@@ -92,10 +92,7 @@ class PreprocessCheckpoint(BaseModel):
     schema_version: Literal[1] = PREPROCESS_CHECKPOINT_SCHEMA_VERSION
     stage: Literal["preprocess"] = "preprocess"
     status: Literal["completed"] = "completed"
-    repo_url: str
-    branch: str
     commit_sha: str | None
-    options: dict[str, Any]
     preprocessor_version: Literal[1] = PREPROCESSOR_VERSION
     metrics: dict[str, int]
     result: PortablePreprocessResult
@@ -252,16 +249,9 @@ class PreprocessCheckpointStore:
     def save(
         self,
         result: PreprocessResult,
-        *,
-        repo_url: str,
-        branch: str,
-        options: dict[str, Any],
     ) -> None:
         self.bundle_store.bundle.preprocess = PreprocessCheckpoint(
-            repo_url=repo_url,
-            branch=branch,
             commit_sha=repository_commit_sha(result.repo_path),
-            options=options,
             metrics={
                 "files": len(result.file_targets),
                 "static_findings": len(result.static_findings),

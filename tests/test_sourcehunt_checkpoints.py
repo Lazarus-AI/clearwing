@@ -100,8 +100,7 @@ def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path:
     session = tmp_path / "results" / "sh-test"
     bundle_store = CheckpointBundleStore(session)
     store = PreprocessCheckpointStore(bundle_store)
-    options = {"run_taint": True}
-    store.save(_result(repo), repo_url="repo", branch="main", options=options)
+    store.save(_result(repo))
     assert bundle_store.bundle.preprocess is not None
     assert bundle_store.bundle.preprocess.commit_sha == commit_sha
 
@@ -122,7 +121,7 @@ def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
     _commit(repo)
     bundle_store = CheckpointBundleStore(tmp_path / "results" / "sh-test")
     store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo), repo_url="repo", branch="main", options={})
+    store.save(_result(repo))
 
     source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "sample.c"], check=True)
@@ -152,8 +151,7 @@ def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
     session = tmp_path / "results" / "sh-test"
     bundle_store = CheckpointBundleStore(session)
     store = PreprocessCheckpointStore(bundle_store)
-    options = {"run_taint": False}
-    store.save(_result(repo), repo_url="repo", branch="main", options=options)
+    store.save(_result(repo))
     payload = bundle_store.path.read_text(encoding="utf-8").replace(
         '"schema_version": 1', '"schema_version": 999', 1
     )
@@ -196,9 +194,7 @@ def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
     preprocess = PreprocessCheckpointStore(bundle_store)
-    preprocess.save(
-        _result(repo), repo_url="repo", branch="main", options={"run_taint": True}
-    )
+    preprocess.save(_result(repo))
     RankCheckpointStore(bundle_store).save(
         [{"path": "sample.c", "priority": 4.0}],
         preprocess_digest=preprocess_result_digest(_result(repo)),
@@ -223,9 +219,7 @@ def test_preprocess_checkpoint_isolated_from_rank_mutation(tmp_path: Path):
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     result = _result(repo)
     bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
-    PreprocessCheckpointStore(bundle_store).save(
-        result, repo_url="repo", branch="main", options={}
-    )
+    PreprocessCheckpointStore(bundle_store).save(result)
     saved_digest = preprocess_result_digest(result)
 
     result.file_targets[0]["priority"] = 5.0
@@ -245,9 +239,7 @@ def test_preprocess_checkpoint_rejects_path_traversal(tmp_path: Path):
     bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
     result = _result(repo)
     result.file_targets[0]["path"] = "../outside.c"
-    PreprocessCheckpointStore(bundle_store).save(
-        result, repo_url="repo", branch="main", options={}
-    )
+    PreprocessCheckpointStore(bundle_store).save(result)
 
     assert PreprocessCheckpointStore(bundle_store).load(repo_path=str(repo)) is None
 
