@@ -35,7 +35,6 @@ from clearwing.providers import (
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
     CheckpointBundleStore,
-    CheckpointInput,
     PreprocessCheckpointStore,
 )
 from .config import SourceHuntConfig
@@ -237,7 +236,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
-        checkpoint: CheckpointInput = None,
+        checkpoint: dict[str, Any] | str | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,

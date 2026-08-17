@@ -36,10 +36,9 @@ class CheckpointBundle(BaseModel):
     preprocess: PreprocessCheckpoint | None = None
 
 
-CheckpointInput = CheckpointBundle | dict[str, Any] | str | None
-
-
-def parse_checkpoint(value: CheckpointInput) -> CheckpointBundle | None:
+def parse_checkpoint(
+    value: CheckpointBundle | dict[str, Any] | str | None,
+) -> CheckpointBundle | None:
     """Validate a bridge-provided checkpoint object or serialized JSON blob."""
 
     if value is None:
@@ -73,7 +72,11 @@ def repository_commit_sha(repo_path: str | Path) -> str | None:
 class CheckpointBundleStore:
     """Read and atomically publish one portable checkpoint document."""
 
-    def __init__(self, session_dir: Path, bundle: CheckpointInput = None):
+    def __init__(
+        self,
+        session_dir: Path,
+        bundle: CheckpointBundle | dict[str, Any] | str | None = None,
+    ):
         self.session_dir = session_dir
         self.path = session_dir / "checkpoint.json"
         self.bundle = parse_checkpoint(bundle) or CheckpointBundle()
