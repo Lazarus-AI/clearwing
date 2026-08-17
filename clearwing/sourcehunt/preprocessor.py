@@ -14,6 +14,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,6 +43,52 @@ class PreprocessResult(BaseModel):
     callgraph: CallGraph | None = None  # v0.2
     fuzz_corpora: list[dict] = Field(default_factory=list)  # v0.2
     taint_paths: list[TaintPath] = Field(default_factory=list)  # v0.4
+
+    def to_checkpoint(self) -> dict[str, Any]:
+        """Serialize without paths tied to the current worker."""
+
+        payload = self.model_dump(mode="json")
+        payload.pop("repo_path")
+        for target in payload["file_targets"]:
+            target.pop("absolute_path", None)
+        return payload
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        payload: dict[str, Any],
+        repo_path: str | Path,
+    ) -> PreprocessResult:
+        """Restore worker-local paths for a newly materialized checkout."""
+
+        root = Path(repo_path).resolve()
+        saved_targets = payload.get("file_targets")
+        if not isinstance(saved_targets, list):
+            raise ValueError("checkpoint file targets must be a list")
+        targets: list[FileTarget] = []
+        for target in saved_targets:
+            if not isinstance(target, dict):
+                raise ValueError("checkpoint file target must be an object")
+            relative = Path(str(target.get("path") or ""))
+            if not relative.parts or relative.is_absolute():
+                raise ValueError("checkpoint file target must be repository-relative")
+            absolute = (root / relative).resolve()
+            if not absolute.is_relative_to(root):
+                raise ValueError("checkpoint file target escapes repository")
+            if not absolute.is_file():
+                raise ValueError(f"checkpoint file target is missing: {relative.as_posix()}")
+            rebound = dict(target)
+            rebound["path"] = relative.as_posix()
+            rebound["absolute_path"] = str(absolute)
+            targets.append(rebound)
+
+        return cls.model_validate(
+            {
+                **payload,
+                "repo_path": str(root),
+                "file_targets": targets,
+            }
+        )
 
     @property
     def file_count(self) -> int:

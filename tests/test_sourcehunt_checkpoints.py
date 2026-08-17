@@ -9,13 +9,21 @@ from clearwing.sourcehunt.checkpoints import (
     CheckpointBundle,
     CheckpointBundleStore,
     PreprocessCheckpointStore,
-    RankCheckpointStore,
     parse_checkpoint,
-    preprocess_result_digest,
 )
 from clearwing.sourcehunt.preprocessor import PreprocessResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.taint import TaintPath
+
+OPTIONS = {
+    "tag_files": True,
+    "build_callgraph": False,
+    "propagate_reachability": False,
+    "run_semgrep": False,
+    "run_taint": False,
+    "respect_gitignore": False,
+    "subsystem_paths": [],
+}
 
 
 def _result(repo: Path) -> PreprocessResult:
@@ -88,7 +96,7 @@ def test_preprocess_result_round_trips_nested_types(tmp_path: Path):
     assert isinstance(restored.callgraph.function_info["sample.c"][0], FunctionInfo)
     assert isinstance(restored.taint_paths[0], TaintPath)
     assert restored.callgraph.functions["sample.c"] == {"parse"}
-    assert preprocess_result_digest(restored) == preprocess_result_digest(result)
+    assert restored == result
 
 
 def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path: Path):
@@ -100,17 +108,17 @@ def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path:
     session = tmp_path / "results" / "sh-test"
     bundle_store = CheckpointBundleStore(session)
     store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo))
+    store.save(_result(repo), options=OPTIONS)
     assert bundle_store.bundle.preprocess is not None
     assert bundle_store.bundle.preprocess.commit_sha == commit_sha
 
-    restored = store.load(repo_path=str(repo))
+    restored = store.load(repo_path=str(repo), options=OPTIONS)
     assert restored is not None
     assert restored.repo_path == str(repo.resolve())
     assert restored.file_targets[0]["absolute_path"] == str(source.resolve())
 
     source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
-    assert store.load(repo_path=str(repo)) is not None
+    assert store.load(repo_path=str(repo), options=OPTIONS) is not None
 
 
 def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
@@ -121,7 +129,7 @@ def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
     _commit(repo)
     bundle_store = CheckpointBundleStore(tmp_path / "results" / "sh-test")
     store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo))
+    store.save(_result(repo), options=OPTIONS)
 
     source.write_text("int sample(void) { return 2; }\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "sample.c"], check=True)
@@ -141,7 +149,7 @@ def test_preprocess_checkpoint_rejects_different_commit(tmp_path: Path):
         check=True,
     )
 
-    assert store.load(repo_path=str(repo)) is None
+    assert store.load(repo_path=str(repo), options=OPTIONS) is None
 
 
 def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
@@ -151,7 +159,7 @@ def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
     session = tmp_path / "results" / "sh-test"
     bundle_store = CheckpointBundleStore(session)
     store = PreprocessCheckpointStore(bundle_store)
-    store.save(_result(repo))
+    store.save(_result(repo), options=OPTIONS)
     payload = bundle_store.path.read_text(encoding="utf-8").replace(
         '"schema_version": 1', '"schema_version": 999', 1
     )
@@ -163,43 +171,13 @@ def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
         raise AssertionError("invalid checkpoint schema was accepted")
 
 
-def test_rank_checkpoint_round_trips_exact_ranked_targets(tmp_path: Path):
-    bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
-    store = RankCheckpointStore(bundle_store)
-    ranked = [
-        {
-            "path": "sample.c",
-            "surface": 5,
-            "influence": 4,
-            "reachability": 3,
-            "priority": 4.2,
-            "surface_rationale": "attacker input",
-        }
-    ]
-    options = {"model": "test-model", "max_parallel": 4}
-
-    store.save(ranked, preprocess_digest="preprocess-sha", options=options)
-
-    assert store.load(preprocess_digest="preprocess-sha", options=options) == ranked
-    assert store.load(preprocess_digest="different", options=options) is None
-    assert store.load(
-        preprocess_digest="preprocess-sha",
-        options={**options, "model": "other-model"},
-    ) is None
-
-
 def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
     preprocess = PreprocessCheckpointStore(bundle_store)
-    preprocess.save(_result(repo))
-    RankCheckpointStore(bundle_store).save(
-        [{"path": "sample.c", "priority": 4.0}],
-        preprocess_digest=preprocess_result_digest(_result(repo)),
-        options={"model": "test"},
-    )
+    preprocess.save(_result(repo), options=OPTIONS)
 
     assert bundle_store.path == tmp_path / "sh-test" / "checkpoint.json"
     assert not (tmp_path / "sh-test" / "checkpoints").exists()
@@ -208,46 +186,48 @@ def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
     assert "absolute_path" not in raw
     restored = CheckpointBundle.model_validate_json(bundle_store.path.read_text())
     assert restored.preprocess is not None
-    assert restored.preprocess.result.file_targets[0]["path"] == "sample.c"
-    assert restored.rank is not None
-    assert restored.rank.result[0]["priority"] == 4.0
+    assert restored.preprocess.result["file_targets"][0]["path"] == "sample.c"
+    assert restored.preprocess.options == OPTIONS
 
 
-def test_preprocess_checkpoint_isolated_from_rank_mutation(tmp_path: Path):
+def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     result = _result(repo)
+    _commit(repo)
     bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
-    PreprocessCheckpointStore(bundle_store).save(result)
-    saved_digest = preprocess_result_digest(result)
+    store = PreprocessCheckpointStore(bundle_store)
+    store.save(result, options=OPTIONS)
 
-    result.file_targets[0]["priority"] = 5.0
-    bundle_store.save()
-    restored = CheckpointBundle.model_validate_json(bundle_store.path.read_text())
-
-    assert "priority" not in restored.preprocess.result.file_targets[0]
-    rebound = restored.preprocess.result.materialize(repo)
-    assert preprocess_result_digest(rebound) == saved_digest
+    assert store.load(
+        repo_path=str(repo),
+        options={**OPTIONS, "run_semgrep": True},
+    ) is None
 
 
 def test_preprocess_checkpoint_rejects_path_traversal(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
     outside = tmp_path / "outside.c"
     outside.write_text("int outside(void);\n", encoding="utf-8")
     bundle_store = CheckpointBundleStore(tmp_path / "sh-test")
     result = _result(repo)
     result.file_targets[0]["path"] = "../outside.c"
-    PreprocessCheckpointStore(bundle_store).save(result)
+    PreprocessCheckpointStore(bundle_store).save(result, options=OPTIONS)
 
-    assert PreprocessCheckpointStore(bundle_store).load(repo_path=str(repo)) is None
+    assert PreprocessCheckpointStore(bundle_store).load(
+        repo_path=str(repo), options=OPTIONS
+    ) is None
 
 
 def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
     first = SourceHuntRunner(
         repo_url=str(repo),
         local_path=str(repo),
@@ -284,6 +264,7 @@ def test_runner_accepts_checkpoint_as_json_object(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
     first = SourceHuntRunner(
         repo_url=str(repo),
         local_path=str(repo),

@@ -37,8 +37,6 @@ from .checkpoints import (
     CheckpointBundleStore,
     CheckpointInput,
     PreprocessCheckpointStore,
-    RankCheckpointStore,
-    preprocess_result_digest,
 )
 from .config import SourceHuntConfig
 from .disclosure import (
@@ -1081,40 +1079,13 @@ class SourceHuntRunner:
                     budget_stage="rank",
                 )
             )
-            rank_options = {
-                "no_rank": self._no_rank,
-                "preprocessing": self._preprocessing,
-                "model": self.model_override or "",
-                "max_parallel": self.max_parallel,
-            }
-            rank_input_digest = preprocess_result_digest(preprocess_result)
-            rank_store = RankCheckpointStore(self._checkpoint_store)
-            rank_restored = False
-            if self._checkpoint_store.bundle.rank is not None and not self._no_rank:
-                restored_files = rank_store.load(
-                    preprocess_digest=rank_input_digest,
-                    options=rank_options,
-                )
-                if restored_files is not None:
-                    files = restored_files
-                    preprocess_result.file_targets = files
-                    rank_restored = True
-                    logger.info("Restored rank result from session %s", self._session_id)
             self._emit_stage(
                 "rank",
                 "started",
                 detail=f"{len(files)} files",
                 files=stage_files,
             )
-            if rank_restored:
-                pipeline_status.record_succeeded("ranker")
-                self._emit_stage(
-                    "rank",
-                    "completed",
-                    detail=f"Restored {len(files)} ranked files from checkpoint",
-                    files=stage_files,
-                )
-            elif self._no_rank:
+            if self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
                 for ft in files:
                     ft["surface"] = ft.get("surface") or 3
@@ -1156,11 +1127,6 @@ class SourceHuntRunner:
                             ranker_config.max_inflight_chunks,
                         )
                     await Ranker(ranker_llm, ranker_config).arank(files)
-                    rank_store.save(
-                        files,
-                        preprocess_digest=rank_input_digest,
-                        options=rank_options,
-                    )
                     logger.info("Ranker completed")
                     pipeline_status.record_succeeded("ranker")
                     self._emit_stage(
@@ -2722,6 +2688,7 @@ class SourceHuntRunner:
             repo_path = self._preprocessor.resolve_repository()
             restored = checkpoint_store.load(
                 repo_path=repo_path,
+                options=options,
             )
             if restored is not None:
                 self._preprocess_restored = True
@@ -2730,7 +2697,7 @@ class SourceHuntRunner:
 
         result = self._preprocessor.run(repo_path=repo_path)
         try:
-            checkpoint_store.save(result)
+            checkpoint_store.save(result, options=options)
         except Exception:
             logger.warning("Could not persist preprocess checkpoint", exc_info=True)
         return result

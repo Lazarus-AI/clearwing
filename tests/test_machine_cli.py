@@ -126,7 +126,7 @@ def test_sourcehunt_request_rejects_paths_credentials_and_provider_fields():
 
 
 def test_sourcehunt_machine_request_accepts_checkpoint_object():
-    checkpoint = {"schema_version": 1, "flow": "legacy", "preprocess": None, "rank": None}
+    checkpoint = {"schema_version": 1, "flow": "legacy", "preprocess": None}
 
     parsed = sourcehunt._machine_request(
         {"repo_url": "https://example.test/repo", "checkpoint": checkpoint}
@@ -208,7 +208,6 @@ class _SourceResult:
             "schema_version": 1,
             "flow": "legacy",
             "preprocess": None,
-            "rank": None,
         }
     )
 
