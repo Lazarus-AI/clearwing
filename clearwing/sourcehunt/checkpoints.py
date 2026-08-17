@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 class PreprocessCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
     commit_sha: str | None
     options: dict[str, Any]
     result: dict[str, Any]
@@ -59,28 +60,18 @@ class PreprocessCheckpoint(BaseModel):
             return None
 
 
-class CheckpointBundle(BaseModel):
-    """Portable preprocessing checkpoint representation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
-    flow: Literal["legacy"] = "legacy"
-    preprocess: PreprocessCheckpoint | None = None
-
-
 def parse_checkpoint(
-    value: CheckpointBundle | dict[str, Any] | str | None,
-) -> CheckpointBundle | None:
+    value: PreprocessCheckpoint | dict[str, Any] | str | None,
+) -> PreprocessCheckpoint | None:
     """Validate a bridge-provided checkpoint object or serialized JSON blob."""
 
     if value is None:
         return None
-    if isinstance(value, CheckpointBundle):
+    if isinstance(value, PreprocessCheckpoint):
         return value.model_copy(deep=True)
     if isinstance(value, str):
-        return CheckpointBundle.model_validate_json(value)
-    return CheckpointBundle.model_validate(value)
+        return PreprocessCheckpoint.model_validate_json(value)
+    return PreprocessCheckpoint.model_validate(value)
 
 
 def repository_commit_sha(repo_path: str | Path) -> str | None:

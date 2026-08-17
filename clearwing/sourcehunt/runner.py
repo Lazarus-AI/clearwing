@@ -34,7 +34,6 @@ from clearwing.providers import (
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
-    CheckpointBundle,
     PreprocessCheckpoint,
     parse_checkpoint,
 )
@@ -528,7 +527,7 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
-        self._checkpoint = parse_checkpoint(checkpoint) or CheckpointBundle()
+        self._checkpoint = parse_checkpoint(checkpoint)
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -2270,7 +2269,11 @@ class SourceHuntRunner:
                 spent_per_tier=spent_per_tier,
                 tokens_used=budget_summary["total_tokens"],
                 output_paths=output_paths,
-                checkpoint=self._checkpoint.model_dump(mode="json"),
+                checkpoint=(
+                    self._checkpoint.model_dump(mode="json")
+                    if self._checkpoint is not None
+                    else None
+                ),
                 session_id=self._session_id,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
@@ -2679,9 +2682,9 @@ class SourceHuntRunner:
             subsystem_paths=self._subsystem_paths,
         )
         repo_path: str | None = None
-        if self._checkpoint.preprocess is not None:
+        if self._checkpoint is not None:
             repo_path = self._preprocessor.resolve_repository()
-            restored = self._checkpoint.preprocess.restore(
+            restored = self._checkpoint.restore(
                 repo_path=repo_path,
                 options=options,
             )
@@ -2691,7 +2694,7 @@ class SourceHuntRunner:
                 return restored
 
         result = self._preprocessor.run(repo_path=repo_path)
-        self._checkpoint.preprocess = PreprocessCheckpoint.from_result(
+        self._checkpoint = PreprocessCheckpoint.from_result(
             result,
             options=options,
         )
@@ -2865,7 +2868,11 @@ class SourceHuntRunner:
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
             tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
-            checkpoint=self._checkpoint.model_dump(mode="json"),
+            checkpoint=(
+                self._checkpoint.model_dump(mode="json")
+                if self._checkpoint is not None
+                else None
+            ),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
             status=run_status,

@@ -6,7 +6,6 @@ from pathlib import Path
 from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
-    CheckpointBundle,
     PreprocessCheckpoint,
     parse_checkpoint,
 )
@@ -149,10 +148,8 @@ def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
-    bundle = CheckpointBundle(
-        preprocess=PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
-    )
-    payload = bundle.model_dump_json().replace(
+    checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    payload = checkpoint.model_dump_json().replace(
         '"schema_version":1', '"schema_version":999', 1
     )
     try:
@@ -167,16 +164,13 @@ def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
-    bundle = CheckpointBundle(
-        preprocess=PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
-    )
-    raw = bundle.model_dump_json()
+    checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    raw = checkpoint.model_dump_json()
     assert str(repo) not in raw
     assert "absolute_path" not in raw
-    restored = CheckpointBundle.model_validate_json(raw)
-    assert restored.preprocess is not None
-    assert restored.preprocess.result["file_targets"][0]["path"] == "sample.c"
-    assert restored.preprocess.options == OPTIONS
+    restored = PreprocessCheckpoint.model_validate_json(raw)
+    assert restored.result["file_targets"][0]["path"] == "sample.c"
+    assert restored.options == OPTIONS
 
 
 def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
@@ -292,7 +286,7 @@ def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
     result = runner.run()
 
     assert result.checkpoint is not None
-    assert result.checkpoint["preprocess"]["result"]["file_targets"][0]["path"] == "sample.c"
+    assert result.checkpoint["result"]["file_targets"][0]["path"] == "sample.c"
     assert "checkpoint" not in result.output_paths
 
 
