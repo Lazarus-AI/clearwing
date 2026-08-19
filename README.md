@@ -350,4 +350,4 @@ There are two lanes, and they go to different places:
 
 MIT. See [`LICENSE`](LICENSE).
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Lazarus-AI/clearwing&type=Date)](https://star-history.com/#Lazarus-AI/clearwing&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Lazarus-AI/clearwing&type=Date)](https://star-history.dera.page/#Lazarus-AI/clearwing&Date)
