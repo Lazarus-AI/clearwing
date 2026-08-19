@@ -131,6 +131,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "anthropic/claude-haiku-4-5",
             "openai/gpt-4o",
             "meta-llama/llama-3.3-70b-instruct",
+            "qwen/qwen3.8-27b",
             "qwen/qwen-2.5-coder-32b-instruct",
             "google/gemini-2.0-flash",
         ),

@@ -143,6 +143,7 @@ _REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
     "mistral",
     "mixtral",
     "qwen2",
+    "qwen3",
     "gemma",
 )
 
@@ -157,9 +158,7 @@ _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 # Everything else supports it, so we capture reasoning by default and only skip
 # for names matching this list. Case-insensitive substring match on the model
 # name. Add new offenders here as they surface.
-_REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
-    "gpt-5.3-codex-spark",
-)
+_REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = ("gpt-5.3-codex-spark",)
 
 
 def _model_supports_reasoning_capture(model_name: str) -> bool:
@@ -195,7 +194,9 @@ def _is_root_model_type(schema_model: type[BaseModel]) -> bool:
 
 def _validate_schema_response(schema_model: type[BaseModel], text: str) -> BaseModel:
     if not text or not text.strip():
-        raise ValueError("LLM returned empty response; expected JSON matching " + schema_model.__name__)
+        raise ValueError(
+            "LLM returned empty response; expected JSON matching " + schema_model.__name__
+        )
     try:
         return schema_model.model_validate_json(text)
     except Exception:
@@ -309,9 +310,7 @@ class AsyncLLMClient:
 
             account_id = extract_account_id(self.api_key)
             if not account_id:
-                raise RuntimeError(
-                    "OpenAI OAuth access token is missing the ChatGPT account id."
-                )
+                raise RuntimeError("OpenAI OAuth access token is missing the ChatGPT account id.")
 
             # Store the `.../codex/` base; `_build_client` derives the full
             # `.../codex/responses` URL and passes it (plus the OAuth headers)
@@ -476,9 +475,7 @@ class AsyncLLMClient:
                 for tool in tools or []
             ],
         }
-        serialized_bytes = len(
-            json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        )
+        serialized_bytes = len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
         framing_overhead = 256 + 32 * len(messages) + 64 * len(tools or [])
         return serialized_bytes + framing_overhead
 
@@ -495,9 +492,7 @@ class AsyncLLMClient:
             reservation,
             input_tokens=usage.prompt_tokens,
             output_tokens=usage.completion_tokens,
-            cached_input_tokens=(
-                details.cached_tokens if details is not None else None
-            ),
+            cached_input_tokens=(details.cached_tokens if details is not None else None),
         )
 
     def _fail_spend_call(
@@ -801,10 +796,7 @@ class AsyncLLMClient:
                         options = self._rebuild_options_without_max_tokens(options)
                         response = await _consume(options)
                     elif self._should_try_openai_http_fallback(exc) and (
-                        not (
-                            self._spend_ledger is not None
-                            and self._spend_ledger.enforcing
-                        )
+                        not (self._spend_ledger is not None and self._spend_ledger.enforcing)
                         or self._is_definitely_unbilled_transport_error(exc)
                     ):
                         logger.debug(
@@ -823,9 +815,7 @@ class AsyncLLMClient:
                     else:
                         raise
                 if response is None:
-                    raise RuntimeError(
-                        "LLM stream ended without a terminal usage event"
-                    )
+                    raise RuntimeError("LLM stream ended without a terminal usage event")
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
@@ -837,9 +827,8 @@ class AsyncLLMClient:
                 self._format_exc_chain(exc),
             )
             _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
-            if (
-                "without a terminal usage event" in str(exc)
-                and not (self._spend_ledger is not None and self._spend_ledger.enforcing)
+            if "without a terminal usage event" in str(exc) and not (
+                self._spend_ledger is not None and self._spend_ledger.enforcing
             ):
                 return await self.achat(
                     messages=messages,
@@ -1259,11 +1248,15 @@ class AsyncLLMClient:
                         }
                 elif event_type == "response.function_call_arguments.delta":
                     idx = int(chunk.get("output_index") or 0)
-                    acc = resp_tool_parts.setdefault(idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""})
+                    acc = resp_tool_parts.setdefault(
+                        idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""}
+                    )
                     acc["arguments"] += chunk.get("delta") or ""
                 elif event_type == "response.function_call_arguments.done":
                     idx = int(chunk.get("output_index") or 0)
-                    acc = resp_tool_parts.setdefault(idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""})
+                    acc = resp_tool_parts.setdefault(
+                        idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""}
+                    )
                     acc["arguments"] = chunk.get("arguments") or acc["arguments"]
                 continue
 
@@ -1340,11 +1333,13 @@ class AsyncLLMClient:
                     elif part_type in ("reasoning", "thinking"):
                         reasoning_parts.append(part.get("text") or part.get("thinking") or "")
             elif item_type == "function_call":
-                tool_calls.append({
-                    "call_id": item.get("call_id") or item.get("id") or "",
-                    "fn_name": item.get("name") or "",
-                    "fn_arguments": self._parse_openai_tool_arguments(item.get("arguments")),
-                })
+                tool_calls.append(
+                    {
+                        "call_id": item.get("call_id") or item.get("id") or "",
+                        "fn_name": item.get("name") or "",
+                        "fn_arguments": self._parse_openai_tool_arguments(item.get("arguments")),
+                    }
+                )
             elif item_type == "reasoning":
                 for summary in item.get("summary") or []:
                     reasoning_parts.append(summary.get("text") or "")
@@ -1373,7 +1368,9 @@ class AsyncLLMClient:
             return "".join(parts)
         return str(content)
 
-    def _openai_tool_calls_from_message(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _openai_tool_calls_from_message(
+        self, tool_calls: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         parsed: list[dict[str, Any]] = []
         for call in tool_calls:
             fn = call.get("function") or {}
@@ -1495,7 +1492,9 @@ class AsyncLLMClient:
             except Exception as exc:
                 is_rate_limit = self._is_rate_limit_error(exc)
                 is_transport = self._is_transient_transport_error(exc)
-                if (not is_rate_limit and not is_transport) or attempt >= self.rate_limit_max_retries:
+                if (
+                    not is_rate_limit and not is_transport
+                ) or attempt >= self.rate_limit_max_retries:
                     raise
 
                 delay = self._retry_delay_seconds(exc, attempt)
