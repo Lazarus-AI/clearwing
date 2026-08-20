@@ -42,32 +42,6 @@ from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
 
-# Security-relevant function name keywords used to prioritise callgraph entries
-# in sitreps, initial messages, and coverage tracking. General-purpose set that
-# works across C/C++, Go, Rust, Java, etc.
-SECURITY_FUNCTION_KEYWORDS: set[str] = {
-    "verify", "validate", "check", "parse", "decode",
-    "free", "copy", "alloc", "write", "read",
-    "auth", "sign", "exec", "eval", "deserialize",
-}
-
-
-def _dedup_function_infos(infos: list) -> list:
-    """De-duplicate FunctionInfo entries by (name, start_line)."""
-    seen: set[tuple[str, int]] = set()
-    out = []
-    for fi in infos:
-        key = (fi.name, fi.start_line)
-        if key not in seen:
-            seen.add(key)
-            out.append(fi)
-    return out
-
-
-def _security_verb_hits(name: str) -> int:
-    """Count how many security keywords appear in a function name."""
-    low = name.lower()
-    return sum(1 for kw in SECURITY_FUNCTION_KEYWORDS if kw in low)
 
 
 def _trajectory_base_dir() -> Path:
@@ -1237,43 +1211,14 @@ This subsystem spans {file_count} files under {root_path}:
 {cross_file_calls}
 You have full shell access. The source tree is at /workspace.
 
-Your mission is to find all exploitable vulnerabilities in this subsystem — \
-single-file bugs and cross-file bugs alike:
-- Memory safety: buffer overflows, use-after-free, integer misuse before allocation
-- Logic bugs: protocol/API contracts violated across call boundaries
-- State corruption: shared state modified by one file but consumed by another
-- Inconsistent validation: input validated in one path but not another
-
-Record findings early — once you can name the vulnerable value, the missing/wrong \
-check, and the downstream effect, call record_finding. Use flag_potential to \
-bookmark suspicions as you go; don't wait until you have a full exploit chain.
+Your mission is to find exploitable vulnerabilities in this subsystem — \
+single-file bugs and cross-file bugs alike.
 
 Not a finding (skip these):
 - Missing NULL check on trusted-caller pointers (robustness, not security)
 - "Could hypothetically" without a concrete arithmetic/comparison anchor
 - Style, naming, or dead-code issues
-{existing_findings_block}{entry_points_block}
-METHODOLOGY:
-
-1. Survey — Before deep investigation, identify 3-5 falsifiable security \
-invariants for this subsystem type. Use the pre-ranked function list above as \
-your starting point; read those functions by line range first, then use \
-list_functions to find additional security-relevant targets (validate, parse, \
-free, copy, verify, decode).
-
-2. Investigate — Work sink-first: identify dangerous operations, use \
-lookup_callers to find all paths reaching them, then check what guards each \
-caller applies. Asymmetry between callers of the same sink (one checks bounds, \
-another doesn't) is the strongest signal. When you find a guard, consider \
-whether it can be bypassed (encoding differences, state changes after check, \
-format mismatches).
-
-3. Cross-file analysis — Use flag_potential and get_potentials to accumulate \
-leads across files. Cross-file bugs often only become visible when comparing \
-leads side by side. Use dismiss_potential to rule out false positives.
-
-Use record_trace_step as you read to anchor each step of the path. Record \
-findings at evidence_level=static_corroboration with the specific file and line."""
+{existing_findings_block}{entry_points_block}"""
 
 
 def _build_subsystem_prompt(
@@ -1294,6 +1239,26 @@ def _build_subsystem_prompt(
     file_listing = "\n".join(file_lines)
 
     cross_file_calls = ""
+    if callgraph is not None:
+        edges: list[str] = []
+        for ft in subsystem.files[:50]:
+            src = ft.get("path", "")
+            called = callgraph.calls_out.get(src, set())
+            for func_name in called:
+                for def_file in callgraph.defined_in.get(func_name, set()):
+                    if def_file != src and def_file in subsystem_files:
+                        edges.append(f"  {src} -> {def_file} (via {func_name})")
+                        if len(edges) >= 30:
+                            break
+                if len(edges) >= 30:
+                    break
+            if len(edges) >= 30:
+                break
+        if edges:
+            cross_file_calls = (
+                "\nCross-file call edges within this subsystem:\n"
+                + "\n".join(edges) + "\n"
+            )
 
     existing_findings_block = ""
     if findings_pool is not None:
@@ -1347,12 +1312,6 @@ def _build_subsystem_prompt(
     return prompt + DEEP_TRACE_INSTRUCTIONS
 
 
-def _terminal_functions_for_file(callgraph: Any, file_path: str) -> list[Any]:
-    """Return FunctionInfo entries for functions in file_path not called by anyone in the repo."""
-    all_called: set[str] = {name for names in callgraph.calls_out.values() for name in names}
-    infos = callgraph.function_info.get(file_path, [])
-    return [fi for fi in infos if fi.name not in all_called]
-
 
 def build_subsystem_hunter_agent(
     subsystem: SubsystemTarget,
@@ -1395,59 +1354,12 @@ def build_subsystem_hunter_agent(
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
     _initial_msg = (
-        f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
+        f"Hunt for vulnerabilities in the {subsystem.name} "
         f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
     )
-    kw_lines: list[str] = []
-    term_lines: list[str] = []
-    if callgraph is not None:
-        # Per-file cap scales inversely with file count so single-file subsystems
-        # (e.g. one .c targeted eval) don't get artificially clipped at 5.
-        per_file_cap = max(5, min(20, 25 // max(1, len(subsystem.files))))
-
-        # Security-keyword functions per file. Sort by verb-hit-count desc so
-        # compound names (DigestVerifyFinal = digest+verify+final) float above
-        # single-verb (EncryptFinal) — the target CVE class lives in the compounds.
-        for ft in subsystem.files:
-            fpath = ft["path"]
-            infos = _dedup_function_infos(callgraph.function_info.get(fpath, []))
-            hits = [fi for fi in infos if _security_verb_hits(fi.name)]
-            if hits:
-                hits.sort(key=lambda fi: (-_security_verb_hits(fi.name), fi.start_line))
-                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in hits[:per_file_cap])
-                kw_lines.append(f"  {fpath}: {fn_list}")
-        if kw_lines:
-            _initial_msg += (
-                "\n\nSecurity-relevant functions by file (compound names first):\n"
-                + "\n".join(kw_lines)
-            )
-
-        # Terminal functions (public API — not called by anything in the repo)
-        for ft in subsystem.files:
-            fpath = ft["path"]
-            terminals = _dedup_function_infos(_terminal_functions_for_file(callgraph, fpath))
-            if terminals:
-                fn_list = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(terminals, key=lambda fi: fi.start_line)[:per_file_cap])
-                term_lines.append(f"  {fpath}: {fn_list}")
-        if term_lines:
-            _initial_msg += (
-                "\n\nPublic API / terminal nodes (not called by anything in the repo — attacker entry points):\n"
-                + "\n".join(term_lines)
-            )
-
-        if kw_lines or term_lines:
-            _initial_msg += (
-                "\n\nPrioritise these functions. Use lookup_callers to walk backwards from any "
-                "sink. Call list_functions(path, filter=<keyword>) to expand a file, then read by line range."
-            )
-
-    # Count actual functions injected (comma-separated names per line).
-    _n_kw = sum(line.count(",") + 1 for line in kw_lines)
-    _n_term = sum(line.count(",") + 1 for line in term_lines)
     logger.info(
-        "Subsystem hunt [%s]: %d files, %d kw funcs, %d terminal funcs (cap=%d/file)",
-        subsystem.name, len(subsystem.files), _n_kw, _n_term,
-        max(5, min(20, 25 // max(1, len(subsystem.files)))),
+        "Subsystem hunt [%s]: %d files",
+        subsystem.name, len(subsystem.files),
     )
     return NativeHunter(
         llm=llm,
@@ -1575,46 +1487,12 @@ class NativeHunter:
                     f"  Files visited: {visited_list}\n"
                     f"{budget_note}"
                 )
-                # Callgraph coverage: security functions not yet read (partially or fully unread)
-                if self.ctx.callgraph is not None:
-                    _SECURITY_KW = SECURITY_FUNCTION_KEYWORDS
-                    unread_by_file: list[str] = []
-
-                    # Files opened but with unread security functions
-                    for fpath, ranges in lines_read.items():
-                        infos = self.ctx.callgraph.function_info.get(fpath, [])
-                        seen_names: set[str] = set()
-                        sec_funcs = []
-                        for fi in infos:
-                            if fi.name not in seen_names and any(kw in fi.name.lower() for kw in _SECURITY_KW):
-                                seen_names.add(fi.name)
-                                sec_funcs.append(fi)
-                        unread = [
-                            fi for fi in sec_funcs
-                            if not any(r[0] <= fi.start_line <= r[1] for r in ranges)
-                        ]
-                        if unread:
-                            names = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(unread, key=lambda fi: fi.start_line))
-                            unread_by_file.append(f"    {fpath} (opened, unread functions): {names}")
-
-                    # Files not opened at all that have security functions
-                    subsystem_files = [ft["path"] for ft in self.ctx.subsystem.files] if self.ctx.subsystem else []
-                    for fpath in subsystem_files:
-                        if fpath in lines_read:
-                            continue
-                        infos = self.ctx.callgraph.function_info.get(fpath, [])
-                        seen_names2: set[str] = set()
-                        sec_funcs2 = []
-                        for fi in infos:
-                            if fi.name not in seen_names2 and any(kw in fi.name.lower() for kw in _SECURITY_KW):
-                                seen_names2.add(fi.name)
-                                sec_funcs2.append(fi)
-                        if sec_funcs2:
-                            names = ", ".join(f"{fi.name}:{fi.start_line}" for fi in sorted(sec_funcs2, key=lambda fi: fi.start_line)[:5])
-                            unread_by_file.append(f"    {fpath} (NOT OPENED): {names}")
-
-                    if unread_by_file:
-                        sitrep += "\n  Security functions not yet read — consider investigating these before recording findings:\n" + "\n".join(unread_by_file)
+                # Coverage note: how many files in the subsystem haven't been opened yet
+                if self.ctx.subsystem is not None:
+                    subsystem_files = {ft.get("path", "") for ft in self.ctx.subsystem.files}
+                    unopened = subsystem_files - files_visited
+                    if unopened:
+                        sitrep += f"\n  Unopened subsystem files: {len(unopened)}/{len(subsystem_files)}"
                 messages.append(ChatMessage("user", sitrep))
                 trajectory.log("sitrep", {"step": step, "content": sitrep})
 
@@ -1680,7 +1558,8 @@ class NativeHunter:
                     EventType.HUNTER_STATUS,
                     {
                         "hunter_target": self.ctx.file_path,
-                        "text": last_assistant_text,
+                        "text": last_assistant_text[:512],
+                        "content_length": len(last_assistant_text),
                         "step": step,
                     },
                 )
@@ -2154,6 +2033,7 @@ def build_hunter_agent(
     entry_point: Any = None,
     seed_context: str | None = None,
     findings_pool: Any = None,
+    callgraph: Any = None,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -2209,6 +2089,7 @@ def build_hunter_agent(
         sandbox_manager=sandbox_manager,
         default_sanitizers=tuple(default_sanitizers),
         findings_pool=findings_pool,
+        callgraph=callgraph,
     )
 
     if specialist == "propagation":
@@ -2267,29 +2148,6 @@ def build_hunter_agent(
         prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)
 
     initial_user_message = f"Hunt for vulnerabilities in {ctx.file_path or 'unknown'}."
-    if ctx.callgraph is not None and ctx.file_path:
-        infos = ctx.callgraph.function_info.get(ctx.file_path, [])
-        if infos:
-            fn_lines = "\n".join(
-                f"  {fi.name} (lines {fi.start_line}-{fi.end_line})"
-                for fi in sorted(infos, key=lambda fi: fi.start_line)
-            )
-            initial_user_message += (
-                f"\n\nFunctions defined in this file ({len(infos)} total):\n{fn_lines}"
-                f"\n\nInvestigate every function above — prioritise security-sensitive "
-                f"names (validation, parsing, memory ops, auth)."
-            )
-        terminals = _terminal_functions_for_file(ctx.callgraph, ctx.file_path)
-        if terminals:
-            term_list = ", ".join(
-                f"{fi.name}:{fi.start_line}"
-                for fi in sorted(terminals, key=lambda fi: fi.start_line)
-            )
-            initial_user_message += (
-                f"\n\nPublic API / terminal nodes (not called by anything in the repo):\n  {term_list}"
-                f"\n\nThese are attacker entry points. Use lookup_callers on what they call "
-                f"to walk the full path inward."
-            )
 
     return NativeHunter(
         llm=llm,

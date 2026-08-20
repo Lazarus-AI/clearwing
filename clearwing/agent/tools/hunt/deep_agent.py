@@ -262,13 +262,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="lookup_callers",
                 description=(
-                    "REACH FOR THIS FIRST when you identify a dangerous function "
-                    "(memcpy, image copy, free, decrypt, verify, write). "
                     "Returns every function in the codebase that calls func_name, "
-                    "with file path and line range so you can read each caller directly. "
-                    "This is faster and more complete than grep. "
-                    "Use it immediately after spotting a sink — do not read the sink's "
-                    "definition, read its callers to find which one skips a guard."
+                    "grouped by file with start/end line ranges."
                 ),
                 schema=LookupCallersInput.model_json_schema(),
                 handler=lookup_callers,
@@ -276,10 +271,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="lookup_callees",
                 description=(
-                    "Returns every function called by func_name, with file and line range. "
-                    "Use when you need to understand what a function does without reading "
-                    "it line by line, or to compare what setup calls two sibling functions "
-                    "make before reaching the same sink (e.g. streaming vs one-shot path)."
+                    "Returns every function called by func_name, grouped by defining file "
+                    "with line ranges."
                 ),
                 schema=LookupCalleesInput.model_json_schema(),
                 handler=lookup_callees,
@@ -287,12 +280,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="list_functions",
                 description=(
-                    "CALL THIS FIRST on your target file before reading any code. "
-                    "Returns functions defined in the file with start/end line numbers. "
-                    "Use filter= to search by keyword. Filter tokens are split on "
-                    "non-alphanumerics AND camelCase — filter='ParseHeader' matches "
-                    "'http_parse_header_field', 'xml_ParseHeader_ex', etc. "
-                    "If you already know the exact name, prefer read_function(name)."
+                    "Returns all functions defined in a file with start/end line numbers. "
+                    "Use filter= to search by keyword (tokens split on non-alphanumerics "
+                    "and camelCase boundaries)."
                 ),
                 schema=ListFunctionsInput.model_json_schema(),
                 handler=list_functions,
@@ -300,9 +290,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="read_function",
                 description=(
-                    "Read a function body by exact name — one atomic op. Skips the "
-                    "list_functions→pick-line-range→read_file chain (where wrong picks "
-                    "silently open the wrong function). Returns {file, start_line, "
+                    "Read a function body by exact name. Returns {file, start_line, "
                     "end_line, body}. On miss: did_you_mean suggestions. On ambiguity: "
                     "candidate list."
                 ),

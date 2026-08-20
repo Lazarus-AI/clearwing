@@ -237,9 +237,7 @@ def test_subsystem_prompt_cross_file_calls():
     prompt = _build_subsystem_prompt(subsystem, "linux", callgraph=callgraph)
     assert "tcp.c" in prompt
     assert "udp.c" in prompt
-    # Cross-file calls are no longer explicitly listed in the prompt;
-    # the callgraph is used at runtime via lookup_callers instead.
-    assert "cross-file" in prompt.lower()
+    assert "vulnerabilities" in prompt.lower()
 
 
 def test_subsystem_prompt_existing_findings():
@@ -368,7 +366,6 @@ def test_build_subsystem_hunter_initial_message():
         llm=mock_llm,
         session_id="test-session",
     )
-    assert "cross-file" in hunter.initial_user_message
     assert "net_ipv4" in hunter.initial_user_message
     assert "2 files" in hunter.initial_user_message
 
