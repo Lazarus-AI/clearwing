@@ -2489,15 +2489,20 @@ class SourceHuntRunner:
                             files,
                             callgraph=callgraph,
                             entry_points_by_file=entry_points_by_file,
+                            max_files=self._subsystem_max_files,
                         )
                     )
                 except ValueError:
                     logger.warning("No files match subsystem path: %s", path)
         else:
+            auto_kwargs: dict = {}
+            if self._subsystem_max_files is not None:
+                auto_kwargs["max_files_per_subsystem"] = self._subsystem_max_files
             subsystem_targets = identify_subsystems_auto(
                 files,
                 callgraph=callgraph,
                 entry_points_by_file=entry_points_by_file,
+                **auto_kwargs,
             )
         if not subsystem_targets:
             return
@@ -2546,6 +2551,7 @@ class SourceHuntRunner:
                 sandbox_manager=self._sandbox_manager,
                 campaign_hint=self._campaign_hint,
                 callgraph=callgraph,
+                max_files_in_prompt=self._subsystem_max_files,
                 trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                 instrumentation=self._instrumentation,
             )
