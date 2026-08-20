@@ -284,6 +284,12 @@ def resolve_llm_endpoint(
     # Anthropic direct when a custom endpoint is already configured.
     if env_model and not env_base_url and config_provider:
         env_base_url = config_provider.get("base_url") or env_base_url
+        if env_base_url:
+            logger.info(
+                "CLEARWING_MODEL=%s set without CLEARWING_BASE_URL; "
+                "inheriting base_url=%s from provider config",
+                env_model, env_base_url,
+            )
         if not env_api_key:
             env_api_key = _resolve_config_secret(config_provider.get("api_key"))
 

@@ -279,24 +279,54 @@ class TestSpawnContainer:
         assert volumes[repo_abs]["bind"] == "/workspace"
         assert volumes[repo_abs]["mode"] == "ro"
 
-    def test_spawn_writable_workspace_mounts_rw(self, c_repo: Path, mock_docker):
+    def test_spawn_writable_workspace_copies_tree(self, c_repo: Path, mock_docker):
         mock_docker.images.get.return_value = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "writable-cid"
         mock_container.short_id = "writ"
+        mock_container.exec_run.return_value = MagicMock(exit_code=0, output=(b"", b""))
         mock_docker.containers.run.return_value = mock_container
 
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
         sb.build_image()
-        container = sb.spawn(writable_workspace=True, scratch_mount=False)
 
-        # Writable workspace should bind-mount as rw
-        found_rw = False
-        for host, container_path, mode in container.config.mounts:
+        with (
+            patch.object(SandboxContainer, "start", return_value="writable-cid"),
+            patch.object(SandboxContainer, "copy_tree_into") as mock_copy,
+            patch.object(SandboxContainer, "exec") as mock_exec,
+        ):
+            mock_exec.return_value = MagicMock(exit_code=0)
+            container = sb.spawn(writable_workspace=True)
+
+        # Must copy, then git init
+        mock_copy.assert_called_once_with(str(c_repo), "/workspace")
+        git_calls = [
+            c for c in mock_exec.call_args_list
+            if isinstance(c[0][0], str) and "git init" in c[0][0]
+        ]
+        assert len(git_calls) == 1
+
+    def test_spawn_writable_no_ro_mount(self, c_repo: Path, mock_docker):
+        """Writable workspace must NOT have a read-only bind mount."""
+        mock_docker.images.get.return_value = MagicMock()
+
+        sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
+
+        with (
+            patch.object(HunterSandbox, "_build_variant_image", return_value="img:test"),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+            patch.object(SandboxContainer, "copy_tree_into"),
+            patch.object(SandboxContainer, "exec", return_value=MagicMock(exit_code=0)),
+        ):
+            container = sb.spawn(writable_workspace=True)
+
+        for mount in container.config.mounts:
+            host, container_path, mode = mount
             if container_path == "/workspace":
-                assert mode == "rw"
-                found_rw = True
-        assert found_rw, "Expected /workspace mount with mode=rw"
+                pytest.fail(
+                    f"Writable workspace should not have a /workspace mount, "
+                    f"found mode={mode}"
+                )
 
     def test_spawn_network_disabled(self, c_repo: Path, mock_docker):
         mock_docker.images.get.return_value = MagicMock()
@@ -535,22 +565,41 @@ class TestCleanup:
 
 
 class TestWritableWorkspaceResilience:
-    def test_writable_workspace_mounts_rw_mode(self, c_repo: Path, mock_docker):
-        """Writable workspace just sets the bind mount to rw."""
+    def test_git_init_failure_does_not_crash_spawn(self, c_repo: Path, mock_docker):
+        """If git init in writable workspace fails, spawn still succeeds."""
         mock_docker.images.get.return_value = MagicMock()
-        mock_container = MagicMock()
-        mock_container.id = "rw-test"
-        mock_container.short_id = "rw"
-        mock_docker.containers.run.return_value = mock_container
 
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
-        sb.build_image()
-        container = sb.spawn(writable_workspace=True, scratch_mount=False)
 
-        kwargs = mock_docker.containers.run.call_args.kwargs
-        volumes = kwargs["volumes"]
-        repo_abs = os.path.abspath(str(c_repo))
-        assert volumes[repo_abs]["mode"] == "rw"
+        with (
+            patch.object(HunterSandbox, "_build_variant_image", return_value="img:t"),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+            patch.object(SandboxContainer, "copy_tree_into"),
+            patch.object(
+                SandboxContainer, "exec",
+                side_effect=RuntimeError("git not installed"),
+            ),
+        ):
+            # Should not raise despite git init failure
+            container = sb.spawn(writable_workspace=True)
+            assert container is not None
+
+    def test_copy_tree_failure_propagates(self, c_repo: Path, mock_docker):
+        """If copy_tree_into fails, spawn MUST fail — we can't hunt without code."""
+        mock_docker.images.get.return_value = MagicMock()
+
+        sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
+
+        with (
+            patch.object(HunterSandbox, "_build_variant_image", return_value="img:t"),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+            patch.object(
+                SandboxContainer, "copy_tree_into",
+                side_effect=RuntimeError("tar failed"),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="tar failed"):
+                sb.spawn(writable_workspace=True)
 
 
 # ---------------------------------------------------------------------------

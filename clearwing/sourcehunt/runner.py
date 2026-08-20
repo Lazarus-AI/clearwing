@@ -2657,12 +2657,17 @@ class SourceHuntRunner:
             image_tag = manager.build_image()
         except Exception as exc:
             logger.error(
-                "HunterSandbox unavailable (%s); aborting. "
+                "HunterSandbox unavailable (%s); falling back to host mode. "
                 "Start Docker to enable sanitizer-backed containers.",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
-            raise RuntimeError(f"HunterSandbox unavailable: {exc}") from exc
+            EventBus().emit_message(
+                f"WARNING: sandbox unavailable ({exc}); running without container isolation. "
+                "Findings may lack sanitizer corroboration. Start Docker for full coverage.",
+                "warning",
+            )
+            return
 
         self._sandbox_manager = manager
         cpu_limit = manager.default_cpu_limit

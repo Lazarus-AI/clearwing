@@ -335,16 +335,15 @@ class TestHunterSandboxWritableWorkspace:
                 with patch.object(SandboxContainer, "exec", return_value=MagicMock(exit_code=0)):
                     sb = manager.spawn(writable_workspace=True)
 
-        # writable_workspace=True mounts /workspace as rw (not ro)
-        workspace_mounts = [
-            (h, c, m) for h, c, m in sb.config.mounts if c == "/workspace"
-        ]
-        assert len(workspace_mounts) == 1
-        assert workspace_mounts[0][2] == "rw"
+        # Check no read-only workspace mount (copy-based, not bind-mounted)
+        for mount in sb.config.mounts:
+            host, container, mode = mount
+            if container == "/workspace":
+                pytest.fail(f"Found /workspace mount with mode={mode}, expected none")
 
     @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._build_variant_image")
     @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._get_client")
-    def test_spawn_writable_mounts_rw(self, mock_client, mock_build):
+    def test_spawn_writable_calls_copy_and_git(self, mock_client, mock_build):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
         mock_build.return_value = "clearwing-sourcehunt:test123"
@@ -355,16 +354,22 @@ class TestHunterSandboxWritableWorkspace:
             deep_agent_mode=True,
         )
 
-        with patch.object(SandboxContainer, "start", return_value="cid"):
-            sb = manager.spawn(writable_workspace=True)
+        with (
+            patch.object(SandboxContainer, "start", return_value="cid"),
+            patch.object(SandboxContainer, "copy_tree_into") as mock_copy,
+            patch.object(SandboxContainer, "exec") as mock_exec,
+        ):
+            mock_exec.return_value = MagicMock(exit_code=0)
+            manager.spawn(writable_workspace=True)
 
-        # writable_workspace=True results in rw bind mount (no copy needed)
-        workspace_mounts = [
-            (h, c, m) for h, c, m in sb.config.mounts if c == "/workspace"
+        mock_copy.assert_called_once_with("/tmp/repo", "/workspace")
+        # git init should have been called
+        git_calls = [
+            c
+            for c in mock_exec.call_args_list
+            if isinstance(c[0][0], str) and "git init" in c[0][0]
         ]
-        assert len(workspace_mounts) == 1
-        assert workspace_mounts[0][0] == "/tmp/repo"
-        assert workspace_mounts[0][2] == "rw"
+        assert len(git_calls) == 1
 
     def test_deep_agent_mode_adds_packages(self):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox

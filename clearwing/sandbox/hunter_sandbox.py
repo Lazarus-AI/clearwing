@@ -11,7 +11,6 @@ Lifecycle:
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import logging
@@ -370,7 +369,8 @@ class HunterSandbox:
 
         # Build mounts list
         mounts: list[tuple[str, str, str]] = []
-        mounts.append((self.repo_path, "/workspace", "rw" if writable_workspace else "ro"))
+        if not writable_workspace:
+            mounts.append((self.repo_path, "/workspace", "ro"))
         scratch_host_dir = None
         if scratch_mount:
             scratch_host_dir = tempfile.mkdtemp(prefix="clearwing-scratch-")
@@ -413,6 +413,16 @@ class HunterSandbox:
         _t = time.monotonic()
         sb.start()
         logger.debug("Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t)
+
+        if writable_workspace:
+            sb.copy_tree_into(self.repo_path, "/workspace")
+            try:
+                sb.exec(
+                    "cd /workspace && git init -q && git add -A && git commit -m initial -q",
+                    timeout=120,
+                )
+            except Exception:
+                logger.warning("git init in writable workspace failed", exc_info=True)
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir
