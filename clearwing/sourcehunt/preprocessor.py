@@ -13,8 +13,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
@@ -29,17 +31,64 @@ from .taint import TaintAnalyzer, TaintPath
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PreprocessResult:
+class PreprocessResult(BaseModel):
     """Output of the preprocessor — fed into the Ranker."""
+
+    model_config = ConfigDict(extra="forbid")
 
     repo_path: str
     file_targets: list[FileTarget]
     static_findings: list[StaticFinding]
-    semgrep_findings: list[dict] = field(default_factory=list)  # v0.2
+    semgrep_findings: list[dict] = Field(default_factory=list)  # v0.2
     callgraph: CallGraph | None = None  # v0.2
-    fuzz_corpora: list[dict] = field(default_factory=list)  # v0.2
-    taint_paths: list[TaintPath] = field(default_factory=list)  # v0.4
+    fuzz_corpora: list[dict] = Field(default_factory=list)  # v0.2
+    taint_paths: list[TaintPath] = Field(default_factory=list)  # v0.4
+
+    def to_checkpoint(self) -> dict[str, Any]:
+        """Serialize without paths tied to the current worker."""
+
+        payload = self.model_dump(mode="json")
+        payload.pop("repo_path")
+        for target in payload["file_targets"]:
+            target.pop("absolute_path", None)
+        return payload
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        payload: dict[str, Any],
+        repo_path: str | Path,
+    ) -> PreprocessResult:
+        """Restore worker-local paths for a newly materialized checkout."""
+
+        root = Path(repo_path).resolve()
+        saved_targets = payload.get("file_targets")
+        if not isinstance(saved_targets, list):
+            raise ValueError("checkpoint file targets must be a list")
+        targets: list[FileTarget] = []
+        for target in saved_targets:
+            if not isinstance(target, dict):
+                raise ValueError("checkpoint file target must be an object")
+            relative = Path(str(target.get("path") or ""))
+            if not relative.parts or relative.is_absolute():
+                raise ValueError("checkpoint file target must be repository-relative")
+            absolute = (root / relative).resolve()
+            if not absolute.is_relative_to(root):
+                raise ValueError("checkpoint file target escapes repository")
+            if not absolute.is_file():
+                raise ValueError(f"checkpoint file target is missing: {relative.as_posix()}")
+            rebound = dict(target)
+            rebound["path"] = relative.as_posix()
+            rebound["absolute_path"] = str(absolute)
+            targets.append(rebound)
+
+        return cls.model_validate(
+            {
+                **payload,
+                "repo_path": str(root),
+                "file_targets": targets,
+            }
+        )
 
     @property
     def file_count(self) -> int:
@@ -261,9 +310,14 @@ class Preprocessor:
         self._analyzer: SourceAnalyzer | None = None
         self._cloner: SourceAnalyzer | None = None
 
-    def run(self) -> PreprocessResult:
+    def resolve_repository(self) -> str:
+        """Materialize the requested repository without analyzing it."""
+
+        return self._clone_or_use_local()
+
+    def run(self, *, repo_path: str | None = None) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
-        repo_path = self._clone_or_use_local()
+        repo_path = repo_path or self.resolve_repository()
 
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")
