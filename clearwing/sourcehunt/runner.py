@@ -39,6 +39,8 @@ from .checkpoints import (
     PreprocessCheckpoint,
     RankCheckpoint,
     SourceHuntCheckpoint,
+    VerificationCheckpoint,
+    VerificationResult,
 )
 from .config import SourceHuntConfig
 from .disclosure import (
@@ -1286,78 +1288,11 @@ class SourceHuntRunner:
                     historical_db.close()
 
             # 4. Verify (unless --no-verify)
-            verified: list[Finding] = []
-            rejected: list[Finding] = []
-            verify_status = "completed"
-            self._emit_stage(
-                "verify",
-                "started",
-                findings_so_far=len(all_findings),
-                detail=f"{len(all_findings)} findings to verify",
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+            verification_result = await self._verify(
+                all_findings, repo_path=repo_path, pipeline_status=pipeline_status
             )
-            if not self.no_verify:
-                if self._budget_exhausted():
-                    verify_status = "budget_exhausted"
-                    pipeline_status.record(
-                        "verifier",
-                        StageOutcome.SKIPPED,
-                        fallback_description="Budget exhausted; findings remain unverified",
-                    )
-                else:
-                    verifier_llm = self._get_native_client(
-                        "verifier",
-                        self.verifier_llm,
-                        budget_stage="verify",
-                    )
-                    if verifier_llm is not None:
-                        if self.validator_mode == "v2":
-                            verified, rejected = await self._verify_v2(
-                                verifier_llm,
-                                all_findings,
-                                repo_path,
-                            )
-                        else:
-                            verified = await self._verify_v1(
-                                verifier_llm,
-                                all_findings,
-                                repo_path,
-                            )
-                    else:
-                        verify_status = "degraded"
-                        for f in all_findings:
-                            f["verified"] = True
-                        verified = all_findings
-                        pipeline_status.record_degraded(
-                            "verifier",
-                            "Findings auto-verified without independent review",
-                        )
-            else:
-                for finding in all_findings:
-                    finding["verified"] = False
-                verified = []
-                pipeline_status.record(
-                    "verifier",
-                    StageOutcome.SKIPPED,
-                    fallback_description="Verification skipped (--no-verify)",
-                )
-
-            verify_detail = (
-                "Verification skipped (--no-verify)"
-                if self.no_verify
-                else f"{len(verified)} verified, {len(rejected)} rejected"
-            )
-            self._emit_stage(
-                "verify",
-                verify_status,
-                findings_so_far=len(all_findings),
-                detail=verify_detail,
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-            )
+            verified = verification_result.verified
+            rejected = verification_result.rejected
             if rejected:
                 self._write_rejected_findings(rejected)
 
@@ -2008,6 +1943,97 @@ class SourceHuntRunner:
             )
         except Exception:
             logger.debug("gh pr create failed", exc_info=True)
+
+    async def _verify(
+        self,
+        findings: list[Finding],
+        *,
+        repo_path: str,
+        pipeline_status: PipelineStatus,
+    ) -> VerificationResult:
+        """Run or restore the completed verification stage."""
+
+        options = {
+            "no_verify": self.no_verify,
+            "validator_mode": self.validator_mode,
+            "adversarial_verifier": self.adversarial_verifier,
+            "adversarial_threshold": self.adversarial_threshold,
+            "enable_patch_oracle": self.enable_patch_oracle,
+        }
+        self._verification_restored = False
+        self._emit_stage(
+            "verify",
+            "started",
+            findings_so_far=len(findings),
+            detail=f"{len(findings)} findings to verify",
+            files=[str(finding.file or "") for finding in findings],
+            symbols=self._finding_symbols(findings),
+            finding_ids=[finding.id for finding in findings],
+        )
+        if self._checkpoint is not None and self._checkpoint.verification is not None:
+            restored = self._checkpoint.verification.restore(options=options)
+            if restored is None:
+                raise ValueError("verification checkpoint is invalid or incompatible with this run")
+            self._verification_restored = True
+            pipeline_status.record_succeeded("verifier")
+            result = restored
+            result.status = "completed"
+            detail = f"Restored {len(result.verified)} verified findings from checkpoint"
+        else:
+            result = VerificationResult(verified=[], rejected=[])
+            if self.no_verify:
+                for finding in findings:
+                    finding["verified"] = False
+                pipeline_status.record(
+                    "verifier",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Verification skipped (--no-verify)",
+                )
+            elif self._budget_exhausted():
+                result.status = "budget_exhausted"
+                pipeline_status.record(
+                    "verifier",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; findings remain unverified",
+                )
+            else:
+                verifier_llm = self._get_native_client(
+                    "verifier", self.verifier_llm, budget_stage="verify"
+                )
+                if verifier_llm is None:
+                    result.status = "degraded"
+                    for finding in findings:
+                        finding["verified"] = True
+                    result.verified = findings
+                    pipeline_status.record_degraded(
+                        "verifier", "Findings auto-verified without independent review"
+                    )
+                elif self.validator_mode == "v2":
+                    result.verified, result.rejected = await self._verify_v2(
+                        verifier_llm, findings, repo_path
+                    )
+                else:
+                    result.verified = await self._verify_v1(verifier_llm, findings, repo_path)
+            if self._checkpoint is None:
+                raise RuntimeError("verification requires a preprocessing checkpoint")
+            self._checkpoint.verification = VerificationCheckpoint.from_result(
+                result, options=options
+            )
+            detail = (
+                "Verification skipped (--no-verify)"
+                if self.no_verify
+                else f"{len(result.verified)} verified, {len(result.rejected)} rejected"
+            )
+        self._emit_stage(
+            "verify",
+            result.status,
+            findings_so_far=len(findings),
+            detail=detail,
+            files=[str(finding.file or "") for finding in findings],
+            symbols=self._finding_symbols(findings),
+            finding_ids=[finding.id for finding in findings],
+        )
+        return result
 
     async def _verify_v1(
         self,
