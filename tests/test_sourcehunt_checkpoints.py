@@ -321,10 +321,10 @@ async def test_runner_checkpoints_and_restores_ranking(tmp_path: Path, monkeypat
         local_path=str(repo),
         output_dir=str(tmp_path / "first"),
         depth="quick",
-        no_rank=True,
         enable_mechanism_memory=False,
         enable_calibration=False,
     )
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
     preprocessed = first._preprocess()
     ranked = await first._rank(
         preprocessed.file_targets,
@@ -342,7 +342,6 @@ async def test_runner_checkpoints_and_restores_ranking(tmp_path: Path, monkeypat
         local_path=str(repo),
         output_dir=str(tmp_path / "resumed"),
         depth="quick",
-        no_rank=True,
         checkpoint=first._checkpoint.model_dump(mode="json"),
         enable_mechanism_memory=False,
         enable_calibration=False,
@@ -373,14 +372,13 @@ async def test_runner_restores_independent_stage_payloads(tmp_path: Path, monkey
     ranked = [{"path": "sample.c", "priority": 4.2}]
     rank = RankCheckpoint.from_result(
         ranked,
-        options={"no_rank": True, "preprocessing": True},
+        options={"preprocessing": True},
     )
     runner = SourceHuntRunner(
         repo_url=str(repo),
         local_path=str(repo),
         output_dir=str(tmp_path / "results"),
         depth="quick",
-        no_rank=True,
         checkpoint={
             "schema_version": 1,
             "preprocess": preprocess.model_dump(mode="json"),
@@ -407,7 +405,7 @@ async def test_runner_restores_independent_stage_payloads(tmp_path: Path, monkey
     assert restored_rank[0]["priority"] == pytest.approx(4.2)
 
 
-def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
+def test_no_rank_bypasses_ranking_and_exposes_preprocess_checkpoint(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
@@ -422,11 +420,16 @@ def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
         enable_knowledge_graph=False,
     )
 
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("_rank ran despite --no-rank")
+
+    monkeypatch.setattr(runner, "_rank", fail_if_called)
+
     result = runner.run()
 
     assert result.checkpoint is not None
     assert result.checkpoint["preprocess"]["result"]["file_targets"][0]["path"] == "sample.c"
-    assert result.checkpoint["rank"]["ranked_file_targets"][0]["priority"] == pytest.approx(2.8)
+    assert result.checkpoint["rank"] is None
     assert "checkpoint" not in result.output_paths
 
 

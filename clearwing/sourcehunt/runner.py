@@ -1069,7 +1069,17 @@ class SourceHuntRunner:
             logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
 
             # 2. Rank
-            files = await self._rank(files, pipeline_status, stage_files)
+            if self._no_rank:
+                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+                pipeline_status.record_degraded(
+                    "ranker", "All files assigned default priority scores (--no-rank)"
+                )
+                self._emit_stage(
+                    "rank", "degraded", detail="Skipped (--no-rank)", files=stage_files
+                )
+                self._apply_rank_fallbacks(files)
+            else:
+                files = await self._rank(files, pipeline_status, stage_files)
             preprocess_result.file_targets = files
 
             # depth=quick exits here with the static_findings as-is
@@ -2591,7 +2601,6 @@ class SourceHuntRunner:
         """Rank files or restore the completed ranking stage from the checkpoint."""
 
         options = {
-            "no_rank": self._no_rank,
             "preprocessing": self._preprocessing,
         }
         self._rank_restored = False
@@ -2612,18 +2621,8 @@ class SourceHuntRunner:
             logger.info("Restored rank result from session %s", self._session_id)
             return restored
 
-        ranker_llm = (
-            None
-            if self._no_rank
-            else self._get_native_client("ranker", self.ranker_llm, budget_stage="rank")
-        )
-        if self._no_rank:
-            logger.info("Ranker skipped (--no-rank); assigning default priority scores")
-            pipeline_status.record_degraded(
-                "ranker", "All files assigned default priority scores (--no-rank)"
-            )
-            self._emit_stage("rank", "degraded", detail="Skipped (--no-rank)", files=stage_files)
-        elif ranker_llm is not None and files:
+        ranker_llm = self._get_native_client("ranker", self.ranker_llm, budget_stage="rank")
+        if ranker_llm is not None and files:
             logger.info("Ranker starting on %d files", len(files))
             try:
                 ranker_config = RankerConfig()
@@ -2676,8 +2675,19 @@ class SourceHuntRunner:
                 files=stage_files,
             )
 
-        # A partial, skipped, or failed rank pass is still a completed stage once
+        # A partial or failed rank pass is still a completed stage once
         # every file has deterministic fallback scores.
+        self._apply_rank_fallbacks(files)
+
+        if self._checkpoint is None:
+            raise RuntimeError("ranking requires a preprocessing checkpoint")
+        self._checkpoint.rank = RankCheckpoint.from_result(files, options=options)
+        return files
+
+    @staticmethod
+    def _apply_rank_fallbacks(files: list[FileTarget]) -> None:
+        """Ensure every file has deterministic scores when ranking is unavailable."""
+
         for target in files:
             target["surface"] = target.get("surface") or 3
             target["influence"] = target.get("influence") or 2
@@ -2685,11 +2695,6 @@ class SourceHuntRunner:
             target["priority"] = target.get("priority") or (
                 target["surface"] * 0.5 + target["influence"] * 0.2 + target["reachability"] * 0.3
             )
-
-        if self._checkpoint is None:
-            raise RuntimeError("ranking requires a preprocessing checkpoint")
-        self._checkpoint.rank = RankCheckpoint.from_result(files, options=options)
-        return files
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
