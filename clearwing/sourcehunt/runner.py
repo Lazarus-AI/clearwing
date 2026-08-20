@@ -2629,7 +2629,7 @@ class SourceHuntRunner:
                 if not self._preprocessing:
                     ranker_config.include_static_hints = False
                     ranker_config.include_imports_by = False
-                if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
+                if ranker_llm.provider_name in ("openai_resp", "openai_codex", "openai"):
                     ranker_config.chunk_size = 30
                     ranker_config.max_inflight_chunks = self.max_parallel
                     logger.info(
