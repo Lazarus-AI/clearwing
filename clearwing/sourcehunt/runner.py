@@ -1077,11 +1077,20 @@ class SourceHuntRunner:
             # 2. Rank
             if self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+                self._emit_stage(
+                    "rank",
+                    "started",
+                    detail=f"{len(files)} files",
+                    files=stage_files,
+                )
                 pipeline_status.record_degraded(
                     "ranker", "All files assigned default priority scores (--no-rank)"
                 )
                 self._emit_stage(
-                    "rank", "degraded", detail="Skipped (--no-rank)", files=stage_files
+                    "rank",
+                    "degraded",
+                    detail="Skipped (--no-rank)",
+                    files=stage_files,
                 )
                 self._apply_rank_fallbacks(files)
             else:
@@ -2370,7 +2379,13 @@ class SourceHuntRunner:
         hunter_llm = self._get_native_client("hunter", self.hunter_llm, budget_stage="hunt")
         if self._no_per_file_hunt:
             logger.info("Per-file hunt skipped (--no-per-file-hunt)")
-            self._emit_stage("hunt", "skipped", detail="Per-file hunt disabled", files=stage_files)
+            self._emit_stage(
+                "hunt",
+                "skipped",
+                detail="Per-file hunt disabled",
+                files=stage_files,
+                symbols=hunt_symbols,
+            )
         elif hunter_llm is not None and files and not self._budget_exhausted():
             self._emit_stage(
                 "hunt",
@@ -2416,27 +2431,43 @@ class SourceHuntRunner:
                         StageOutcome.SKIPPED,
                         fallback_description="Budget exhausted; partial hunter results retained",
                     )
-                    status = "budget_exhausted"
+                    self._emit_stage(
+                        "hunt",
+                        "budget_exhausted",
+                        findings_so_far=len(result.findings),
+                        cost_usd=pool.total_spent,
+                        detail=f"{len(result.findings)} partial findings",
+                        files=[str(finding.file or "") for finding in result.findings],
+                        symbols=self._finding_symbols(result.findings),
+                        finding_ids=[finding.id for finding in result.findings],
+                    )
                 else:
                     pipeline_status.record_succeeded("hunter_pool")
-                    status = "completed"
-                self._emit_stage(
-                    "hunt",
-                    status,
-                    findings_so_far=len(result.findings),
-                    cost_usd=pool.total_spent,
-                    detail=f"{len(result.findings)} findings",
-                    files=[str(finding.file or "") for finding in result.findings],
-                    symbols=self._finding_symbols(result.findings),
-                    finding_ids=[finding.id for finding in result.findings],
-                )
+                    self._emit_stage(
+                        "hunt",
+                        "completed",
+                        findings_so_far=len(result.findings),
+                        cost_usd=pool.total_spent,
+                        detail=f"{len(result.findings)} findings",
+                        files=[str(finding.file or "") for finding in result.findings],
+                        symbols=self._finding_symbols(result.findings),
+                        finding_ids=[finding.id for finding in result.findings],
+                    )
             except BudgetExceeded:
+                logger.info("HunterPool stopped because the run budget is exhausted")
                 pipeline_status.record(
                     "hunter_pool",
                     StageOutcome.SKIPPED,
                     fallback_description="Budget exhausted; partial hunter results retained",
                 )
-                self._emit_stage("hunt", "budget_exhausted", files=stage_files)
+                self._emit_stage(
+                    "hunt",
+                    "budget_exhausted",
+                    findings_so_far=len(result.findings),
+                    files=stage_files,
+                    symbols=hunt_symbols,
+                    finding_ids=[finding.id for finding in result.findings],
+                )
             except Exception as exc:
                 logger.warning("HunterPool run failed", exc_info=True)
                 pipeline_status.record_degraded(
@@ -2445,7 +2476,10 @@ class SourceHuntRunner:
                 self._emit_stage(
                     "hunt",
                     "degraded",
+                    findings_so_far=len(result.findings),
                     files=stage_files,
+                    symbols=hunt_symbols,
+                    finding_ids=[finding.id for finding in result.findings],
                     error={"type": type(exc).__name__, "message": str(exc)},
                 )
             result.spent_per_tier = pool.spent_per_tier
@@ -2460,12 +2494,23 @@ class SourceHuntRunner:
             }
             result.files_hunted = pool.completed_target_count
         else:
-            status = (
-                "skipped"
-                if not files
-                else ("budget_exhausted" if self._budget_exhausted() else "degraded")
+            logger.info("HunterPool skipped; no LLM available")
+            if not files:
+                hunt_status = "skipped"
+                hunt_detail = "No source files were available"
+            elif self._budget_exhausted():
+                hunt_status = "budget_exhausted"
+                hunt_detail = "Run budget was exhausted before hunting"
+            else:
+                hunt_status = "degraded"
+                hunt_detail = "No hunter model was available"
+            self._emit_stage(
+                "hunt",
+                hunt_status,
+                detail=hunt_detail,
+                files=stage_files,
+                symbols=hunt_symbols,
             )
-            self._emit_stage("hunt", status, files=stage_files, symbols=hunt_symbols)
 
         await self._hunt_subsystems(
             result,
