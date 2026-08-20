@@ -9,10 +9,12 @@ from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
     PreprocessCheckpoint,
-    parse_checkpoint,
+    RankCheckpoint,
+    SourceHuntCheckpoint,
 )
 from clearwing.sourcehunt.preprocessor import PreprocessResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
+from clearwing.sourcehunt.state import PipelineStatus
 from clearwing.sourcehunt.taint import TaintPath
 
 OPTIONS = {
@@ -151,11 +153,10 @@ def test_preprocess_checkpoint_rejects_corrupt_payload(tmp_path: Path):
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
     checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
-    payload = checkpoint.model_dump_json().replace(
-        '"schema_version":1', '"schema_version":999', 1
-    )
+    payload = SourceHuntCheckpoint(preprocess=checkpoint).model_dump_json()
+    payload = payload.replace('"schema_version":1', '"schema_version":999', 1)
     try:
-        parse_checkpoint(payload)
+        SourceHuntCheckpoint.from_input(payload)
     except ValueError:
         pass
     else:
@@ -175,6 +176,21 @@ def test_checkpoint_is_one_self_contained_json_blob(tmp_path: Path):
     assert restored.options == OPTIONS
 
 
+def test_sourcehunt_checkpoint_rejects_flat_phase_payload(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checkpoint = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+
+    with pytest.raises(ValueError):
+        SourceHuntCheckpoint.from_input(checkpoint.model_dump(mode="json"))
+
+
+def test_sourcehunt_checkpoint_preserves_checkpoint_instance():
+    checkpoint = SourceHuntCheckpoint()
+
+    assert SourceHuntCheckpoint.from_input(checkpoint) is checkpoint
+
+
 def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -183,10 +199,13 @@ def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
     _commit(repo)
     checkpoint = PreprocessCheckpoint.from_result(result, options=OPTIONS)
 
-    assert checkpoint.restore(
-        repo_path=str(repo),
-        options={**OPTIONS, "run_semgrep": True},
-    ) is None
+    assert (
+        checkpoint.restore(
+            repo_path=str(repo),
+            options={**OPTIONS, "run_semgrep": True},
+        )
+        is None
+    )
 
 
 def test_preprocess_checkpoint_rejects_path_traversal(tmp_path: Path):
@@ -282,7 +301,7 @@ def test_runner_rejects_incompatible_preprocess_checkpoint(tmp_path: Path):
         local_path=str(repo),
         output_dir=str(tmp_path / "results"),
         depth="quick",
-        checkpoint=checkpoint.model_dump(mode="json"),
+        checkpoint=SourceHuntCheckpoint(preprocess=checkpoint).model_dump(mode="json"),
         enable_mechanism_memory=False,
         enable_calibration=False,
     )
@@ -291,7 +310,102 @@ def test_runner_rejects_incompatible_preprocess_checkpoint(tmp_path: Path):
         runner._preprocess()
 
 
-def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_runner_checkpoints_and_restores_ranking(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
+    first = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "first"),
+        depth="quick",
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
+    preprocessed = first._preprocess()
+    ranked = await first._rank(
+        preprocessed.file_targets,
+        PipelineStatus(),
+        ["sample.c"],
+    )
+
+    assert isinstance(first._checkpoint, SourceHuntCheckpoint)
+    assert isinstance(first._checkpoint.rank, RankCheckpoint)
+    assert ranked[0]["priority"] == pytest.approx(2.8)
+    assert "absolute_path" not in first._checkpoint.rank.ranked_file_targets[0]
+
+    resumed = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "resumed"),
+        depth="quick",
+        checkpoint=first._checkpoint.model_dump(mode="json"),
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+    restored_preprocess = resumed._preprocess()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("ranker client resolved instead of restoring the checkpoint")
+
+    monkeypatch.setattr(resumed, "_get_native_client", fail_if_called)
+    restored = await resumed._rank(
+        restored_preprocess.file_targets,
+        PipelineStatus(),
+        ["sample.c"],
+    )
+
+    assert resumed._rank_restored is True
+    assert restored == ranked
+
+
+@pytest.mark.asyncio
+async def test_runner_restores_independent_stage_payloads(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
+    preprocess = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    ranked = [{"path": "sample.c", "priority": 4.2}]
+    rank = RankCheckpoint.from_result(
+        ranked,
+        options={"preprocessing": True},
+    )
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        depth="quick",
+        checkpoint={
+            "schema_version": 1,
+            "preprocess": preprocess.model_dump(mode="json"),
+            "rank": rank.model_dump(mode="json"),
+        },
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+
+    restored_preprocess = runner._preprocess()
+    monkeypatch.setattr(
+        runner,
+        "_get_native_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ranker called")),
+    )
+    restored_rank = await runner._rank(
+        restored_preprocess.file_targets,
+        PipelineStatus(),
+        ["sample.c"],
+    )
+
+    assert runner._preprocess_restored is True
+    assert runner._rank_restored is True
+    assert restored_rank[0]["priority"] == pytest.approx(4.2)
+
+
+def test_no_rank_bypasses_ranking_and_exposes_preprocess_checkpoint(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
@@ -306,10 +420,16 @@ def test_runner_result_exposes_checkpoint_for_bridge_response(tmp_path: Path):
         enable_knowledge_graph=False,
     )
 
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("_rank ran despite --no-rank")
+
+    monkeypatch.setattr(runner, "_rank", fail_if_called)
+
     result = runner.run()
 
     assert result.checkpoint is not None
-    assert result.checkpoint["result"]["file_targets"][0]["path"] == "sample.c"
+    assert result.checkpoint["preprocess"]["result"]["file_targets"][0]["path"] == "sample.c"
+    assert result.checkpoint["rank"] is None
     assert "checkpoint" not in result.output_paths
 
 

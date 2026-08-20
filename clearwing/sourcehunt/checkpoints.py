@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from .preprocessor import PreprocessResult
+from .state import FileTarget
 
 CHECKPOINT_SCHEMA_VERSION = 1
 
@@ -61,18 +62,76 @@ class PreprocessCheckpoint(BaseModel):
             return None
 
 
-def parse_checkpoint(
-    value: PreprocessCheckpoint | dict[str, Any] | str | None,
-) -> PreprocessCheckpoint | None:
-    """Validate a bridge-provided checkpoint object or serialized JSON blob."""
+class RankCheckpoint(BaseModel):
+    """Portable state produced by the completed ranking stage."""
 
-    if value is None:
-        return None
-    if isinstance(value, PreprocessCheckpoint):
-        return value.model_copy(deep=True)
-    if isinstance(value, str):
-        return PreprocessCheckpoint.model_validate_json(value)
-    return PreprocessCheckpoint.model_validate(value)
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
+    options: dict[str, Any]
+    ranked_file_targets: list[FileTarget]
+
+    @classmethod
+    def from_result(
+        cls,
+        files: list[FileTarget],
+        *,
+        options: dict[str, Any],
+    ) -> RankCheckpoint:
+        ranked_targets = []
+        for target in files:
+            portable = dict(target)
+            portable.pop("absolute_path", None)
+            ranked_targets.append(portable)
+        return cls(
+            options=options,
+            ranked_file_targets=ranked_targets,
+        )
+
+    def restore(
+        self,
+        files: list[FileTarget],
+        *,
+        options: dict[str, Any],
+    ) -> list[FileTarget] | None:
+        if self.options != options:
+            logger.error("Rank checkpoint options do not match this run")
+            return None
+        if len(files) != len(self.ranked_file_targets):
+            logger.error("Rank checkpoint file count does not match preprocessing")
+            return None
+
+        restored: list[FileTarget] = []
+        for current, saved in zip(files, self.ranked_file_targets, strict=True):
+            if current.get("path") != saved.get("path"):
+                logger.error("Rank checkpoint files do not match preprocessing")
+                return None
+            rebound = dict(saved)
+            if "absolute_path" in current:
+                rebound["absolute_path"] = current["absolute_path"]
+            restored.append(rebound)
+        return restored
+
+
+class SourceHuntCheckpoint(BaseModel):
+    """Stage-keyed sourcehunt checkpoint passed across the bridge boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
+    preprocess: PreprocessCheckpoint | None = None
+    rank: RankCheckpoint | None = None
+
+    @classmethod
+    def from_input(
+        cls,
+        value: SourceHuntCheckpoint | dict[str, Any] | str,
+    ) -> SourceHuntCheckpoint:
+        """Validate a bridge-provided checkpoint object or serialized JSON blob."""
+
+        if isinstance(value, str):
+            return cls.model_validate_json(value)
+        return cls.model_validate(value)
 
 
 def repository_commit_sha(repo_path: str | Path) -> str | None:
