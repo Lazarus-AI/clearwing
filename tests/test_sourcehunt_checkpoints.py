@@ -13,6 +13,8 @@ from clearwing.sourcehunt.checkpoints import (
     PreprocessCheckpoint,
     RankCheckpoint,
     SourceHuntCheckpoint,
+    VerificationCheckpoint,
+    VerificationResult,
 )
 from clearwing.sourcehunt.preprocessor import PreprocessResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
@@ -522,3 +524,42 @@ def test_hunt_checkpoint_rejects_different_options():
         HuntResult(findings=[], spent_per_tier={}), options={"agent_mode": "auto"}
     )
     assert checkpoint.restore(options={"agent_mode": "deep"}) is None
+
+
+@pytest.mark.asyncio
+async def test_runner_checkpoints_and_restores_verification(tmp_path: Path, monkeypatch):
+    finding = Finding(id="finding-1", file="sample.c", severity="high")
+    first = SourceHuntRunner(
+        repo_url=str(tmp_path), output_dir=str(tmp_path), enable_mechanism_memory=False
+    )
+    first._checkpoint = SourceHuntCheckpoint()
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
+    result = await first._verify(
+        [finding], repo_path=str(tmp_path), pipeline_status=PipelineStatus()
+    )
+    assert isinstance(first._checkpoint.verification, VerificationCheckpoint)
+    assert result.verified[0].id == "finding-1"
+
+    resumed = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path),
+        checkpoint=first._checkpoint.model_dump(mode="json"),
+        enable_mechanism_memory=False,
+    )
+    monkeypatch.setattr(
+        resumed,
+        "_get_native_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("verifier called")),
+    )
+    restored = await resumed._verify(
+        [finding], repo_path=str(tmp_path), pipeline_status=PipelineStatus()
+    )
+    assert resumed._verification_restored is True
+    assert restored.verified[0].id == "finding-1"
+
+
+def test_verification_checkpoint_rejects_different_options():
+    checkpoint = VerificationCheckpoint.from_result(
+        VerificationResult(verified=[], rejected=[]), options={"validator_mode": "v2"}
+    )
+    assert checkpoint.restore(options={"validator_mode": "v1"}) is None

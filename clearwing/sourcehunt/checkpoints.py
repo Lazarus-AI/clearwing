@@ -148,6 +148,38 @@ class HuntCheckpoint(BaseModel):
         return self.result.model_copy(deep=True)
 
 
+class VerificationResult(BaseModel):
+    """State handed from verification to exploitation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verified: list[Finding]
+    rejected: list[Finding]
+    status: str = "completed"
+
+
+class VerificationCheckpoint(BaseModel):
+    """Portable state produced by the completed verification stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
+    options: dict[str, Any]
+    result: VerificationResult
+
+    @classmethod
+    def from_result(
+        cls, result: VerificationResult, *, options: dict[str, Any]
+    ) -> VerificationCheckpoint:
+        return cls(options=options, result=result)
+
+    def restore(self, *, options: dict[str, Any]) -> VerificationResult | None:
+        if self.options != options:
+            logger.error("Verification checkpoint options do not match this run")
+            return None
+        return self.result.model_copy(deep=True)
+
+
 class SourceHuntCheckpoint(BaseModel):
     """Stage-keyed sourcehunt checkpoint passed across the bridge boundary."""
 
@@ -157,6 +189,7 @@ class SourceHuntCheckpoint(BaseModel):
     preprocess: PreprocessCheckpoint | None = None
     rank: RankCheckpoint | None = None
     hunt: HuntCheckpoint | None = None
+    verification: VerificationCheckpoint | None = None
 
     @classmethod
     def from_input(
