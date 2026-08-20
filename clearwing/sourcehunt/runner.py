@@ -249,6 +249,7 @@ class SourceHuntRunner:
         no_rank: bool = False,
         subsystem_budget_usd: float = 0.0,
         subsystem_max_parallel: int = 4,
+        subsystem_max_files: int | None = None,
         enable_behavior_monitor: bool = True,
         enable_artifact_store: bool = False,
         gvisor_runtime: str | None = None,
@@ -309,6 +310,11 @@ class SourceHuntRunner:
             )
             subsystem_max_parallel = (
                 subsystem_max_parallel if subsystem_max_parallel != 4 else b.subsystem_max_parallel
+            )
+            subsystem_max_files = (
+                subsystem_max_files
+                if subsystem_max_files is not None
+                else getattr(b, "subsystem_max_files", None)
             )
             # Output params
             output_dir = output_dir if output_dir is not None else (o.output_dir or None)
@@ -530,6 +536,10 @@ class SourceHuntRunner:
         self._no_rank = no_rank
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
+        # None = library default (DEFAULT_MAX_FILES_PER_SUBSYSTEM for auto
+        # detection; uncapped for an explicit --subsystem PATH). An operator
+        # override raises/removes the per-subsystem file cap for both paths.
+        self._subsystem_max_files = subsystem_max_files
         self._injected_findings_pool = None
         self._injected_historical_db = None
         self._enable_behavior_monitor = enable_behavior_monitor
@@ -1083,7 +1093,13 @@ class SourceHuntRunner:
                     if not self._preprocessing:
                         ranker_config.include_static_hints = False
                         ranker_config.include_imports_by = False
-                    if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
+                    # Generic "openai" chat gateways (e.g. a custom base_url +
+                    # api_key endpoint like kimi) send no max_tokens from the
+                    # ranker, so output collapses to the budget reservation cap
+                    # (~4096 tokens). A 150-file JSON with two rationales each
+                    # overflows that and truncates mid-string. Use the same
+                    # small chunk as the Responses backends so it fits.
+                    if ranker_llm.provider_name in ("openai_resp", "openai_codex", "openai"):
                         ranker_config.chunk_size = 30
                         ranker_config.max_inflight_chunks = self.max_parallel
                         logger.info(
@@ -1524,20 +1540,30 @@ class SourceHuntRunner:
                 if self._subsystem_paths:
                     for sp in self._subsystem_paths:
                         try:
+                            # Explicit scope: default uncapped (None) so a
+                            # deliberately-named path is never silently
+                            # truncated; an operator override still applies.
                             st = subsystem_from_path(
                                 sp,
                                 files,
                                 callgraph=preprocess_result.callgraph,
                                 entry_points_by_file=entry_points_by_file,
+                                max_files=self._subsystem_max_files,
                             )
                             subsystem_targets.append(st)
                         except ValueError:
                             logger.warning("No files match subsystem path: %s", sp)
                 else:
+                    # Auto-detection keeps the library default cap unless an
+                    # operator raised/removed it; every drop is logged.
+                    auto_kwargs: dict = {}
+                    if self._subsystem_max_files is not None:
+                        auto_kwargs["max_files_per_subsystem"] = self._subsystem_max_files
                     subsystem_targets = identify_subsystems_auto(
                         files,
                         callgraph=preprocess_result.callgraph,
                         entry_points_by_file=entry_points_by_file,
+                        **auto_kwargs,
                     )
 
                 if subsystem_targets:
@@ -1602,6 +1628,7 @@ class SourceHuntRunner:
                             session_id_prefix=f"{self._session_id}-subsys",
                             sandbox_manager=self._sandbox_manager,
                             campaign_hint=self._campaign_hint,
+                            max_files_in_prompt=self._subsystem_max_files,
                             callgraph=preprocess_result.callgraph,
                             trajectory_root=(
                                 Path(self.output_dir) / self._session_id / "trajectories"
