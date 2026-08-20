@@ -14,6 +14,7 @@ verifier, exploiter, patcher, and reporter stages downstream.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 from pydantic import Field
@@ -25,6 +26,8 @@ from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.state import Finding
 
 from .sandbox import HunterContext
+
+logger = logging.getLogger(__name__)
 
 
 class RecordTraceStepInput(ToolInputModel):
@@ -141,8 +144,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "step_number": n,
             },
         )
-        import logging as _logging
-        _logging.getLogger(__name__).info(
+        logger.info(
             "[%s] trace#%d %s:%s%s%s",
             ctx.file_path,
             n,
