@@ -8,13 +8,15 @@ import pytest
 from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
+    HuntCheckpoint,
+    HuntResult,
     PreprocessCheckpoint,
     RankCheckpoint,
     SourceHuntCheckpoint,
 )
 from clearwing.sourcehunt.preprocessor import PreprocessResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
-from clearwing.sourcehunt.state import PipelineStatus
+from clearwing.sourcehunt.state import Finding, PipelineStatus
 from clearwing.sourcehunt.taint import TaintPath
 
 OPTIONS = {
@@ -440,3 +442,61 @@ def test_runner_rejects_invalid_checkpoint_json():
         assert "json" in str(exc).lower()
     else:
         raise AssertionError("invalid checkpoint JSON was accepted")
+
+
+@pytest.mark.asyncio
+async def test_runner_checkpoints_and_restores_hunt(tmp_path: Path, monkeypatch):
+    first = SourceHuntRunner(
+        repo_url=str(tmp_path), output_dir=str(tmp_path), enable_mechanism_memory=False
+    )
+    first._checkpoint = SourceHuntCheckpoint()
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
+    result = await first._hunt(
+        files=[],
+        repo_path=str(tmp_path),
+        pipeline_status=PipelineStatus(),
+        stage_files=[],
+        seeded_by_file={},
+        semgrep_hints_by_file={},
+        entry_points_by_file={},
+        seed_corpus_by_file={},
+        findings_pool=None,
+    )
+    assert isinstance(first._checkpoint.hunt, HuntCheckpoint)
+
+    result.findings.append(Finding(id="finding-1", file="sample.c", severity="high"))
+    first._checkpoint.hunt = HuntCheckpoint.from_result(
+        result,
+        options=first._checkpoint.hunt.options,
+    )
+    resumed = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path),
+        checkpoint=first._checkpoint.model_dump(mode="json"),
+        enable_mechanism_memory=False,
+    )
+    monkeypatch.setattr(
+        resumed,
+        "_get_native_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hunter called")),
+    )
+    restored = await resumed._hunt(
+        files=[],
+        repo_path=str(tmp_path),
+        pipeline_status=PipelineStatus(),
+        stage_files=[],
+        seeded_by_file={},
+        semgrep_hints_by_file={},
+        entry_points_by_file={},
+        seed_corpus_by_file={},
+        findings_pool=None,
+    )
+    assert resumed._hunt_restored is True
+    assert restored.findings[0].id == "finding-1"
+
+
+def test_hunt_checkpoint_rejects_different_options():
+    checkpoint = HuntCheckpoint.from_result(
+        HuntResult(findings=[], spent_per_tier={}), options={"agent_mode": "auto"}
+    )
+    assert checkpoint.restore(options={"agent_mode": "deep"}) is None
