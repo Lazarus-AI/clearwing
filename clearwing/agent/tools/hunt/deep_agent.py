@@ -71,15 +71,15 @@ class ListFunctionsInput(ToolInputModel):
         description=(
             "Optional filter. Split into tokens on non-alphanumeric AND camelCase "
             "boundaries; each token must appear (case-insensitive) as a substring "
-            "of the function name. filter='DigestFinal' matches DigestVerifyFinal, "
-            "DigestFinal_ex, wolfSSL_EVP_DigestFinal, etc."
+            "of the function name. e.g. filter='FooBar' matches "
+            "do_foo_bar, FooBarBaz, my_FooBar_impl, etc."
         ),
     )
 
 
 class ReadFunctionInput(ToolInputModel):
     name: str = Field(
-        description="Exact function name to read (e.g. 'wolfSSL_EVP_DigestVerifyFinal')."
+        description="Exact function name to read (e.g. 'foo_bar_baz')."
     )
 
 

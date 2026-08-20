@@ -183,20 +183,6 @@ class HunterSandbox:
             self._client = get_docker_client()
         return self._client
 
-    def _target_platform(self) -> str:
-        """Docker platform for both the fallback check and the build command.
-
-        C/C++ toolchains (gcc, valgrind, sanitizers) run painfully slow under
-        qemu on Apple Silicon and occasionally miscompile — use host arch for
-        those. All other languages pin amd64 for cross-host reproducibility.
-        """
-        import platform as _plat
-
-        lang = (self.build_recipe.primary_language or "").lower()
-        if lang in ("c", "cpp", "c++") and _plat.machine() in ("arm64", "aarch64"):
-            return "linux/arm64"
-        return "linux/amd64"
-
     def build_image(self) -> str:
         """Build the primary sandbox image. Returns its tag.
 
@@ -296,6 +282,7 @@ class HunterSandbox:
                     env=docker_env,
                 )
                 output_lines: list[str] = []
+                assert proc.stdout is not None
                 for line in proc.stdout:
                     line = line.rstrip()
                     if line:
