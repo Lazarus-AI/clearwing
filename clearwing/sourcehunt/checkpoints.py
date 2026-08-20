@@ -116,7 +116,7 @@ class RankCheckpoint(BaseModel):
 
 
 class HuntResult(BaseModel):
-    """State handed from the per-file hunt to downstream phases."""
+    """State handed from all source hunting to downstream phases."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -124,10 +124,12 @@ class HuntResult(BaseModel):
     files_hunted: int = 0
     spent_per_tier: dict[str, float]
     band_stats: dict[str, Any] | None = None
+    subsystems_hunted: int = 0
+    subsystem_spent_usd: float = 0.0
 
 
 class HuntCheckpoint(BaseModel):
-    """Portable state produced by the completed per-file hunt stage."""
+    """Portable state produced by the completed source-hunt stage."""
 
     model_config = ConfigDict(extra="forbid")
 
