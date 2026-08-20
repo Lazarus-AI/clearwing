@@ -1028,6 +1028,8 @@ class SourceHuntRunner:
             files = preprocess_result.file_targets
             files_ranked = len(files)
             logger.info("Preprocessor enumerated %d files", files_ranked)
+            if preprocess_result.callgraph is not None and not preprocess_result.callgraph.empty:
+                logger.info("Callgraph ready  functions=%d", sum(len(v) for v in preprocess_result.callgraph.functions.values()))
             stage_files = [str(file_target.get("path") or "") for file_target in files]
             self._emit_stage(
                 "preprocess",
@@ -1035,7 +1037,9 @@ class SourceHuntRunner:
                 detail=f"Enumerated {files_ranked} files",
                 files=stage_files,
             )
+            _t = time.monotonic()
             self._ensure_sandbox_factory(repo_path, files)
+            logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
 
             # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
             ranker_llm = (
@@ -1566,7 +1570,7 @@ class SourceHuntRunner:
                     for st in subsystem_targets:
                         logger.info(
                             "  %s (%d files, priority=%.2f)",
-                            st.name,
+                            st.root_path,
                             len(st.files),
                             st.priority,
                         )
@@ -2615,8 +2619,9 @@ class SourceHuntRunner:
             build_callgraph=(self.depth != "quick" and self._preprocessing),
             propagate_reachability=(self.depth != "quick" and self._preprocessing),
             run_semgrep=(self.depth != "quick" and self._preprocessing),
-            run_taint=(self.depth != "quick" and self._preprocessing),
+            run_taint=(self.depth != "quick" and self._preprocessing and not self._no_rank),
             respect_gitignore=self._respect_gitignore,
+            subsystem_paths=self._subsystem_paths,
         )
         return self._preprocessor.run()
 
@@ -2647,22 +2652,24 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
-                extra_packages=["python3-pip"],
-                post_install_commands=[
-                    "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true",
-                ],
                 default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()
         except Exception as exc:
-            logger.warning(
+            logger.error(
                 "HunterSandbox unavailable (%s); falling back to host mode. "
                 "Start Docker to enable sanitizer-backed containers.",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
+            EventBus().emit_message(
+                f"WARNING: sandbox unavailable ({exc}); running without container isolation. "
+                "Findings may lack sanitizer corroboration. Start Docker for full coverage.",
+                "warning",
+            )
             return
 
+        self._sandbox_manager = manager
         cpu_limit = manager.default_cpu_limit
         available_cpus = manager.available_cpus
         logger.info(
@@ -2682,7 +2689,6 @@ class SourceHuntRunner:
                 aggregate_limit,
                 available_cpus,
             )
-        self._sandbox_manager = manager
         gvisor_rt = self._gvisor_runtime
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(

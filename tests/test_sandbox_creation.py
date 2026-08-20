@@ -183,22 +183,25 @@ class TestImageTagDeterminism:
 
 
 class TestBuildImageFlow:
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_build_calls_docker_cli_when_not_cached(self, mock_run, c_repo: Path):
-        # First call: `docker image inspect` → not found (returncode=1)
-        # Second call: `docker build` → success
-        inspect_result = MagicMock(returncode=1)
-        build_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_run.side_effect = [inspect_result, build_result]
+    def test_build_calls_docker_cli_when_not_cached(self, mock_run, mock_popen, c_repo: Path):
+        # subprocess.run: `docker image inspect` → not found
+        mock_run.return_value = MagicMock(returncode=1)
+        # subprocess.Popen: `docker build` → success
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
 
         sb = HunterSandbox(repo_path=str(c_repo))
         tag = sb.build_image()
 
         assert tag.startswith("clearwing-sourcehunt:")
-        assert mock_run.call_count == 2
-        # Second call is the actual docker build
-        build_call = mock_run.call_args_list[1]
-        build_argv = build_call[0][0]
+        mock_run.assert_called_once()  # inspect only
+        mock_popen.assert_called_once()
+        build_argv = mock_popen.call_args[0][0]
         assert "docker" in build_argv[0]
         assert "build" in build_argv
         assert tag in build_argv
@@ -214,32 +217,42 @@ class TestBuildImageFlow:
         argv = mock_run.call_args[0][0]
         assert "inspect" in argv
 
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_build_failure_raises_runtime_error(self, mock_run, c_repo: Path):
-        inspect_result = MagicMock(returncode=1)
-        build_result = MagicMock(returncode=1, stdout="", stderr="apt-get failed")
-        mock_run.side_effect = [inspect_result, build_result]
+    def test_build_failure_raises_runtime_error(self, mock_run, mock_popen, c_repo: Path):
+        # inspect → miss
+        mock_run.return_value = MagicMock(returncode=1)
+        # build → failure
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["error: apt-get failed"])
+        mock_proc.wait.return_value = 1
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
 
         sb = HunterSandbox(repo_path=str(c_repo))
         with pytest.raises(RuntimeError):
             sb.build_image()
 
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_extra_variants_built(self, mock_run, c_repo: Path):
-        # Each variant: inspect (miss) + build (ok) = 2 calls per variant
-        mock_run.side_effect = [
-            MagicMock(returncode=1),  # inspect primary
-            MagicMock(returncode=0, stdout="", stderr=""),  # build primary
-            MagicMock(returncode=1),  # inspect msan
-            MagicMock(returncode=0, stdout="", stderr=""),  # build msan
-        ]
+    def test_extra_variants_built(self, mock_run, mock_popen, c_repo: Path):
+        # inspect always misses
+        mock_run.return_value = MagicMock(returncode=1)
+        # build always succeeds
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
         sb = HunterSandbox(
             repo_path=str(c_repo),
             sanitizers=["asan", "ubsan"],
             extra_variants=[["msan"]],
         )
         sb.build_image()
-        assert mock_run.call_count == 4  # 2 inspects + 2 builds
+        assert mock_run.call_count == 2  # 2 inspects
+        assert mock_popen.call_count == 2  # 2 builds
         assert len(sb.available_variants) == 2
 
 
@@ -620,16 +633,18 @@ class TestVariantSpawn:
         assert "msan" in env["CLEARWING_SANITIZER_VARIANT"]
         assert "MSAN_OPTIONS" in env
 
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_spawn_unbuilt_variant_auto_builds(self, mock_run, c_repo: Path, mock_docker):
+    def test_spawn_unbuilt_variant_auto_builds(self, mock_run, mock_popen, c_repo: Path, mock_docker):
         """Requesting an unbuilt variant auto-builds on demand."""
-        # Primary build: inspect miss + build ok
-        mock_run.side_effect = [
-            MagicMock(returncode=1),  # inspect primary
-            MagicMock(returncode=0, stdout="", stderr=""),  # build primary
-            MagicMock(returncode=1),  # inspect tsan (auto-build)
-            MagicMock(returncode=0, stdout="", stderr=""),  # build tsan
-        ]
+        # subprocess.run: inspect calls always miss
+        mock_run.return_value = MagicMock(returncode=1)
+        # subprocess.Popen: builds always succeed
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.wait.return_value = 0
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
 
         sb = HunterSandbox(repo_path=str(c_repo), sanitizers=["asan", "ubsan"])
         sb.build_image()
@@ -641,5 +656,6 @@ class TestVariantSpawn:
 
         container = sb.spawn(variant=["tsan"], scratch_mount=False)
         assert container.variant == ["tsan"]
-        # 4 subprocess calls: 2 for primary + 2 for tsan auto-build
-        assert mock_run.call_count == 4
+        # 2 inspects (primary + tsan) and 2 builds (primary + tsan)
+        assert mock_run.call_count == 2
+        assert mock_popen.call_count == 2

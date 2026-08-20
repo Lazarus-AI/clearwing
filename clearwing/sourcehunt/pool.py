@@ -209,6 +209,7 @@ class HuntPoolConfig:
     entry_points_by_file: dict = field(default_factory=dict)  # {path: [EntryPoint]}
     seed_corpus_by_file: dict = field(default_factory=dict)  # {path: [SeedCorpusEntry]}
     shard_entry_points: bool = False
+    max_findings: int = 0  # stop dispatching new work after N findings (0 = no limit)
     findings_pool: Any = None  # FindingsPool | None — spec 005
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
@@ -742,7 +743,8 @@ class HunterPool:
             try:
                 sandbox = await asyncio.to_thread(self.config.sandbox_factory)
             except Exception as e:
-                logger.warning("sandbox_factory failed for %s: %s", file_target.get("path"), e)
+                logger.error("sandbox_factory failed for %s: %s", file_target.get("path"), e)
+                raise SystemExit(1) from e
 
         try:
             hunter, ctx = self._build_hunter_for_file(

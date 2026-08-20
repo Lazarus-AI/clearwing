@@ -20,6 +20,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Bundled custom rules shipped with clearwing — always applied alongside the
+# configured remote config so they work without a semgrep login.
+_BUNDLED_RULES_DIR = Path(__file__).parent / "semgrep_rules"
+
 
 DEFAULT_SEMGREP_CONFIG = "p/security-audit"
 SEMGREP_TIMEOUT_SECONDS = 300
@@ -63,7 +67,7 @@ class SemgrepSidecar:
     def available(self) -> bool:
         return shutil.which(self.binary) is not None
 
-    def run_scan(self, repo_path: str) -> list[SemgrepFinding]:
+    def run_scan(self, repo_path: str, base_path: str | None = None) -> list[SemgrepFinding]:
         """Invoke `semgrep --json --config <config> <repo_path>`.
 
         Returns a list of normalized findings. On any failure, logs and
@@ -83,6 +87,12 @@ class SemgrepSidecar:
             "--quiet",
             "--skip-unknown-extensions",
         ]
+        # Always inject bundled rules on top of the configured remote pack.
+        # These are clearwing-maintained patterns (e.g. CWE-190 C integer
+        # overflow) that the free OSS semgrep registry doesn't cover.
+        if _BUNDLED_RULES_DIR.is_dir():
+            for rule_file in sorted(_BUNDLED_RULES_DIR.glob("*.yaml")):
+                cmd += ["--config", str(rule_file)]
         if not self.respect_gitignore:
             cmd.append("--no-git-ignore")  # also scan ignored files — v0.1 choice
         cmd = cmd + self.extra_args + [repo_path]
@@ -110,7 +120,7 @@ class SemgrepSidecar:
             logger.warning("Semgrep exited with code %d: %s", proc.returncode, proc.stderr[:500])
             return []
 
-        return self._parse_semgrep_json(proc.stdout, repo_path)
+        return self._parse_semgrep_json(proc.stdout, base_path or repo_path)
 
     def _parse_semgrep_json(self, stdout: str, repo_path: str) -> list[SemgrepFinding]:
         """Parse `semgrep --json` output into SemgrepFinding entries."""
