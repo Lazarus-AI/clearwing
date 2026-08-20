@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from clearwing.findings.types import Finding
+
 from .preprocessor import PreprocessResult
 from .state import FileTarget
 
@@ -113,6 +115,39 @@ class RankCheckpoint(BaseModel):
         return restored
 
 
+class HuntResult(BaseModel):
+    """State handed from all source hunting to downstream phases."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    findings: list[Finding]
+    files_hunted: int = 0
+    spent_per_tier: dict[str, float]
+    band_stats: dict[str, Any] | None = None
+    subsystems_hunted: int = 0
+    subsystem_spent_usd: float = 0.0
+
+
+class HuntCheckpoint(BaseModel):
+    """Portable state produced by the completed source-hunt stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
+    options: dict[str, Any]
+    result: HuntResult
+
+    @classmethod
+    def from_result(cls, result: HuntResult, *, options: dict[str, Any]) -> HuntCheckpoint:
+        return cls(options=options, result=result)
+
+    def restore(self, *, options: dict[str, Any]) -> HuntResult | None:
+        if self.options != options:
+            logger.error("Hunt checkpoint options do not match this run")
+            return None
+        return self.result.model_copy(deep=True)
+
+
 class SourceHuntCheckpoint(BaseModel):
     """Stage-keyed sourcehunt checkpoint passed across the bridge boundary."""
 
@@ -121,6 +156,7 @@ class SourceHuntCheckpoint(BaseModel):
     schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
     preprocess: PreprocessCheckpoint | None = None
     rank: RankCheckpoint | None = None
+    hunt: HuntCheckpoint | None = None
 
     @classmethod
     def from_input(

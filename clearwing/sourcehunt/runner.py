@@ -34,6 +34,8 @@ from clearwing.providers import (
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
+    HuntCheckpoint,
+    HuntResult,
     PreprocessCheckpoint,
     RankCheckpoint,
     SourceHuntCheckpoint,
@@ -1224,161 +1226,24 @@ class SourceHuntRunner:
                     historical_db = None
 
             # 3. Tiered hunt
-            hunter_llm = self._get_native_client(
-                "hunter",
-                self.hunter_llm,
-                budget_stage="hunt",
+            hunt_result = await self._hunt(
+                files=files,
+                repo_path=repo_path,
+                pipeline_status=pipeline_status,
+                stage_files=stage_files,
+                seeded_by_file=seeded_by_file,
+                semgrep_hints_by_file=semgrep_hints_by_file,
+                entry_points_by_file=entry_points_by_file,
+                seed_corpus_by_file=seed_corpus_by_file,
+                findings_pool=findings_pool,
+                callgraph=preprocess_result.callgraph,
             )
-            all_findings: list[Finding] = []
-            files_hunted = 0
-            spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
-            band_stats: dict | None = None
-            hunt_symbols = sorted(
-                {
-                    str(getattr(entry_point, "function_name", "") or "")
-                    for entry_points in entry_points_by_file.values()
-                    for entry_point in entry_points
-                    if getattr(entry_point, "function_name", "")
-                }
-            )
-
-            if self._no_per_file_hunt:
-                logger.info("Per-file hunt skipped (--no-per-file-hunt)")
-                self._emit_stage(
-                    "hunt",
-                    "skipped",
-                    detail="Per-file hunt disabled",
-                    files=stage_files,
-                    symbols=hunt_symbols,
-                )
-            elif hunter_llm is not None and files and not self._budget_exhausted():
-                self._emit_stage(
-                    "hunt",
-                    "started",
-                    detail=f"{len(files)} files",
-                    files=stage_files,
-                    symbols=hunt_symbols,
-                )
-                logger.info("HunterPool starting on %d files", len(files))
-                pool = HunterPool(
-                    HuntPoolConfig(
-                        files=files,
-                        repo_path=repo_path,
-                        sandbox_factory=self.sandbox_factory,
-                        sandbox_manager=self._sandbox_manager,
-                        hunter_factory=None,
-                        llm=hunter_llm,
-                        max_parallel=self.max_parallel,
-                        budget_usd=self.budget_usd,
-                        tier_budget=self.tier_budget,
-                        session_id_prefix=self._session_id,
-                        seeded_crashes_by_file=seeded_by_file,
-                        semgrep_hints_by_file=semgrep_hints_by_file,
-                        agent_mode=self._effective_agent_mode,
-                        prompt_mode=self._prompt_mode,
-                        campaign_hint=self._campaign_hint,
-                        exploit_mode=self._exploit_mode,
-                        starting_band=self._starting_band,
-                        max_band=self._max_band,
-                        redundancy_override=self._redundancy_override,
-                        entry_points_by_file=entry_points_by_file,
-                        seed_corpus_by_file=seed_corpus_by_file,
-                        shard_entry_points=self._shard_entry_points,
-                        findings_pool=findings_pool,
-                        trajectory_root=(Path(self.output_dir) / self._session_id / "trajectories"),
-                        instrumentation=self._instrumentation,
-                    )
-                )
-                try:
-                    all_findings = await pool.arun()
-                    logger.info("HunterPool completed with %d findings", len(all_findings))
-                    if pool.budget_exhausted or self._budget_exhausted():
-                        pipeline_status.record(
-                            "hunter_pool",
-                            StageOutcome.SKIPPED,
-                            fallback_description="Budget exhausted; partial hunter results retained",
-                        )
-                        self._emit_stage(
-                            "hunt",
-                            "budget_exhausted",
-                            findings_so_far=len(all_findings),
-                            cost_usd=pool.total_spent,
-                            detail=f"{len(all_findings)} partial findings",
-                            files=[str(finding.file or "") for finding in all_findings],
-                            symbols=self._finding_symbols(all_findings),
-                            finding_ids=[finding.id for finding in all_findings],
-                        )
-                    else:
-                        pipeline_status.record_succeeded("hunter_pool")
-                        self._emit_stage(
-                            "hunt",
-                            "completed",
-                            findings_so_far=len(all_findings),
-                            cost_usd=pool.total_spent,
-                            detail=f"{len(all_findings)} findings",
-                            files=[str(finding.file or "") for finding in all_findings],
-                            symbols=self._finding_symbols(all_findings),
-                            finding_ids=[finding.id for finding in all_findings],
-                        )
-                except BudgetExceeded:
-                    logger.info("HunterPool stopped because the run budget is exhausted")
-                    pipeline_status.record(
-                        "hunter_pool",
-                        StageOutcome.SKIPPED,
-                        fallback_description="Budget exhausted; partial hunter results retained",
-                    )
-                    self._emit_stage(
-                        "hunt",
-                        "budget_exhausted",
-                        findings_so_far=len(all_findings),
-                        files=stage_files,
-                        symbols=hunt_symbols,
-                        finding_ids=[finding.id for finding in all_findings],
-                    )
-                except Exception as exc:
-                    logger.warning("HunterPool run failed", exc_info=True)
-                    pipeline_status.record_degraded(
-                        "hunter_pool",
-                        "Hunter phase produced no findings due to error",
-                    )
-                    self._emit_stage(
-                        "hunt",
-                        "degraded",
-                        findings_so_far=len(all_findings),
-                        files=stage_files,
-                        symbols=hunt_symbols,
-                        finding_ids=[finding.id for finding in all_findings],
-                        error={"type": type(exc).__name__, "message": str(exc)},
-                    )
-                spent_per_tier = pool.spent_per_tier
-                band_stats = {
-                    "fast_runs": pool.runs_per_band.get("fast", 0),
-                    "fast_cost": pool.spent_per_band.get("fast", 0.0),
-                    "standard_runs": pool.runs_per_band.get("standard", 0),
-                    "standard_cost": pool.spent_per_band.get("standard", 0.0),
-                    "deep_runs": pool.runs_per_band.get("deep", 0),
-                    "deep_cost": pool.spent_per_band.get("deep", 0.0),
-                    "promotions": pool.promotion_counts,
-                }
-                files_hunted = pool.completed_target_count
-            else:
-                logger.info("HunterPool skipped; no LLM available")
-                if not files:
-                    hunt_status = "skipped"
-                    hunt_detail = "No source files were available"
-                elif self._budget_exhausted():
-                    hunt_status = "budget_exhausted"
-                    hunt_detail = "Run budget was exhausted before hunting"
-                else:
-                    hunt_status = "degraded"
-                    hunt_detail = "No hunter model was available"
-                self._emit_stage(
-                    "hunt",
-                    hunt_status,
-                    detail=hunt_detail,
-                    files=stage_files,
-                    symbols=hunt_symbols,
-                )
+            all_findings = hunt_result.findings
+            files_hunted = hunt_result.files_hunted
+            spent_per_tier = hunt_result.spent_per_tier
+            band_stats = hunt_result.band_stats
+            subsystems_hunted = hunt_result.subsystems_hunted
+            subsystem_spent = hunt_result.subsystem_spent_usd
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
             if self._enable_behavior_monitor and all_findings:
@@ -1419,164 +1284,6 @@ class SourceHuntRunner:
                     logger.warning("Historical DB ingest failed", exc_info=True)
                 finally:
                     historical_db.close()
-
-            # 3.7. Subsystem hunt (spec 006)
-            subsystems_hunted = 0
-            subsystem_spent = 0.0
-            if self._enable_subsystem_hunt and hunter_llm is not None and self._budget_exhausted():
-                logger.info(
-                    "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
-                    self.budget_usd,
-                    self._run_spent_usd(),
-                )
-            elif self._enable_subsystem_hunt and hunter_llm is not None:
-                from .subsystem import (
-                    SubsystemHuntConfig,
-                    identify_subsystems_auto,
-                    subsystem_from_path,
-                )
-                from .subsystem import (
-                    SubsystemHuntRunner as SubsysRunner,
-                )
-
-                subsystem_llm = self._get_native_client(
-                    "hunter",
-                    self.hunter_llm,
-                    budget_stage="subsystem_hunt",
-                )
-
-                subsystem_targets: list = []
-                if self._subsystem_paths:
-                    for sp in self._subsystem_paths:
-                        try:
-                            # Explicit scope: default uncapped (None) so a
-                            # deliberately-named path is never silently
-                            # truncated; an operator override still applies.
-                            st = subsystem_from_path(
-                                sp,
-                                files,
-                                callgraph=preprocess_result.callgraph,
-                                entry_points_by_file=entry_points_by_file,
-                                max_files=self._subsystem_max_files,
-                            )
-                            subsystem_targets.append(st)
-                        except ValueError:
-                            logger.warning("No files match subsystem path: %s", sp)
-                else:
-                    # Auto-detection keeps the library default cap unless an
-                    # operator raised/removed it; every drop is logged.
-                    auto_kwargs: dict = {}
-                    if self._subsystem_max_files is not None:
-                        auto_kwargs["max_files_per_subsystem"] = self._subsystem_max_files
-                    subsystem_targets = identify_subsystems_auto(
-                        files,
-                        callgraph=preprocess_result.callgraph,
-                        entry_points_by_file=entry_points_by_file,
-                        **auto_kwargs,
-                    )
-
-                if subsystem_targets:
-                    subsystem_files = sorted(
-                        {
-                            str(file_target.get("path") or "")
-                            for subsystem in subsystem_targets
-                            for file_target in subsystem.files
-                        }
-                    )
-                    subsystem_symbols = sorted(
-                        {
-                            str(getattr(entry_point, "function_name", "") or "")
-                            for subsystem in subsystem_targets
-                            for entry_point in subsystem.entry_points
-                            if getattr(entry_point, "function_name", "")
-                        }
-                    )
-                    self._emit_stage(
-                        "subsystem_hunt",
-                        "started",
-                        detail=f"{len(subsystem_targets)} subsystems",
-                        files=subsystem_files,
-                        symbols=subsystem_symbols,
-                    )
-                    logger.info(
-                        "Subsystem hunt: %d targets identified",
-                        len(subsystem_targets),
-                    )
-                    for st in subsystem_targets:
-                        logger.info(
-                            "  %s (%d files, priority=%.2f)",
-                            st.root_path,
-                            len(st.files),
-                            st.priority,
-                        )
-                    # Bound the whole subsystem phase to whatever --budget is
-                    # left, split evenly across targets, so 3 subsystems can't
-                    # each burn the internal $100 default ($300 total) past the
-                    # budget the user set. Falls back to the explicit override /
-                    # $100 default only when no --budget is in play.
-                    if self.budget_usd:
-                        assert self._spend_ledger is not None
-                        remaining = self._spend_ledger.remaining_usd or 0.0
-                        per_subsystem_budget = remaining / len(subsystem_targets)
-                        if self._subsystem_budget_usd:
-                            per_subsystem_budget = min(
-                                per_subsystem_budget,
-                                self._subsystem_budget_usd,
-                            )
-                    else:
-                        per_subsystem_budget = self._subsystem_budget_usd or 100.0
-                    subsys_runner = SubsysRunner(
-                        SubsystemHuntConfig(
-                            subsystems=subsystem_targets,
-                            repo_path=repo_path,
-                            sandbox_factory=self.sandbox_factory,
-                            llm=subsystem_llm,
-                            max_parallel=self._subsystem_max_parallel,
-                            budget_per_subsystem_usd=per_subsystem_budget,
-                            findings_pool=findings_pool,
-                            session_id_prefix=f"{self._session_id}-subsys",
-                            sandbox_manager=self._sandbox_manager,
-                            campaign_hint=self._campaign_hint,
-                            max_files_in_prompt=self._subsystem_max_files,
-                            callgraph=preprocess_result.callgraph,
-                            trajectory_root=(
-                                Path(self.output_dir) / self._session_id / "trajectories"
-                            ),
-                            instrumentation=self._instrumentation,
-                        )
-                    )
-                    try:
-                        subsys_findings = await subsys_runner.arun()
-                        all_findings.extend(subsys_findings)
-                        subsystems_hunted = len(subsystem_targets)
-                        subsystem_spent = subsys_runner.total_spent
-                        logger.info(
-                            "Subsystem hunt completed: %d findings, $%.4f spent",
-                            len(subsys_findings),
-                            subsystem_spent,
-                        )
-                        self._emit_stage(
-                            "subsystem_hunt",
-                            "completed",
-                            findings_so_far=len(subsys_findings),
-                            cost_usd=subsystem_spent,
-                            files=subsystem_files,
-                            symbols=subsystem_symbols,
-                            finding_ids=[finding.id for finding in subsys_findings],
-                        )
-                    except Exception as exc:
-                        logger.warning("Subsystem hunt failed", exc_info=True)
-                        pipeline_status.record_degraded(
-                            "subsystem_hunt",
-                            "Subsystem hunt failed; only per-file findings available",
-                        )
-                        self._emit_stage(
-                            "subsystem_hunt",
-                            "degraded",
-                            files=subsystem_files,
-                            symbols=subsystem_symbols,
-                            error={"type": type(exc).__name__, "message": str(exc)},
-                        )
 
             # 4. Verify (unless --no-verify)
             verified: list[Finding] = []
@@ -2547,6 +2254,335 @@ class SourceHuntRunner:
                 "source": "mechanism_memory",
             }
         ]
+
+    async def _hunt(
+        self,
+        *,
+        files: list[FileTarget],
+        repo_path: str,
+        pipeline_status: PipelineStatus,
+        stage_files: list[str],
+        seeded_by_file: dict[str, dict],
+        semgrep_hints_by_file: dict[str, list[dict]],
+        entry_points_by_file: dict,
+        seed_corpus_by_file: dict,
+        findings_pool: Any,
+        callgraph: Any,
+    ) -> HuntResult:
+        """Run or restore per-file and subsystem source hunting."""
+
+        options = {
+            "no_per_file_hunt": self._no_per_file_hunt,
+            "agent_mode": self._effective_agent_mode,
+            "prompt_mode": self._prompt_mode,
+            "campaign_hint": self._campaign_hint,
+            "exploit_mode": self._exploit_mode,
+            "starting_band": self._starting_band,
+            "max_band": self._max_band,
+            "redundancy_override": self._redundancy_override,
+            "shard_entry_points": self._shard_entry_points,
+            "max_parallel": self.max_parallel,
+            "enable_subsystem_hunt": self._enable_subsystem_hunt,
+            "subsystem_paths": sorted(self._subsystem_paths or []),
+            "subsystem_budget_usd": self._subsystem_budget_usd,
+            "subsystem_max_parallel": self._subsystem_max_parallel,
+        }
+        self._hunt_restored = False
+        hunt_symbols = sorted(
+            {
+                str(getattr(entry_point, "function_name", "") or "")
+                for entry_points in entry_points_by_file.values()
+                for entry_point in entry_points
+                if getattr(entry_point, "function_name", "")
+            }
+        )
+        if self._checkpoint is not None and self._checkpoint.hunt is not None:
+            restored = self._checkpoint.hunt.restore(options=options)
+            if restored is None:
+                raise ValueError("hunt checkpoint is invalid or incompatible with this run")
+            self._hunt_restored = True
+            pipeline_status.record_succeeded("hunter_pool")
+            self._emit_stage(
+                "hunt",
+                "completed",
+                findings_so_far=len(restored.findings),
+                detail=f"Restored {len(restored.findings)} findings from checkpoint",
+                files=[str(finding.file or "") for finding in restored.findings],
+                symbols=self._finding_symbols(restored.findings),
+                finding_ids=[finding.id for finding in restored.findings],
+            )
+            if self._enable_subsystem_hunt:
+                self._emit_stage(
+                    "subsystem_hunt",
+                    "completed",
+                    findings_so_far=restored.subsystems_hunted,
+                    cost_usd=restored.subsystem_spent_usd,
+                    detail=(
+                        f"Restored {restored.subsystems_hunted} hunted subsystems from checkpoint"
+                    ),
+                )
+            return restored
+
+        result = HuntResult(
+            findings=[],
+            files_hunted=0,
+            spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+        )
+        hunter_llm = self._get_native_client("hunter", self.hunter_llm, budget_stage="hunt")
+        if self._no_per_file_hunt:
+            logger.info("Per-file hunt skipped (--no-per-file-hunt)")
+            self._emit_stage("hunt", "skipped", detail="Per-file hunt disabled", files=stage_files)
+        elif hunter_llm is not None and files and not self._budget_exhausted():
+            self._emit_stage(
+                "hunt",
+                "started",
+                detail=f"{len(files)} files",
+                files=stage_files,
+                symbols=hunt_symbols,
+            )
+            pool = HunterPool(
+                HuntPoolConfig(
+                    files=files,
+                    repo_path=repo_path,
+                    sandbox_factory=self.sandbox_factory,
+                    sandbox_manager=self._sandbox_manager,
+                    hunter_factory=None,
+                    llm=hunter_llm,
+                    max_parallel=self.max_parallel,
+                    budget_usd=self.budget_usd,
+                    tier_budget=self.tier_budget,
+                    session_id_prefix=self._session_id,
+                    seeded_crashes_by_file=seeded_by_file,
+                    semgrep_hints_by_file=semgrep_hints_by_file,
+                    agent_mode=self._effective_agent_mode,
+                    prompt_mode=self._prompt_mode,
+                    campaign_hint=self._campaign_hint,
+                    exploit_mode=self._exploit_mode,
+                    starting_band=self._starting_band,
+                    max_band=self._max_band,
+                    redundancy_override=self._redundancy_override,
+                    entry_points_by_file=entry_points_by_file,
+                    seed_corpus_by_file=seed_corpus_by_file,
+                    shard_entry_points=self._shard_entry_points,
+                    findings_pool=findings_pool,
+                    trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
+                    instrumentation=self._instrumentation,
+                )
+            )
+            try:
+                result.findings = await pool.arun()
+                if pool.budget_exhausted or self._budget_exhausted():
+                    pipeline_status.record(
+                        "hunter_pool",
+                        StageOutcome.SKIPPED,
+                        fallback_description="Budget exhausted; partial hunter results retained",
+                    )
+                    status = "budget_exhausted"
+                else:
+                    pipeline_status.record_succeeded("hunter_pool")
+                    status = "completed"
+                self._emit_stage(
+                    "hunt",
+                    status,
+                    findings_so_far=len(result.findings),
+                    cost_usd=pool.total_spent,
+                    detail=f"{len(result.findings)} findings",
+                    files=[str(finding.file or "") for finding in result.findings],
+                    symbols=self._finding_symbols(result.findings),
+                    finding_ids=[finding.id for finding in result.findings],
+                )
+            except BudgetExceeded:
+                pipeline_status.record(
+                    "hunter_pool",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; partial hunter results retained",
+                )
+                self._emit_stage("hunt", "budget_exhausted", files=stage_files)
+            except Exception as exc:
+                logger.warning("HunterPool run failed", exc_info=True)
+                pipeline_status.record_degraded(
+                    "hunter_pool", "Hunter phase produced no findings due to error"
+                )
+                self._emit_stage(
+                    "hunt",
+                    "degraded",
+                    files=stage_files,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
+            result.spent_per_tier = pool.spent_per_tier
+            result.band_stats = {
+                "fast_runs": pool.runs_per_band.get("fast", 0),
+                "fast_cost": pool.spent_per_band.get("fast", 0.0),
+                "standard_runs": pool.runs_per_band.get("standard", 0),
+                "standard_cost": pool.spent_per_band.get("standard", 0.0),
+                "deep_runs": pool.runs_per_band.get("deep", 0),
+                "deep_cost": pool.spent_per_band.get("deep", 0.0),
+                "promotions": pool.promotion_counts,
+            }
+            result.files_hunted = pool.completed_target_count
+        else:
+            status = (
+                "skipped"
+                if not files
+                else ("budget_exhausted" if self._budget_exhausted() else "degraded")
+            )
+            self._emit_stage("hunt", status, files=stage_files, symbols=hunt_symbols)
+
+        await self._hunt_subsystems(
+            result,
+            files=files,
+            repo_path=repo_path,
+            callgraph=callgraph,
+            entry_points_by_file=entry_points_by_file,
+            findings_pool=findings_pool,
+            pipeline_status=pipeline_status,
+        )
+
+        if self._checkpoint is None:
+            raise RuntimeError("hunting requires a preprocessing checkpoint")
+        self._checkpoint.hunt = HuntCheckpoint.from_result(result, options=options)
+        return result
+
+    async def _hunt_subsystems(
+        self,
+        result: HuntResult,
+        *,
+        files: list[FileTarget],
+        repo_path: str,
+        callgraph: Any,
+        entry_points_by_file: dict,
+        findings_pool: Any,
+        pipeline_status: PipelineStatus,
+    ) -> None:
+        """Run the subsystem portion of the hunt into the shared phase result."""
+
+        if not self._enable_subsystem_hunt:
+            return
+        if self._budget_exhausted():
+            logger.info(
+                "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
+                self.budget_usd,
+                self._run_spent_usd(),
+            )
+            return
+        subsystem_llm = self._get_native_client(
+            "hunter", self.hunter_llm, budget_stage="subsystem_hunt"
+        )
+        if subsystem_llm is None:
+            logger.info("Subsystem hunt skipped; no hunter model available")
+            return
+
+        from .subsystem import (
+            SubsystemHuntConfig,
+            SubsystemHuntRunner,
+            identify_subsystems_auto,
+            subsystem_from_path,
+        )
+
+        subsystem_targets: list = []
+        if self._subsystem_paths:
+            for path in self._subsystem_paths:
+                try:
+                    subsystem_targets.append(
+                        subsystem_from_path(
+                            path,
+                            files,
+                            callgraph=callgraph,
+                            entry_points_by_file=entry_points_by_file,
+                            max_files=self._subsystem_max_files,
+                        )
+                    )
+                except ValueError:
+                    logger.warning("No files match subsystem path: %s", path)
+        else:
+            auto_kwargs: dict = {}
+            if self._subsystem_max_files is not None:
+                auto_kwargs["max_files_per_subsystem"] = self._subsystem_max_files
+            subsystem_targets = identify_subsystems_auto(
+                files,
+                callgraph=callgraph,
+                entry_points_by_file=entry_points_by_file,
+                **auto_kwargs,
+            )
+        if not subsystem_targets:
+            return
+
+        subsystem_files = sorted(
+            {
+                str(file_target.get("path") or "")
+                for subsystem in subsystem_targets
+                for file_target in subsystem.files
+            }
+        )
+        subsystem_symbols = sorted(
+            {
+                str(getattr(entry_point, "function_name", "") or "")
+                for subsystem in subsystem_targets
+                for entry_point in subsystem.entry_points
+                if getattr(entry_point, "function_name", "")
+            }
+        )
+        self._emit_stage(
+            "subsystem_hunt",
+            "started",
+            detail=f"{len(subsystem_targets)} subsystems",
+            files=subsystem_files,
+            symbols=subsystem_symbols,
+        )
+        if self.budget_usd:
+            assert self._spend_ledger is not None
+            per_subsystem_budget = (self._spend_ledger.remaining_usd or 0.0) / len(
+                subsystem_targets
+            )
+            if self._subsystem_budget_usd:
+                per_subsystem_budget = min(per_subsystem_budget, self._subsystem_budget_usd)
+        else:
+            per_subsystem_budget = self._subsystem_budget_usd or 100.0
+        subsystem_runner = SubsystemHuntRunner(
+            SubsystemHuntConfig(
+                subsystems=subsystem_targets,
+                repo_path=repo_path,
+                sandbox_factory=self.sandbox_factory,
+                llm=subsystem_llm,
+                max_parallel=self._subsystem_max_parallel,
+                budget_per_subsystem_usd=per_subsystem_budget,
+                findings_pool=findings_pool,
+                session_id_prefix=f"{self._session_id}-subsys",
+                sandbox_manager=self._sandbox_manager,
+                campaign_hint=self._campaign_hint,
+                callgraph=callgraph,
+                max_files_in_prompt=self._subsystem_max_files,
+                trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
+                instrumentation=self._instrumentation,
+            )
+        )
+        try:
+            subsystem_findings = await subsystem_runner.arun()
+            result.findings.extend(subsystem_findings)
+            result.subsystems_hunted = len(subsystem_targets)
+            result.subsystem_spent_usd = subsystem_runner.total_spent
+            self._emit_stage(
+                "subsystem_hunt",
+                "completed",
+                findings_so_far=len(subsystem_findings),
+                cost_usd=result.subsystem_spent_usd,
+                files=subsystem_files,
+                symbols=subsystem_symbols,
+                finding_ids=[finding.id for finding in subsystem_findings],
+            )
+        except Exception as exc:
+            logger.warning("Subsystem hunt failed", exc_info=True)
+            pipeline_status.record_degraded(
+                "subsystem_hunt",
+                "Subsystem hunt failed; only per-file findings available",
+            )
+            self._emit_stage(
+                "subsystem_hunt",
+                "degraded",
+                files=subsystem_files,
+                symbols=subsystem_symbols,
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
 
     def _preprocess(self) -> PreprocessResult:
         # v0.2: enable callgraph + reachability + Semgrep by default at
