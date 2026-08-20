@@ -33,7 +33,11 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
-from .checkpoints import PreprocessCheckpoint, parse_checkpoint
+from .checkpoints import (
+    PreprocessCheckpoint,
+    RankCheckpoint,
+    SourceHuntCheckpoint,
+)
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -524,7 +528,9 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
-        self._checkpoint = parse_checkpoint(checkpoint)
+        self._checkpoint = (
+            SourceHuntCheckpoint.from_input(checkpoint) if checkpoint is not None else None
+        )
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -1062,127 +1068,9 @@ class SourceHuntRunner:
             self._ensure_sandbox_factory(repo_path, files)
             logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
 
-            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
-            ranker_llm = (
-                None
-                if self._no_rank
-                else self._get_native_client(
-                    "ranker",
-                    self.ranker_llm,
-                    budget_stage="rank",
-                )
-            )
-            self._emit_stage(
-                "rank",
-                "started",
-                detail=f"{len(files)} files",
-                files=stage_files,
-            )
-            if self._no_rank:
-                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
-                for ft in files:
-                    ft["surface"] = ft.get("surface") or 3
-                    ft["influence"] = ft.get("influence") or 2
-                    ft["reachability"] = ft.get("reachability") or 3
-                    ft["priority"] = (
-                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                    )
-                pipeline_status.record_degraded(
-                    "ranker",
-                    "All files assigned default priority scores (--no-rank)",
-                )
-                self._emit_stage(
-                    "rank",
-                    "degraded",
-                    detail="Skipped (--no-rank)",
-                    files=stage_files,
-                )
-            elif ranker_llm is not None and files:
-                logger.info("Ranker starting on %d files", len(files))
-                try:
-                    ranker_config = RankerConfig()
-                    if not self._preprocessing:
-                        ranker_config.include_static_hints = False
-                        ranker_config.include_imports_by = False
-                    # Generic "openai" chat gateways (e.g. a custom base_url +
-                    # api_key endpoint like kimi) send no max_tokens from the
-                    # ranker, so output collapses to the budget reservation cap
-                    # (~4096 tokens). A 150-file JSON with two rationales each
-                    # overflows that and truncates mid-string. Use the same
-                    # small chunk as the Responses backends so it fits.
-                    if ranker_llm.provider_name in ("openai_resp", "openai_codex", "openai"):
-                        ranker_config.chunk_size = 30
-                        ranker_config.max_inflight_chunks = self.max_parallel
-                        logger.info(
-                            "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
-                            ranker_llm.provider_name,
-                            ranker_config.chunk_size,
-                            ranker_config.max_inflight_chunks,
-                        )
-                    await Ranker(ranker_llm, ranker_config).arank(files)
-                    logger.info("Ranker completed")
-                    pipeline_status.record_succeeded("ranker")
-                    self._emit_stage(
-                        "rank",
-                        "completed",
-                        detail=f"Ranked {len(files)} files",
-                        files=stage_files,
-                    )
-                except BudgetExceeded:
-                    logger.info("Ranker stopped because the run budget is exhausted")
-                    pipeline_status.record(
-                        "ranker",
-                        StageOutcome.SKIPPED,
-                        fallback_description="Budget exhausted; remaining files use heuristic ranks",
-                    )
-                    self._emit_stage(
-                        "rank",
-                        "budget_exhausted",
-                        detail="Using heuristic ranks",
-                        files=stage_files,
-                    )
-                except Exception:
-                    logger.warning("Ranker failed", exc_info=True)
-                    pipeline_status.record_degraded(
-                        "ranker",
-                        "All files assigned default priority scores (surface=3, influence=2)",
-                    )
-                    self._emit_stage(
-                        "rank",
-                        "degraded",
-                        detail="Default priority scores used",
-                        files=stage_files,
-                    )
-            else:
-                logger.info("Ranker skipped; no LLM available")
-                pipeline_status.record_degraded(
-                    "ranker",
-                    "All files assigned default priority scores (surface=3, influence=2)",
-                )
-                # Fallback: assign reasonable defaults so tier assignment still works
-                for ft in files:
-                    ft["surface"] = ft.get("surface") or 3
-                    ft["influence"] = ft.get("influence") or 2
-                    ft["reachability"] = ft.get("reachability") or 3
-                    ft["priority"] = (
-                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                    )
-                self._emit_stage(
-                    "rank",
-                    "degraded",
-                    detail="No ranker model available; default priority scores used",
-                    files=stage_files,
-                )
-
-            # Ensure a partial/failed rank pass still leaves every file
-            # schedulable by the deterministic fallback.
-            for ft in files:
-                ft["surface"] = ft.get("surface") or 3
-                ft["influence"] = ft.get("influence") or 2
-                ft["reachability"] = ft.get("reachability") or 3
-                ft["priority"] = ft.get("priority") or (
-                    ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                )
+            # 2. Rank
+            files = await self._rank(files, pipeline_status, stage_files)
+            preprocess_result.file_targets = files
 
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
@@ -2677,9 +2565,9 @@ class SourceHuntRunner:
             subsystem_paths=self._subsystem_paths,
         )
         repo_path: str | None = None
-        if self._checkpoint is not None:
+        if self._checkpoint is not None and self._checkpoint.preprocess is not None:
             repo_path = self._preprocessor.resolve_repository()
-            restored = self._checkpoint.restore(repo_path=repo_path, options=options)
+            restored = self._checkpoint.preprocess.restore(repo_path=repo_path, options=options)
             if restored is not None:
                 self._preprocess_restored = True
                 logger.info("Restored preprocess result from session %s", self._session_id)
@@ -2687,8 +2575,121 @@ class SourceHuntRunner:
             raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
 
         result = self._preprocessor.run(repo_path=repo_path)
-        self._checkpoint = PreprocessCheckpoint.from_result(result, options=options)
+        preprocess_checkpoint = PreprocessCheckpoint.from_result(result, options=options)
+        if self._checkpoint is None:
+            self._checkpoint = SourceHuntCheckpoint(preprocess=preprocess_checkpoint)
+        else:
+            self._checkpoint.preprocess = preprocess_checkpoint
         return result
+
+    async def _rank(
+        self,
+        files: list[FileTarget],
+        pipeline_status: PipelineStatus,
+        stage_files: list[str],
+    ) -> list[FileTarget]:
+        """Rank files or restore the completed ranking stage from the checkpoint."""
+
+        options = {
+            "no_rank": self._no_rank,
+            "preprocessing": self._preprocessing,
+        }
+        self._rank_restored = False
+        self._emit_stage("rank", "started", detail=f"{len(files)} files", files=stage_files)
+
+        if self._checkpoint is not None and self._checkpoint.rank is not None:
+            restored = self._checkpoint.rank.restore(files, options=options)
+            if restored is None:
+                raise ValueError("rank checkpoint is invalid or incompatible with this run")
+            self._rank_restored = True
+            pipeline_status.record_succeeded("ranker")
+            self._emit_stage(
+                "rank",
+                "completed",
+                detail=f"Restored {len(restored)} ranked files from checkpoint",
+                files=stage_files,
+            )
+            logger.info("Restored rank result from session %s", self._session_id)
+            return restored
+
+        ranker_llm = (
+            None
+            if self._no_rank
+            else self._get_native_client("ranker", self.ranker_llm, budget_stage="rank")
+        )
+        if self._no_rank:
+            logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+            pipeline_status.record_degraded(
+                "ranker", "All files assigned default priority scores (--no-rank)"
+            )
+            self._emit_stage("rank", "degraded", detail="Skipped (--no-rank)", files=stage_files)
+        elif ranker_llm is not None and files:
+            logger.info("Ranker starting on %d files", len(files))
+            try:
+                ranker_config = RankerConfig()
+                if not self._preprocessing:
+                    ranker_config.include_static_hints = False
+                    ranker_config.include_imports_by = False
+                if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
+                    ranker_config.chunk_size = 30
+                    ranker_config.max_inflight_chunks = self.max_parallel
+                    logger.info(
+                        "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
+                        ranker_llm.provider_name,
+                        ranker_config.chunk_size,
+                        ranker_config.max_inflight_chunks,
+                    )
+                await Ranker(ranker_llm, ranker_config).arank(files)
+                logger.info("Ranker completed")
+                pipeline_status.record_succeeded("ranker")
+                self._emit_stage(
+                    "rank", "completed", detail=f"Ranked {len(files)} files", files=stage_files
+                )
+            except BudgetExceeded:
+                logger.info("Ranker stopped because the run budget is exhausted")
+                pipeline_status.record(
+                    "ranker",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; remaining files use heuristic ranks",
+                )
+                self._emit_stage(
+                    "rank", "budget_exhausted", detail="Using heuristic ranks", files=stage_files
+                )
+            except Exception:
+                logger.warning("Ranker failed", exc_info=True)
+                pipeline_status.record_degraded(
+                    "ranker",
+                    "All files assigned default priority scores (surface=3, influence=2)",
+                )
+                self._emit_stage(
+                    "rank", "degraded", detail="Default priority scores used", files=stage_files
+                )
+        else:
+            logger.info("Ranker skipped; no LLM available")
+            pipeline_status.record_degraded(
+                "ranker", "All files assigned default priority scores (surface=3, influence=2)"
+            )
+            self._emit_stage(
+                "rank",
+                "degraded",
+                detail="No ranker model available; default priority scores used",
+                files=stage_files,
+            )
+
+        # A partial, skipped, or failed rank pass is still a completed stage once
+        # every file has deterministic fallback scores.
+        for target in files:
+            target["surface"] = target.get("surface") or 3
+            target["influence"] = target.get("influence") or 2
+            target["reachability"] = target.get("reachability") or 3
+            target["priority"] = target.get("priority") or (
+                target["surface"] * 0.5 + target["influence"] * 0.2 + target["reachability"] * 0.3
+            )
+
+        if self._checkpoint is None:
+            raise RuntimeError("ranking requires a preprocessing checkpoint")
+        self._checkpoint.rank = RankCheckpoint.from_result(files, options=options)
+        return files
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
@@ -2864,9 +2865,7 @@ class SourceHuntRunner:
             tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
             checkpoint=(
-                self._checkpoint.model_dump(mode="json")
-                if self._checkpoint is not None
-                else None
+                self._checkpoint.model_dump(mode="json") if self._checkpoint is not None else None
             ),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
