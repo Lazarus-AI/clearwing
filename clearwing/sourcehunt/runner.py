@@ -33,6 +33,7 @@ from clearwing.providers import (
 )
 
 from ..sandbox.hunter_sandbox import HunterSandbox
+from .checkpoints import PreprocessCheckpoint, parse_checkpoint
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -88,6 +89,7 @@ class SourceHuntResult:
     spent_per_tier: dict[str, float]
     tokens_used: int
     output_paths: dict[str, str] = field(default_factory=dict)
+    checkpoint: dict[str, Any] | None = None
     session_id: str = ""
     subsystems_hunted: int = 0
     subsystem_spent_usd: float = 0.0
@@ -231,6 +233,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
+        checkpoint: dict[str, Any] | str | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
@@ -438,6 +441,7 @@ class SourceHuntRunner:
                 emit_rejection_certificates and p.emit_rejection_certificates
             )
             falsify = falsify and p.falsify
+            checkpoint = checkpoint if checkpoint is not None else config.checkpoint
 
         if not repo_url:
             raise ValueError(
@@ -448,6 +452,8 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
+        if checkpoint is not None and flow != "legacy":
+            raise ValueError("checkpoint restoration is currently supported only for legacy flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -518,6 +524,7 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._checkpoint = parse_checkpoint(checkpoint)
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -1044,7 +1051,11 @@ class SourceHuntRunner:
             self._emit_stage(
                 "preprocess",
                 "completed",
-                detail=f"Enumerated {files_ranked} files",
+                detail=(
+                    f"Restored {files_ranked} files from checkpoint"
+                    if self._preprocess_restored
+                    else f"Enumerated {files_ranked} files"
+                ),
                 files=stage_files,
             )
             _t = time.monotonic()
@@ -2255,6 +2266,11 @@ class SourceHuntRunner:
                 spent_per_tier=spent_per_tier,
                 tokens_used=budget_summary["total_tokens"],
                 output_paths=output_paths,
+                checkpoint=(
+                    self._checkpoint.model_dump(mode="json")
+                    if self._checkpoint is not None
+                    else None
+                ),
                 session_id=self._session_id,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
@@ -2638,19 +2654,41 @@ class SourceHuntRunner:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
+        options = {
+            "tag_files": True,
+            "build_callgraph": self.depth != "quick" and self._preprocessing,
+            "propagate_reachability": self.depth != "quick" and self._preprocessing,
+            "run_semgrep": self.depth != "quick" and self._preprocessing,
+            "run_taint": self.depth != "quick" and self._preprocessing and not self._no_rank,
+            "respect_gitignore": self._respect_gitignore,
+            "subsystem_paths": sorted(self._subsystem_paths or []),
+        }
+        self._preprocess_restored = False
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
-            tag_files=True,
-            build_callgraph=(self.depth != "quick" and self._preprocessing),
-            propagate_reachability=(self.depth != "quick" and self._preprocessing),
-            run_semgrep=(self.depth != "quick" and self._preprocessing),
-            run_taint=(self.depth != "quick" and self._preprocessing and not self._no_rank),
+            tag_files=options["tag_files"],
+            build_callgraph=options["build_callgraph"],
+            propagate_reachability=options["propagate_reachability"],
+            run_semgrep=options["run_semgrep"],
+            run_taint=options["run_taint"],
             respect_gitignore=self._respect_gitignore,
             subsystem_paths=self._subsystem_paths,
         )
-        return self._preprocessor.run()
+        repo_path: str | None = None
+        if self._checkpoint is not None:
+            repo_path = self._preprocessor.resolve_repository()
+            restored = self._checkpoint.restore(repo_path=repo_path, options=options)
+            if restored is not None:
+                self._preprocess_restored = True
+                logger.info("Restored preprocess result from session %s", self._session_id)
+                return restored
+            raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
+
+        result = self._preprocessor.run(repo_path=repo_path)
+        self._checkpoint = PreprocessCheckpoint.from_result(result, options=options)
+        return result
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
@@ -2825,6 +2863,11 @@ class SourceHuntRunner:
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
             tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
+            checkpoint=(
+                self._checkpoint.model_dump(mode="json")
+                if self._checkpoint is not None
+                else None
+            ),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
             status=run_status,

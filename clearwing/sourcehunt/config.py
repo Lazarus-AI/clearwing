@@ -141,3 +141,4 @@ class SourceHuntConfig:
     features: FeatureFlags = field(default_factory=FeatureFlags)
     tuning: HuntTuning = field(default_factory=HuntTuning)
     proof: ProofConfig = field(default_factory=ProofConfig)
+    checkpoint: dict[str, Any] | str | None = None
