@@ -34,6 +34,8 @@ from clearwing.providers import (
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
+    ExploitationCheckpoint,
+    ExploitationResult,
     HuntCheckpoint,
     HuntResult,
     PreprocessCheckpoint,
@@ -1454,82 +1456,12 @@ class SourceHuntRunner:
                 verified = stable_verified + non_poc
 
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
-            self._emit_stage(
-                "exploit",
-                "started",
-                findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in verified],
-                symbols=self._finding_symbols(verified),
-                finding_ids=[finding.id for finding in verified],
-            )
-            exploited: list[Finding] = []
+            exploitation_result = await self._exploit(verified, findings_pool=findings_pool)
+            verified = exploitation_result.verified
+            exploited = exploitation_result.exploited
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
             patched: list[Finding] = []
-            if not self.no_exploit and not self._budget_exhausted():
-                exploiter_llm = self._get_native_client(
-                    "sourcehunt_exploit",
-                    self.exploiter_llm,
-                    budget_stage="exploit",
-                )
-                if exploiter_llm is not None:
-                    eligible = filter_by_evidence(verified, "crash_reproduced")
-                    has_sandbox = (
-                        self._sandbox_manager is not None or self.sandbox_factory is not None
-                    )
-                    if eligible and has_sandbox:
-                        agentic = AgenticExploiter(
-                            llm=exploiter_llm,
-                            sandbox_manager=self._sandbox_manager,
-                            sandbox_factory=self.sandbox_factory,
-                            findings_pool=findings_pool,
-                            budget_band=self._exploit_budget_band,
-                            output_dir=str(self._ensure_output_dir_layout()),
-                            project_name=(
-                                self.repo_url.split("/")[-1] if self.repo_url else "target"
-                            ),
-                        )
-                        for finding in eligible:
-                            if self._budget_exhausted():
-                                logger.info(
-                                    "Exploit phase halted: budget $%.2f exhausted ($%.2f spent)",
-                                    self.budget_usd,
-                                    self._run_spent_usd(),
-                                )
-                                break
-                            try:
-                                exploit_result = await agentic.aattempt(finding)
-                                apply_exploiter_result(finding, exploit_result)
-                                if exploit_result.success:
-                                    exploited.append(finding)
-                                if exploit_result.partial and findings_pool is not None:
-                                    finding["primitive_type"] = (
-                                        exploit_result.primitive_type
-                                        or finding.get("primitive_type", "")
-                                    )
-                                    await findings_pool.add(finding)
-                            except BudgetExceeded:
-                                logger.info("Exploit generation stopped at the run budget")
-                                break
-                            except Exception:
-                                logger.warning(
-                                    "Agentic exploiter failed for %s",
-                                    finding.get("id"),
-                                    exc_info=True,
-                                )
-                    elif eligible:
-                        e = Exploiter(exploiter_llm)
-                        for finding in eligible:
-                            try:
-                                exploit_result = await e.aattempt(finding)
-                                apply_exploiter_result(finding, exploit_result)
-                                if exploit_result.success:
-                                    exploited.append(finding)
-                            except BudgetExceeded:
-                                logger.info("Exploit triage stopped at the run budget")
-                                break
-                            except Exception:
-                                logger.warning("Exploiter failed", exc_info=True)
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
@@ -1943,6 +1875,87 @@ class SourceHuntRunner:
             )
         except Exception:
             logger.debug("gh pr create failed", exc_info=True)
+
+    async def _exploit(self, verified: list[Finding], *, findings_pool: Any) -> ExploitationResult:
+        """Run or restore the completed exploitation stage."""
+
+        options = {
+            "no_exploit": self.no_exploit,
+            "exploit_budget_band": self._exploit_budget_band,
+            "agent_mode": self._effective_agent_mode,
+        }
+        self._exploitation_restored = False
+        self._emit_stage(
+            "exploit",
+            "started",
+            findings_so_far=len(verified),
+            files=[str(finding.file or "") for finding in verified],
+            symbols=self._finding_symbols(verified),
+            finding_ids=[finding.id for finding in verified],
+        )
+        if self._checkpoint is not None and self._checkpoint.exploitation is not None:
+            restored = self._checkpoint.exploitation.restore(options=options)
+            if restored is None:
+                raise ValueError("exploitation checkpoint is invalid or incompatible with this run")
+            self._exploitation_restored = True
+            self._emit_stage(
+                "exploit",
+                "completed",
+                findings_so_far=len(restored.exploited),
+                detail=f"Restored {len(restored.exploited)} exploited findings from checkpoint",
+                finding_ids=[finding.id for finding in restored.exploited],
+            )
+            return restored
+
+        result = ExploitationResult(verified=verified, exploited=[])
+        if not self.no_exploit and not self._budget_exhausted():
+            exploiter_llm = self._get_native_client(
+                "sourcehunt_exploit", self.exploiter_llm, budget_stage="exploit"
+            )
+            if exploiter_llm is not None:
+                eligible = filter_by_evidence(result.verified, "crash_reproduced")
+                has_sandbox = self._sandbox_manager is not None or self.sandbox_factory is not None
+                if eligible and has_sandbox:
+                    exploiter = AgenticExploiter(
+                        llm=exploiter_llm,
+                        sandbox_manager=self._sandbox_manager,
+                        sandbox_factory=self.sandbox_factory,
+                        findings_pool=findings_pool,
+                        budget_band=self._exploit_budget_band,
+                        output_dir=str(self._ensure_output_dir_layout()),
+                        project_name=self.repo_url.split("/")[-1] if self.repo_url else "target",
+                    )
+                else:
+                    exploiter = Exploiter(exploiter_llm)
+                for finding in eligible:
+                    if self._budget_exhausted():
+                        break
+                    try:
+                        exploit_result = await exploiter.aattempt(finding)
+                        apply_exploiter_result(finding, exploit_result)
+                        if exploit_result.success:
+                            result.exploited.append(finding)
+                        if has_sandbox and exploit_result.partial and findings_pool is not None:
+                            finding["primitive_type"] = (
+                                exploit_result.primitive_type or finding.get("primitive_type", "")
+                            )
+                            await findings_pool.add(finding)
+                    except BudgetExceeded:
+                        logger.info("Exploitation stopped at the run budget")
+                        break
+                    except Exception:
+                        logger.warning("Exploiter failed for %s", finding.id, exc_info=True)
+        if self._checkpoint is None:
+            raise RuntimeError("exploitation requires a preprocessing checkpoint")
+        self._checkpoint.exploitation = ExploitationCheckpoint.from_result(result, options=options)
+        self._emit_stage(
+            "exploit",
+            "completed" if not self._budget_exhausted() else "budget_exhausted",
+            findings_so_far=len(result.exploited),
+            detail=f"{len(result.exploited)} exploited findings",
+            finding_ids=[finding.id for finding in result.exploited],
+        )
+        return result
 
     async def _verify(
         self,

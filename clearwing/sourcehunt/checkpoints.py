@@ -180,6 +180,37 @@ class VerificationCheckpoint(BaseModel):
         return self.result.model_copy(deep=True)
 
 
+class ExploitationResult(BaseModel):
+    """State handed from exploitation to reporting and optional follow-ups."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verified: list[Finding]
+    exploited: list[Finding]
+
+
+class ExploitationCheckpoint(BaseModel):
+    """Portable state produced by the completed exploitation stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = CHECKPOINT_SCHEMA_VERSION
+    options: dict[str, Any]
+    result: ExploitationResult
+
+    @classmethod
+    def from_result(
+        cls, result: ExploitationResult, *, options: dict[str, Any]
+    ) -> ExploitationCheckpoint:
+        return cls(options=options, result=result)
+
+    def restore(self, *, options: dict[str, Any]) -> ExploitationResult | None:
+        if self.options != options:
+            logger.error("Exploitation checkpoint options do not match this run")
+            return None
+        return self.result.model_copy(deep=True)
+
+
 class SourceHuntCheckpoint(BaseModel):
     """Stage-keyed sourcehunt checkpoint passed across the bridge boundary."""
 
@@ -190,6 +221,7 @@ class SourceHuntCheckpoint(BaseModel):
     rank: RankCheckpoint | None = None
     hunt: HuntCheckpoint | None = None
     verification: VerificationCheckpoint | None = None
+    exploitation: ExploitationCheckpoint | None = None
 
     @classmethod
     def from_input(

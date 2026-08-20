@@ -8,6 +8,8 @@ import pytest
 from clearwing.analysis.source_analyzer import AnalyzerFinding
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
+    ExploitationCheckpoint,
+    ExploitationResult,
     HuntCheckpoint,
     HuntResult,
     PreprocessCheckpoint,
@@ -563,3 +565,44 @@ def test_verification_checkpoint_rejects_different_options():
         VerificationResult(verified=[], rejected=[]), options={"validator_mode": "v2"}
     )
     assert checkpoint.restore(options={"validator_mode": "v1"}) is None
+
+
+@pytest.mark.asyncio
+async def test_runner_checkpoints_and_restores_exploitation(tmp_path: Path, monkeypatch):
+    finding = Finding(
+        id="finding-1", file="sample.c", severity="high", evidence_level="crash_reproduced"
+    )
+    first = SourceHuntRunner(
+        repo_url=str(tmp_path), output_dir=str(tmp_path), enable_mechanism_memory=False
+    )
+    first._checkpoint = SourceHuntCheckpoint()
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
+    result = await first._exploit([finding], findings_pool=None)
+    assert isinstance(first._checkpoint.exploitation, ExploitationCheckpoint)
+    assert result.verified[0].id == "finding-1"
+
+    saved = ExploitationResult(verified=[finding], exploited=[finding])
+    first._checkpoint.exploitation = ExploitationCheckpoint.from_result(
+        saved, options=first._checkpoint.exploitation.options
+    )
+    resumed = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path),
+        checkpoint=first._checkpoint.model_dump(mode="json"),
+        enable_mechanism_memory=False,
+    )
+    monkeypatch.setattr(
+        resumed,
+        "_get_native_client",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("exploiter called")),
+    )
+    restored = await resumed._exploit([finding], findings_pool=None)
+    assert resumed._exploitation_restored is True
+    assert restored.exploited[0].id == "finding-1"
+
+
+def test_exploitation_checkpoint_rejects_different_options():
+    checkpoint = ExploitationCheckpoint.from_result(
+        ExploitationResult(verified=[], exploited=[]), options={"no_exploit": False}
+    )
+    assert checkpoint.restore(options={"no_exploit": True}) is None
