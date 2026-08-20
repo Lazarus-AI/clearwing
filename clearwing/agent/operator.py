@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from clearwing.agent.graph import _create_llm, create_agent
 from clearwing.agent.runtime import Command
+from clearwing.providers import ProviderManager
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class OperatorConfig:
     operator_model: str = ""  # model for the operator LLM; defaults to self.model
     base_url: str | None = None
     api_key: str | None = None
+    provider_manager: ProviderManager | None = None
 
     # Behaviour
     max_turns: int = 100  # max inner-agent turns before force-stop
@@ -42,6 +44,8 @@ class OperatorConfig:
     cost_limit: float = 0.0  # 0 = no limit
     auto_approve_scans: bool = True  # auto-approve non-destructive scan tools
     auto_approve_exploits: bool = False  # require user for exploit approval
+    lhost: str = "host.docker.internal"  # callback address reachable from target
+    lport: int = 9999  # preferred callback-listener port
 
     # Callbacks
     on_message: Callable[[str, str], None] | None = None  # (role, content)
@@ -133,6 +137,7 @@ class OperatorAgent:
             session_id=session_id,
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            provider_manager=self.config.provider_manager,
         )
         config = {"configurable": {"thread_id": f"operator-{session_id}"}}
 
@@ -142,6 +147,8 @@ class OperatorAgent:
             op_model,
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            provider_manager=self.config.provider_manager,
+            task="operator",
         )
 
         # Build initial goal message
@@ -252,7 +259,7 @@ class OperatorAgent:
                 graph,
                 config,
                 start,
-                "completed",
+                "max_turns",
                 error=f"Reached max turns ({self.config.max_turns})",
             )
 
@@ -264,12 +271,21 @@ class OperatorAgent:
     def _format_goals(self) -> str:
         """Format goals into the initial instruction for the inner agent."""
         goal_lines = "\n".join(f"  {i + 1}. {g}" for i, g in enumerate(self.config.goals))
+        callback_guidance = (
+            "\n\nOUT-OF-BAND PROOF:\n"
+            f"The target can reach callback listeners at {self.config.lhost}, starting at "
+            f"port {self.config.lport}. Use start_callback_listener with those values and "
+            "check_callback_received with the exact returned token. The returned URL accepts "
+            "GET or POST and records the request body. Do not use 127.0.0.1 unless the "
+            "listener actually runs inside the target."
+        )
         return (
             f"TARGET: {self.config.target}\n\n"
             f"You are being operated autonomously. Complete the following goals:\n"
             f"{goal_lines}\n\n"
             f"Work through these goals systematically. Report your findings as you go. "
             f"If you need information you cannot obtain yourself, ask clearly."
+            f"{callback_guidance}"
         )
 
     async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> str:

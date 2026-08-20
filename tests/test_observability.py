@@ -434,3 +434,65 @@ class TestObservabilityIntegration:
     def test_spans_property(self):
         obs = ObservabilityIntegration()
         assert obs.spans == []
+
+    def test_phoenix_disabled_by_default(self):
+        """PhoenixExporter not attached when env vars absent."""
+        obs = ObservabilityIntegration()
+        # Only InMemoryExporter present (no Phoenix without PHOENIX_ENDPOINT)
+        assert len(obs.tracer._exporters) == 1
+
+    def test_cost_update_emits_llm_span(self):
+        """cost_update event creates an llm_call span for Arize."""
+        obs = ObservabilityIntegration()
+        obs._on_cost_update({
+            "model": "claude-opus-4-6",
+            "provider": "anthropic",
+            "input_tokens": 2000,
+            "output_tokens": 400,
+            "cached_tokens": 500,
+            "total_cost_usd": 0.12,
+            "elapsed_ms": 1500,
+        })
+        obs.tracer.flush()
+        llm_spans = obs._in_memory.get_spans("llm_call")
+        assert len(llm_spans) == 1
+        s = llm_spans[0]
+        assert s.attributes["llm.model"] == "claude-opus-4-6"
+        assert s.attributes["llm.token_count.input"] == 2000
+        assert s.attributes["llm.cost_usd"] == 0.12
+
+
+# ---------------------------------------------------------------------------
+# PhoenixExporter tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhoenixExporter:
+    def test_construct(self):
+        from clearwing.observability.phoenix import PhoenixExporter
+
+        exporter = PhoenixExporter(endpoint="http://localhost:6006", project_name="test")
+        exporter.shutdown()
+
+    def test_from_env_returns_none_without_endpoint(self, monkeypatch):
+        from clearwing.observability.phoenix import phoenix_exporter_from_env
+
+        monkeypatch.delenv("PHOENIX_ENDPOINT", raising=False)
+        monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
+        assert phoenix_exporter_from_env() is None
+
+    def test_from_env_returns_none_without_project(self, monkeypatch):
+        from clearwing.observability.phoenix import phoenix_exporter_from_env
+
+        monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
+        monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
+        assert phoenix_exporter_from_env() is None
+
+    def test_from_env_returns_exporter_when_both_set(self, monkeypatch):
+        from clearwing.observability.phoenix import phoenix_exporter_from_env
+
+        monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
+        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing")
+        exporter = phoenix_exporter_from_env()
+        assert exporter is not None
+        exporter.shutdown()

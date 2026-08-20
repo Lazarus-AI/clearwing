@@ -144,7 +144,6 @@ _REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
     "mixtral",
     "qwen2",
     "gemma",
-    "glm",
 )
 
 # Explicit re-enable list for model names that contain an unsupported pattern
@@ -368,6 +367,12 @@ class AsyncLLMClient:
         # every model except the blacklisted ones (see
         # _REASONING_CAPTURE_UNSUPPORTED_PATTERNS), which error if it's set.
         self.capture_reasoning_content = _model_supports_reasoning_capture(model_name)
+        # Some Responses-compatible gateways reject the standard
+        # `max_output_tokens` field.  Learn that once from an explicit HTTP
+        # 400 and omit the optional provider-side cap for the rest of this
+        # client session; the spend ledger still reserves against the caller's
+        # requested maximum before ChatOptions is built.
+        self._omit_max_tokens = False
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
@@ -523,6 +528,8 @@ class AsyncLLMClient:
             return True
         if self._is_unsupported_reasoning_effort_error(exc):
             return True
+        if isinstance(exc, Exception) and self._is_definitely_unbilled_transport_error(exc):
+            return True
         text = str(exc).lower()
         return any(
             marker in text
@@ -585,7 +592,7 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
                 capture_tool_calls=True,
@@ -613,32 +620,50 @@ class AsyncLLMClient:
                 client = self._build_client(Client)
                 dispatched = True
                 try:
-                    response = await self._with_rate_limit_retries(
+                    response = await self._with_retries(
                         lambda: self._achat_with_provider_policy(client, request, options)
                     )
                 except Exception as exc:
-                    if not self._is_unsupported_reasoning_effort_error(exc):
+                    if (
+                        options.reasoning_effort is not None
+                        and self._is_unsupported_reasoning_effort_error(exc)
+                    ):
+                        logger.warning(
+                            "Provider rejected reasoning_effort for model %r; retrying "
+                            "with reasoning_effort=None and disabling it for this session.",
+                            self.model_name,
+                        )
+                        self.reasoning_effort = None
+                        options = self._rebuild_options_without_reasoning(options)
+                        response = await self._with_retries(
+                            lambda: self._achat_with_provider_policy(client, request, options)
+                        )
+                    elif (
+                        options.max_tokens is not None
+                        and self._is_unsupported_max_output_tokens_error(exc)
+                    ):
+                        logger.warning(
+                            "Provider rejected max_output_tokens for model %r; retrying "
+                            "without it and disabling it for this session.",
+                            self.model_name,
+                        )
+                        self._omit_max_tokens = True
+                        options = self._rebuild_options_without_max_tokens(options)
+                        response = await self._with_retries(
+                            lambda: self._achat_with_provider_policy(client, request, options)
+                        )
+                    else:
                         raise
-                    logger.warning(
-                        "Provider rejected reasoning_effort for model %r; retrying "
-                        "with reasoning_effort=None and disabling it for this session.",
-                        self.model_name,
-                    )
-                    self.reasoning_effort = None
-                    options = self._rebuild_options_without_reasoning(options)
-                    response = await self._with_rate_limit_retries(
-                        lambda: self._achat_with_provider_policy(client, request, options)
-                    )
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
-            if _LOG_CALLS:
-                logger.info(
-                    "LLM %s failed in %dms: %s",
-                    self.model_name,
-                    elapsed_ms,
-                    exc,
-                )
+            logger.warning(
+                "LLM call failed for model=%s provider=%s in %dms: %s",
+                self.model_name,
+                self.provider_name,
+                elapsed_ms,
+                self._format_exc_chain(exc),
+            )
             _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
             raise
 
@@ -725,7 +750,7 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
                 capture_tool_calls=True,
@@ -748,9 +773,12 @@ class AsyncLLMClient:
                     return None
 
                 try:
-                    response = await _consume(options)
+                    response = await self._with_retries(lambda: _consume(options))
                 except Exception as exc:
-                    if self._is_unsupported_reasoning_effort_error(exc):
+                    if (
+                        options.reasoning_effort is not None
+                        and self._is_unsupported_reasoning_effort_error(exc)
+                    ):
                         logger.warning(
                             "Provider rejected reasoning_effort (streaming) for model "
                             "%r; retrying with reasoning_effort=None and disabling it "
@@ -760,9 +788,24 @@ class AsyncLLMClient:
                         self.reasoning_effort = None
                         options = self._rebuild_options_without_reasoning(options)
                         response = await _consume(options)
-                    elif self._should_try_openai_http_fallback(exc) and not (
-                        self._spend_ledger is not None
-                        and self._spend_ledger.enforcing
+                    elif (
+                        options.max_tokens is not None
+                        and self._is_unsupported_max_output_tokens_error(exc)
+                    ):
+                        logger.warning(
+                            "Provider rejected max_output_tokens (streaming) for model "
+                            "%r; retrying without it and disabling it for this session.",
+                            self.model_name,
+                        )
+                        self._omit_max_tokens = True
+                        options = self._rebuild_options_without_max_tokens(options)
+                        response = await _consume(options)
+                    elif self._should_try_openai_http_fallback(exc) and (
+                        not (
+                            self._spend_ledger is not None
+                            and self._spend_ledger.enforcing
+                        )
+                        or self._is_definitely_unbilled_transport_error(exc)
                     ):
                         logger.debug(
                             "Native OpenAI async stream failed for model=%s "
@@ -786,6 +829,13 @@ class AsyncLLMClient:
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
+            logger.warning(
+                "LLM stream failed for model=%s provider=%s in %dms: %s",
+                self.model_name,
+                self.provider_name,
+                elapsed_ms,
+                self._format_exc_chain(exc),
+            )
             _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
             if (
                 "without a terminal usage event" in str(exc)
@@ -973,10 +1023,17 @@ class AsyncLLMClient:
         except Exception as exc:
             if not self._should_try_openai_http_fallback(exc):
                 raise
-            if self._spend_ledger is not None and self._spend_ledger.enforcing:
+            if (
+                self._spend_ledger is not None
+                and self._spend_ledger.enforcing
+                and not self._is_definitely_unbilled_transport_error(exc)
+            ):
                 # The failed transport may already have reached the provider.
                 # Retrying through another transport could incur a second bill;
                 # let the ledger conservatively charge this reservation instead.
+                # Exception: pre-response transport errors (connection refused,
+                # DNS, TLS, "error sending request") never generated, so the
+                # aiohttp fallback is safe even under enforcement.
                 raise
             logger.debug(
                 "Native OpenAI streaming transport failed for model=%s base_url=%s; "
@@ -1423,21 +1480,32 @@ class AsyncLLMClient:
             total_tokens=usage.get("total_tokens"),
         )
 
-    async def _with_rate_limit_retries(self, op) -> ChatResponse:
+    async def _with_retries(self, op) -> ChatResponse:
+        """Retry *op* on rate-limit AND transient transport errors.
+
+        Transport errors (reqwest connection/send failures) never reached a
+        response, so retrying them can't double-bill — see
+        ``_is_transient_transport_error``. Both share the same backoff schedule
+        and ``rate_limit_max_retries`` cap.
+        """
         attempt = 0
         while True:
             try:
                 return await op()
             except Exception as exc:
-                if not self._is_rate_limit_error(exc) or attempt >= self.rate_limit_max_retries:
+                is_rate_limit = self._is_rate_limit_error(exc)
+                is_transport = self._is_transient_transport_error(exc)
+                if (not is_rate_limit and not is_transport) or attempt >= self.rate_limit_max_retries:
                     raise
 
                 delay = self._retry_delay_seconds(exc, attempt)
                 attempt += 1
                 logger.warning(
-                    "LLM call rate-limited for model=%s provider=%s; retrying in %.2fs (attempt %d/%d): %s",
+                    "LLM call failed for model=%s provider=%s (%s); retrying in "
+                    "%.2fs (attempt %d/%d): %s",
                     self.model_name,
                     self.provider_name,
+                    "rate-limited" if is_rate_limit else "transport error",
                     delay,
                     attempt,
                     self.rate_limit_max_retries,
@@ -1465,6 +1533,22 @@ class AsyncLLMClient:
         )
 
     @staticmethod
+    def _rebuild_options_without_max_tokens(options: ChatOptions) -> ChatOptions:
+        """Return a copy of *options* with ``max_tokens=None``."""
+
+        return ChatOptions(
+            temperature=options.temperature,
+            max_tokens=None,
+            capture_content=options.capture_content,
+            capture_usage=options.capture_usage,
+            capture_tool_calls=options.capture_tool_calls,
+            capture_reasoning_content=options.capture_reasoning_content,
+            normalize_reasoning_content=options.normalize_reasoning_content,
+            reasoning_effort=options.reasoning_effort,
+            response_json_spec=options.response_json_spec,
+        )
+
+    @staticmethod
     def _is_unsupported_reasoning_effort_error(exc: BaseException) -> bool:
         """True when *exc* indicates the provider rejected ``reasoning_effort``.
 
@@ -1478,6 +1562,15 @@ class AsyncLLMClient:
             return False
         return "400" in text or "unsupported" in text
 
+    @staticmethod
+    def _is_unsupported_max_output_tokens_error(exc: BaseException) -> bool:
+        """True for an explicit rejection of Responses' output-token cap."""
+
+        text = str(exc).lower()
+        if "max_output_tokens" not in text:
+            return False
+        return "400" in text or "unsupported" in text
+
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return (
@@ -1488,6 +1581,72 @@ class AsyncLLMClient:
             or "rate limit" in text
             or "ratelimit" in text
         )
+
+    # Transport failures where the request never completed a round-trip, so the
+    # provider never generated (and never billed) — safe to retry. These come
+    # from genai-pyo3's reqwest layer ("Web call failed ... Cause: Reqwest
+    # error: error sending request ...") or a stalled/aborted stream. We match
+    # on connection-establishment / send-side phrases only; we deliberately do
+    # NOT retry generic 5xx here (those may have partially generated).
+    _TRANSPORT_ERROR_MARKERS = (
+        "error sending request",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection error",
+        "broken pipe",
+        "timed out",
+        "timeout",
+        "dns error",
+        "tls",
+        "handshake",
+        "web call failed",
+        "web stream error",
+        "reqwest error",
+        "transport error",
+        "without a terminal usage event",
+    )
+
+    def _is_transient_transport_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(marker in text for marker in self._TRANSPORT_ERROR_MARKERS)
+
+    # Subset of transport failures that provably occur *before* the request is
+    # sent, so the provider never generated or billed. Safe to reroute through
+    # the aiohttp fallback even while the spend ledger is enforcing (unlike a
+    # mid-response drop, which may have already produced billable tokens).
+    _PRE_RESPONSE_TRANSPORT_MARKERS = (
+        "error sending request",
+        "connection refused",
+        "connection error",
+        "dns error",
+        "tls",
+        "handshake",
+    )
+
+    def _is_definitely_unbilled_transport_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(marker in text for marker in self._PRE_RESPONSE_TRANSPORT_MARKERS)
+
+    @staticmethod
+    def _format_exc_chain(exc: BaseException) -> str:
+        """Render an exception plus its __cause__/__context__ chain on one line.
+
+        genai-pyo3 surfaces transport failures as a terse top-level message
+        ("Web call failed for model ...") whose real detail lives in the nested
+        cause ("Reqwest error: error sending request ... connection refused").
+        Python's implicit chaining keeps that reachable via __cause__ /
+        __context__; walk it so the log line shows *why*, not just *that*.
+        """
+        parts: list[str] = []
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            msg = str(cur).strip()
+            parts.append(f"{type(cur).__name__}: {msg}" if msg else type(cur).__name__)
+            cur = cur.__cause__ or cur.__context__
+        return "  <- ".join(parts)
 
     def _retry_delay_seconds(self, exc: Exception, attempt: int) -> float:
         retry_after = self._parse_retry_after_seconds(str(exc))

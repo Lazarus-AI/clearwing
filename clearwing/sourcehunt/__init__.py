@@ -28,6 +28,7 @@ from .config import (
     SourceHuntConfig,
     TargetConfig,
 )
+from .runner import SourceHuntProgress, SourceHuntProgressCallback, SourceHuntRunner
 from .state import (
     EVIDENCE_LEVELS,
     EvidenceLevel,
@@ -50,6 +51,9 @@ __all__ = [
     "OutputConfig",
     "ProofConfig",
     "SourceHuntConfig",
+    "SourceHuntProgress",
+    "SourceHuntProgressCallback",
+    "SourceHuntRunner",
     "SourceHuntState",
     "TargetConfig",
     "EVIDENCE_LEVELS",

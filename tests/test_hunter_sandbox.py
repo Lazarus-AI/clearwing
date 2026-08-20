@@ -112,39 +112,48 @@ class TestBuildSystemDetector:
 
 @pytest.fixture
 def mock_docker():
-    with patch("docker.from_env") as mock_from_env:
+    with patch("clearwing.sandbox.dind.get_docker_host", return_value=None), \
+         patch("docker.from_env") as mock_from_env:
         mock_client = MagicMock()
         mock_from_env.return_value = mock_client
         yield mock_client
 
 
 class TestHunterSandboxBuildImage:
-    def test_build_image_calls_images_build(self, temp_repo: Path, mock_docker):
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
+    def test_build_image_calls_images_build(self, mock_run, temp_repo: Path):
         (temp_repo / "Makefile").write_text("all:\n")
-        # Make images.get raise so we go down the build path
-        mock_docker.images.get.side_effect = Exception("not found")
+        # inspect miss → build
+        mock_run.side_effect = [
+            MagicMock(returncode=1),  # docker image inspect
+            MagicMock(returncode=0, stdout="", stderr=""),  # docker build
+        ]
 
         sb = HunterSandbox(repo_path=str(temp_repo))
         tag = sb.build_image()
         assert tag.startswith("clearwing-sourcehunt:")
-        mock_docker.images.build.assert_called_once()
-        kwargs = mock_docker.images.build.call_args.kwargs
-        assert kwargs["tag"] == tag
+        assert mock_run.call_count == 2
+        build_argv = mock_run.call_args_list[1][0][0]
+        assert "build" in build_argv
+        assert tag in build_argv
 
-    def test_build_image_reuses_cached(self, temp_repo: Path, mock_docker):
+    @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
+    def test_build_image_reuses_cached(self, mock_run, temp_repo: Path):
         (temp_repo / "Makefile").write_text("all:\n")
-        # images.get succeeds → reuse
-        mock_docker.images.get.return_value = MagicMock()
+        # docker image inspect succeeds → cached
+        mock_run.return_value = MagicMock(returncode=0)
 
         sb = HunterSandbox(repo_path=str(temp_repo))
         sb.build_image()
-        mock_docker.images.build.assert_not_called()
+        mock_run.assert_called_once()
+        argv = mock_run.call_args[0][0]
+        assert "inspect" in argv
 
     def test_dockerfile_includes_recipe_apt_packages(self, temp_repo: Path):
         (temp_repo / "Makefile").write_text("all:\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
         df = sb._render_dockerfile()
-        assert "FROM gcc:13" in df
+        assert "FROM gcc:12-bullseye" in df
         assert "ripgrep" in df
         assert "gdb" in df
         assert "ltrace" not in df

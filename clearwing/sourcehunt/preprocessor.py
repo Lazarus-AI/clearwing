@@ -97,6 +97,10 @@ _SOURCE_EXTS_TO_LANG: dict[str, str] = {
     ".hh": "cpp",
     ".hxx": "cpp",
     ".rs": "rust",
+    ".s": "asm",
+    ".asm": "asm",
+    ".pl": "perl",
+    ".pm": "perl",
 }
 
 
@@ -301,6 +305,7 @@ class Preprocessor:
         self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD = quality_cutoff
         self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD = quality_cutoff
         self._analyzer: SourceAnalyzer | None = None
+        self._cloner: SourceAnalyzer | None = None
 
     def run(self) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
@@ -681,9 +686,11 @@ class Preprocessor:
 
     def cleanup(self) -> None:
         """Clean up the cloned repo (if we cloned one)."""
-        if self._analyzer is not None:
+        for holder in (self._cloner, self._analyzer):
+            if holder is None:
+                continue
             try:
-                self._analyzer.cleanup()
+                holder.cleanup()
             except Exception:
                 logger.debug("Preprocessor cleanup failed", exc_info=True)
 
@@ -702,12 +709,12 @@ class Preprocessor:
 
         # Heuristic: looks like a git URL?
         if self._is_git_url(self.repo_url):
-            self._analyzer = SourceAnalyzer(
+            self._cloner = SourceAnalyzer(
                 max_file_size=self._max_file_size_bytes,
                 max_depth=self._traversal_depth,
             )
-            self._analyzer.respect_gitignore = self.respect_gitignore
-            return self._analyzer.clone(self.repo_url, branch=self.branch)
+            self._cloner.respect_gitignore = self.respect_gitignore
+            return self._cloner.clone(self.repo_url, branch=self.branch)
 
         # Otherwise treat repo_url as a local path
         if os.path.isdir(self.repo_url):

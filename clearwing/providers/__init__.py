@@ -13,6 +13,7 @@ from clearwing.providers.env import (
     ENV_API_KEY,
     ENV_BASE_URL,
     ENV_MODEL,
+    EndpointPricing,
     LLMEndpoint,
     resolve_llm_endpoint,
 )
@@ -23,10 +24,15 @@ from clearwing.providers.manager import (
     ProviderConfig,
     ProviderManager,
 )
+from clearwing.providers.runtime import (
+    install_runtime_routing,
+    runtime_routing,
+)
 
 __all__ = [
     # Endpoint resolution
     "LLMEndpoint",
+    "EndpointPricing",
     "resolve_llm_endpoint",
     "ENV_BASE_URL",
     "ENV_API_KEY",
@@ -39,6 +45,9 @@ __all__ = [
     "ModelRoute",
     "PROVIDER_PRESETS",
     "DEFAULT_ROUTES",
+    # One-run process provider routing
+    "install_runtime_routing",
+    "runtime_routing",
     # Provider catalog (for the setup wizard + doctor command)
     "KNOWN_PROVIDERS",
     "ProviderPreset",

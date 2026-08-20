@@ -19,9 +19,10 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
@@ -123,6 +124,28 @@ class SourceHuntResult:
             for f in self.verified_findings
             if (f.get("severity_verified") or f.get("severity")) == "high"
         )
+
+
+@dataclass(frozen=True)
+class SourceHuntProgress:
+    """One semantic sourcehunt stage transition.
+
+    Transports may persist and sequence these values for polling or streaming.
+    """
+
+    stage: str
+    status: str
+    findings_so_far: int = 0
+    cost_usd: float = 0.0
+    detail: str = ""
+    files: tuple[str, ...] = ()
+    symbols: tuple[str, ...] = ()
+    finding_ids: tuple[str, ...] = ()
+    error: dict[str, Any] | None = None
+    type: Literal["stage"] = "stage"
+
+
+SourceHuntProgressCallback = Callable[[SourceHuntProgress], None]
 
 
 _IMPACT_TO_SEVERITY = {
@@ -271,6 +294,7 @@ class SourceHuntRunner:
         retain_incomplete_certificates: bool = True,
         emit_rejection_certificates: bool = True,
         falsify: bool = True,
+        on_progress: SourceHuntProgressCallback | None = None,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -535,6 +559,7 @@ class SourceHuntRunner:
         self.exploiter_llm = exploiter_llm
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
+        self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
@@ -614,6 +639,7 @@ class SourceHuntRunner:
         self._runtime_hunter_max_steps_deep = (
             runtime_verification.hunter_max_steps_deep
         )
+        self._on_progress = on_progress
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -652,6 +678,18 @@ class SourceHuntRunner:
         if self.depth in ("standard", "deep"):
             return "deep"
         return "constrained"
+
+    @property
+    def _effective_agent_mode(self) -> str:
+        """Select tools that can actually access the checked-out source.
+
+        Downgrades ``deep`` to ``constrained`` when no sandbox_factory is
+        available — avoids crashing when Docker isn't installed.
+        """
+        requested = self._agent_mode
+        if requested == "deep" and self.sandbox_factory is None:
+            return "constrained"
+        return requested
 
     @property
     def _starting_band(self) -> str:
@@ -1001,6 +1039,17 @@ class SourceHuntRunner:
         finding_ids: list[str] | tuple[str, ...] = (),
         error: dict[str, Any] | None = None,
     ) -> None:
+        progress = SourceHuntProgress(
+            stage=stage,
+            status=status,
+            findings_so_far=findings_so_far,
+            cost_usd=cost_usd,
+            detail=detail,
+            files=tuple(files),
+            symbols=tuple(symbols),
+            finding_ids=tuple(finding_ids),
+            error=error,
+        )
         EventBus().emit_sourcehunt_stage(
             SourcehuntStagePayload(
                 session_id=self._session_id,
@@ -1012,6 +1061,11 @@ class SourceHuntRunner:
                 detail=detail,
             )
         )
+        if self._on_progress is not None:
+            try:
+                self._on_progress(progress)
+            except Exception:  # pragma: no cover - observer isolation
+                logger.warning("sourcehunt progress observer failed", exc_info=True)
         try:
             self._instrumentation.stage(
                 stage,
@@ -1699,7 +1753,7 @@ class SourceHuntRunner:
                         semgrep_hints_by_file=semgrep_hints_by_file,
                         hunter_max_steps_constrained=self._runtime_hunter_max_steps_constrained,
                         hunter_max_steps_deep=self._runtime_hunter_max_steps_deep,
-                        agent_mode=self._agent_mode,
+                        agent_mode=self._effective_agent_mode,
                         prompt_mode=self._prompt_mode,
                         campaign_hint=self._campaign_hint,
                         exploit_mode=self._exploit_mode,
@@ -2657,6 +2711,9 @@ class SourceHuntRunner:
                     self._sandbox_manager.cleanup(remove_image=False)
                 except Exception:
                     logger.debug("HunterSandbox cleanup failed", exc_info=True)
+            if self._preprocessor is not None:
+                self._preprocessor.cleanup()
+                self._preprocessor = None
 
     @property
     def session_id(self) -> str:
@@ -3065,7 +3122,7 @@ class SourceHuntRunner:
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
         runtime_coverage = self._runtime_tuning.sourcehunt.coverage
-        pp = Preprocessor(
+        self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
@@ -3080,7 +3137,7 @@ class SourceHuntRunner:
             large_repo_quality_cutoff=runtime_coverage.large_repo_quality_cutoff,
             respect_gitignore=self._respect_gitignore,
         )
-        return pp.run()
+        return self._preprocessor.run()
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":

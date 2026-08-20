@@ -20,9 +20,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from clearwing.observability.telemetry import CostTracker
+
+if TYPE_CHECKING:
+    from clearwing.providers.env import LLMEndpoint
 
 
 class BudgetExceeded(RuntimeError):
@@ -41,6 +44,31 @@ class ModelPricing:
     output_per_million: float
     cached_input_per_million: float
     source: str
+
+
+def _endpoint_pricing(endpoint: LLMEndpoint | None) -> ModelPricing | None:
+    """Map an endpoint's optional :class:`EndpointPricing` to ``ModelPricing``.
+
+    When the active endpoint carries a ``pricing`` block it is the
+    authoritative price for cost accounting, so this converts it into the
+    ledger's own ``ModelPricing`` shape (``*_per_mtok`` → ``*_per_million``).
+    The cached-read rate falls back to the input rate when the endpoint does
+    not carry a distinct cached price, matching the operator-override and
+    pricing-table behavior. Returns ``None`` when the endpoint is absent or
+    carries no pricing, so runs without endpoint pricing are unaffected.
+    """
+    pricing = getattr(endpoint, "pricing", None)
+    if pricing is None:
+        return None
+    cached = (
+        pricing.cached_per_mtok if pricing.cached_per_mtok is not None else pricing.input_per_mtok
+    )
+    return ModelPricing(
+        input_per_million=float(pricing.input_per_mtok),
+        output_per_million=float(pricing.output_per_mtok),
+        cached_input_per_million=float(cached),
+        source="endpoint_pricing",
+    )
 
 
 @dataclass(slots=True)
@@ -101,6 +129,7 @@ class SpendLedger:
         output_price_per_million: float | None = None,
         default_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         manifest_filename: str = "manifest.json",
+        endpoint: LLMEndpoint | None = None,
     ) -> None:
         if not math.isfinite(limit_usd) or limit_usd < 0:
             raise BudgetConfigurationError("LLM budget must be a finite value >= 0")
@@ -136,10 +165,12 @@ class SpendLedger:
                 cached_input_per_million=float(input_price_per_million),
                 source="operator_override",
             )
-            if input_price_per_million is not None
-            and output_price_per_million is not None
+            if input_price_per_million is not None and output_price_per_million is not None
             else None
         )
+        # The active endpoint's own price, when it carries one, outranks both
+        # the operator override and the built-in table (see `_resolve_pricing`).
+        self._endpoint_pricing = _endpoint_pricing(endpoint)
 
         self._lock = threading.RLock()
         self._spent_usd = 0.0
@@ -209,11 +240,7 @@ class SpendLedger:
             provider=provider,
             strict=self.enforcing,
         )
-        if (
-            self.enforcing
-            and pricing.output_per_million > 0
-            and not supports_output_limit
-        ):
+        if self.enforcing and pricing.output_per_million > 0 and not supports_output_limit:
             raise BudgetConfigurationError(
                 f"--budget cannot be enforced for provider {provider!r}: "
                 "it does not accept an output-token ceiling"
@@ -257,9 +284,7 @@ class SpendLedger:
                     0.0,
                     self.limit_usd - self._spent_usd - self._reserved_usd,
                 )
-                input_cost = (
-                    input_token_upper_bound * pricing.input_per_million / 1_000_000
-                )
+                input_cost = input_token_upper_bound * pricing.input_per_million / 1_000_000
                 if input_cost > available + self._EPSILON:
                     self._mark_exhausted_locked(
                         stage=stage,
@@ -273,9 +298,7 @@ class SpendLedger:
 
                 if pricing.output_per_million > 0:
                     affordable_output = math.floor(
-                        max(0.0, available - input_cost)
-                        * 1_000_000
-                        / pricing.output_per_million
+                        max(0.0, available - input_cost) * 1_000_000 / pricing.output_per_million
                     )
                     effective_max_tokens = min(requested, affordable_output)
                     if effective_max_tokens < 1:
@@ -292,9 +315,7 @@ class SpendLedger:
                     effective_max_tokens = requested
 
                 reserved_usd = input_cost + (
-                    (effective_max_tokens or 0)
-                    * pricing.output_per_million
-                    / 1_000_000
+                    (effective_max_tokens or 0) * pricing.output_per_million / 1_000_000
                 )
                 if reserved_usd > available + self._EPSILON:
                     self._mark_exhausted_locked(
@@ -355,9 +376,7 @@ class SpendLedger:
             cached_count = min(input_count, max(0, int(cached_input_tokens or 0)))
             usage_missing = input_tokens is None and output_tokens is None
 
-            provider_cost = (
-                float(provider_cost_usd) if provider_cost_usd is not None else None
-            )
+            provider_cost = float(provider_cost_usd) if provider_cost_usd is not None else None
             if provider_cost is not None and math.isfinite(provider_cost) and provider_cost >= 0:
                 actual_cost = provider_cost
                 cost_source = "provider"
@@ -587,6 +606,14 @@ class SpendLedger:
         provider: str,
         strict: bool,
     ) -> ModelPricing:
+        # Highest precedence: the active endpoint's own price. When an
+        # LLMEndpoint carries a `pricing` block it is the authoritative,
+        # already-resolved per-model price and outranks both the operator
+        # override and the built-in pricing table. Absent it (the default for
+        # every endpoint) this is None and the existing sources apply unchanged.
+        if self._endpoint_pricing is not None:
+            return self._endpoint_pricing
+
         if self._pricing_override is not None:
             return self._pricing_override
 
@@ -643,9 +670,7 @@ class SpendLedger:
         return ModelPricing(
             input_per_million=float(prices["input"]),
             output_per_million=float(prices["output"]),
-            cached_input_per_million=float(
-                prices.get("cached_input", prices["input"])
-            ),
+            cached_input_per_million=float(prices.get("cached_input", prices["input"])),
             source=f"pricing_table:{matched_key}",
         )
 

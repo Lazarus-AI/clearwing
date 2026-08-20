@@ -67,6 +67,8 @@ dependencies = [
     "tree-sitter-go>=0.21.0",
     "tree-sitter-rust>=0.21.0",
     "uv>=0.11.26",
+    # Observability
+    "arize-phoenix-otel>=0.6.0",
 ]
 
 [project.optional-dependencies]

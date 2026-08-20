@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from genai_pyo3 import ToolCall
 
+from clearwing.agent.tools.hunt import build_reporting_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.llm.native import NativeToolSpec
 from clearwing.sourcehunt.hunter import NativeHunter
@@ -121,6 +122,27 @@ async def test_deep_mode_safety_cap():
     # With budget_usd=0 (unlimited), should stop at max_steps=5
     assert llm.achat.call_count == 5
     assert result.stop_reason == "max_steps"
+
+
+@pytest.mark.asyncio
+async def test_deep_mode_stops_on_degenerate_loop():
+    # Real failure mode observed against crAPI with a local devstral model
+    # (both 4-bit and 6-bit quantizations): it keeps reissuing the exact
+    # same already-throttled tool call forever and never recovers. This
+    # must not be allowed to grind through the full max_steps budget.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=500, budget_usd=0.0)
+
+    llm.achat.return_value = FakeResponse(
+        tool_calls_list=[_make_tool_call("think", {"notes": "same notes"})],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "degenerate_loop"
+    # Should bail out well short of the 500-step budget.
+    assert llm.achat.call_count < 25
 
 
 @pytest.mark.asyncio
@@ -341,6 +363,57 @@ async def test_read_file_exact_repeat_still_throttled():
         if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
     ]
     assert len(skipped) > 0
+
+
+@pytest.mark.asyncio
+async def test_record_trace_step_tolerates_explicit_null_optional_args():
+    # Real failure mode observed against crAPI: devstral-small sends explicit
+    # `"function": null` for the unused optional `function` param instead of
+    # omitting it. Tool-call arguments are passed straight through to the
+    # handler as **kwargs without going through the declared Pydantic input
+    # schema, so `function=None` reached TraceStep's plain `str` field (not
+    # Optional) and raised a pydantic ValidationError. _run_tool's generic
+    # except caught it and returned an error string, but the trace step was
+    # silently dropped instead of recorded — 38 times in one batch run.
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=MagicMock())
+    ctx.files_read.add("views.py")
+    tools = build_reporting_tools(ctx)
+
+    llm = AsyncMock()
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "record_trace_step",
+                    {
+                        "file": "views.py",
+                        "line": 10,
+                        "function": None,
+                        "code_snippet": "verify=False,",
+                        "note": "SINK: disables TLS verification",
+                    },
+                )
+            ],
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=tools,
+        ctx=ctx,
+        max_steps=2,
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        await hunter.arun()
+
+    assert len(ctx.trace_steps) == 1
+    assert ctx.trace_steps[0].function == ""
+    assert ctx.trace_steps[0].line == 10
+    assert ctx.trace_steps[0].note == "SINK: disables TLS verification"
 
 
 @pytest.mark.asyncio

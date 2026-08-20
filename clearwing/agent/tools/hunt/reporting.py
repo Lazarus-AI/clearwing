@@ -63,7 +63,13 @@ class RecordFindingInput(ToolInputModel):
     line_number: int
     finding_type: str
     severity: str
-    cwe: str
+    cwe: str = Field(
+        default="",
+        description=(
+            "CWE identifier (for example CWE-89 or CWE-787). "
+            "Leave blank when the finding is not yet classified."
+        ),
+    )
     description: str
     code_snippet: str = ""
     crash_evidence: str = ""
@@ -150,8 +156,8 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         line_number: int,
         finding_type: str,
         severity: str,
-        cwe: str,
         description: str,
+        cwe: str = "",
         code_snippet: str = "",
         crash_evidence: str = "",
         poc: str = "",
@@ -178,8 +184,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             line_number: 1-indexed line number.
             finding_type: e.g. sql_injection, memory_safety, timing_side_channel.
             severity: critical / high / medium / low / info.
-            cwe: CWE identifier (e.g. CWE-89, CWE-787, CWE-208).
             description: One- or two-sentence description of the bug.
+            cwe: CWE identifier (e.g. CWE-89, CWE-787, CWE-208). Leave blank
+                if unclassified — don't block on picking one.
             code_snippet: Relevant code snippet (helpful for triage).
             crash_evidence: Sanitizer/PoC output if available.
             poc: Proof-of-concept input.
@@ -221,6 +228,19 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         trace_dict = vuln_trace.model_dump()
         # Reset only after the authoritative steps are stored on the finding.
         ctx.trace_steps.clear()
+
+        duplicate = next(
+            (f for f in ctx.findings if f.file == file and f.line_number == line_number),
+            None,
+        )
+        if duplicate is not None:
+            return (
+                f"Finding at {file}:{line_number} was already recorded earlier "
+                f"in this session (finding_type={duplicate.finding_type!r}, "
+                f"severity={duplicate.severity!r}). Skipping this duplicate "
+                "call — if you have new information about a different issue, "
+                "record it at a different line instead of re-reporting this one."
+            )
 
         stable_finding_id = stable_run_id(
             "hunter",

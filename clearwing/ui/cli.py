@@ -4,15 +4,20 @@ This module provides the thin dispatcher; each subcommand lives in its own
 module under ``clearwing.ui.commands``.
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from clearwing import __version__
 
-from ..core import Config, CoreEngine
 from .commands import ALL_COMMANDS
+
+if TYPE_CHECKING:
+    from ..core import Config, CoreEngine
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +27,26 @@ class CLI:
 
     def __init__(self):
         self.console = Console()
-        self.config = Config()
-        self.engine = CoreEngine(self.config)
+        self._config: Config | None = None
+        self._engine: CoreEngine | None = None
+
+    @property
+    def config(self) -> Config:
+        """Load the interactive configuration when a command needs it."""
+        if self._config is None:
+            from ..core import Config
+
+            self._config = Config()
+        return self._config
+
+    @property
+    def engine(self) -> CoreEngine:
+        """Construct the core engine when a command needs it."""
+        if self._engine is None:
+            from ..core import CoreEngine
+
+            self._engine = CoreEngine(self.config)
+        return self._engine
 
     def run(self, args: list | None = None) -> None:
         """Run the CLI."""

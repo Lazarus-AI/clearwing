@@ -136,10 +136,30 @@ def temp_c_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def mock_docker():
+    """Mock both the Docker Python SDK and subprocess.run (used for docker build/inspect)."""
     with patch("docker.from_env") as mock_from_env:
         client = MagicMock()
         mock_from_env.return_value = client
-        yield client
+        # The implementation uses subprocess.run for `docker build` and `docker image inspect`.
+        # Mock subprocess.run in the hunter_sandbox module namespace.
+        with patch("clearwing.sandbox.hunter_sandbox.subprocess.run") as mock_subproc:
+            # Default: image inspect fails (not cached), build succeeds
+            def _subproc_side_effect(cmd, **kwargs):
+                result = MagicMock()
+                if cmd[:3] == ["docker", "image", "inspect"]:
+                    result.returncode = 1  # not found → triggers build
+                elif cmd[:2] == ["docker", "build"]:
+                    result.returncode = 0
+                    result.stdout = ""
+                    result.stderr = ""
+                else:
+                    result.returncode = 0
+                return result
+
+            mock_subproc.side_effect = _subproc_side_effect
+            # Expose build call count via a helper
+            client._mock_subprocess = mock_subproc
+            yield client
 
 
 class TestHunterSandboxVariantValidation:
@@ -168,16 +188,18 @@ class TestHunterSandboxVariantValidation:
 
 class TestHunterSandboxVariantImages:
     def test_build_image_builds_primary_only_by_default(self, temp_c_repo, mock_docker):
-        mock_docker.images.get.side_effect = Exception("not found")
         sb = HunterSandbox(repo_path=str(temp_c_repo))
         sb.build_image()
-        # One image built, one variant registered
-        assert mock_docker.images.build.call_count == 1
+        # Count docker build subprocess calls
+        build_calls = [
+            c for c in mock_docker._mock_subprocess.call_args_list
+            if c[0][0][:2] == ["docker", "build"]
+        ]
+        assert len(build_calls) == 1
         assert len(sb._variant_images) == 1
         assert "asan+ubsan" in sb._variant_images
 
     def test_build_image_builds_extra_variants(self, temp_c_repo, mock_docker):
-        mock_docker.images.get.side_effect = Exception("not found")
         sb = HunterSandbox(
             repo_path=str(temp_c_repo),
             sanitizers=["asan", "ubsan"],
@@ -185,7 +207,11 @@ class TestHunterSandboxVariantImages:
         )
         sb.build_image()
         # Two images built (primary + msan)
-        assert mock_docker.images.build.call_count == 2
+        build_calls = [
+            c for c in mock_docker._mock_subprocess.call_args_list
+            if c[0][0][:2] == ["docker", "build"]
+        ]
+        assert len(build_calls) == 2
         assert "asan+ubsan" in sb._variant_images
         assert "msan" in sb._variant_images
         # They have different tags
@@ -278,7 +304,6 @@ class TestHunterSandboxSpawnVariant:
     def test_spawn_variant_auto_builds_on_demand(self, temp_c_repo, mock_docker):
         """If a caller asks for a variant that wasn't declared, HunterSandbox
         builds it on the fly rather than raising."""
-        mock_docker.images.get.side_effect = Exception("not found")
         mock_container = MagicMock(id="cid", short_id="cid")
         mock_docker.containers.run.return_value = mock_container
 
@@ -288,7 +313,11 @@ class TestHunterSandboxSpawnVariant:
         # Ask for MSan — should trigger an on-demand build
         sb.spawn(scratch_mount=False, variant=["msan"])
         # Two builds total: primary + the on-demand msan
-        assert mock_docker.images.build.call_count == 2
+        build_calls = [
+            c for c in mock_docker._mock_subprocess.call_args_list
+            if c[0][0][:2] == ["docker", "build"]
+        ]
+        assert len(build_calls) == 2
 
     def test_spawn_variant_tags_container_with_variant_env(self, temp_c_repo, mock_docker):
         mock_docker.images.get.return_value = MagicMock()

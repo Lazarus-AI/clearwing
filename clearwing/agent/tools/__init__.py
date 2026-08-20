@@ -196,6 +196,11 @@ def get_all_tools() -> list[Any]:
     from .meta.sourcehunt_tools import get_sourcehunt_tools
     from .meta.utility_tools import calculate_severity, validate_target
     from .meta.wargame_tools import get_wargame_tools
+    from .ops.callback_listener import (
+        check_callback_received,
+        reset_callback_listeners,
+        start_callback_listener,
+    )
     from .ops.dynamic_tool_creator import create_custom_tool, list_custom_tools
     from .ops.kali_docker_tool import kali_cleanup, kali_execute, kali_install_tool, kali_setup
     from .ops.mcp_tools import get_mcp_tools
@@ -218,6 +223,9 @@ def get_all_tools() -> list[Any]:
         kali_execute,
         kali_install_tool,
         kali_cleanup,
+        start_callback_listener,
+        check_callback_received,
+        reset_callback_listeners,
         generate_report,
         save_report,
         query_scan_history,

@@ -8,6 +8,7 @@ limits, and sanitizer-instrumented build images.
 
 from .builders import BuildRecipe, BuildSystemDetector
 from .container import ExecResult, SandboxConfig, SandboxContainer
+from .dind import get_docker_client, get_docker_host, get_subprocess_env
 from .hunter_sandbox import HunterSandbox
 from .registry import ContainerRegistry
 
@@ -19,4 +20,7 @@ __all__ = [
     "BuildRecipe",
     "BuildSystemDetector",
     "HunterSandbox",
+    "get_docker_client",
+    "get_docker_host",
+    "get_subprocess_env",
 ]

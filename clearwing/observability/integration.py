@@ -7,6 +7,7 @@ from typing import Any
 
 from clearwing.core.events import EventBus, EventType
 
+from .phoenix import phoenix_exporter_from_env
 from .metrics import MetricsCollector
 from .tracer import ConsoleExporter, InMemoryExporter, Tracer
 
@@ -38,6 +39,8 @@ class ObservabilityIntegration:
             exporters = []
             if debug:
                 exporters.append(ConsoleExporter())
+            if phoenix_exp := phoenix_exporter_from_env():
+                exporters.append(phoenix_exp)
         self._in_memory = InMemoryExporter()
         exporters.append(self._in_memory)
 
@@ -109,10 +112,29 @@ class ObservabilityIntegration:
     def _on_cost_update(self, data: Any) -> None:
         if not isinstance(data, dict):
             return
-        self.metrics.increment("llm_calls_total", labels={"model": data.get("model", "unknown")})
+        model = data.get("model", "unknown")
+        self.metrics.increment("llm_calls_total", labels={"model": model})
         self.metrics.increment("input_tokens_total", value=float(data.get("input_tokens", 0)))
         self.metrics.increment("output_tokens_total", value=float(data.get("output_tokens", 0)))
         self.metrics.set_gauge("total_cost_usd", data.get("total_cost_usd", 0.0))
+
+        # Emit a synthetic span so Arize sees per-call LLM telemetry
+        import time
+
+        now = time.time()
+        elapsed_s = data.get("elapsed_ms", 0) / 1000.0
+        with self.tracer.span("llm_call", attributes={
+            "llm.model": model,
+            "llm.provider": data.get("provider", "unknown"),
+            "llm.token_count.input": data.get("input_tokens", 0),
+            "llm.token_count.output": data.get("output_tokens", 0),
+            "llm.token_count.cached": data.get("cached_tokens", 0),
+            "llm.cost_usd": data.get("total_cost_usd", 0.0),
+            "span.kind": "llm",
+        }) as s:
+            # Backdate start to reflect actual call timing
+            if elapsed_s > 0:
+                s.start_time = now - elapsed_s
 
     def _on_flag_found(self, data: Any) -> None:
         self.metrics.increment("flags_found_total")

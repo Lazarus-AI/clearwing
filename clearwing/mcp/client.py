@@ -6,9 +6,10 @@ import threading
 class MCPClient:
     """MCP client for connecting to external MCP servers via stdio transport."""
 
-    def __init__(self, command: str, args: list[str] = None):
+    def __init__(self, command: str, args: list[str] = None, env: dict[str, str] | None = None):
         self.command = command
         self.args = args or []
+        self.env = env
         self.process: subprocess.Popen | None = None
         self._id_counter = 0
         self._pending_requests: dict[int, threading.Event] = {}
@@ -24,6 +25,7 @@ class MCPClient:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=self.env,
         )
         self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._read_thread.start()

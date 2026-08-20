@@ -210,7 +210,18 @@ class TestJSPayload:
 
 
 class TestInstallOnBlankPage:
-    def test_succeeds_with_init_script(self):
+    def test_succeeds_with_init_script(self, monkeypatch):
+        from unittest.mock import MagicMock, patch
+        from clearwing.agent.tools.recon import browser_tools
+
+        mock_page = MagicMock()
+        mock_context = MagicMock()
+        mock_state = {"context": mock_context, "browser": MagicMock()}
+
+        monkeypatch.setattr(browser_tools, "_browser_state", mock_state)
+        monkeypatch.setattr(browser_tools, "_ensure_browser", lambda: None)
+        monkeypatch.setattr(browser_tools, "_get_page", lambda tab: mock_page)
+
         result = install_webcrypto_hooks.invoke({})
         assert result["success"] is True
         assert result["methods_hooked"] == _SUBTLE_METHODS

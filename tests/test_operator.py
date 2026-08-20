@@ -44,6 +44,8 @@ class TestOperatorConfig:
         assert cfg.auto_approve_scans is True
         assert cfg.auto_approve_exploits is False
         assert cfg.cost_limit == 0.0
+        assert cfg.lhost == "host.docker.internal"
+        assert cfg.lport == 9999
 
     def test_custom_values(self):
         cfg = OperatorConfig(
@@ -110,6 +112,8 @@ class TestFormatGoals:
         assert "10.0.0.1" in text
         assert "Scan for open ports" in text
         assert "1." in text
+        assert "start_callback_listener" in text
+        assert "records the request body" in text
 
     def test_multiple_goals(self):
         cfg = OperatorConfig(
@@ -541,6 +545,7 @@ class TestOperatorRun:
         result = op.run()
 
         assert result.turns == 3
+        assert result.status == "max_turns"
         assert "max turns" in result.error.lower()
 
     @patch(

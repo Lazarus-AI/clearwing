@@ -14,7 +14,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from clearwing.agent.tools.hunt import (
     build_propagation_auditor_tools,
 )
 from clearwing.core.events import EventBus, EventType
+from clearwing.data.memory import ContextSummarizer
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
 from clearwing.llm.budget import spend_metadata
 from clearwing.observability.telemetry import CostTracker
@@ -1365,7 +1366,7 @@ class HunterRunResult:
     findings: list[Finding]
     cost_usd: float
     tokens_used: int
-    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps"
+    stop_reason: str  # "completed" | "budget_exhausted" | "max_steps" | "degenerate_loop"
     transcript_summary: str = ""
 
 
@@ -1379,6 +1380,8 @@ class NativeHunter:
     agent_mode: str = "constrained"  # "constrained" | "deep"
     budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
     initial_user_message: str = ""  # spec 006: override default first message
+    max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
+    summarizer: ContextSummarizer | None = field(default=None)
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
         """Return a stop reason string, or None to continue."""
@@ -1404,6 +1407,7 @@ class NativeHunter:
         total_output_tokens = 0
         total_cost_usd = 0.0
         repeated_tool_calls: dict[tuple[str, str], int] = {}
+        total_repeated_skips = 0
         tools_by_name = {tool.name: tool for tool in self.tools}
         last_assistant_text = ""
 
@@ -1448,6 +1452,11 @@ class NativeHunter:
                 },
             )
             with spend_metadata(model_call_id=model_call_id):
+                if self.summarizer and self.summarizer.should_summarize(messages):
+                    pre = len(messages)
+                    messages = await self.summarizer.summarize(messages, self.llm)
+                    logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
+
                 response = await self.llm.achat(
                     messages=messages,
                     system=self.prompt,
@@ -1553,10 +1562,14 @@ class NativeHunter:
                     skipped = repeated_tool_calls[key] > 3
 
                     if skipped:
+                        total_repeated_skips += 1
                         tool_output = {
                             "error": (
-                                "tool call skipped because the assistant repeated the same "
-                                "call too many times"
+                                "tool call skipped: you already made this exact call and it "
+                                "produced no new information. Do not repeat it. Either "
+                                "investigate a different function or code path in this file, "
+                                "or if you have nothing further to add, respond with your "
+                                "final summary and no tool calls to finish this hunt."
                             )
                         }
                         tool_summary = _tool_output_text(
@@ -1612,6 +1625,34 @@ class NativeHunter:
                             "message": _serialize_message(messages[-1]),
                         },
                     )
+                    if skipped and total_repeated_skips > self.max_repeated_skips:
+                        logger.warning(
+                            "Hunter stopped for %s: degenerate_loop (step=%d, cost=$%.4f, "
+                            "findings=%d, skipped=%d)",
+                            self.ctx.file_path,
+                            step,
+                            total_cost_usd,
+                            len(self.ctx.findings),
+                            total_repeated_skips,
+                        )
+                        trajectory.log(
+                            "finish",
+                            {
+                                "step": step,
+                                "status": "degenerate_loop",
+                                "findings": [self._serialize_finding(f) for f in self.ctx.findings],
+                                "total_input_tokens": total_input_tokens,
+                                "total_output_tokens": total_output_tokens,
+                                "total_cost_usd": total_cost_usd,
+                            },
+                        )
+                        return HunterRunResult(
+                            findings=list(self.ctx.findings),
+                            cost_usd=total_cost_usd,
+                            tokens_used=total_input_tokens + total_output_tokens,
+                            stop_reason="degenerate_loop",
+                            transcript_summary=last_assistant_text[-500:],
+                        )
                 continue
 
             if last_assistant_text:
@@ -1662,6 +1703,15 @@ class NativeHunter:
             # Reject calls missing required params (model emitted empty/partial args).
             # Return an error string so the model can self-correct on next turn.
             required = set(tool.schema.get("required", [])) if tool.schema else set()
+            # Some local models emit explicit `null` for optional params instead
+            # of omitting them. Arguments are passed straight through to the
+            # handler as **kwargs without going through the schema's Pydantic
+            # model, so an explicit None overrides the handler's own default
+            # (e.g. `function: str = ""`) and can reach strict downstream
+            # validation (TraceStep.function is a plain `str`, not Optional).
+            # Drop None for optional params so the handler default applies,
+            # matching the omitted-argument case.
+            arguments = {k: v for k, v in arguments.items() if v is not None or k in required}
             missing = required - set(arguments.keys())
             if missing:
                 logger.info(
@@ -1957,4 +2007,5 @@ def build_hunter_agent(
         max_steps=max_steps,
         agent_mode=agent_mode,
         budget_usd=budget_usd,
+        summarizer=ContextSummarizer(),
     ), ctx

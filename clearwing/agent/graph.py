@@ -104,7 +104,11 @@ def _create_llm(
     model_name: str,
     base_url: str | None = None,
     api_key: str | None = None,
+    provider_manager: ProviderManager | None = None,
+    task: str = "default",
 ) -> AsyncLLMClient:
+    if provider_manager is not None:
+        return provider_manager.get_native_client(task)
     endpoint = resolve_llm_endpoint(
         cli_model=model_name,
         cli_base_url=base_url,
@@ -119,6 +123,7 @@ def create_agent(
     session_id: str = None,
     base_url: str = None,
     api_key: str = None,
+    provider_manager: ProviderManager | None = None,
 ):
     all_tools = get_all_tools()
     if custom_tools:
@@ -131,7 +136,15 @@ def create_agent(
 
     # No `bind_tools` step: the native client takes the tool list per-call.
     # `build_react_graph` builds the NativeToolSpec list from `all_tools`.
-    llm = _create_llm(model_name, base_url=base_url, api_key=api_key)
+    if provider_manager is None:
+        llm = _create_llm(model_name, base_url=base_url, api_key=api_key)
+    else:
+        llm = _create_llm(
+            model_name,
+            base_url=base_url,
+            api_key=api_key,
+            provider_manager=provider_manager,
+        )
 
     return build_react_graph(
         llm_with_tools=llm,
