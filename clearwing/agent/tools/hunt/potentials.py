@@ -9,13 +9,13 @@ from __future__ import annotations
 import logging
 import uuid
 
-logger = logging.getLogger(__name__)
-
 from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
 
 from .sandbox import HunterContext
+
+logger = logging.getLogger(__name__)
 
 
 class FlagPotentialInput(ToolInputModel):

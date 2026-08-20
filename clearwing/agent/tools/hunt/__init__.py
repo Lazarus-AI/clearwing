@@ -34,6 +34,7 @@ from .analysis import (
     _parse_sanitizer_report,
     build_analysis_tools,
 )
+from .deep_agent import build_deep_agent_tools
 from .discovery import (
     _container_path,
     _grep_python_fallback,
@@ -42,7 +43,6 @@ from .discovery import (
     build_discovery_tools,
     build_semgrep_tool,
 )
-from .deep_agent import build_deep_agent_tools
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext, _parse_variant_arg

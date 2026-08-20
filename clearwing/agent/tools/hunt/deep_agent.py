@@ -89,8 +89,8 @@ def _cap_output(text: str, label: str = "output") -> str:
     return text[:_OUTPUT_CAP] + f"\n\n[{label} truncated at {_OUTPUT_CAP} bytes]"
 
 
-# Split on non-alphanumeric AND camelCase boundaries so filter="DigestFinal"
-# yields ["digest","final"] and matches DigestVerifyFinal.
+# Split on non-alphanumeric AND camelCase boundaries so filter="FooBar"
+# yields ["foo","bar"] and matches FooBarBaz, do_foo_bar, etc.
 _TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
@@ -205,7 +205,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         cg = ctx.callgraph
         if cg is None:
             return {"error": "callgraph not available"}
-        infos = cg.function_info.get(path) or cg.function_info.get(path.lstrip("/workspace/"))
+        infos = cg.function_info.get(path) or cg.function_info.get(path.removeprefix("/workspace/"))
         if not infos:
             return {"functions": [], "note": f"no functions found for '{path}' in callgraph"}
         results = sorted(infos, key=lambda fi: fi.start_line)

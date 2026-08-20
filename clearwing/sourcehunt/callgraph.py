@@ -18,14 +18,14 @@ from __future__ import annotations
 
 import logging
 import os
-
-from clearwing.core.events import EventBus
 from collections import defaultdict
-from functools import partial
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
+
+from clearwing.core.events import EventBus
 
 logger = logging.getLogger(__name__)
 
