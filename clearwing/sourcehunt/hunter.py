@@ -910,38 +910,6 @@ Rules:
   "field==2" but your PoC sets "field=1", you have a contradiction —
   resolve it before calling record_finding.
 - The streamed trace must contain at least one ENTRY step and one SINK step.
-
-## Using callgraph tools for cross-function tracing
-
-When you find a dangerous sink or an interesting entry point, use `lookup_callers`
-and `lookup_callees` to trace data flow across function boundaries:
-
-- **Found a sink?** → `lookup_callers(file, function)` to find who passes data in.
-  Then `read_source_file` on each caller to check whether user input reaches the
-  sink without sanitization.
-- **Found an entry point?** → `lookup_callees(file, function)` to map where user
-  input propagates. Follow the chain until you hit a dangerous operation.
-- **Complex call chains?** → `list_functions(file)` first to orient yourself, then
-  iteratively expand with `lookup_callees`/`lookup_callers` at each hop.
-
-These tools query a pre-built callgraph — they are instant and cheap. Prefer them
-over grepping or guessing at interprocedural flow.
-
-## Verification discipline
-
-Before reading code, build a private queue of every dangerous operation visible
-in the file listing or initial context: sinks, casts, copies, allocations,
-arithmetic on untrusted values, ownership transfers, and boundary crossings.
-Trace each queue entry; do not let a detailed investigation of one erase the
-others from your working set.
-
-When evaluating a potential finding, apply the lossless principle: a source-backed
-lead must survive into your submission unless the actual source AFFIRMATIVELY
-disproves its invariant or reachability. Absence of an external callee, buffer
-declaration, or implementation is uncertainty to record, not affirmative disproof.
-
-Keep different primitive flaws separate. Do not drop a secondary finding merely
-because another nearby candidate seems more severe.
 """
 
 
