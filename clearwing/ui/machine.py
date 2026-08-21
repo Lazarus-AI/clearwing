@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
@@ -36,6 +37,8 @@ class MachineChannel:
         os.close(descriptor)
         self._sequence = 0
         self._terminal = False
+        self._closed = False
+        self._write_lock = threading.Lock()
         self.workspace: dict[str, Any] | None = None
 
     def read_start(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -84,24 +87,35 @@ class MachineChannel:
         self._write("error", {"error": str(error)}, terminal=True)
 
     def close(self) -> None:
-        """Close both sides of the inherited channel."""
-        self._reader.close()
-        self._writer.close()
+        """Close both sides of the inherited channel.
+
+        Idempotent: a second call is a no-op rather than an error on an
+        already-closed descriptor.
+        """
+        with self._write_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._reader.close()
+            self._writer.close()
 
     def _write(self, kind: str, payload: dict[str, Any], *, terminal: bool) -> None:
-        if self._terminal:
-            raise MachineProtocolError("terminal record already emitted")
-        self._sequence += 1
-        record = {
-            "v": PROTOCOL_VERSION,
-            "type": f"{self.operation}.{kind}",
-            "seq": self._sequence,
-            **payload,
-        }
-        encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
-        self._writer.write(encoded + b"\n")
-        if terminal:
-            self._terminal = True
+        with self._write_lock:
+            if self._closed:
+                raise MachineProtocolError("machine channel is closed")
+            if self._terminal:
+                raise MachineProtocolError("terminal record already emitted")
+            self._sequence += 1
+            record = {
+                "v": PROTOCOL_VERSION,
+                "type": f"{self.operation}.{kind}",
+                "seq": self._sequence,
+                **payload,
+            }
+            encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
+            self._writer.write(encoded + b"\n")
+            if terminal:
+                self._terminal = True
 
 
 def _decode_provider_routing(value: Any, *, required: bool) -> dict[str, Any] | None:
