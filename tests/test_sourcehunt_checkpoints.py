@@ -598,6 +598,41 @@ def test_hunt_checkpoint_rejects_different_options():
     assert checkpoint.restore(options={"agent_mode": "deep"}) is None
 
 
+def test_hunt_checkpoint_preserves_subsystem_budget_exhaustion():
+    checkpoint = HuntCheckpoint.from_result(
+        HuntResult(
+            findings=[],
+            spent_per_tier={},
+            subsystem_status="budget_exhausted",
+        ),
+        options={},
+    )
+
+    restored = checkpoint.restore(options={})
+
+    assert restored is not None
+    assert restored.subsystem_status == "budget_exhausted"
+
+
+def test_legacy_hunt_checkpoint_defaults_subsystem_status_to_completed():
+    checkpoint = HuntCheckpoint.model_validate(
+        {
+            "schema_version": 1,
+            "options": {},
+            "result": {
+                "findings": [],
+                "spent_per_tier": {},
+                "subsystems_hunted": 1,
+            },
+        }
+    )
+
+    restored = checkpoint.restore(options={})
+
+    assert restored is not None
+    assert restored.subsystem_status == "completed"
+
+
 @pytest.mark.asyncio
 async def test_runner_checkpoints_and_restores_verification(tmp_path: Path, monkeypatch):
     finding = Finding(id="finding-1", file="sample.c", severity="high")

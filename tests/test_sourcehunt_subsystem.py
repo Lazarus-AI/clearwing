@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from clearwing.sourcehunt.state import FileTarget, SubsystemTarget
+from clearwing.sourcehunt.runner import SourceHuntRunner
+from clearwing.sourcehunt.state import FileTarget, StageOutcome, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
     SubsystemHuntConfig,
     SubsystemHuntRunner,
@@ -428,6 +430,132 @@ async def test_subsystem_hunt_runner_no_subsystems():
     ))
     result = await runner.arun()
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_subsystem_hunt_runner_preserves_budget_exhaustion(monkeypatch):
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
+            repo_path="/tmp",
+            llm=MagicMock(),
+        )
+    )
+
+    async def budget_exhausted(*args, **kwargs):
+        return [], 1.0, 10, "budget_exhausted"
+
+    monkeypatch.setattr(runner, "_run_one_subsystem", budget_exhausted)
+
+    assert await runner.arun() == []
+    assert runner.budget_exhausted is True
+
+
+def test_subsystem_budget_stop_marks_sourcehunt_run_incomplete(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.checkpoints.repository_commit_sha",
+        lambda repo_path: "a" * 40,
+    )
+
+    class BudgetExhaustedSubsystemRunner:
+        def __init__(self, config):
+            self.total_spent = 1.0
+            self.budget_exhausted = True
+
+        async def arun(self):
+            return []
+
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.subsystem.SubsystemHuntRunner",
+        BudgetExhaustedSubsystemRunner,
+    )
+    repo = tmp_path / "repo"
+    source_dir = repo / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "app.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+    progress = []
+    runner_options = {
+        "repo_url": str(repo),
+        "local_path": str(repo),
+        "depth": "standard",
+        "output_formats": ["json"],
+        "no_rank": True,
+        "no_verify": True,
+        "no_exploit": True,
+        "enable_mechanism_memory": False,
+        "enable_knowledge_graph": False,
+        "enable_behavior_monitor": False,
+        "enable_findings_pool": False,
+        "enable_subsystem_hunt": True,
+        "subsystem_paths": ["src"],
+        "no_per_file_hunt": True,
+        "preprocessing": False,
+        "shard_entry_points": False,
+        "hunter_llm": MagicMock(),
+        "sandbox_factory": lambda: None,
+        "on_progress": progress.append,
+    }
+    output = tmp_path / "out"
+    runner = SourceHuntRunner(
+        output_dir=str(output),
+        **runner_options,
+    )
+
+    result = runner.run()
+    manifest = json.loads(
+        (output / result.session_id / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert runner._spend_ledger is not None
+    assert runner._spend_ledger.exhausted is False
+    assert result.status == "budget_exhausted"
+    assert result.exit_code == 3
+    assert result.checkpoint is not None
+    assert result.checkpoint["hunt"]["result"]["subsystem_status"] == "budget_exhausted"
+    assert result.pipeline_status.stages["subsystem_hunt"].outcome is StageOutcome.SKIPPED
+    fresh_budget_event = next(
+        event
+        for event in progress
+        if event.stage == "subsystem_hunt" and event.status == "budget_exhausted"
+    )
+    assert fresh_budget_event.findings_so_far == 0
+    assert fresh_budget_event.cost_usd == 1.0
+    assert manifest["status"] == "budget_exhausted"
+    assert manifest["complete"] is False
+
+    class UnexpectedSubsystemRunner:
+        def __init__(self, config):
+            raise AssertionError("subsystem hunt ran instead of restoring its checkpoint")
+
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.subsystem.SubsystemHuntRunner",
+        UnexpectedSubsystemRunner,
+    )
+    resumed_output = tmp_path / "resumed-out"
+    first_run_event_count = len(progress)
+    resumed = SourceHuntRunner(
+        output_dir=str(resumed_output),
+        checkpoint=result.checkpoint,
+        **runner_options,
+    )
+
+    resumed_result = resumed.run()
+    resumed_manifest = json.loads(
+        (resumed_output / resumed_result.session_id / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert resumed_result.status == "budget_exhausted"
+    assert resumed_result.exit_code == 3
+    assert resumed_result.pipeline_status.stages["subsystem_hunt"].outcome is StageOutcome.SKIPPED
+    resumed_budget_event = next(
+        event
+        for event in progress[first_run_event_count:]
+        if event.stage == "subsystem_hunt" and event.status == "budget_exhausted"
+    )
+    assert resumed_budget_event.findings_so_far == 0
+    assert resumed_budget_event.cost_usd == 1.0
+    assert resumed_manifest["status"] == "budget_exhausted"
+    assert resumed_manifest["complete"] is False
 
 
 # ---------------------------------------------------------------------------
