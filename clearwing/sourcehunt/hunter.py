@@ -2180,8 +2180,7 @@ class NativeHunter:
                 logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, cg_arg)
                 result = await tool.ainvoke(arguments)
                 # Log the callgraph result so --live output shows what came back
-                import json as _json
-                result_str = _json.dumps(result, default=str)
+                result_str = json.dumps(result, default=str)
                 if len(result_str) > 2000:
                     result_str = result_str[:2000] + "..."
                 logger.info(
