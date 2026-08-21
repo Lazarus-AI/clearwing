@@ -36,6 +36,7 @@ class MachineChannel:
         os.close(descriptor)
         self._sequence = 0
         self._terminal = False
+        self.workspace: dict[str, Any] | None = None
 
     def read_start(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Read and validate the command's start record."""
@@ -50,7 +51,7 @@ class MachineChannel:
             raise MachineProtocolError("start record must be UTF-8 JSON") from exc
         if not isinstance(record, dict):
             raise MachineProtocolError("start record must be an object")
-        allowed = {"v", "type", "request", "provider_routing"}
+        allowed = {"v", "type", "request", "provider_routing", "workspace"}
         unknown = sorted(set(record) - allowed)
         if unknown:
             raise MachineProtocolError(f"unknown start field(s): {', '.join(unknown)}")
@@ -61,6 +62,10 @@ class MachineChannel:
         request = record.get("request")
         if not isinstance(request, dict):
             raise MachineProtocolError("request must be an object")
+        workspace = record.get("workspace")
+        if workspace is not None and not isinstance(workspace, dict):
+            raise MachineProtocolError("workspace must be an object")
+        self.workspace = workspace
         routing = _decode_provider_routing(
             record.get("provider_routing"), required=self.require_provider_routing
         )

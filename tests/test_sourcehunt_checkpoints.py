@@ -197,6 +197,28 @@ def test_sourcehunt_checkpoint_preserves_checkpoint_instance():
     assert SourceHuntCheckpoint.from_input(checkpoint) is checkpoint
 
 
+def test_sourcehunt_checkpoint_dumps_one_atomic_aggregate_file(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    preprocess = PreprocessCheckpoint.from_result(_result(repo), options=OPTIONS)
+    checkpoint = SourceHuntCheckpoint(preprocess=preprocess)
+    target = tmp_path / "workspace" / "sourcehunt" / "pipeline" / "checkpoint.json"
+
+    assert checkpoint.dump(target) == target
+    restored = SourceHuntCheckpoint.model_validate_json(target.read_text(encoding="utf-8"))
+    assert restored.preprocess == preprocess
+    assert restored.rank is None
+
+    checkpoint.rank = RankCheckpoint.from_result(
+        [{"path": "sample.c", "priority": 4.2}], options={"preprocessing": True}
+    )
+    checkpoint.dump(target)
+    restored = SourceHuntCheckpoint.model_validate_json(target.read_text(encoding="utf-8"))
+    assert restored.rank == checkpoint.rank
+    assert list(target.parent.glob("*.tmp")) == []
+
+
 def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -244,6 +266,11 @@ def test_runner_restores_preprocess_checkpoint(tmp_path: Path, monkeypatch):
     )
     original = first._preprocess()
     checkpoint_blob = first._checkpoint.model_dump_json()
+    checkpoint_path = tmp_path / "results" / "sh-resume" / "checkpoint.json"
+    assert (
+        SourceHuntCheckpoint.model_validate_json(checkpoint_path.read_text(encoding="utf-8"))
+        == first._checkpoint
+    )
 
     resumed = SourceHuntRunner(
         repo_url=str(repo),
@@ -293,6 +320,49 @@ def test_runner_accepts_checkpoint_as_json_object(tmp_path: Path):
 
     assert resumed._preprocess().file_targets[0]["path"] == "sample.c"
     assert resumed._preprocess_restored is True
+
+
+def test_runner_loads_and_updates_bridge_checkpoint_path(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
+    checkpoint_path = tmp_path / "workspace" / "pipeline" / "checkpoint.json"
+    output_dir = tmp_path / "workspace" / "sourcehunt"
+    first = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(output_dir),
+        parent_session_id="bridge-session",
+        checkpoint_path=checkpoint_path,
+        depth="quick",
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+
+    original = first._preprocess()
+
+    assert checkpoint_path.is_file()
+    assert not (output_dir / "bridge-session" / "checkpoint.json").exists()
+    resumed = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(output_dir),
+        parent_session_id="another-session",
+        checkpoint_path=checkpoint_path,
+        depth="quick",
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("preprocessor ran instead of loading checkpoint_path")
+
+    monkeypatch.setattr("clearwing.sourcehunt.preprocessor.Preprocessor.run", fail_if_called)
+    restored = resumed._preprocess()
+
+    assert resumed._preprocess_restored is True
+    assert restored.file_targets == original.file_targets
 
 
 def test_runner_rejects_incompatible_preprocess_checkpoint(tmp_path: Path):

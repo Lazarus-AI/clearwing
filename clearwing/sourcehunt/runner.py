@@ -244,6 +244,7 @@ class SourceHuntRunner:
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
         checkpoint: dict[str, Any] | str | None = None,
+        checkpoint_path: str | Path | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
@@ -534,9 +535,17 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
-        self._checkpoint = (
-            SourceHuntCheckpoint.from_input(checkpoint) if checkpoint is not None else None
+        self._checkpoint_path = (
+            Path(checkpoint_path)
+            if checkpoint_path is not None
+            else Path(self.output_dir) / self._session_id / "checkpoint.json"
         )
+        if checkpoint is not None:
+            self._checkpoint = SourceHuntCheckpoint.from_input(checkpoint)
+        elif self._checkpoint_path.is_file():
+            self._checkpoint = SourceHuntCheckpoint.from_file(self._checkpoint_path)
+        else:
+            self._checkpoint = None
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -594,6 +603,11 @@ class SourceHuntRunner:
         self._instrumentation_finalized = False
         self._last_reporting_error: dict[str, str] | None = None
         self._on_progress = on_progress
+
+    def _dump_checkpoint(self) -> None:
+        if self._checkpoint is None:
+            return
+        self._checkpoint.dump(self._checkpoint_path)
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -1957,6 +1971,7 @@ class SourceHuntRunner:
         if self._checkpoint is None:
             raise RuntimeError("exploitation requires a preprocessing checkpoint")
         self._checkpoint.exploitation = ExploitationCheckpoint.from_result(result, options=options)
+        self._dump_checkpoint()
         self._emit_stage(
             "exploit",
             "completed" if not self._budget_exhausted() else "budget_exhausted",
@@ -2041,6 +2056,7 @@ class SourceHuntRunner:
             self._checkpoint.verification = VerificationCheckpoint.from_result(
                 result, options=options
             )
+            self._dump_checkpoint()
             detail = (
                 "Verification skipped (--no-verify)"
                 if self.no_verify
@@ -2525,6 +2541,7 @@ class SourceHuntRunner:
         if self._checkpoint is None:
             raise RuntimeError("hunting requires a preprocessing checkpoint")
         self._checkpoint.hunt = HuntCheckpoint.from_result(result, options=options)
+        self._dump_checkpoint()
         return result
 
     async def _hunt_subsystems(
@@ -2710,6 +2727,7 @@ class SourceHuntRunner:
             self._checkpoint = SourceHuntCheckpoint(preprocess=preprocess_checkpoint)
         else:
             self._checkpoint.preprocess = preprocess_checkpoint
+        self._dump_checkpoint()
         return result
 
     async def _rank(
@@ -2802,6 +2820,7 @@ class SourceHuntRunner:
         if self._checkpoint is None:
             raise RuntimeError("ranking requires a preprocessing checkpoint")
         self._checkpoint.rank = RankCheckpoint.from_result(files, options=options)
+        self._dump_checkpoint()
         return files
 
     @staticmethod
