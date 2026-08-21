@@ -547,6 +547,17 @@ class SourceHuntRunner:
             self._checkpoint = SourceHuntCheckpoint.from_file(self._checkpoint_path)
         else:
             self._checkpoint = None
+        if self._checkpoint is not None:
+            available = [
+                name
+                for name in ("preprocess", "rank", "hunt", "verification", "exploitation")
+                if getattr(self._checkpoint, name, None) is not None
+            ]
+            logger.info(
+                "Checkpoint loaded: stages=%s source=%s",
+                ",".join(available) or "(empty)",
+                "caller_input" if checkpoint is not None else str(self._checkpoint_path),
+            )
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -606,10 +617,27 @@ class SourceHuntRunner:
         self._last_reporting_error: dict[str, str] | None = None
         self._on_progress = on_progress
 
-    def _dump_checkpoint(self) -> None:
+    def _dump_checkpoint(self, stage: str = "", **diagnostics: Any) -> None:
         if self._checkpoint is None:
             return
         self._checkpoint.dump(self._checkpoint_path)
+        # Emit a stage record so a machine-mode host can see what was persisted.
+        saved_stages = [
+            name
+            for name in ("preprocess", "rank", "hunt", "verification", "exploitation")
+            if getattr(self._checkpoint, name, None) is not None
+        ]
+        detail_parts = [
+            f"saved={','.join(saved_stages)}",
+            f"path={self._checkpoint_path}",
+        ]
+        if diagnostics:
+            detail_parts.extend(f"{key}={value}" for key, value in diagnostics.items())
+        self._emit_stage(
+            stage or (saved_stages[-1] if saved_stages else "unknown"),
+            "checkpoint_saved",
+            detail="; ".join(detail_parts),
+        )
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -1980,9 +2008,9 @@ class SourceHuntRunner:
             self._exploitation_restored = True
             self._emit_stage(
                 "exploit",
-                "completed",
+                "checkpoint_restored",
                 findings_so_far=len(restored.exploited),
-                detail=f"Restored {len(restored.exploited)} exploited findings from checkpoint",
+                detail=f"verified={len(restored.verified)}; exploited={len(restored.exploited)}",
                 finding_ids=[finding.id for finding in restored.exploited],
             )
             return restored
@@ -2028,7 +2056,11 @@ class SourceHuntRunner:
         if self._checkpoint is None:
             raise RuntimeError("exploitation requires a preprocessing checkpoint")
         self._checkpoint.exploitation = ExploitationCheckpoint.from_result(result, options=options)
-        self._dump_checkpoint()
+        self._dump_checkpoint(
+            "exploit",
+            verified=len(result.verified),
+            exploited=len(result.exploited),
+        )
         self._emit_stage(
             "exploit",
             "completed" if not self._budget_exhausted() else "budget_exhausted",
@@ -2072,6 +2104,12 @@ class SourceHuntRunner:
             pipeline_status.record_succeeded("verifier")
             result = restored
             result.status = "completed"
+            self._emit_stage(
+                "verify",
+                "checkpoint_restored",
+                findings_so_far=len(result.verified),
+                detail=f"verified={len(result.verified)}; rejected={len(result.rejected)}",
+            )
             detail = f"Restored {len(result.verified)} verified findings from checkpoint"
         else:
             result = VerificationResult(verified=[], rejected=[])
@@ -2113,7 +2151,11 @@ class SourceHuntRunner:
             self._checkpoint.verification = VerificationCheckpoint.from_result(
                 result, options=options
             )
-            self._dump_checkpoint()
+            self._dump_checkpoint(
+                "verify",
+                verified=len(result.verified),
+                rejected=len(result.rejected),
+            )
             detail = (
                 "Verification skipped (--no-verify)"
                 if self.no_verify
@@ -2425,9 +2467,14 @@ class SourceHuntRunner:
             pipeline_status.record_succeeded("hunter_pool")
             self._emit_stage(
                 "hunt",
-                "completed",
+                "checkpoint_restored",
                 findings_so_far=len(restored.findings),
-                detail=f"Restored {len(restored.findings)} findings from checkpoint",
+                detail=(
+                    f"findings={len(restored.findings)}; "
+                    f"files_hunted={restored.files_hunted}; "
+                    f"subsystems_hunted={restored.subsystems_hunted}; "
+                    f"spent_usd={sum(restored.spent_per_tier.values()):.4f}"
+                ),
                 files=[str(finding.file or "") for finding in restored.findings],
                 symbols=self._finding_symbols(restored.findings),
                 finding_ids=[finding.id for finding in restored.findings],
@@ -2613,7 +2660,13 @@ class SourceHuntRunner:
         if self._checkpoint is None:
             raise RuntimeError("hunting requires a preprocessing checkpoint")
         self._checkpoint.hunt = HuntCheckpoint.from_result(result, options=options)
-        self._dump_checkpoint()
+        self._dump_checkpoint(
+            "hunt",
+            findings=len(result.findings),
+            files_hunted=result.files_hunted,
+            subsystems_hunted=result.subsystems_hunted,
+            spent_usd=sum(result.spent_per_tier.values()),
+        )
         return result
 
     async def _hunt_subsystems(
@@ -2813,6 +2866,15 @@ class SourceHuntRunner:
             restored = self._checkpoint.preprocess.restore(repo_path=repo_path, options=options)
             if restored is not None:
                 self._preprocess_restored = True
+                self._emit_stage(
+                    "preprocess",
+                    "checkpoint_restored",
+                    detail=(
+                        f"files={len(restored.file_targets)}; "
+                        f"commit={self._checkpoint.preprocess.commit_sha or 'unknown'}; "
+                        f"static_findings={len(restored.static_findings)}"
+                    ),
+                )
                 logger.info("Restored preprocess result from session %s", self._session_id)
                 return restored
             if self._stop_after == "preprocess":
@@ -2829,7 +2891,11 @@ class SourceHuntRunner:
             self._checkpoint = SourceHuntCheckpoint(preprocess=preprocess_checkpoint)
         else:
             self._checkpoint.preprocess = preprocess_checkpoint
-        self._dump_checkpoint()
+        self._dump_checkpoint(
+            "preprocess",
+            files=len(result.file_targets),
+            commit=preprocess_checkpoint.commit_sha or "unknown",
+        )
         return result
 
     async def _rank(
@@ -2854,8 +2920,11 @@ class SourceHuntRunner:
             pipeline_status.record_succeeded("ranker")
             self._emit_stage(
                 "rank",
-                "completed",
-                detail=f"Restored {len(restored)} ranked files from checkpoint",
+                "checkpoint_restored",
+                detail=(
+                    f"files={len(restored)}; "
+                    f"top_surface={restored[0].get('surface', '?') if restored else '?'}"
+                ),
                 files=stage_files,
             )
             logger.info("Restored rank result from session %s", self._session_id)
@@ -2922,7 +2991,7 @@ class SourceHuntRunner:
         if self._checkpoint is None:
             raise RuntimeError("ranking requires a preprocessing checkpoint")
         self._checkpoint.rank = RankCheckpoint.from_result(files, options=options)
-        self._dump_checkpoint()
+        self._dump_checkpoint("rank", files_ranked=len(files))
         return files
 
     @staticmethod
