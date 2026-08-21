@@ -75,13 +75,13 @@ def _normalize_path(repo_path: str, path: str) -> str:
     Returns a repo-relative path (no leading slash). Caller can prepend
     repo_path or '/workspace' depending on context.
     """
-    repo_root = os.path.abspath(repo_path)
+    repo_root = os.path.realpath(repo_path)
     # Strip a leading slash/backslash so POSIX-looking inputs like
     # "/foo/bar" still resolve inside the repo on Windows.
     if path.startswith(("/", "\\")):
         path = path.lstrip("/\\")
-    # Resolve and check it's still under repo_path
-    abs_path = os.path.abspath(os.path.join(repo_root, path))
+    # Resolve symlinks and check it's still under repo_path
+    abs_path = os.path.realpath(os.path.join(repo_root, path))
     common = os.path.commonpath([abs_path, repo_root])
     if common != repo_root:
         raise ValueError(f"path escapes repo: {path}")

@@ -129,7 +129,19 @@ class SemgrepSidecar:
         # Inject bundled rules, optionally filtered to target languages.
         bundled_count = 0
         if _BUNDLED_RULES_DIR.is_dir():
-            lang_set = {l.lower() for l in languages} if languages else None
+            if languages:
+                lang_lower = [l.lower() for l in languages]
+                lang_set: set[str] | None = set(lang_lower)
+                # Add aliases so "c++" matches "cpp" in rule filenames
+                for l in lang_lower:
+                    if l == "c++":
+                        lang_set.add("cpp")
+                    elif l == "c#":
+                        lang_set.add("csharp")
+                    # Also strip punctuation generically
+                    lang_set.add(l.replace("+", "p").replace("#", "sharp"))
+            else:
+                lang_set = None
             for rule_file in sorted(_BUNDLED_RULES_DIR.glob("*.yaml")):
                 if lang_set is not None:
                     # Rule filenames are like "c-cpp.yaml", "python.yaml", "php.yaml"
