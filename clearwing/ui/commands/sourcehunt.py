@@ -45,6 +45,16 @@ def add_parser(subparsers):
         metavar="JSON",
         help="Restore a legacy sourcehunt run from a checkpoint JSON blob",
     )
+    parser.add_argument(
+        "--checkpoint-path",
+        metavar="PATH",
+        help="Where to save the checkpoint file (default: <output-dir>/<session>/checkpoint.json)",
+    )
+    parser.add_argument(
+        "--stop-after",
+        choices=["preprocess", "rank", "hunt", "verify", "exploit"],
+        help="Stop after the named stage completes (checkpoint is saved for resumption)",
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -1216,6 +1226,8 @@ def handle(cli, args):
         retain_incomplete_certificates=args.retain_incomplete_certificates,
         emit_rejection_certificates=args.emit_rejection_certificates,
         falsify=args.falsify,
+        checkpoint_path=getattr(args, "checkpoint_path", None),
+        stop_after=getattr(args, "stop_after", None),
     )
 
     cli.console.print(
