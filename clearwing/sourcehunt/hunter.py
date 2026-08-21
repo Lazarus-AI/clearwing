@@ -2200,7 +2200,7 @@ class NativeHunter:
                 )
             return await tool.ainvoke(arguments)
         except Exception as exc:
-            logger.warning(
+            logger.error(
                 "Hunter tool %s failed for %s: %s | fn_arguments=%r fn_arguments_json=%r",
                 tool_call.fn_name,
                 self.ctx.file_path,

@@ -13,7 +13,6 @@ verifier, exploiter, patcher, and reporter stages downstream.
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 
@@ -217,7 +216,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 steps take precedence when present.
         """
         if isinstance(trace, str):
-            trace = json.loads(trace)
+            trace = CompatibilityTraceInput.model_validate_json(trace).model_dump()
+        elif isinstance(trace, dict):
+            trace = CompatibilityTraceInput.model_validate(trace).model_dump()
         explicit_steps = trace.get("steps", []) if trace else []
         try:
             authoritative_steps = (
