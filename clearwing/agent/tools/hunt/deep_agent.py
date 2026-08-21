@@ -19,12 +19,9 @@ See docs/spec/001_deep_agent_mode.md for the design rationale.
 from __future__ import annotations
 
 import difflib
-import inspect
-import json
 import logging
 import re
 import shlex
-import time
 
 from pydantic import Field
 
@@ -104,29 +101,6 @@ def _matches(name: str, tokens: list[str]) -> bool:
     low = name.lower()
     return all(t in low for t in tokens)
 
-
-
-def _flush_diagnostics(ctx: HunterContext) -> None:
-    """Write tool_calls to /tmp/diagnostics.json inside the sandbox."""
-    if ctx.sandbox is None:
-        return
-    payload = json.dumps({"tool_calls": ctx.tool_calls}, indent=2)
-    ctx.sandbox.write_file("/tmp/diagnostics.json", payload.encode("utf-8"))
-
-
-def _instrumented(ctx: HunterContext, name: str, handler):
-    """Wrap a tool handler to record every invocation to ctx.tool_calls."""
-
-    is_async = inspect.iscoroutinefunction(handler)
-
-    async def wrapper(**kwargs):
-        params = {k: (v[:500] + f"…[{len(v)} chars]" if isinstance(v, str) and len(v) > 500 else v)
-                  for k, v in kwargs.items() if k != "_"}
-        ctx.tool_calls.append({"tool": name, "ts": round(time.time(), 3), **params})
-        result = await handler(**kwargs) if is_async else handler(**kwargs)
-        _flush_diagnostics(ctx)
-        return result
-    return wrapper
 
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
@@ -278,7 +252,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Returns every function that calls func_name, grouped by file with line ranges."
                 ),
                 schema=LookupCallersInput.model_json_schema(),
-                handler=_instrumented(ctx, "lookup_callers", lookup_callers),
+                handler=lookup_callers,
             ),
             NativeToolSpec(
                 name="lookup_callees",
@@ -286,7 +260,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Returns every function called by func_name, grouped by file with line ranges."
                 ),
                 schema=LookupCalleesInput.model_json_schema(),
-                handler=_instrumented(ctx, "lookup_callees", lookup_callees),
+                handler=lookup_callees,
             ),
             NativeToolSpec(
                 name="list_functions",
@@ -295,7 +269,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Optional filter= narrows by keyword."
                 ),
                 schema=ListFunctionsInput.model_json_schema(),
-                handler=_instrumented(ctx, "list_functions", list_functions),
+                handler=list_functions,
             ),
             NativeToolSpec(
                 name="read_function",
@@ -303,7 +277,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Read a function body by exact name. Returns file, line range, and source."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
-                handler=_instrumented(ctx, "read_function", read_function),
+                handler=read_function,
             ),
         ]
         if ctx.callgraph is not None
@@ -318,7 +292,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "Use for compilation, debugging, running tests, etc."
             ),
             schema=ExecuteInput.model_json_schema(),
-            handler=_instrumented(ctx, "execute", execute),
+            handler=execute,
         ),
         NativeToolSpec(
             name="read_file",
@@ -327,32 +301,18 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "For large files, read sequentially — the tool suggests the next offset."
             ),
             schema=ReadFileInput.model_json_schema(),
-            handler=_instrumented(ctx, "read_file", read_file),
+            handler=read_file,
         ),
         NativeToolSpec(
             name="write_file",
             description="Write contents to a file in the container. Creates parent directories.",
             schema=WriteFileInput.model_json_schema(),
-            handler=_instrumented(ctx, "write_file", write_file),
+            handler=write_file,
         ),
-        *_wrap_tools(ctx, [semgrep_tool, build_threat_context_tool(ctx)]),
-        *_wrap_tools(ctx, reporting_tools),
-        *_wrap_tools(ctx, build_potential_tools(ctx)),
-        *_wrap_tools(ctx, build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
+        semgrep_tool,
+        build_threat_context_tool(ctx),
+        *reporting_tools,
+        *build_potential_tools(ctx),
+        *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
         *callgraph_tools,
     ]
-
-
-def _wrap_tools(ctx: HunterContext, tools: list[NativeToolSpec]) -> list[NativeToolSpec]:
-    """Wrap pre-built NativeToolSpec handlers with diagnostics instrumentation."""
-    wrapped = []
-    for tool in tools:
-        wrapped.append(
-            NativeToolSpec(
-                name=tool.name,
-                description=tool.description,
-                schema=tool.schema,
-                handler=_instrumented(ctx, tool.name, tool.handler),
-            )
-        )
-    return wrapped
