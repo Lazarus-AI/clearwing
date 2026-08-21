@@ -246,8 +246,3 @@ rules:
             ...
           }
 
-  paths:
-    exclude:
-      - "**/test/**"
-      - "**/*Test.java"
-      - "**/tests/**"

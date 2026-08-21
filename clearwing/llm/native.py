@@ -272,6 +272,18 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
     "deepseek-v4-flash",
 )
 
+# Models that default to "high" reasoning_effort. GLM-5.x only supports
+# "high" and "max" (no "medium"/"low"); "high" is the sensible default for
+# agentic workloads — saves reasoning tokens vs "max".
+# TODO: LiteLLM v1.89 has a bug where streaming /v1/responses requests get
+# the `reasoning` object naively mapped to `reasoning_effort` (as an object,
+# not a string) when proxied to Fireworks chat/completions. Non-streaming
+# works fine. Workaround: use adapter=openai (chat/completions directly).
+# Retest after LiteLLM upgrade and remove this note if fixed.
+_REASONING_EFFORT_HIGH_DEFAULT_PATTERNS: tuple[str, ...] = (
+    "glm-5",
+)
+
 # Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
 # genai-pyo3 / the backend errors when reasoning capture is requested for them.
 # Everything else supports it, so we capture reasoning by default and only skip
@@ -346,10 +358,20 @@ def _is_root_model_type(schema_model: type[BaseModel]) -> bool:
 def _validate_schema_response(schema_model: type[BaseModel], text: str) -> BaseModel:
     if not text or not text.strip():
         raise ValueError("LLM returned empty response; expected JSON matching " + schema_model.__name__)
+    # Strip markdown fences if the model wraps JSON in ```json ... ```
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        # Remove first line (```json) and last line (```)
+        if lines[-1].strip() == "```":
+            lines = lines[1:-1]
+        elif lines[0].startswith("```"):
+            lines = lines[1:]
+        stripped = "\n".join(lines).strip()
     try:
-        return schema_model.model_validate_json(text)
+        return schema_model.model_validate_json(stripped)
     except Exception:
-        parsed_json = json.loads(text)
+        parsed_json = json.loads(stripped)
         if isinstance(parsed_json, list) and "results" in schema_model.model_fields:
             return schema_model.model_validate({"results": parsed_json})
         raise
@@ -403,6 +425,9 @@ class AsyncLLMClient:
                     pattern,
                 )
                 return None
+        for pattern in _REASONING_EFFORT_HIGH_DEFAULT_PATTERNS:
+            if pattern in lower:
+                return "high"
         for pattern in _REASONING_EFFORT_LOW_DEFAULT_PATTERNS:
             if pattern in lower:
                 return "low"

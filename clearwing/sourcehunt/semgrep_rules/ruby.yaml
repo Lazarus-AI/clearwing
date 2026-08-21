@@ -97,7 +97,7 @@ rules:
     pattern-either:
       - pattern: $MODEL.where("...#{$VAR}...")
       - pattern: $MODEL.find_by_sql("...#{$VAR}...")
-      - pattern: ActiveRecord::Base.connection.execute("...#{$VAR}...")
+      - pattern: 'ActiveRecord::Base.connection.execute("...#{$VAR}...")'
 
   # ── CWE-918: SSRF via unvalidated URL fetch ─────────────────────────────────
 
@@ -112,7 +112,7 @@ rules:
       confidence: LOW
     pattern-either:
       - pattern: URI.open($URL)
-      - pattern: Net::HTTP.get(URI($URL))
+      - pattern: "Net::HTTP.get(URI($URL))"
       - pattern: HTTParty.get($URL)
 
   # ── CWE-94: Tainted eval from params/cookies (semgrep/semgrep-rules) ────────
@@ -138,7 +138,6 @@ rules:
           - pattern: $X.class_eval(...)
           - pattern: $X.instance_eval(...)
           - pattern: $X.module_eval(...)
-      - pattern-not: $M("...", ...)
 
   # ── CWE-502: Unsafe deserialization from params (semgrep/semgrep-rules) ─────
 
@@ -204,7 +203,7 @@ rules:
       confidence: MEDIUM
     pattern-either:
       - pattern: skip_before_action :verify_authenticity_token
-      - pattern: protect_from_forgery with: :null_session
+      - pattern: "protect_from_forgery with: :null_session"
 
   # ── CWE-327: Weak hash algorithms ──────────────────────────────────────────
 
@@ -218,16 +217,10 @@ rules:
       cwe: "CWE-327"
       confidence: HIGH
     pattern-either:
-      - pattern: Digest::MD5.hexdigest(...)
-      - pattern: Digest::MD5.digest(...)
-      - pattern: Digest::SHA1.hexdigest(...)
-      - pattern: Digest::SHA1.digest(...)
-      - pattern: OpenSSL::Digest::MD5.new(...)
-      - pattern: OpenSSL::Digest::SHA1.new(...)
+      - pattern: "Digest::MD5.hexdigest(...)"
+      - pattern: "Digest::MD5.digest(...)"
+      - pattern: "Digest::SHA1.hexdigest(...)"
+      - pattern: "Digest::SHA1.digest(...)"
+      - pattern: "OpenSSL::Digest::MD5.new(...)"
+      - pattern: "OpenSSL::Digest::SHA1.new(...)"
 
-  paths:
-    exclude:
-      - "**/test/**"
-      - "**/spec/**"
-      - "**/*_test.rb"
-      - "**/*_spec.rb"

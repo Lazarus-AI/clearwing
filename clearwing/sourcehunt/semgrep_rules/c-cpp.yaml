@@ -367,12 +367,21 @@ rules:
       cwe: "CWE-325"
       confidence: LOW
     patterns:
-      - pattern: |
-          $RET = $CIPHER_FUNC($CTX, $OUT, $IN, $LEN);
+      - pattern-either:
+          - pattern: |
+              $RET = EVP_EncryptUpdate($CTX, $OUT, $OUTL, $IN, $LEN);
+          - pattern: |
+              $RET = EVP_DecryptUpdate($CTX, $OUT, $OUTL, $IN, $LEN);
+          - pattern: |
+              $RET = EVP_CipherUpdate($CTX, $OUT, $OUTL, $IN, $LEN);
       - pattern-not-inside: |
-          $INIT_FUNC($CTX, ...);
+          EVP_EncryptInit_ex(...);
           ...
-          $RET = $CIPHER_FUNC($CTX, $OUT, $IN, $LEN);
+          $RET = $FUNC($CTX, ...);
+      - pattern-not-inside: |
+          EVP_DecryptInit_ex(...);
+          ...
+          $RET = $FUNC($CTX, ...);
 
   # ── CWE-122: Validated rect dimensions vs actual copy dimensions mismatch ────
   # Pattern from CVE-2026-40033 (FreeRDP): validation uses clamped values but
@@ -394,8 +403,3 @@ rules:
           ...
           $FUNC(..., $ORIG, ...);
 
-  paths:
-    exclude:
-      - "**/test/**"
-      - "**/*_test.c"
-      - "**/*_test.cpp"

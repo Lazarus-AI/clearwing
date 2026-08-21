@@ -127,10 +127,3 @@ rules:
           metavariable: $VERIFY
           regex: "(?i)(verify|validate|check).*"
 
-  paths:
-    exclude:
-      - "**/test/**"
-      - "**/*.test.js"
-      - "**/*.spec.js"
-      - "**/node_modules/**"
-      - "**/dist/**"

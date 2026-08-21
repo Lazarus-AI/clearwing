@@ -51,8 +51,10 @@ class HunterContext:
     exploit_result: object | None = None  # ExploiterResult slot for exploit agent
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
     potentials: list[dict] = field(default_factory=list)  # investigation queue for flag_potential tool
+    tool_calls: list[dict] = field(default_factory=list)  # diagnostics: every tool invocation logged here
     callgraph: object | None = None  # CallGraph from preprocessor (avoiding circular import)
     subsystem: object | None = None  # SubsystemSpec; set for subsystem hunters only
+    oracle_llm: object | None = None  # AsyncLLMClient for cheap sub-calls (threat context, etc.)
 
     def get_sandbox_for_variant(
         self,

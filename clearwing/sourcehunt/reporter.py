@@ -34,6 +34,7 @@ def write_sourcehunt_report(
     subsystem_stats: dict | None = None,
     pipeline_status: PipelineStatus | None = None,
     budget_summary: dict[str, Any] | None = None,
+    potentials: list[dict] | None = None,
 ) -> dict[str, str]:
     """Write the requested formats. Returns {format: filesystem_path}."""
     formats = formats or ["sarif", "markdown", "json"]
@@ -100,6 +101,8 @@ def write_sourcehunt_report(
             }
         if budget_summary is not None:
             json_data["budget"] = budget_summary
+        if potentials:
+            json_data["potentials"] = potentials
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f, indent=2, default=_json_default)
         paths["json"] = str(json_path)

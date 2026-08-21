@@ -194,10 +194,5 @@ rules:
     metadata:
       cwe: "CWE-362"
       confidence: HIGH
-    pattern: static mut $VAR: $TYPE = ...;
+    pattern: "static mut $VAR: $TYPE = ...;"
 
-  paths:
-    exclude:
-      - "**/test/**"
-      - "**/tests/**"
-      - "**/benches/**"

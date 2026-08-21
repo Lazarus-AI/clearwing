@@ -396,16 +396,25 @@ reconsider whether the bug is real or interesting."""
 
 HUNTER_EXECUTION_RULES = """
 Execution rules:
-- This is a single-file hunt. Start with the target file, not a broad directory listing.
-- Only use list_source_tree when you need to locate a concretely named related file or directory.
+- Start with find_security_issues on the target file, then read the flagged lines.
 - By step 3, form at least one concrete candidate hypothesis tied to a function, field, buffer, or array.
 - Prefer narrow grep_source queries over broad regex sweeps across large directories.
-- If a grep result is dominated by static tables, scan constants, or generic arithmetic noise, refine the query immediately.
 - Keep read_source_file windows tight, usually 40-120 lines around the suspicious code.
-- If a tool result is summarized or truncated, narrow the next request instead of repeating the same broad call.
 - Once you have a plausible candidate, validate it with compile/run/fuzz tools when realistic, or explain exactly why static evidence is sufficient.
-- Do not spend the final step on marginal confirmation. If the mechanism is already coherent, use record_finding.
 - By the last 2 steps, either call record_finding or state explicitly why the evidence is still insufficient.
+
+Example investigation (ideal flow):
+
+  1. find_security_issues("src/parser/decode.c")
+     → returns: line 87 CWE-787, line 203 CWE-190
+  2. read_source_file("src/parser/decode.c", start_line=80, end_line=100)
+     → sees memcpy with user-supplied length
+  3. flag_potential(file="src/parser/decode.c", line=87, note="memcpy length from untrusted header field", hypothesis="CWE-120 heap overflow")
+  4. grep_source("parse_header", path="src/parser/")
+     → finds caller in src/parser/input.c:44
+  5. read_source_file("src/parser/input.c", start_line=30, end_line=60)
+     → confirms: length read from network packet, no bounds check before passing to decode
+  6. record_finding(file="src/parser/decode.c", line_number=87, ...)
 """
 
 
@@ -1020,7 +1029,7 @@ def _build_hunter_prompt(
     semgrep_hints_block = ""
     if semgrep_hints:
         hint_lines = []
-        for h in semgrep_hints[:5]:
+        for h in semgrep_hints:
             hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — use as starting points):\n"
@@ -1057,10 +1066,16 @@ The source tree at /workspace is a writable copy — modify source, add debug pr
 ASan is enabled by default. UBSan is also available.
 
 Tools:
+- find_security_issues(path): Scan for known vulnerability patterns. Start here.
+- get_threat_context(pattern): Get expert knowledge on what goes wrong with a code pattern (e.g. "parser", "crypto", "auth_check").
 - execute(command): Run any shell command. gcc, gdb, strace, valgrind, make are all available.
-- read_file(path): Read a file from the container.
+- read_file(path, limit=2000): Read a file. Use large ranges — most files fit in one read (limit=2000). Do NOT scroll in overlapping 500-line chunks.
 - write_file(path, contents): Write a file in the container.
-- record_trace_step(file, line, function, code_snippet, note): Record one step in the vulnerability dataflow trace as you read code. Build the trace incrementally from attacker entry to sink.
+- lookup_callers(func_name): Find every function that calls func_name.
+- lookup_callees(func_name): Find every function called by func_name.
+- read_function(name): Read a function body by exact name.
+- flag_potential(file, line, note, hypothesis): Bookmark a suspicious line for later.
+- record_trace_step(file, line, function, note): Record one step in the vulnerability dataflow trace.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
 
 Project: {project_name}
@@ -1068,8 +1083,58 @@ File: {file_path}
 Language: {language}
 Tags: {tags}
 {seeded_crash_block}{semgrep_hints_block}{specialist_focus}
-When you find a vulnerability, call record_finding. Partial results are valuable — if you find a primitive but can't build a full exploit, record it anyway.
+Strategy: SCAN BROADLY, THEN DIG DEEP.
+Do NOT hyper-focus on the first interesting line you see. First do a cursory sweep of the whole file to identify ALL candidate spots, then prioritize and investigate the strongest leads.
+
+Phase 1 — Survey (first 3-5 tool calls):
+  - find_security_issues on the file
+  - get_threat_context for the code pattern
+  - Skim the file structure (read_file or list_functions) to understand what it does
+  - flag_potential for every suspicious spot you notice
+  - If you don't know what a function does and can't determine its behavior from
+    context, flag it with priority="unknown" — e.g. "don't know what
+    wc_ecc_verify_hash_ex does or what it returns"
+
+Phase 2 — Trace backward from sink to source (remaining budget):
+  - Pick the highest-confidence flagged potential (the SINK)
+  - lookup_callers(sink_function) → who passes data in?
+  - lookup_callers(caller) → chain backward until you hit a public entry point
+  - read_function on each node to confirm data flows through unchecked
+  - record_finding with the full trace once you have source→sink evidence
+  - Move to the next flagged potential if time remains
+
+Build the trace BACKWARD (sink → source) using callgraph tools. Do NOT scroll
+through large files hoping to spot connections — use lookup_callers/lookup_callees
+to navigate, and read_function for targeted confirmation.
+
+When you find a vulnerability, call record_finding then move on. Don't re-verify recorded findings. Partial results are valuable — if you find a primitive but can't build a full exploit, record it anyway.
+
+Example investigation (ideal flow):
+
+  1. find_security_issues("/workspace/src/parser/decode.c")
+     → returns: line 87 CWE-787, line 203 CWE-190
+  2. get_threat_context("parser")
+     → returns: expert brief on parser vulns — length fields, integer overflow in sizes, etc.
+  3. flag_potential(file="src/parser/decode.c", line=87, hypothesis="CWE-120 heap overflow")
+  4. read_function("decode_frame")
+     → sees memcpy with user-supplied length at line 87
+  5. lookup_callers("decode_frame")
+     → finds caller parse_input_packet in src/parser/input.c
+  6. read_function("parse_input_packet")
+     → confirms: length from network, no bounds check before calling decode_frame
+  7. lookup_callers("parse_input_packet")
+     → called from handle_connection (entry point, attacker-controlled)
+  8. record_finding(file="src/parser/decode.c", line_number=87, ...)
+
 If you find nothing after thorough analysis, say so explicitly.
+
+Function-level tracking:
+  - When you finish investigating a function and it's clean, call
+    flag_potential with priority="clear" and hypothesis explaining WHY it's safe.
+  - When you find something, record_finding covers it.
+  - The sitrep shows your coverage: cleared functions, open leads, unknowns.
+  - If a function is already marked clear, don't revisit it unless new context
+    (e.g. a caller you didn't know about) changes the picture.
 """
 
 _DEEP_SPECIALIST_FOCUS = {
@@ -1132,7 +1197,7 @@ def _build_deep_agent_prompt(
     semgrep_hints_block = ""
     if semgrep_hints:
         hint_lines = []
-        for h in semgrep_hints[:5]:
+        for h in semgrep_hints:
             hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — starting points only):\n"
@@ -1195,7 +1260,7 @@ def _build_unconstrained_prompt(
         )
     if semgrep_hints:
         hint_lines = []
-        for h in semgrep_hints[:5]:
+        for h in semgrep_hints:
             hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
         seed_parts.append(
             "\nStatic analysis hints (NOT ground truth — starting points only):\n"
@@ -1496,6 +1561,7 @@ class HunterRunResult:
     # | "empty_response"
     stop_reason: str
     transcript_summary: str = ""
+    potentials: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1597,6 +1663,7 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason=stop_reason,
                     transcript_summary=last_assistant_text[-500:],
+                    potentials=list(self.ctx.potentials),
                 )
 
             model_call_id = stable_run_id(
@@ -1614,12 +1681,40 @@ class NativeHunter:
                     f"  Cost so far: ${total_cost_usd:.2f}"
                     + (f" of ${self.budget_usd:.2f}" if self.budget_usd else "")
                 )
+                # Nudge toward new classes after findings are recorded
+                diversity_note = ""
+                if records > 0:
+                    recorded_cwes = {
+                        f.get("cwe", "") for f in self.ctx.findings if f.get("cwe")
+                    }
+                    diversity_note = (
+                        f"\n  CWEs found so far: {', '.join(sorted(recorded_cwes)) or 'none'}"
+                        f"\n  → Look for DIFFERENT vulnerability classes now (UAF, race, logic, auth bypass, etc.)"
+                    )
                 sitrep = (
                     f"[SITUATION REPORT — step {step}]\n"
                     f"  Findings recorded: {records}  Flags raised: {flags_raised}\n"
                     f"  Files visited: {visited_list}\n"
-                    f"{budget_note}"
+                    f"{budget_note}{diversity_note}"
                 )
+                # Show investigation state so the model knows what's done/remaining
+                all_potentials = self.ctx.potentials
+                cleared = [p for p in all_potentials if p.get("priority") == "clear"]
+                unknowns = [p for p in all_potentials if p.get("priority") == "unknown"]
+                leads = [
+                    p for p in all_potentials
+                    if p.get("status") == "open" and p.get("priority") not in ("clear", "unknown")
+                ]
+                if leads:
+                    sitrep += "\n  Open leads:"
+                    for p in leads:
+                        sitrep += (
+                            f"\n    [{p['priority']}] {p['file']}:{p['line']} — {p['hypothesis']}"
+                        )
+                if unknowns:
+                    sitrep += f"\n  Unknown ({len(unknowns)} functions with unclear behavior)"
+                if cleared:
+                    sitrep += f"\n  Cleared: {len(cleared)} functions investigated, no vuln found"
                 # Coverage note: how many files in the subsystem haven't been opened yet
                 if self.ctx.subsystem is not None:
                     subsystem_files = {ft.get("path", "") for ft in self.ctx.subsystem.files}
@@ -1777,7 +1872,7 @@ class NativeHunter:
 
                     # Track file visits, line ranges, and flag counts for the
                     # end-of-run summary. Independent of the dedup key above.
-                    if tool_call.fn_name in ("read_file", "semgrep_scan"):
+                    if tool_call.fn_name in ("read_file", "find_security_issues"):
                         fpath = tool_arguments.get("path", "")
                         if fpath:
                             rel = str(fpath).removeprefix("/workspace/").removeprefix("/")
@@ -1884,6 +1979,7 @@ class NativeHunter:
                             tokens_used=total_input_tokens + total_output_tokens,
                             stop_reason="degenerate_loop",
                             transcript_summary=last_assistant_text[-500:],
+                            potentials=list(self.ctx.potentials),
                         )
                 continue
 
@@ -1955,6 +2051,7 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason="empty_response",
                     transcript_summary=last_assistant_text[-500:],
+                    potentials=list(self.ctx.potentials),
                 )
 
             if last_assistant_text:
@@ -1982,6 +2079,7 @@ class NativeHunter:
                 tokens_used=total_input_tokens + total_output_tokens,
                 stop_reason="completed",
                 transcript_summary=last_assistant_text[-500:],
+                potentials=list(self.ctx.potentials),
             )
 
     async def _run_tool(
@@ -2237,6 +2335,7 @@ def build_hunter_agent(
     seed_context: str | None = None,
     findings_pool: Any = None,
     callgraph: Any = None,
+    oracle_llm: Any = None,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -2293,6 +2392,7 @@ def build_hunter_agent(
         default_sanitizers=tuple(default_sanitizers),
         findings_pool=findings_pool,
         callgraph=callgraph,
+        oracle_llm=oracle_llm or llm,
     )
 
     if specialist == "propagation":

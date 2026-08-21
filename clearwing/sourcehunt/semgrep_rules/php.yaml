@@ -220,9 +220,3 @@ rules:
       - pattern: md5($PASSWORD)
       - pattern: sha1($PASSWORD)
 
-  paths:
-    exclude:
-      - "**/test/**"
-      - "**/tests/**"
-      - "**/*Test.php"
-      - "**/vendor/**"

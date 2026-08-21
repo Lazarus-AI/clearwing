@@ -19,9 +19,12 @@ See docs/spec/001_deep_agent_mode.md for the design rationale.
 from __future__ import annotations
 
 import difflib
+import inspect
+import json
 import logging
 import re
 import shlex
+import time
 
 from pydantic import Field
 
@@ -32,6 +35,7 @@ from .pool_query import build_pool_query_tools
 from .potentials import build_potential_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext
+from .threat_context import build_threat_context_tool
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +49,8 @@ class ExecuteInput(ToolInputModel):
 
 class ReadFileInput(ToolInputModel):
     path: str = Field(description="Absolute path in the container.")
-    offset: int = Field(default=0, description="Line offset (0-based, default 0). Or use start_line (1-based).")
-    limit: int = Field(default=2000, description="Max lines to return (default 2000). Or use end_line with start_line.")
-    start_line: int | None = Field(default=None, description="Alias — 1-based line number to start at. Overrides offset if set.")
-    end_line: int | None = Field(default=None, description="Alias — 1-based inclusive end line. Requires start_line.")
+    offset: int = Field(default=0, description="Line offset (0-based, default 0).")
+    limit: int = Field(default=2000, description="Max lines to return (default 2000).")
 
 
 class WriteFileInput(ToolInputModel):
@@ -104,6 +106,29 @@ def _matches(name: str, tokens: list[str]) -> bool:
 
 
 
+def _flush_diagnostics(ctx: HunterContext) -> None:
+    """Write tool_calls to /tmp/diagnostics.json inside the sandbox."""
+    if ctx.sandbox is None:
+        return
+    payload = json.dumps({"tool_calls": ctx.tool_calls}, indent=2)
+    ctx.sandbox.write_file("/tmp/diagnostics.json", payload.encode("utf-8"))
+
+
+def _instrumented(ctx: HunterContext, name: str, handler):
+    """Wrap a tool handler to record every invocation to ctx.tool_calls."""
+
+    is_async = inspect.iscoroutinefunction(handler)
+
+    async def wrapper(**kwargs):
+        params = {k: (v[:500] + f"…[{len(v)} chars]" if isinstance(v, str) and len(v) > 500 else v)
+                  for k, v in kwargs.items() if k != "_"}
+        ctx.tool_calls.append({"tool": name, "ts": round(time.time(), 3), **params})
+        result = await handler(**kwargs) if is_async else handler(**kwargs)
+        _flush_diagnostics(ctx)
+        return result
+    return wrapper
+
+
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     """Build the deep agent tool set: execute, read_file, write_file,
     plus the shared reporting + findings-pool tools.
@@ -126,30 +151,12 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "duration_seconds": round(result.duration_seconds, 2),
         }
 
-    def read_file(
-        path: str,
-        offset: int = 0,
-        limit: int = 2000,
-        start_line: int | None = None,
-        end_line: int | None = None,
-        **_: object,
-    ) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = 2000, **_: object) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
-        # Accept both idioms. Model naturally reaches for start_line/end_line
-        # (the prompt used to advertise them); swallowing them via **_ made the
-        # tool silently return lines 1-2000 and looked like a tool bug.
-        if start_line is not None:
-            offset = start_line - 1
-            if end_line is not None:
-                limit = max(1, end_line - start_line + 1)
         start = offset + 1
         end = offset + limit
-        # Previously this was `sed ... | cat -n`, which numbers output
-        # starting from 1 regardless of offset — a hunter asking for
-        # lines 101-150 got back "line 1..line 50" and then reasoned
-        # about the wrong line numbers when reporting findings. Use awk
-        # with NR directly so the emitted line numbers match the file.
+
         cmd = (
             f"awk -v s={start} -v e={end} "
             f"'NR>=s && NR<=e {{ printf \"%6d\\t%s\\n\", NR, $0 }}' "
@@ -158,7 +165,13 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
             return f"error reading {path}: {result.stderr.strip()}"
-        return result.stdout
+
+        output = result.stdout
+        lines_returned = output.count("\n")
+        if lines_returned >= limit:
+            next_offset = offset + limit
+            output += f"\n[continues — next: read_file(\"{path}\", offset={next_offset})]"
+        return output
 
     def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:
@@ -265,7 +278,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Returns every function that calls func_name, grouped by file with line ranges."
                 ),
                 schema=LookupCallersInput.model_json_schema(),
-                handler=lookup_callers,
+                handler=_instrumented(ctx, "lookup_callers", lookup_callers),
             ),
             NativeToolSpec(
                 name="lookup_callees",
@@ -273,7 +286,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Returns every function called by func_name, grouped by file with line ranges."
                 ),
                 schema=LookupCalleesInput.model_json_schema(),
-                handler=lookup_callees,
+                handler=_instrumented(ctx, "lookup_callees", lookup_callees),
             ),
             NativeToolSpec(
                 name="list_functions",
@@ -282,7 +295,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Optional filter= narrows by keyword."
                 ),
                 schema=ListFunctionsInput.model_json_schema(),
-                handler=list_functions,
+                handler=_instrumented(ctx, "list_functions", list_functions),
             ),
             NativeToolSpec(
                 name="read_function",
@@ -290,7 +303,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                     "Read a function body by exact name. Returns file, line range, and source."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
-                handler=read_function,
+                handler=_instrumented(ctx, "read_function", read_function),
             ),
         ]
         if ctx.callgraph is not None
@@ -305,27 +318,41 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 "Use for compilation, debugging, running tests, etc."
             ),
             schema=ExecuteInput.model_json_schema(),
-            handler=execute,
+            handler=_instrumented(ctx, "execute", execute),
         ),
         NativeToolSpec(
             name="read_file",
             description=(
-                "Read lines from a file in the container. "
-                "Parameters: path (required), offset (line offset, default 0), "
-                "limit (max lines, default 2000). No other parameters exist."
+                "Read lines from a file. Most files fit in one call (limit=2000). "
+                "For large files, read sequentially — the tool suggests the next offset."
             ),
             schema=ReadFileInput.model_json_schema(),
-            handler=read_file,
+            handler=_instrumented(ctx, "read_file", read_file),
         ),
         NativeToolSpec(
             name="write_file",
             description="Write contents to a file in the container. Creates parent directories.",
             schema=WriteFileInput.model_json_schema(),
-            handler=write_file,
+            handler=_instrumented(ctx, "write_file", write_file),
         ),
-        semgrep_tool,
-        *reporting_tools,
-        *build_potential_tools(ctx),
-        *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
+        *_wrap_tools(ctx, [semgrep_tool, build_threat_context_tool(ctx)]),
+        *_wrap_tools(ctx, reporting_tools),
+        *_wrap_tools(ctx, build_potential_tools(ctx)),
+        *_wrap_tools(ctx, build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
         *callgraph_tools,
     ]
+
+
+def _wrap_tools(ctx: HunterContext, tools: list[NativeToolSpec]) -> list[NativeToolSpec]:
+    """Wrap pre-built NativeToolSpec handlers with diagnostics instrumentation."""
+    wrapped = []
+    for tool in tools:
+        wrapped.append(
+            NativeToolSpec(
+                name=tool.name,
+                description=tool.description,
+                schema=tool.schema,
+                handler=_instrumented(ctx, tool.name, tool.handler),
+            )
+        )
+    return wrapped

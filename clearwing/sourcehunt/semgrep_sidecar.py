@@ -67,38 +67,90 @@ class SemgrepSidecar:
     def available(self) -> bool:
         return shutil.which(self.binary) is not None
 
-    def run_scan(self, repo_path: str, base_path: str | None = None) -> list[SemgrepFinding]:
+    def run_scan(
+        self, repo_path: str, base_path: str | None = None, languages: list[str] | None = None
+    ) -> list[SemgrepFinding]:
         """Invoke `semgrep --json --config <config> <repo_path>`.
 
         Returns a list of normalized findings. On any failure, logs and
         returns an empty list — Semgrep is a hint source, not a
         correctness-critical dependency.
+
+        If ``languages`` is provided, only bundled rules for those languages
+        are included (avoids exit code 7 from rules targeting missing parsers).
         """
         if not self.available:
             logger.debug("Semgrep binary not found; skipping")
             return []
 
+        proc = self._run_semgrep(repo_path, languages=languages, include_remote=True)
+        if proc is None:
+            return []
+
+        # Exit code 7 = "at least one rule in the config is invalid".
+        # This usually means the remote config (p/security-audit) couldn't be
+        # fetched (no API key) or has rules incompatible with installed version.
+        # Retry with bundled rules only.
+        if proc.returncode == 7:
+            logger.info(
+                "Semgrep exit code 7 (invalid config); retrying with bundled rules only"
+            )
+            proc = self._run_semgrep(repo_path, languages=languages, include_remote=False)
+            if proc is None:
+                return []
+
+        if proc.returncode not in (0, 1, 2):
+            logger.warning("Semgrep exited with code %d: %s", proc.returncode, proc.stderr[:500])
+            return []
+        if proc.returncode == 2:
+            logger.debug("Semgrep had rule parse errors (rc=2) but scan completed")
+
+        return self._parse_semgrep_json(proc.stdout, base_path or repo_path)
+
+    def _run_semgrep(
+        self,
+        repo_path: str,
+        *,
+        languages: list[str] | None = None,
+        include_remote: bool = True,
+    ) -> subprocess.CompletedProcess | None:
+        """Build and execute the semgrep command. Returns None on hard failure."""
         cmd = [
             self.binary,
             "scan",
             "--json",
-            "--config",
-            self.config,
             "--quiet",
             "--skip-unknown-extensions",
         ]
-        # Always inject bundled rules on top of the configured remote pack.
-        # These are clearwing-maintained patterns (e.g. CWE-190 C integer
-        # overflow) that the free OSS semgrep registry doesn't cover.
+
+        if include_remote:
+            cmd += ["--config", self.config]
+
+        # Inject bundled rules, optionally filtered to target languages.
+        bundled_count = 0
         if _BUNDLED_RULES_DIR.is_dir():
+            lang_set = {l.lower() for l in languages} if languages else None
             for rule_file in sorted(_BUNDLED_RULES_DIR.glob("*.yaml")):
+                if lang_set is not None:
+                    # Rule filenames are like "c-cpp.yaml", "python.yaml", "php.yaml"
+                    stem = rule_file.stem.lower()
+                    stem_parts = stem.replace("-", " ").replace("_", " ").split()
+                    if not any(part in lang_set for part in stem_parts):
+                        continue
                 cmd += ["--config", str(rule_file)]
+                bundled_count += 1
+
+        # If no configs at all (no remote, no matching bundled rules), bail
+        if not include_remote and bundled_count == 0:
+            logger.debug("No bundled rules match languages=%s; skipping semgrep", languages)
+            return None
+
         if not self.respect_gitignore:
-            cmd.append("--no-git-ignore")  # also scan ignored files — v0.1 choice
+            cmd.append("--no-git-ignore")
         cmd = cmd + self.extra_args + [repo_path]
 
         try:
-            proc = subprocess.run(
+            return subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -107,20 +159,12 @@ class SemgrepSidecar:
             )
         except subprocess.TimeoutExpired:
             logger.warning("Semgrep scan timed out after %ds", self.timeout_seconds)
-            return []
+            return None
         except FileNotFoundError:
-            return []
+            return None
         except Exception:
             logger.warning("Semgrep scan failed", exc_info=True)
-            return []
-
-        # Semgrep exits with rc=1 when there are findings, rc=0 when clean,
-        # rc=2+ on error. Don't treat rc=1 as a failure.
-        if proc.returncode not in (0, 1):
-            logger.warning("Semgrep exited with code %d: %s", proc.returncode, proc.stderr[:500])
-            return []
-
-        return self._parse_semgrep_json(proc.stdout, base_path or repo_path)
+            return None
 
     def _parse_semgrep_json(self, stdout: str, repo_path: str) -> list[SemgrepFinding]:
         """Parse `semgrep --json` output into SemgrepFinding entries."""

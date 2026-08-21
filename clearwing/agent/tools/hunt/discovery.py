@@ -362,10 +362,11 @@ def build_semgrep_tool(ctx: HunterContext) -> NativeToolSpec:
         return [finding_to_dict(f) for f in findings]
 
     return NativeToolSpec(
-        name="semgrep_scan",
+        name="find_security_issues",
         description=(
-            "Run Semgrep static analysis on a file or directory. "
-            "Returns findings with file, line, rule ID, severity, and message."
+            "Scan a file or directory for known vulnerability patterns "
+            "(buffer overflows, injections, auth bypasses, use-after-free, crypto weaknesses). "
+            "Returns each finding with file, line, CWE, severity, and description."
         ),
         schema=SemgrepScanInput.model_json_schema(),
         handler=semgrep_scan,

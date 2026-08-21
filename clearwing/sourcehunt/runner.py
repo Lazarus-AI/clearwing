@@ -105,6 +105,7 @@ class SourceHuntResult:
     session_id: str = ""
     subsystems_hunted: int = 0
     subsystem_spent_usd: float = 0.0
+    potentials: list[dict] = field(default_factory=list)
     elaborated_findings: list[Finding] = field(default_factory=list)
     pipeline_status: PipelineStatus = field(default_factory=PipelineStatus)
     status: str = "completed"
@@ -1295,6 +1296,7 @@ class SourceHuntRunner:
                 callgraph=preprocess_result.callgraph,
             )
             all_findings = hunt_result.findings
+            all_potentials = hunt_result.potentials
             files_hunted = hunt_result.files_hunted
             spent_per_tier = hunt_result.spent_per_tier
             band_stats = hunt_result.band_stats
@@ -1368,6 +1370,7 @@ class SourceHuntRunner:
                     subsystem_spent_usd=subsystem_spent,
                     subsystem_status=hunt_result.subsystem_status,
                     pipeline_status=pipeline_status,
+                    potentials=all_potentials,
                 )
 
             # 4. Verify (unless --no-verify)
@@ -1562,6 +1565,7 @@ class SourceHuntRunner:
                     subsystem_spent_usd=subsystem_spent,
                     subsystem_status=hunt_result.subsystem_status,
                     pipeline_status=pipeline_status,
+                    potentials=all_potentials,
                 )
 
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
@@ -1777,6 +1781,7 @@ class SourceHuntRunner:
                 subsystem_spent_usd=subsystem_spent,
                 subsystem_status=hunt_result.subsystem_status,
                 pipeline_status=pipeline_status,
+                potentials=all_potentials,
             )
         finally:
             if self._spend_ledger is not None:
@@ -2693,6 +2698,7 @@ class SourceHuntRunner:
         try:
             subsystem_findings = await subsystem_runner.arun()
             result.findings.extend(subsystem_findings)
+            result.potentials.extend(subsystem_runner.all_potentials)
             result.subsystems_hunted = len(subsystem_targets)
             result.subsystem_spent_usd = subsystem_runner.total_spent
             result.subsystem_status = (
@@ -3091,6 +3097,7 @@ class SourceHuntRunner:
         subsystem_spent_usd: float,
         subsystem_status: str,
         pipeline_status: PipelineStatus,
+        potentials: list[dict[str, Any]],
     ) -> SourceHuntResult:
         """Write final outputs and preserve the pipeline state accumulated so far."""
         finding_files = [str(finding.file or "") for finding in findings]
@@ -3150,6 +3157,7 @@ class SourceHuntRunner:
             subsystem_stats=subsystem_stats,
             pipeline_status=pipeline_status,
             budget_summary=budget_summary,
+            potentials=potentials,
         )
         report_status = "degraded" if self._last_reporting_error else "completed"
         self._emit_stage(
@@ -3198,6 +3206,7 @@ class SourceHuntRunner:
             session_id=self._session_id,
             subsystems_hunted=subsystems_hunted,
             subsystem_spent_usd=subsystem_spent_usd,
+            potentials=potentials,
             pipeline_status=pipeline_status,
             status=run_status,
             budget_usd=self.budget_usd,
@@ -3356,6 +3365,7 @@ class SourceHuntRunner:
         subsystem_stats: dict | None = None,
         pipeline_status: PipelineStatus | None = None,
         budget_summary: dict[str, Any] | None = None,
+        potentials: list[dict] | None = None,
     ) -> dict[str, str]:
         """Write SARIF / markdown / JSON outputs to the output directory.
 
@@ -3387,6 +3397,7 @@ class SourceHuntRunner:
                 subsystem_stats=subsystem_stats,
                 pipeline_status=pipeline_status,
                 budget_summary=budget_summary,
+                potentials=potentials,
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)

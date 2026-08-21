@@ -265,6 +265,7 @@ class SubsystemHuntRunner:
         self._spent: float = 0.0
         self._subsystems_completed: int = 0
         self._budget_exhausted = False
+        self.all_potentials: list[dict] = []
 
     @property
     def total_spent(self) -> float:
@@ -308,7 +309,7 @@ class SubsystemHuntRunner:
                     subsystem=subsystem.name,
                     work_item_id=work_item_id,
                 ):
-                    findings, cost, tokens, stop = await self._run_one_subsystem(
+                    findings, cost, tokens, stop, potentials = await self._run_one_subsystem(
                         subsystem,
                         self.config.budget_per_subsystem_usd,
                         work_item_id=work_item_id,
@@ -317,6 +318,7 @@ class SubsystemHuntRunner:
                 self._subsystems_completed += 1
                 if stop == "budget_exhausted":
                     self._budget_exhausted = True
+                self.all_potentials.extend(potentials)
                 logger.info(
                     "Subsystem %s finished: %d findings, $%.4f, stop=%s",
                     subsystem.name,
@@ -357,7 +359,7 @@ class SubsystemHuntRunner:
         budget_usd: float,
         *,
         work_item_id: str,
-    ) -> tuple[list[Finding], float, int, str]:
+    ) -> tuple[list[Finding], float, int, str, list[dict]]:
         """Spawn sandbox, build agent, run, collect findings."""
         from .hunter import build_subsystem_hunter_agent
 
@@ -436,6 +438,7 @@ class SubsystemHuntRunner:
                 result.cost_usd,
                 result.tokens_used,
                 result.stop_reason,
+                list(result.potentials),
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -451,8 +454,8 @@ class SubsystemHuntRunner:
                     work_item_id=work_item_id,
                 )
             if "ctx" in locals():
-                return (list(ctx.findings), 0.0, 0, "timeout")
-            return ([], 0.0, 0, "timeout")
+                return (list(ctx.findings), 0.0, 0, "timeout", list(ctx.potentials))
+            return ([], 0.0, 0, "timeout", [])
         except BudgetExceeded:
             raise
         except Exception as exc:
@@ -467,7 +470,7 @@ class SubsystemHuntRunner:
                     work_item_id=work_item_id,
                     error={"type": type(exc).__name__, "message": str(exc)},
                 )
-            return ([], 0.0, 0, "error")
+            return ([], 0.0, 0, "error", [])
         finally:
             if sandbox is not None:
                 try:

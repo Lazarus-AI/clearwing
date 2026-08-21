@@ -196,7 +196,7 @@ class TestPromptBuilders:
         assert "test_project" in prompt
         # Phrase must mention severity and evidence_level (from the prompt template)
         assert "evidence_level" in prompt
-        assert "This is a single-file hunt" in prompt
+        assert "find_security_issues" in prompt
 
     def test_general_prompt_with_seeded_crash(self):
         ft = _make_file_target("foo.c")
@@ -238,7 +238,7 @@ class TestPromptBuilders:
         assert "MEMCPY BOUNDS" in prompt
         assert "SENTINEL / COUNTER COLLISIONS" in prompt
         assert "USE-AFTER-FREE" in prompt
-        assert "Do not spend the final step on marginal confirmation" in prompt
+        assert "Example investigation" in prompt
         assert "record_finding with" in prompt
         assert "evidence_level=static_corroboration" in prompt
 
@@ -361,7 +361,7 @@ class TestBuildHunterAgent:
             "fuzz_harness",
             "record_trace_step",
             "record_finding",
-            "semgrep_scan",
+            "find_security_issues",
             "flag_potential",
         }
 
@@ -410,7 +410,7 @@ class TestBuildHunterAgent:
             "grep_source",
             "record_trace_step",
             "record_finding",
-            "semgrep_scan",
+            "find_security_issues",
             "flag_potential",
         }
         assert "compile_file" not in tool_names
