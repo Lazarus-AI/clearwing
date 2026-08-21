@@ -53,7 +53,7 @@ class HunterContext:
     potentials: list[dict] = field(default_factory=list)  # investigation queue for flag_potential tool
     callgraph: object | None = None  # CallGraph from preprocessor (avoiding circular import)
     subsystem: object | None = None  # SubsystemSpec; set for subsystem hunters only
-    oracle_llm: object | None = None  # AsyncLLMClient for cheap sub-calls (threat context, etc.)
+    llm: object | None = None  # AsyncLLMClient for sub-calls (threat context, etc.)
 
     def get_sandbox_for_variant(
         self,

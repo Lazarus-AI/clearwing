@@ -2302,7 +2302,6 @@ def build_hunter_agent(
     seed_context: str | None = None,
     findings_pool: Any = None,
     callgraph: Any = None,
-    oracle_llm: Any = None,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -2359,7 +2358,7 @@ def build_hunter_agent(
         default_sanitizers=tuple(default_sanitizers),
         findings_pool=findings_pool,
         callgraph=callgraph,
-        oracle_llm=oracle_llm or llm,
+        llm=llm,
     )
 
     if specialist == "propagation":

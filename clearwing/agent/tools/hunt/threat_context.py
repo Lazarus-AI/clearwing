@@ -278,8 +278,7 @@ def _resolve_static(context: str) -> str | None:
 def build_threat_context_tool(ctx: HunterContext) -> NativeToolSpec:
 
     async def get_threat_context(context: str, **_: object) -> str:
-        # If we have an oracle LLM, use it for rich context-specific analysis
-        if ctx.oracle_llm is not None:
+        if ctx.llm is not None:
             try:
                 from clearwing.llm.native import ChatMessage
 
@@ -292,7 +291,7 @@ def build_threat_context_tool(ctx: HunterContext) -> NativeToolSpec:
                 system = _ORACLE_SYSTEM.format(knowledge_context=knowledge_context)
                 messages = [ChatMessage("user", context)]
 
-                response = await ctx.oracle_llm.achat(
+                response = await ctx.llm.achat(
                     messages=messages,
                     system=system,
                     max_tokens=2000,
