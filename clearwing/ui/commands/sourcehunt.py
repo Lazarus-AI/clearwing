@@ -45,6 +45,16 @@ def add_parser(subparsers):
         metavar="JSON",
         help="Restore a legacy sourcehunt run from a checkpoint JSON blob",
     )
+    parser.add_argument(
+        "--checkpoint-path",
+        metavar="PATH",
+        help="Where to save the checkpoint file (default: <output-dir>/<session>/checkpoint.json)",
+    )
+    parser.add_argument(
+        "--stop-after",
+        choices=["preprocess", "rank", "hunt", "verify", "exploit"],
+        help="Stop after the named stage completes (checkpoint is saved for resumption)",
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -1216,6 +1226,8 @@ def handle(cli, args):
         retain_incomplete_certificates=args.retain_incomplete_certificates,
         emit_rejection_certificates=args.emit_rejection_certificates,
         falsify=args.falsify,
+        checkpoint_path=getattr(args, "checkpoint_path", None),
+        stop_after=getattr(args, "stop_after", None),
     )
 
     cli.console.print(
@@ -1335,6 +1347,7 @@ def _handle_machine(descriptor: int) -> int:
                 subsystem_max_files=parsed.get("subsystem_max_files") or None,
                 output_formats=parsed.get("format"),
                 checkpoint=parsed.get("checkpoint"),
+                stop_after=parsed.get("stop_after"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1368,6 +1381,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_max_files",
         "no_per_file_hunt",
         "checkpoint",
+        "stop_after",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -1410,6 +1424,12 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(checkpoint, dict):
             raise ValueError("checkpoint must be a JSON object")
         parsed["checkpoint"] = checkpoint
+    if "stop_after" in value:
+        valid_stages = {"preprocess", "rank", "hunt", "verify"}
+        sa = value["stop_after"]
+        if sa not in valid_stages:
+            raise ValueError(f"stop_after must be one of {sorted(valid_stages)}, got {sa!r}")
+        parsed["stop_after"] = sa
     return parsed
 
 

@@ -289,6 +289,7 @@ class SourceHuntRunner:
         retain_incomplete_certificates: bool = True,
         emit_rejection_certificates: bool = True,
         falsify: bool = True,
+        stop_after: str | None = None,
         on_progress: SourceHuntProgressCallback | None = None,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
@@ -562,6 +563,7 @@ class SourceHuntRunner:
         self._subsystem_paths = subsystem_paths
         self._no_per_file_hunt = no_per_file_hunt
         self._no_rank = no_rank
+        self._stop_after = stop_after
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
         # None = library default (DEFAULT_MAX_FILES_PER_SUBSYSTEM for auto
@@ -1084,6 +1086,17 @@ class SourceHuntRunner:
                 ),
                 files=stage_files,
             )
+
+            if self._stop_after == "preprocess":
+                logger.info("--stop-after preprocess: exiting early")
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                    pipeline_status=pipeline_status,
+                )
+
             _t = time.monotonic()
             self._ensure_sandbox_factory(repo_path, files)
             logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
@@ -1110,6 +1123,16 @@ class SourceHuntRunner:
             else:
                 files = await self._rank(files, pipeline_status, stage_files)
             preprocess_result.file_targets = files
+
+            if self._stop_after == "rank":
+                logger.info("--stop-after rank: exiting early")
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                    pipeline_status=pipeline_status,
+                )
 
             # depth=quick exits here with the static_findings as-is
             if self.depth == "quick":
@@ -1312,6 +1335,16 @@ class SourceHuntRunner:
                 finally:
                     historical_db.close()
 
+            if self._stop_after == "hunt":
+                logger.info("--stop-after hunt: exiting early")
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                    pipeline_status=pipeline_status,
+                )
+
             # 4. Verify (unless --no-verify)
             verification_result = await self._verify(
                 all_findings, repo_path=repo_path, pipeline_status=pipeline_status
@@ -1477,6 +1510,16 @@ class SourceHuntRunner:
                         stable_verified.append(finding)
                 non_poc = [f for f in verified if f not in stability_eligible]
                 verified = stable_verified + non_poc
+
+            if self._stop_after == "verify":
+                logger.info("--stop-after verify: exiting early")
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                    pipeline_status=pipeline_status,
+                )
 
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
             exploitation_result = await self._exploit(verified, findings_pool=findings_pool)
@@ -1747,7 +1790,13 @@ class SourceHuntRunner:
             exit_findings = all_findings if self.no_verify else verified
             return SourceHuntResult(
                 exit_code=(
-                    3 if run_status == "budget_exhausted" else self._exit_code(exit_findings)
+                    0
+                    if self._stop_after
+                    else (
+                        3
+                        if run_status == "budget_exhausted"
+                        else self._exit_code(exit_findings)
+                    )
                 ),
                 repo_url=self.repo_url,
                 repo_path=repo_path,
@@ -2694,7 +2743,7 @@ class SourceHuntRunner:
             "build_callgraph": self.depth != "quick" and self._preprocessing,
             "propagate_reachability": self.depth != "quick" and self._preprocessing,
             "run_semgrep": self.depth != "quick" and self._preprocessing,
-            "run_taint": self.depth != "quick" and self._preprocessing and not self._no_rank,
+            "run_taint": self.depth != "quick" and self._preprocessing,
             "respect_gitignore": self._respect_gitignore,
             "subsystem_paths": sorted(self._subsystem_paths or []),
         }
@@ -2719,7 +2768,13 @@ class SourceHuntRunner:
                 self._preprocess_restored = True
                 logger.info("Restored preprocess result from session %s", self._session_id)
                 return restored
-            raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
+            if self._stop_after == "preprocess":
+                logger.warning(
+                    "Stale preprocess checkpoint does not match current options; re-running"
+                )
+                self._checkpoint.preprocess = None
+            else:
+                raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
 
         result = self._preprocessor.run(repo_path=repo_path)
         preprocess_checkpoint = PreprocessCheckpoint.from_result(result, options=options)
@@ -2995,7 +3050,11 @@ class SourceHuntRunner:
         )
         duration = time.monotonic() - start_time
         return SourceHuntResult(
-            exit_code=(3 if run_status == "budget_exhausted" else self._exit_code(all_findings)),
+            exit_code=(
+                0
+                if self._stop_after
+                else (3 if run_status == "budget_exhausted" else self._exit_code(all_findings))
+            ),
             repo_url=self.repo_url,
             repo_path=repo_path,
             findings=all_findings,
