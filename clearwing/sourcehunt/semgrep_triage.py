@@ -67,7 +67,13 @@ async def triage_semgrep_findings(
         text = response.text.strip()
         # Extract JSON array from response (handle markdown fences)
         if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            lines = text.splitlines()
+            if len(lines) > 1:
+                if lines[-1].strip() == "```":
+                    lines = lines[1:-1]
+                else:
+                    lines = lines[1:]
+                text = "\n".join(lines).strip()
 
         picks = json.loads(text)
         if not isinstance(picks, list):
@@ -92,7 +98,10 @@ async def triage_semgrep_findings(
 
         if not result:
             # LLM picks didn't match any findings (bad file/line) — fall back
-            logger.warning("Triage picks matched no findings, returning raw")
+            logger.warning(
+                "Triage picks matched no findings (%d picks, sample: %s), returning raw",
+                len(picks), picks[:2],
+            )
             return findings
 
         logger.info("Semgrep triage: %d categories from %d raw findings", len(result), len(findings))
