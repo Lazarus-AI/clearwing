@@ -39,7 +39,52 @@ class MachineChannel:
         self._terminal = False
         self._closed = False
         self._write_lock = threading.Lock()
+        self._eventbus_subscriptions: list[tuple[Any, Any, Any]] = []
         self.workspace: dict[str, Any] | None = None
+        self._subscribe_eventbus()
+
+    def _subscribe_eventbus(self) -> None:
+        """Forward EventBus activity onto this channel as progress records.
+
+        A machine-mode host only sees what crosses the descriptor. Stage
+        transitions reach it through the runner's on_progress callback, but
+        tool calls, findings, costs and errors are published on the EventBus
+        and were previously visible only in the guest's own logs.
+
+        Subscriptions are released in close(). No-op when clearwing.core.events
+        is unavailable.
+        """
+        try:
+            from clearwing.core.events import EventBus, EventType
+        except ImportError:
+            return
+
+        FORWARDED = (
+            EventType.TOOL_START,
+            EventType.TOOL_RESULT,
+            EventType.MESSAGE,
+            EventType.FLAG_FOUND,
+            EventType.COST_UPDATE,
+            EventType.ERROR,
+            EventType.SOURCEHUNT_STAGE,
+            EventType.HUNTER_STATUS,
+            EventType.FINDING_RECORDED,
+        )
+
+        def _to_dict(data: object) -> dict:
+            if isinstance(data, dict):
+                return data
+            if is_dataclass(data) and not isinstance(data, type):
+                return asdict(data)
+            return {"data": data}
+
+        bus = EventBus()
+        for etype in FORWARDED:
+            def forward(data: object, event_type=etype) -> None:
+                self.emit("progress", {"event": event_type.value, **_to_dict(data)})
+
+            bus.subscribe(etype, forward)
+            self._eventbus_subscriptions.append((bus, etype, forward))
 
     def read_start(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Read and validate the command's start record."""
@@ -92,6 +137,9 @@ class MachineChannel:
         Idempotent: a second call is a no-op rather than an error on an
         already-closed descriptor.
         """
+        for bus, event_type, handler in self._eventbus_subscriptions:
+            bus.unsubscribe(event_type, handler)
+        self._eventbus_subscriptions.clear()
         with self._write_lock:
             if self._closed:
                 return

@@ -1349,7 +1349,9 @@ def _handle_machine(descriptor: int) -> int:
                 checkpoint=parsed.get("checkpoint"),
                 stop_after=parsed.get("stop_after"),
                 provider_manager=provider_manager,
-                on_progress=lambda progress: channel.emit("progress", progress),
+                # on_progress is intentionally omitted: the channel's EventBus
+                # subscription already forwards SOURCEHUNT_STAGE events, so
+                # passing it too would emit every stage transition twice.
             ).arun()
         )
         channel.result(_public_result(result))
