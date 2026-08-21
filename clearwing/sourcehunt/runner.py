@@ -1201,9 +1201,16 @@ class SourceHuntRunner:
                     "harness_source": c.harness_source,
                 }
 
-            # Build a per-file Semgrep hint lookup so hunters get their file's hits
+            # Triage semgrep findings: LLM picks top finding per category
+            from .semgrep_triage import triage_semgrep_findings
+
+            triaged = await triage_semgrep_findings(
+                findings=preprocess_result.semgrep_findings,
+                target_context=self._campaign_hint or "general security audit",
+                llm=self._get_native_client("semgrep_triage", self.hunter_llm, budget_stage="hunt"),
+            )
             semgrep_hints_by_file: dict[str, list[dict]] = {}
-            for sf in preprocess_result.semgrep_findings:
+            for sf in triaged:
                 semgrep_hints_by_file.setdefault(sf.get("file", ""), []).append(sf)
 
             # v0.3: Recall cross-run mechanisms and inject them into every hunter's

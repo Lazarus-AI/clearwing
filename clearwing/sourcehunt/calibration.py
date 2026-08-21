@@ -26,7 +26,7 @@ _STORE_LOCK = threading.Lock()
 #: Severity values accepted across calibration. Validated by the
 #: pydantic model — a typo writes a loud ValidationError instead of
 #: silently corrupting the exact-match / within-one ratio math.
-Severity = Literal["critical", "high", "medium", "low", "info"]
+Severity = Literal["critical", "high", "medium", "low", "info", "unknown"]
 
 
 @contextlib.contextmanager

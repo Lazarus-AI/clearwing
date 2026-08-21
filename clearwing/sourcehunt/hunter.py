@@ -998,7 +998,10 @@ def _build_hunter_prompt(
     if semgrep_hints:
         hint_lines = []
         for h in semgrep_hints:
-            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+            desc = f"  - line {h.get('line', '?')}: {h.get('description', '')}"
+            if h.get("rationale"):
+                desc += f" [{h['rationale']}]"
+            hint_lines.append(desc)
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — use as starting points):\n"
             + "\n".join(hint_lines)
@@ -1166,7 +1169,10 @@ def _build_deep_agent_prompt(
     if semgrep_hints:
         hint_lines = []
         for h in semgrep_hints:
-            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+            desc = f"  - line {h.get('line', '?')}: {h.get('description', '')}"
+            if h.get("rationale"):
+                desc += f" [{h['rationale']}]"
+            hint_lines.append(desc)
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — starting points only):\n"
             + "\n".join(hint_lines)
@@ -1229,7 +1235,10 @@ def _build_unconstrained_prompt(
     if semgrep_hints:
         hint_lines = []
         for h in semgrep_hints:
-            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+            desc = f"  - line {h.get('line', '?')}: {h.get('description', '')}"
+            if h.get("rationale"):
+                desc += f" [{h['rationale']}]"
+            hint_lines.append(desc)
         seed_parts.append(
             "\nStatic analysis hints (NOT ground truth — starting points only):\n"
             + "\n".join(hint_lines)
