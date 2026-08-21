@@ -128,6 +128,9 @@ class HuntResult(BaseModel):
     band_stats: dict[str, Any] | None = None
     subsystems_hunted: int = 0
     subsystem_spent_usd: float = 0.0
+    subsystem_status: Literal["completed", "skipped", "budget_exhausted", "degraded"] = (
+        "completed"
+    )
 
 
 class HuntCheckpoint(BaseModel):

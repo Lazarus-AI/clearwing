@@ -264,6 +264,7 @@ class SubsystemHuntRunner:
         self.config = config
         self._spent: float = 0.0
         self._subsystems_completed: int = 0
+        self._budget_exhausted = False
 
     @property
     def total_spent(self) -> float:
@@ -272,6 +273,11 @@ class SubsystemHuntRunner:
     @property
     def subsystems_completed(self) -> int:
         return self._subsystems_completed
+
+    @property
+    def budget_exhausted(self) -> bool:
+        """Whether any subsystem stopped before completion at its budget limit."""
+        return self._budget_exhausted
 
     async def arun(self) -> list[Finding]:
         """Run all subsystem hunts. Returns merged findings."""
@@ -284,6 +290,7 @@ class SubsystemHuntRunner:
         async def _guarded_run(subsystem: SubsystemTarget) -> list[Finding]:
             async with sem:
                 if self.config.total_budget_usd > 0 and self._spent >= self.config.total_budget_usd:
+                    self._budget_exhausted = True
                     logger.info(
                         "Subsystem %s skipped: total budget exhausted",
                         subsystem.name,
@@ -308,8 +315,10 @@ class SubsystemHuntRunner:
                     )
                 self._spent += cost
                 self._subsystems_completed += 1
+                if stop == "budget_exhausted":
+                    self._budget_exhausted = True
                 logger.info(
-                    "Subsystem %s completed: %d findings, $%.4f, stop=%s",
+                    "Subsystem %s finished: %d findings, $%.4f, stop=%s",
                     subsystem.name,
                     len(findings),
                     cost,
@@ -330,6 +339,7 @@ class SubsystemHuntRunner:
                 findings = await coro
                 all_findings.extend(findings)
             except BudgetExceeded:
+                self._budget_exhausted = True
                 logger.info("Subsystem hunt stopped because the run budget is exhausted")
                 for task in tasks:
                     if not task.done():

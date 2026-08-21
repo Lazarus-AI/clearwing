@@ -1742,12 +1742,20 @@ class SourceHuntRunner:
             if ledger_subsystem_spend:
                 subsystem_spent = ledger_subsystem_spend
 
-            run_status = "budget_exhausted" if self._budget_exhausted() else "completed"
+            run_status = (
+                "budget_exhausted"
+                if self._budget_exhausted() or hunt_result.subsystem_status == "budget_exhausted"
+                else "completed"
+            )
             if run_status == "budget_exhausted":
                 pipeline_status.record(
                     "budget",
                     StageOutcome.SKIPPED,
-                    fallback_description="Dollar cap reached; partial results retained",
+                    fallback_description=(
+                        "Dollar cap reached; partial results retained"
+                        if self._budget_exhausted()
+                        else "Subsystem hunt budget exhausted; partial results retained"
+                    ),
                 )
             budget_summary = self._finalize_spend_ledger(run_status)
             _pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
@@ -2425,10 +2433,25 @@ class SourceHuntRunner:
                 finding_ids=[finding.id for finding in restored.findings],
             )
             if self._enable_subsystem_hunt:
+                if restored.subsystem_status == "budget_exhausted":
+                    pipeline_status.record(
+                        "subsystem_hunt",
+                        StageOutcome.SKIPPED,
+                        fallback_description=(
+                            "Budget exhausted; partial subsystem results retained"
+                        ),
+                    )
+                elif restored.subsystem_status == "degraded":
+                    pipeline_status.record_degraded(
+                        "subsystem_hunt",
+                        "Subsystem hunt failed; only per-file findings available",
+                    )
+                elif restored.subsystem_status == "completed":
+                    pipeline_status.record_succeeded("subsystem_hunt")
                 self._emit_stage(
                     "subsystem_hunt",
-                    "completed",
-                    findings_so_far=restored.subsystems_hunted,
+                    restored.subsystem_status,
+                    findings_so_far=len(restored.findings),
                     cost_usd=restored.subsystem_spent_usd,
                     detail=(
                         f"Restored {restored.subsystems_hunted} hunted subsystems from checkpoint"
@@ -2609,6 +2632,18 @@ class SourceHuntRunner:
         if not self._enable_subsystem_hunt:
             return
         if self._budget_exhausted():
+            result.subsystem_status = "budget_exhausted"
+            pipeline_status.record(
+                "subsystem_hunt",
+                StageOutcome.SKIPPED,
+                fallback_description="Budget exhausted before subsystem hunting",
+            )
+            self._emit_stage(
+                "subsystem_hunt",
+                "budget_exhausted",
+                cost_usd=self._run_spent_usd(),
+                detail="Run budget was exhausted before subsystem hunting",
+            )
             logger.info(
                 "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
                 self.budget_usd,
@@ -2711,9 +2746,20 @@ class SourceHuntRunner:
             result.findings.extend(subsystem_findings)
             result.subsystems_hunted = len(subsystem_targets)
             result.subsystem_spent_usd = subsystem_runner.total_spent
+            result.subsystem_status = (
+                "budget_exhausted" if subsystem_runner.budget_exhausted else "completed"
+            )
+            if result.subsystem_status == "budget_exhausted":
+                pipeline_status.record(
+                    "subsystem_hunt",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; partial subsystem results retained",
+                )
+            else:
+                pipeline_status.record_succeeded("subsystem_hunt")
             self._emit_stage(
                 "subsystem_hunt",
-                "completed",
+                result.subsystem_status,
                 findings_so_far=len(subsystem_findings),
                 cost_usd=result.subsystem_spent_usd,
                 files=subsystem_files,
@@ -2721,6 +2767,7 @@ class SourceHuntRunner:
                 finding_ids=[finding.id for finding in subsystem_findings],
             )
         except Exception as exc:
+            result.subsystem_status = "degraded"
             logger.warning("Subsystem hunt failed", exc_info=True)
             pipeline_status.record_degraded(
                 "subsystem_hunt",
