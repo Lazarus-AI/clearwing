@@ -51,6 +51,9 @@ class PreprocessResult(BaseModel):
         payload.pop("repo_path")
         for target in payload["file_targets"]:
             target.pop("absolute_path", None)
+        # Serialize callgraph via its own method (plain dataclass, not pydantic)
+        if self.callgraph is not None:
+            payload["callgraph"] = self.callgraph.to_json()
         return payload
 
     @classmethod
@@ -82,13 +85,17 @@ class PreprocessResult(BaseModel):
             rebound["absolute_path"] = str(absolute)
             targets.append(rebound)
 
-        return cls.model_validate(
-            {
-                **payload,
-                "repo_path": str(root),
-                "file_targets": targets,
-            }
-        )
+        # Restore callgraph from serialized dict
+        callgraph = None
+        cg_data = payload.get("callgraph")
+        if isinstance(cg_data, dict):
+            callgraph = CallGraph.from_json(cg_data)
+
+        restored = dict(payload)
+        restored["repo_path"] = str(root)
+        restored["file_targets"] = targets
+        restored["callgraph"] = callgraph
+        return cls.model_validate(restored)
 
     @property
     def file_count(self) -> int:

@@ -9,7 +9,10 @@ def add_parser(subparsers):
     parser = subparsers.add_parser(
         "visualize", help="Open interactive callgraph visualization in browser"
     )
-    parser.add_argument("path", help="Path to repository (builds callgraph from source)")
+    parser.add_argument(
+        "path",
+        help="Path to repository OR checkpoint.json file",
+    )
     parser.add_argument("--output", help="Output HTML file path (default: temp file)")
     parser.add_argument("--no-open", action="store_true", help="Do not open in browser")
     parser.add_argument(
@@ -22,14 +25,31 @@ def add_parser(subparsers):
 
 
 def handle(cli, args):
-    """Build callgraph from repo and render as interactive browser visualization."""
+    """Build callgraph from repo or load from checkpoint, render in browser."""
     from ...sourcehunt.callgraph import CallGraph, CallGraphBuilder
 
-    repo_path = str(Path(args.path).resolve())
-    cli.console.print(f"[dim]Building callgraph for {repo_path}...[/dim]")
+    target = Path(args.path).resolve()
 
-    builder = CallGraphBuilder()
-    cg: CallGraph = builder.build(repo_path)
+    if target.is_file() and target.suffix == ".json":
+        # Load from checkpoint
+        cli.console.print(f"[dim]Loading callgraph from checkpoint {target}...[/dim]")
+        from ...sourcehunt.checkpoints import SourceHuntCheckpoint
+
+        ckpt = SourceHuntCheckpoint.from_file(target)
+        if ckpt.preprocess is None or ckpt.preprocess.result is None:
+            cli.console.print("[red]Checkpoint has no preprocess result[/red]")
+            return
+        cg_data = ckpt.preprocess.result.get("callgraph")
+        if not cg_data:
+            cli.console.print("[red]Checkpoint has no callgraph data[/red]")
+            return
+        cg = CallGraph.from_json(cg_data)
+    else:
+        # Build from source
+        repo_path = str(target)
+        cli.console.print(f"[dim]Building callgraph for {repo_path}...[/dim]")
+        builder = CallGraphBuilder()
+        cg = builder.build(repo_path)
 
     n_files = len(cg.functions)
     n_funcs = sum(len(fns) for fns in cg.functions.values())
