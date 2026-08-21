@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -233,6 +235,33 @@ class SourceHuntCheckpoint(BaseModel):
         if isinstance(value, str):
             return cls.model_validate_json(value)
         return cls.model_validate(value)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> SourceHuntCheckpoint:
+        """Load and validate a checkpoint from its host-selected JSON path."""
+
+        return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
+
+    def dump(self, path: str | Path) -> Path:
+        """Atomically write the complete checkpoint model to a JSON file."""
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = self.model_dump_json(indent=2).encode("utf-8") + b"\n"
+        descriptor, temporary = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        return target
 
 
 def repository_commit_sha(repo_path: str | Path) -> str | None:

@@ -1308,16 +1308,19 @@ def _handle_machine(descriptor: int) -> int:
         request, routing = channel.read_start()
         print(f"sourcehunt machine-fd request fields: {sorted(request)}", file=sys.stderr)
         parsed = _machine_request(request)
+        workspace = channel.workspace or {}
         install_runtime_routing(routing)
         provider_manager = ProviderManager.from_config(routing)
         result = asyncio.run(
             SourceHuntRunner(
                 repo_url=parsed["repo_url"],
+                local_path=workspace.get("local_path"),
                 branch=parsed["branch"],
                 depth=parsed["depth"],
                 budget_usd=parsed["budget_usd"],
                 max_parallel=parsed["max_parallel"],
-                output_dir=os.path.abspath("results/sourcehunt"),
+                output_dir=workspace.get("output_dir") or os.path.abspath("results/sourcehunt"),
+                checkpoint_path=workspace.get("checkpoint_path"),
                 no_verify=not parsed["verify"],
                 no_exploit=not parsed["exploit"],
                 flow=parsed["flow"],

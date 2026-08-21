@@ -39,19 +39,22 @@ def _routing(value: dict | None = None) -> dict:
     return {"encoding": "base64url", "value": encoded}
 
 
-def _channel(operation: str, request: dict, routing: dict | None = None):
+def _channel(
+    operation: str,
+    request: dict,
+    routing: dict | None = None,
+    workspace: dict | None = None,
+):
     parent, child = socket.socketpair()
-    parent.sendall(
-        json.dumps(
-            {
-                "v": 1,
-                "type": f"{operation}.start",
-                "request": request,
-                "provider_routing": routing or _routing(),
-            }
-        ).encode()
-        + b"\n"
-    )
+    record = {
+        "v": 1,
+        "type": f"{operation}.start",
+        "request": request,
+        "provider_routing": routing or _routing(),
+    }
+    if workspace is not None:
+        record["workspace"] = workspace
+    parent.sendall(json.dumps(record).encode() + b"\n")
     return parent, MachineChannel(child.detach(), operation)
 
 
@@ -77,6 +80,25 @@ def test_channel_rejects_unknown_and_oversized_start_records():
     channel = MachineChannel(child.detach(), "operate")
     with pytest.raises(MachineProtocolError, match="unknown start"):
         channel.read_start()
+    channel.close()
+    parent.close()
+
+
+def test_channel_accepts_host_selected_workspace_paths():
+    workspace = {
+        "local_path": "/workspaces/run/source",
+        "output_dir": "/workspaces/run/sourcehunt",
+        "checkpoint_path": "/workspaces/run/sourcehunt/pipeline/checkpoint.json",
+    }
+    parent, channel = _channel(
+        "sourcehunt",
+        {"repo_url": "https://example.test/repo"},
+        workspace=workspace,
+    )
+
+    channel.read_start()
+
+    assert channel.workspace == workspace
     channel.close()
     parent.close()
 
@@ -122,6 +144,13 @@ def test_sourcehunt_request_rejects_paths_credentials_and_provider_fields():
     with pytest.raises(ValueError, match="unknown request field.*model"):
         sourcehunt._machine_request(
             {"repo_url": "https://example.test/repo", "model": "guest-model"}
+        )
+    with pytest.raises(ValueError, match="unknown request field.*stage"):
+        sourcehunt._machine_request(
+            {
+                "repo_url": "https://example.test/repo",
+                "stage": "hunt",
+            }
         )
 
 
