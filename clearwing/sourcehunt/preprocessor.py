@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +29,35 @@ from .state import FileTag, FileTarget
 from .taint import TaintAnalyzer, TaintPath
 
 logger = logging.getLogger(__name__)
+
+
+def _checkpoint_source_path(
+    value: str,
+    root: Path,
+    *,
+    field: str,
+    allow_absolute: bool,
+) -> tuple[Path, Path]:
+    """Return one source path as (repository-relative, resolved absolute)."""
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"{field} must be a non-empty path")
+    local_path = Path(value)
+    windows_path = PureWindowsPath(value)
+    if local_path.is_absolute():
+        if not allow_absolute:
+            raise ValueError(f"{field} must be repository-relative")
+        absolute = local_path.resolve()
+    else:
+        if windows_path.is_absolute() or windows_path.drive or windows_path.root:
+            raise ValueError(f"{field} must be repository-relative")
+        portable_path = PurePosixPath(value.replace("\\", "/"))
+        if not portable_path.parts or ".." in portable_path.parts:
+            raise ValueError(f"{field} must not escape the repository")
+        absolute = (root / Path(*portable_path.parts)).resolve()
+    if not absolute.is_relative_to(root):
+        raise ValueError(f"{field} must not escape the repository")
+    return absolute.relative_to(root), absolute
 
 
 class PreprocessResult(BaseModel):
@@ -49,8 +78,17 @@ class PreprocessResult(BaseModel):
 
         payload = self.model_dump(mode="json")
         payload.pop("repo_path")
+        root = Path(self.repo_path).resolve()
         for target in payload["file_targets"]:
             target.pop("absolute_path", None)
+        for index, finding in enumerate(payload["static_findings"]):
+            relative, _absolute = _checkpoint_source_path(
+                finding.get("file_path"),
+                root,
+                field=f"static_findings[{index}].file_path",
+                allow_absolute=True,
+            )
+            finding["file_path"] = relative.as_posix()
         return payload
 
     @classmethod
@@ -69,12 +107,12 @@ class PreprocessResult(BaseModel):
         for target in saved_targets:
             if not isinstance(target, dict):
                 raise ValueError("checkpoint file target must be an object")
-            relative = Path(str(target.get("path") or ""))
-            if not relative.parts or relative.is_absolute():
-                raise ValueError("checkpoint file target must be repository-relative")
-            absolute = (root / relative).resolve()
-            if not absolute.is_relative_to(root):
-                raise ValueError("checkpoint file target escapes repository")
+            relative, absolute = _checkpoint_source_path(
+                target.get("path"),
+                root,
+                field="checkpoint file target",
+                allow_absolute=False,
+            )
             if not absolute.is_file():
                 raise ValueError(f"checkpoint file target is missing: {relative.as_posix()}")
             rebound = dict(target)
@@ -82,11 +120,29 @@ class PreprocessResult(BaseModel):
             rebound["absolute_path"] = str(absolute)
             targets.append(rebound)
 
+        saved_static_findings = payload.get("static_findings")
+        if not isinstance(saved_static_findings, list):
+            raise ValueError("checkpoint static findings must be a list")
+        static_findings: list[dict[str, Any]] = []
+        for index, finding in enumerate(saved_static_findings):
+            if not isinstance(finding, dict):
+                raise ValueError("checkpoint static finding must be an object")
+            relative, absolute = _checkpoint_source_path(
+                finding.get("file_path"),
+                root,
+                field=f"static_findings[{index}].file_path",
+                allow_absolute=False,
+            )
+            if not absolute.is_file():
+                raise ValueError(f"checkpoint static finding file is missing: {relative.as_posix()}")
+            static_findings.append({**finding, "file_path": str(absolute)})
+
         return cls.model_validate(
             {
                 **payload,
                 "repo_path": str(root),
                 "file_targets": targets,
+                "static_findings": static_findings,
             }
         )
 

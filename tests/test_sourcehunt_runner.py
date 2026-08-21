@@ -19,11 +19,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from genai_pyo3 import ChatResponse
 
+from clearwing.analysis import SourceAnalyzer
+from clearwing.findings.types import Finding
+from clearwing.sourcehunt.checkpoints import HuntResult, SourceHuntCheckpoint
 from clearwing.sourcehunt.pool import assign_tier
 from clearwing.sourcehunt.preprocessor import Preprocessor
 from clearwing.sourcehunt.ranker import Ranker
 from clearwing.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
-from clearwing.sourcehunt.state import StageOutcome
+from clearwing.sourcehunt.state import PipelineStatus, StageOutcome
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
@@ -33,6 +36,282 @@ def test_runner_is_available_from_the_public_sourcehunt_package():
     from clearwing.sourcehunt import SourceHuntRunner as PublicSourceHuntRunner
 
     assert PublicSourceHuntRunner is SourceHuntRunner
+
+
+def test_terminal_run_status_preserves_stage_budget_exhaustion(tmp_path):
+    runner = SourceHuntRunner(
+        repo_url="repo",
+        output_dir=str(tmp_path),
+        enable_mechanism_memory=False,
+    )
+
+    assert runner._terminal_run_status("completed", "skipped") == "completed"
+    assert runner._terminal_run_status("completed", "budget_exhausted") == "budget_exhausted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subsystem_status", "expected_status", "expected_outcome"),
+    [
+        ("completed", "completed", StageOutcome.SUCCEEDED),
+        ("degraded", "degraded", StageOutcome.DEGRADED),
+        ("budget_exhausted", "budget_exhausted", StageOutcome.SKIPPED),
+    ],
+)
+async def test_subsystem_terminal_status_updates_hunt_status_and_event(
+    monkeypatch,
+    tmp_path,
+    subsystem_status,
+    expected_status,
+    expected_outcome,
+):
+    import clearwing.sourcehunt.subsystem as subsystem_module
+
+    class BudgetExhaustedSubsystemRunner:
+        def __init__(self, config):
+            self.total_spent = 1.0
+            self.subsystems_completed = 1
+            self.status = subsystem_status
+
+        async def arun(self):
+            return []
+
+    monkeypatch.setattr(
+        subsystem_module,
+        "SubsystemHuntRunner",
+        BudgetExhaustedSubsystemRunner,
+    )
+    progress = []
+    runner = SourceHuntRunner(
+        repo_url="repo",
+        local_path=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        hunter_llm=MagicMock(),
+        enable_subsystem_hunt=True,
+        subsystem_paths=["src"],
+        no_per_file_hunt=True,
+        enable_mechanism_memory=False,
+        on_progress=progress.append,
+    )
+    result = HuntResult(
+        findings=[],
+        files_hunted=0,
+        spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+        status="skipped",
+    )
+    pipeline_status = PipelineStatus()
+
+    await runner._hunt_subsystems(
+        result,
+        files=[{"path": "src/jv.c", "priority": 1.0}],
+        repo_path=str(tmp_path),
+        callgraph=None,
+        entry_points_by_file={},
+        findings_pool=None,
+        pipeline_status=pipeline_status,
+    )
+
+    assert result.status == expected_status
+    assert result.subsystem_status == subsystem_status
+    assert result.subsystems_hunted == 1
+    assert pipeline_status.stages["subsystem_hunt"].outcome is expected_outcome
+    assert progress[-1].stage == "subsystem_hunt"
+    assert progress[-1].status == subsystem_status
+
+
+@pytest.mark.asyncio
+async def test_subsystem_prestart_budget_exhaustion_is_terminal(monkeypatch, tmp_path):
+    progress = []
+    runner = SourceHuntRunner(
+        repo_url="repo",
+        local_path=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        enable_subsystem_hunt=True,
+        no_per_file_hunt=True,
+        enable_mechanism_memory=False,
+        on_progress=progress.append,
+    )
+    monkeypatch.setattr(runner, "_budget_exhausted", lambda: True)
+    result = HuntResult(
+        findings=[],
+        spent_per_tier={},
+        status="skipped",
+        per_file_status="skipped",
+    )
+    pipeline_status = PipelineStatus()
+
+    await runner._hunt_subsystems(
+        result,
+        files=[],
+        repo_path=str(tmp_path),
+        callgraph=None,
+        entry_points_by_file={},
+        findings_pool=None,
+        pipeline_status=pipeline_status,
+    )
+
+    assert result.status == "budget_exhausted"
+    assert result.per_file_status == "skipped"
+    assert result.subsystem_status == "budget_exhausted"
+    assert pipeline_status.stages["subsystem_hunt"].outcome is StageOutcome.SKIPPED
+    assert progress[-1].stage == "subsystem_hunt"
+    assert progress[-1].status == "budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_missing_subsystem_model_records_degraded_terminal_status(monkeypatch, tmp_path):
+    progress = []
+    runner = SourceHuntRunner(
+        repo_url="repo",
+        local_path=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        enable_subsystem_hunt=True,
+        enable_mechanism_memory=False,
+        on_progress=progress.append,
+    )
+    monkeypatch.setattr(runner, "_budget_exhausted", lambda: False)
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: None)
+    result = HuntResult(findings=[], spent_per_tier={})
+    pipeline_status = PipelineStatus()
+
+    await runner._hunt_subsystems(
+        result,
+        files=[],
+        repo_path=str(tmp_path),
+        callgraph=None,
+        entry_points_by_file={},
+        findings_pool=None,
+        pipeline_status=pipeline_status,
+    )
+
+    assert result.status == "degraded"
+    assert result.per_file_status == "completed"
+    assert result.subsystem_status == "degraded"
+    assert pipeline_status.stages["subsystem_hunt"].outcome is StageOutcome.DEGRADED
+    assert progress[-1].stage == "subsystem_hunt"
+    assert progress[-1].status == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_invalid_hunter_finding_path_is_dropped_and_degrades_stage(monkeypatch, tmp_path):
+    import clearwing.sourcehunt.runner as runner_module
+
+    class InvalidPathPool:
+        def __init__(self, config):
+            self.budget_exhausted = False
+            self.total_spent = 0.25
+            self.spent_per_tier = {"A": 0.25, "B": 0.0, "C": 0.0}
+            self.runs_per_band = {"fast": 1}
+            self.spent_per_band = {"fast": 0.25}
+            self.promotion_counts = {}
+            self.completed_target_count = 1
+
+        async def arun(self):
+            return [Finding(id="bad-path", file="../outside.c", severity="high")]
+
+    monkeypatch.setattr(runner_module, "HunterPool", InvalidPathPool)
+    progress = []
+    runner = SourceHuntRunner(
+        repo_url="repo",
+        local_path=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        hunter_llm=MagicMock(),
+        enable_mechanism_memory=False,
+        on_progress=progress.append,
+    )
+    runner._checkpoint = SourceHuntCheckpoint()
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: MagicMock())
+    pipeline_status = PipelineStatus()
+
+    result = await runner._hunt(
+        files=[{"path": "sample.c", "priority": 5.0}],
+        repo_path=str(tmp_path),
+        pipeline_status=pipeline_status,
+        stage_files=["sample.c"],
+        seeded_by_file={},
+        semgrep_hints_by_file={},
+        entry_points_by_file={},
+        seed_corpus_by_file={},
+        findings_pool=None,
+        callgraph=None,
+    )
+
+    assert result.findings == []
+    assert result.status == "degraded"
+    assert result.per_file_status == "degraded"
+    assert pipeline_status.stages["hunter_pool"].outcome is StageOutcome.DEGRADED
+    assert progress[-1].status == "degraded"
+    assert runner._checkpoint.hunt is not None
+
+
+def test_reconcile_finding_snapshots_uses_stable_identity():
+    upstream = Finding(
+        id="static-random-a",
+        file="sample.c",
+        extra={"stable_finding_id": "static-semantic"},
+    )
+    restored = Finding(
+        id="static-random-b",
+        file="sample.c",
+        verified=True,
+        extra={"stable_finding_id": "static-semantic"},
+    )
+
+    reconciled = SourceHuntRunner._reconcile_finding_snapshots([upstream], [restored])
+
+    assert reconciled == [restored]
+    assert reconciled[0] is restored
+    assert reconciled[0].verified is True
+
+
+@pytest.mark.asyncio
+async def test_v1_verification_returns_rejected_snapshots_for_resume(tmp_path):
+    source = tmp_path / "sample.c"
+    source.write_text("int sample(void);\n", encoding="utf-8")
+    verifier_llm = _make_verifier_llm()
+    verifier_llm.aask_text.return_value = ChatResponse(
+        content=[
+            {
+                "text": json.dumps(
+                    {
+                        "is_real": False,
+                        "severity": "low",
+                        "evidence_level": "suspicion",
+                        "pro_argument": "weak signal",
+                        "counter_argument": "not attacker controlled",
+                        "tie_breaker": "reject",
+                        "duplicate_cve": None,
+                    }
+                )
+            }
+        ]
+    )
+    runner = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        local_path=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        validator_mode="v1",
+        enable_patch_oracle=False,
+        enable_mechanism_memory=False,
+    )
+    upstream = Finding(
+        id="finding-1",
+        file="sample.c",
+        severity="high",
+        extra={"stable_finding_id": "finding-stable"},
+    )
+
+    verified, rejected, status = await runner._verify_v1(
+        verifier_llm,
+        [upstream],
+        str(tmp_path),
+    )
+
+    assert verified == []
+    assert rejected == [upstream]
+    assert rejected[0].verified is False
+    assert rejected[0].verifier_counter_argument == "not attacker controlled"
+    assert status == "completed"
 
 
 def _ranker_response(files: list[str]) -> str:
@@ -308,12 +587,12 @@ class TestNoVerify:
         assert result.pipeline_status.stages["verifier"].outcome is StageOutcome.SKIPPED
         verifier_llm.aask_text.assert_not_awaited()
 
-        verify_completed = next(
+        verify_skipped = next(
             data
             for stage, status, data in stage_events
-            if stage == "verify" and status == "completed"
+            if stage == "verify" and status == "skipped"
         )
-        assert verify_completed["detail"] == "Verification skipped (--no-verify)"
+        assert verify_skipped["detail"] == "Verification skipped (--no-verify)"
 
         manifest = json.loads(Path(result.output_paths["manifest"]).read_text())
         json_report = json.loads(Path(result.output_paths["json"]).read_text())
@@ -480,6 +759,38 @@ class TestAdversarialVerifierDefault:
 
 
 class TestErrorHandling:
+    def test_file_content_loader_rejects_untrusted_paths_and_large_files(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        source = repo / "source.py"
+        source.write_text("print('safe')\n")
+        (repo / "directory").mkdir()
+        oversized = repo / "oversized.py"
+        oversized.write_bytes(b"x" * (SourceAnalyzer.MAX_FILE_SIZE + 1))
+
+        outside = tmp_path / "outside.py"
+        outside.write_text("secret\n")
+        (repo / "outside-link.py").symlink_to(outside)
+
+        runner = SourceHuntRunner(
+            repo_url=str(repo),
+            local_path=str(repo),
+            depth="quick",
+            output_dir=str(tmp_path / "output"),
+        )
+
+        assert runner._load_file_content(str(repo), Finding(file="source.py")) == "print('safe')\n"
+        rejected = [
+            str(source),
+            "nested/../source.py",
+            "../outside.py",
+            "outside-link.py",
+            "directory",
+            "oversized.py",
+        ]
+        for path in rejected:
+            assert runner._load_file_content(str(repo), Finding(file=path)) == ""
+
     def test_no_llm_at_all_runs_quick_path(self, tmp_path):
         # No ranker LLM, no provider manager — fallback should kick in
         runner = SourceHuntRunner(

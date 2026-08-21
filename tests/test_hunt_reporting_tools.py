@@ -67,3 +67,35 @@ def test_record_finding_allows_different_lines(tools, ctx):
 
     assert "Finding recorded" in result
     assert len(ctx.findings) == 2
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["../outside.c", "/etc/passwd", r"C:\\Windows\\system.ini", "bad\x00.c"],
+)
+def test_record_trace_step_rejects_non_repository_paths(tools, ctx, path):
+    result = tools["record_trace_step"](file=path, line=1, note="invalid")
+
+    assert result.startswith("ERROR: invalid trace-step file path")
+    assert ctx.trace_steps == []
+
+
+def test_invalid_finding_path_preserves_streamed_trace_for_retry(tools, ctx):
+    tools["record_trace_step"](file="app.py", line=42, note="entry")
+
+    result = _record_finding(tools, file="../outside.py")
+
+    assert result.startswith("ERROR: invalid finding file path")
+    assert len(ctx.trace_steps) == 1
+    assert ctx.findings == []
+
+
+def test_record_finding_rejects_invalid_compatibility_trace_path(tools, ctx):
+    result = _record_finding(
+        tools,
+        trace={"steps": [{"file": "/etc/passwd", "line": 1}]},
+    )
+
+    assert result.startswith("ERROR: invalid trace")
+    assert ctx.trace_steps == []
+    assert ctx.findings == []

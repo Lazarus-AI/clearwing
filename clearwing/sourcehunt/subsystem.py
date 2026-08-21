@@ -264,6 +264,7 @@ class SubsystemHuntRunner:
         self.config = config
         self._spent: float = 0.0
         self._subsystems_completed: int = 0
+        self._stop_reasons: list[str] = []
 
     @property
     def total_spent(self) -> float:
@@ -272,6 +273,15 @@ class SubsystemHuntRunner:
     @property
     def subsystems_completed(self) -> int:
         return self._subsystems_completed
+
+    @property
+    def status(self) -> str:
+        """Aggregate the terminal state of every attempted subsystem hunt."""
+        if "budget_exhausted" in self._stop_reasons:
+            return "budget_exhausted"
+        if any(reason != "completed" for reason in self._stop_reasons):
+            return "degraded"
+        return "completed"
 
     async def arun(self) -> list[Finding]:
         """Run all subsystem hunts. Returns merged findings."""
@@ -288,6 +298,7 @@ class SubsystemHuntRunner:
                         "Subsystem %s skipped: total budget exhausted",
                         subsystem.name,
                     )
+                    self._stop_reasons.append("budget_exhausted")
                     return []
                 work_item_id = stable_run_id(
                     "work",
@@ -308,8 +319,9 @@ class SubsystemHuntRunner:
                     )
                 self._spent += cost
                 self._subsystems_completed += 1
+                self._stop_reasons.append(stop)
                 logger.info(
-                    "Subsystem %s completed: %d findings, $%.4f, stop=%s",
+                    "Subsystem %s finished: %d findings, $%.4f, stop=%s",
                     subsystem.name,
                     len(findings),
                     cost,
@@ -330,6 +342,7 @@ class SubsystemHuntRunner:
                 findings = await coro
                 all_findings.extend(findings)
             except BudgetExceeded:
+                self._stop_reasons.append("budget_exhausted")
                 logger.info("Subsystem hunt stopped because the run budget is exhausted")
                 for task in tasks:
                     if not task.done():
@@ -337,6 +350,7 @@ class SubsystemHuntRunner:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 break
             except Exception:
+                self._stop_reasons.append("error")
                 logger.warning("Subsystem hunt task failed", exc_info=True)
 
         return all_findings

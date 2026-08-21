@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from pathlib import PurePosixPath, PureWindowsPath
 
 from pydantic import Field
 
@@ -28,6 +29,25 @@ from clearwing.sourcehunt.state import Finding
 from .sandbox import HunterContext
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_report_path(value: str) -> str:
+    """Validate and normalize one untrusted repo-relative reporting path."""
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("path must be a non-empty string without NUL bytes")
+    posix_path = PurePosixPath(value.replace("\\", "/"))
+    windows_path = PureWindowsPath(value)
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or windows_path.root
+    ):
+        raise ValueError("path must be repository-relative")
+    if not posix_path.parts or ".." in posix_path.parts or ".." in windows_path.parts:
+        raise ValueError("path must not escape the repository")
+    return posix_path.as_posix()
 
 
 class RecordTraceStepInput(ToolInputModel):
@@ -117,6 +137,11 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             code_snippet: Exact code from read_source_file (do NOT fabricate).
             note: Free-form reasoning — role, taint state, assumptions.
         """
+        try:
+            file = _canonical_report_path(file)
+        except ValueError as exc:
+            return f"ERROR: invalid trace-step file path ({exc})."
+
         # The files_read set is only populated by the constrained
         # read_source_file tool. Deep hunters read via read_file/execute
         # (cat/sed/grep), so files_read is not authoritative there — enforcing
@@ -216,15 +241,31 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             trace: Optional compatibility trace or summary. Streamed trace
                 steps take precedence when present.
         """
+        try:
+            file = _canonical_report_path(file)
+        except ValueError as exc:
+            return f"ERROR: invalid finding file path ({exc})."
         if isinstance(trace, str):
-            trace = json.loads(trace)
+            try:
+                trace = json.loads(trace)
+            except (TypeError, ValueError) as exc:
+                return f"ERROR: invalid trace JSON ({exc})."
         explicit_steps = trace.get("steps", []) if trace else []
         try:
-            authoritative_steps = (
-                list(ctx.trace_steps)
+            source_steps = (
+                [step.model_dump() for step in ctx.trace_steps]
                 if ctx.trace_steps
-                else [TraceStep(**step) for step in explicit_steps]
+                else explicit_steps
             )
+            authoritative_steps = [
+                TraceStep(
+                    **{
+                        **step,
+                        "file": _canonical_report_path(step.get("file")),
+                    }
+                )
+                for step in source_steps
+            ]
             if not authoritative_steps:
                 return (
                     "ERROR: record_finding requires at least one trace step. "

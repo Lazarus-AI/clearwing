@@ -410,24 +410,58 @@ def test_native_hunter_default_message():
 
 @pytest.mark.asyncio
 async def test_subsystem_hunt_runner_no_llm():
-    runner = SubsystemHuntRunner(SubsystemHuntConfig(
-        subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
-        repo_path="/tmp",
-        llm=None,
-    ))
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
+            repo_path="/tmp",
+            llm=None,
+        )
+    )
     result = await runner.arun()
     assert result == []
 
 
 @pytest.mark.asyncio
 async def test_subsystem_hunt_runner_no_subsystems():
-    runner = SubsystemHuntRunner(SubsystemHuntConfig(
-        subsystems=[],
-        repo_path="/tmp",
-        llm=MagicMock(),
-    ))
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[],
+            repo_path="/tmp",
+            llm=MagicMock(),
+        )
+    )
     result = await runner.arun()
     assert result == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_status"),
+    [
+        ("completed", "completed"),
+        ("budget_exhausted", "budget_exhausted"),
+        ("max_steps", "degraded"),
+        ("empty_response", "degraded"),
+    ],
+)
+async def test_subsystem_hunt_runner_preserves_terminal_status(
+    monkeypatch, stop_reason, expected_status
+):
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
+            repo_path="/tmp",
+            llm=MagicMock(),
+        )
+    )
+
+    async def run_one(*args, **kwargs):
+        return [], 1.0, 10, stop_reason
+
+    monkeypatch.setattr(runner, "_run_one_subsystem", run_one)
+
+    assert await runner.arun() == []
+    assert runner.status == expected_status
 
 
 # ---------------------------------------------------------------------------
