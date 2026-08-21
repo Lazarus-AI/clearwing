@@ -1332,6 +1332,7 @@ def _handle_machine(descriptor: int) -> int:
                 subsystem_max_files=parsed.get("subsystem_max_files") or None,
                 output_formats=parsed.get("format"),
                 checkpoint=parsed.get("checkpoint"),
+                stop_after=parsed.get("stop_after"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1365,6 +1366,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_max_files",
         "no_per_file_hunt",
         "checkpoint",
+        "stop_after",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -1407,6 +1409,12 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(checkpoint, dict):
             raise ValueError("checkpoint must be a JSON object")
         parsed["checkpoint"] = checkpoint
+    if "stop_after" in value:
+        valid_stages = {"preprocess", "rank", "hunt", "verify"}
+        sa = value["stop_after"]
+        if sa not in valid_stages:
+            raise ValueError(f"stop_after must be one of {sorted(valid_stages)}, got {sa!r}")
+        parsed["stop_after"] = sa
     return parsed
 
 
