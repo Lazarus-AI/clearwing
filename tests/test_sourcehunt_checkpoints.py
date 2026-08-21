@@ -197,6 +197,26 @@ def test_sourcehunt_checkpoint_preserves_checkpoint_instance():
     assert SourceHuntCheckpoint.from_input(checkpoint) is checkpoint
 
 
+def test_sourcehunt_checkpoint_dump_and_from_file_roundtrip(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    _commit(repo)
+    result = _result(repo)
+    preprocess_cp = PreprocessCheckpoint.from_result(result, options=OPTIONS)
+    original = SourceHuntCheckpoint(preprocess=preprocess_cp)
+
+    checkpoint_path = tmp_path / "checkpoints" / "checkpoint.json"
+    original.dump(checkpoint_path)
+
+    assert checkpoint_path.exists()
+
+    restored = SourceHuntCheckpoint.from_file(checkpoint_path)
+    assert restored.preprocess is not None
+    assert restored.preprocess.commit_sha == original.preprocess.commit_sha
+    assert restored.preprocess.options == original.preprocess.options
+
+
 def test_preprocess_checkpoint_rejects_different_options(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()

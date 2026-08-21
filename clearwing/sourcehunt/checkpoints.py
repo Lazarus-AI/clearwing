@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -233,6 +234,18 @@ class SourceHuntCheckpoint(BaseModel):
         if isinstance(value, str):
             return cls.model_validate_json(value)
         return cls.model_validate(value)
+
+    @classmethod
+    def from_file(cls, path: Path) -> SourceHuntCheckpoint:
+        """Load a checkpoint from a JSON file on disk."""
+        return cls.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def dump(self, path: Path) -> None:
+        """Atomically write this checkpoint to *path* as JSON."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def repository_commit_sha(repo_path: str | Path) -> str | None:
