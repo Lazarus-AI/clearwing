@@ -399,7 +399,7 @@ Execution rules:
 - This is a single-file hunt. Start with the target file, not a broad directory listing.
 - Only use list_source_tree when you need to locate a concretely named related file or directory.
 - By step 3, form at least one concrete candidate hypothesis tied to a function, field, buffer, or array.
-- Prefer narrow grep_source/find_callers queries over broad regex sweeps across large directories.
+- Prefer narrow grep_source queries over broad regex sweeps across large directories.
 - If a grep result is dominated by static tables, scan constants, or generic arithmetic noise, refine the query immediately.
 - Keep read_source_file windows tight, usually 40-120 lines around the suspicious code.
 - If a tool result is summarized or truncated, narrow the next request instead of repeating the same broad call.
@@ -417,14 +417,14 @@ Lines of code: {loc}
 Tags: {tags}
 {seeded_crash_block}{semgrep_hints_block}
 You have access to:
-- The cloned source tree (read-only) via read_source_file, list_source_tree, grep_source, find_callers
+- The cloned source tree (read-only) via read_source_file, list_source_tree, grep_source
 - A sandboxed compile + run loop via compile_file, run_with_sanitizer, write_test_case
 - record_finding to log a vulnerability when you find one
 
 Approach:
 1. Read the target file and understand its role in the project.
 2. Identify potential vulnerability patterns (memory safety, logic, injection, auth bypass).
-3. Read related files (callers, callees, headers it includes) for context using grep_source and find_callers.
+3. Read related files (callers, callees, headers it includes) for context using grep_source.
 4. Hypothesize specific vulnerabilities.
 5. If the file has a clear entry point, write a test input via write_test_case and try compile_file + run_with_sanitizer to confirm or reject each hypothesis.
 6. If you find a real bug, call record_finding with:
@@ -717,7 +717,7 @@ Do NOT try to find a traditional vulnerability. Instead, answer these specific q
 
 1. BUFFER SIZE ADEQUACY
    For each buffer size constant or macro, ask: is this big enough for every
-   downstream use? Use grep_source / find_callers to walk the call sites — are
+   downstream use? Use grep_source to walk the call sites — are
    any callers writing more bytes than this constant allows? Any cases where
    this constant is used as a memcpy length but the source data can be larger?
 
@@ -901,6 +901,38 @@ Rules:
   "field==2" but your PoC sets "field=1", you have a contradiction —
   resolve it before calling record_finding.
 - The streamed trace must contain at least one ENTRY step and one SINK step.
+
+## Using callgraph tools for cross-function tracing
+
+When you find a dangerous sink or an interesting entry point, use `lookup_callers`
+and `lookup_callees` to trace data flow across function boundaries:
+
+- **Found a sink?** → `lookup_callers(file, function)` to find who passes data in.
+  Then `read_source_file` on each caller to check whether user input reaches the
+  sink without sanitization.
+- **Found an entry point?** → `lookup_callees(file, function)` to map where user
+  input propagates. Follow the chain until you hit a dangerous operation.
+- **Complex call chains?** → `list_functions(file)` first to orient yourself, then
+  iteratively expand with `lookup_callees`/`lookup_callers` at each hop.
+
+These tools query a pre-built callgraph — they are instant and cheap. Prefer them
+over grepping or guessing at interprocedural flow.
+
+## Verification discipline
+
+Before reading code, build a private queue of every dangerous operation visible
+in the file listing or initial context: sinks, casts, copies, allocations,
+arithmetic on untrusted values, ownership transfers, and boundary crossings.
+Trace each queue entry; do not let a detailed investigation of one erase the
+others from your working set.
+
+When evaluating a potential finding, apply the lossless principle: a source-backed
+lead must survive into your submission unless the actual source AFFIRMATIVELY
+disproves its invariant or reachability. Absence of an external callee, buffer
+declaration, or implementation is uncertainty to record, not affirmative disproof.
+
+Keep different primitive flaws separate. Do not drop a secondary finding merely
+because another nearby candidate seems more severe.
 """
 
 
@@ -922,6 +954,38 @@ Rules:
   "field==2" but your PoC sets "field=1", resolve the contradiction before
   calling record_finding.
 - The streamed trace must contain at least one ENTRY step and one SINK step.
+
+## Using callgraph tools for cross-function tracing
+
+When you find a dangerous sink or an interesting entry point, use `lookup_callers`
+and `lookup_callees` to trace data flow across function boundaries:
+
+- **Found a sink?** → `lookup_callers(file, function)` to find who passes data in.
+  Then `read_file` on each caller to check whether user input reaches the sink
+  without sanitization.
+- **Found an entry point?** → `lookup_callees(file, function)` to map where user
+  input propagates. Follow the chain until you hit a dangerous operation.
+- **Complex call chains?** → `list_functions(file)` first to orient yourself, then
+  iteratively expand with `lookup_callees`/`lookup_callers` at each hop.
+
+These tools query a pre-built callgraph — they are instant and cheap. Prefer them
+over grepping or guessing at interprocedural flow.
+
+## Verification discipline
+
+Before reading code, build a private queue of every dangerous operation visible
+in the file listing or initial context: sinks, casts, copies, allocations,
+arithmetic on untrusted values, ownership transfers, and boundary crossings.
+Trace each queue entry; do not let a detailed investigation of one erase the
+others from your working set.
+
+When evaluating a potential finding, apply the lossless principle: a source-backed
+lead must survive into your submission unless the actual source AFFIRMATIVELY
+disproves its invariant or reachability. Absence of an external callee, buffer
+declaration, or implementation is uncertainty to record, not affirmative disproof.
+
+Keep different primitive flaws separate. Do not drop a secondary finding merely
+because another nearby candidate seems more severe.
 """
 
 
@@ -1377,6 +1441,18 @@ def build_subsystem_hunter_agent(
     )
 
     tools = build_deep_agent_tools(ctx)
+    if callgraph is not None:
+        n_funcs = sum(len(v) for v in callgraph.functions.values())
+        n_edges = sum(len(v) for v in callgraph.calls_out.values())
+        cg_tool_names = [t.name for t in tools if t.name in (
+            "lookup_callers", "lookup_callees", "list_functions", "read_function",
+        )]
+        logger.info(
+            "[%s] callgraph active: functions=%d edges=%d tools=%s",
+            subsystem.root_path, n_funcs, n_edges, cg_tool_names,
+        )
+    else:
+        logger.info("[%s] callgraph NOT available — callgraph tools omitted", subsystem.root_path)
     prompt = _build_subsystem_prompt(
         subsystem,
         project_name,
@@ -1471,9 +1547,29 @@ class NativeHunter:
         flags_raised: int = 0
         empty_response_nudges: int = 0
 
+        synthesis_injected = False
         step = 0
         while True:
             step += 1
+            # Forced fresh synthesis: when approaching the stop boundary,
+            # inject a user message demanding the model consolidate findings
+            # before we cut it off.
+            if not synthesis_injected:
+                near_budget = (
+                    self.budget_usd > 0
+                    and total_cost_usd >= self.budget_usd * 0.75
+                )
+                near_steps = step >= self.max_steps - 1
+                if near_budget or near_steps:
+                    synthesis_injected = True
+                    messages.append(ChatMessage(
+                        "user",
+                        "You are approaching the end of your budget. Synthesize your final "
+                        "findings now. For each lead you investigated, either record_finding "
+                        "if it is source-backed, or discard it only if the source affirmatively "
+                        "disproves it. Do not drop leads merely because you ran out of time "
+                        "to fully verify them — record them with the evidence you have.",
+                    ))
             stop_reason = self._should_stop(step, total_cost_usd)
             if stop_reason:
                 logger.warning(
@@ -1966,18 +2062,35 @@ class NativeHunter:
                     },
                 )
                 logger.info("[%s] $ %s", self.ctx.file_path, cmd[:200])
-            elif tool_call.fn_name in ("lookup_callers", "lookup_callees"):
-                func_name = arguments.get("func_name", "")
+            elif tool_call.fn_name in (
+                "lookup_callers", "lookup_callees", "list_functions", "read_function",
+            ):
+                cg_arg = (
+                    arguments.get("func_name")
+                    or arguments.get("name")
+                    or arguments.get("path", "")
+                )
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
                         "tool_name": tool_call.fn_name,
-                        "func_name": func_name,
+                        "func_name": cg_arg,
                         "hunter_target": self.ctx.file_path,
                         "sandbox_id": sandbox_id,
                     },
                 )
-                logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, func_name)
+                logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, cg_arg)
+                result = await tool.ainvoke(arguments)
+                # Log the callgraph result so --live output shows what came back
+                import json as _json
+                result_str = _json.dumps(result, default=str)
+                if len(result_str) > 2000:
+                    result_str = result_str[:2000] + "..."
+                logger.info(
+                    "[%s] %s(%s) → %s",
+                    self.ctx.file_path, tool_call.fn_name, cg_arg, result_str,
+                )
+                return result
             else:
                 EventBus().emit(
                     EventType.TOOL_START,
@@ -2081,7 +2194,7 @@ def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> 
             return _summarize_read_source(arguments, value)
         return _clip_text(value, 3000)
     if isinstance(value, list):
-        if tool_name in {"grep_source", "find_callers"}:
+        if tool_name == "grep_source":
             return _summarize_match_list(tool_name, value)
         if tool_name == "list_source_tree":
             return _summarize_tree_listing(arguments, value)

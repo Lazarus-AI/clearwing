@@ -1,9 +1,9 @@
 """Read-only filesystem discovery tools for the source-hunt hunter.
 
-Four tools: `read_source_file`, `list_source_tree`, `grep_source`,
-`find_callers`. None of them compile or execute anything — they only
-probe the cloned repo on the host and (for grep) delegate to ripgrep
-inside the sandbox when one is attached.
+Three tools: `read_source_file`, `list_source_tree`, `grep_source`.
+None of them compile or execute anything — they only probe the cloned
+repo on the host and (for grep) delegate to ripgrep inside the sandbox
+when one is attached.
 
 Every path crossing the hunter/host boundary is funneled through
 `_normalize_path` so a tool argument like `../../../etc/passwd` is
@@ -49,8 +49,6 @@ class GrepSourceInput(ToolInputModel):
     file_glob: str = Field(default="", description="Glob filter for filenames, e.g. '*.c'")
 
 
-class FindCallersInput(ToolInputModel):
-    symbol: str = Field(description="Symbol name to search for references to")
 
 
 class SemgrepScanInput(ToolInputModel):
@@ -290,17 +288,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             # Fallback: use Python re on the host file tree (slower but works in tests)
             return _grep_python_fallback(ctx.repo_path, rel, pattern, file_glob)
 
-    def find_callers(symbol: str) -> list[dict]:
-        """Find files/lines that reference a symbol. Wraps grep_source.
-
-        Args:
-            symbol: Function or constant name to search for.
-        """
-        # Word-boundary-ish search on the symbol
-        pattern = rf"\b{re.escape(symbol)}\b"
-        matches: list[dict] = grep_source(pattern=pattern, path=".")
-        return matches
-
     return [
         NativeToolSpec(
             name="read_source_file",
@@ -322,12 +309,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             description="Search the repo with a ripgrep-style regex and return up to 100 matches.",
             schema=GrepSourceInput.model_json_schema(),
             handler=grep_source,
-        ),
-        NativeToolSpec(
-            name="find_callers",
-            description="Find files and lines that reference a symbol.",
-            schema=FindCallersInput.model_json_schema(),
-            handler=find_callers,
         ),
         build_semgrep_tool(ctx),
         *build_potential_tools(ctx),
@@ -383,10 +364,8 @@ def build_semgrep_tool(ctx: HunterContext) -> NativeToolSpec:
     return NativeToolSpec(
         name="semgrep_scan",
         description=(
-            "Run Semgrep static analysis on a repo file or directory. "
-            "Returns findings with file, line, rule ID, severity, and message. "
-            "Clearwing's bundled CWE rules (e.g. CWE-190 integer overflow) are always included. "
-            "Call this early to surface high-signal patterns before reading code."
+            "Run Semgrep static analysis on a file or directory. "
+            "Returns findings with file, line, rule ID, severity, and message."
         ),
         schema=SemgrepScanInput.model_json_schema(),
         handler=semgrep_scan,

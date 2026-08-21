@@ -216,3 +216,186 @@ rules:
       - pattern-not: fprintf($F, "...")
       - pattern-not: sprintf($B, "...")
       - pattern-not: snprintf($B, $S, "...")
+
+  # ── CWE-416: Use after free (from semgrep/semgrep-rules) ─────────────────────
+
+  - id: use-after-free
+    message: >
+      Variable '$VAR' used after being freed. This can lead to heap corruption,
+      code execution, or information disclosure (CWE-416).
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-416"
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: $VAR->$ACCESSOR
+          - pattern: (*$VAR).$ACCESSOR
+          - pattern: $VAR[$NUM]
+      - pattern-inside: |
+          free($VAR);
+          ...
+      - pattern-not-inside: |
+          $VAR = NULL;
+          ...
+      - pattern-not-inside: |
+          free($VAR);
+          ...
+          $VAR = malloc(...);
+          ...
+
+  - id: function-use-after-free
+    message: >
+      Variable '$VAR' passed to a function after being freed. This is a
+      use-after-free that can lead to code execution (CWE-416).
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-416"
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: $FUNC(..., <... $VAR ...>, ...)
+          - pattern: $FUNC(..., <... $VAR->$ACCESSOR ...>, ...)
+          - pattern: $FUNC(..., <... (*$VAR).$ACCESSOR ...>, ...)
+          - pattern: $FUNC(..., <... $VAR[$NUM] ...>, ...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: (?!^free$)
+      - pattern-inside: |
+          free($VAR);
+          ...
+      - pattern-not-inside: |
+          free($VAR);
+          ...
+          $VAR = NULL;
+          ...
+      - pattern-not-inside: |
+          free($VAR);
+          ...
+          $VAR = malloc(...);
+          ...
+
+  # ── CWE-415: Double free (from semgrep/semgrep-rules) ────────────────────────
+
+  - id: double-free
+    message: >
+      Variable '$VAR' freed twice. This can lead to heap corruption and
+      arbitrary code execution (CWE-415).
+    severity: ERROR
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-415"
+      confidence: LOW
+    patterns:
+      - pattern-not: |
+          free($VAR);
+          ...
+          $VAR = NULL;
+          ...
+          free($VAR);
+      - pattern-not: |
+          free($VAR);
+          ...
+          $VAR = malloc(...);
+          ...
+          free($VAR);
+      - pattern-inside: |
+          free($VAR);
+          ...
+          free($VAR);
+
+  # ── CWE-197: Integer truncation in allocation (from CVE-2026-6679 wolfSSL) ──
+
+  - id: c-word16-cast-alloc
+    message: >
+      Potential CWE-197 integer truncation: multiplication or size computation
+      cast to a narrow type (word16/uint16_t) before allocation. If the result
+      exceeds 65535, the allocation is undersized and a subsequent write
+      overflows the heap buffer.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-197"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: (word16)($A * $B)
+      - pattern: (uint16_t)($A * $B)
+      - pattern: |
+          $SIZE = (word16)($EXPR);
+          ...
+          $ALLOC($SIZE, ...);
+      - pattern: |
+          $SIZE = (uint16_t)($EXPR);
+          ...
+          $ALLOC($SIZE, ...);
+
+  # ── CWE-354: AEAD tag length not validated (from CVE-2026-34182 OpenSSL) ────
+
+  - id: c-aead-tag-no-bounds
+    message: >
+      AEAD tag length checked only for > 0 or > max without a minimum bound.
+      An attacker-supplied tag length of 1-3 bytes reduces authentication
+      security to trivial brute-force (CWE-354). Ensure taglen >= 4 (or the
+      algorithm's minimum) before use.
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-354"
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if ($TAG_LEN > 0) { ... }
+          - pattern: |
+              if ($TAG_LEN > $MAX) { ... }
+      - pattern-not: |
+          if ($TAG_LEN < $MIN || ...) { ... }
+
+  # ── CWE-325: Missing cryptographic step on code path (CVE-2026-45445 OpenSSL)
+
+  - id: c-crypto-call-missing-on-path
+    message: >
+      A function that processes cryptographic data does not call a required
+      setup function (e.g. IV initialization, key schedule) visible in sibling
+      code paths. Missing a cryptographic step can lead to nonce reuse, key
+      reuse, or plaintext exposure (CWE-325).
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-325"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          $RET = $CIPHER_FUNC($CTX, $OUT, $IN, $LEN);
+      - pattern-not-inside: |
+          $INIT_FUNC($CTX, ...);
+          ...
+          $RET = $CIPHER_FUNC($CTX, $OUT, $IN, $LEN);
+
+  # ── CWE-122: Validated rect dimensions vs actual copy dimensions mismatch ────
+  # Pattern from CVE-2026-40033 (FreeRDP): validation uses clamped values but
+  # the actual copy operation uses the original unclamped values.
+
+  - id: c-validated-vs-used-mismatch
+    message: >
+      A value is validated (clamped, bounded, checked) but the subsequent
+      operation uses the original unclamped value. The validation is bypassed
+      and the operation can overflow (CWE-122/CWE-787).
+    severity: WARNING
+    languages: [c, cpp]
+    metadata:
+      cwe: "CWE-787"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          $CLAMPED = ...MIN(..., $ORIG, ...);
+          ...
+          $FUNC(..., $ORIG, ...);
+
+  paths:
+    exclude:
+      - "**/test/**"
+      - "**/*_test.c"
+      - "**/*_test.cpp"

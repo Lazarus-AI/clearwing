@@ -1,4 +1,4 @@
-"""Investigation queue tools: flag_potential, get_potentials, dismiss_potential.
+"""Investigation queue tool: flag_potential.
 
 Lets the hunter bookmark suspicious lines without committing to a finding.
 The queue accumulates across file reads so cross-file asymmetries stay visible.
@@ -45,14 +45,6 @@ class FlagPotentialInput(ToolInputModel):
     )
 
 
-class DismissPotentialInput(ToolInputModel):
-    potential_id: str = Field(description="ID returned by flag_potential.")
-    reason: str = Field(
-        description=(
-            "Why this was ruled out — one sentence. "
-            "Example: 'update_iv is called two lines earlier at line 499, inside the same if-block.'"
-        )
-    )
 
 
 def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
@@ -79,17 +71,6 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         logger.info("FLAGGED %s:%d [%s] %s", file, line, priority, note[:120])
         return f"Flagged {file}:{line} as potential [{entry['id']}]. Queue: {open_count} open."
 
-    def get_potentials(**_: object) -> list[dict]:
-        return [p for p in ctx.potentials if p["status"] == "open"]
-
-    def dismiss_potential(potential_id: str, reason: str, **_: object) -> str:
-        for p in ctx.potentials:
-            if p["id"] == potential_id:
-                p["status"] = "dismissed"
-                p["dismiss_reason"] = reason
-                return f"Dismissed [{potential_id}]: {reason}"
-        return f"No open potential with id={potential_id}"
-
     return [
         NativeToolSpec(
             name="flag_potential",
@@ -106,33 +87,5 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             ),
             schema=FlagPotentialInput.model_json_schema(),
             handler=flag_potential,
-        ),
-        NativeToolSpec(
-            name="get_potentials",
-            description=(
-                "Return all open potentials in the investigation queue. "
-                "Call this: (1) before deciding what file to read next — the queue "
-                "may already point at the right place; (2) after reading several files "
-                "to compare leads side by side for asymmetries; (3) before concluding "
-                "the hunt to make sure no flagged lead was left uninvestigated."
-            ),
-            schema={
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "title": "GetPotentialsInput",
-            },
-            handler=get_potentials,
-        ),
-        NativeToolSpec(
-            name="dismiss_potential",
-            description=(
-                "Remove a potential from the queue after ruling it out. "
-                "Call this when you have read enough context to confirm the suspicion "
-                "was a false positive. Requires a one-sentence reason so the decision "
-                "is traceable."
-            ),
-            schema=DismissPotentialInput.model_json_schema(),
-            handler=dismiss_potential,
         ),
     ]

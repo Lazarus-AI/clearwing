@@ -355,7 +355,6 @@ class TestBuildHunterAgent:
             "read_source_file",
             "list_source_tree",
             "grep_source",
-            "find_callers",
             "compile_file",
             "run_with_sanitizer",
             "write_test_case",
@@ -364,8 +363,6 @@ class TestBuildHunterAgent:
             "record_finding",
             "semgrep_scan",
             "flag_potential",
-            "get_potentials",
-            "dismiss_potential",
         }
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
@@ -411,13 +408,10 @@ class TestBuildHunterAgent:
             "read_source_file",
             "list_source_tree",
             "grep_source",
-            "find_callers",
             "record_trace_step",
             "record_finding",
             "semgrep_scan",
             "flag_potential",
-            "get_potentials",
-            "dismiss_potential",
         }
         assert "compile_file" not in tool_names
         assert "run_with_sanitizer" not in tool_names
@@ -563,12 +557,6 @@ class TestHunterToolsHostFallback:
             assert "line_number" in m
             assert "matched_text" in m
 
-    def test_find_callers_wraps_grep(self):
-        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
-        callers = next(t for t in tools if t.name == "find_callers")
-        matches = callers.invoke({"symbol": "MAX_FRAME_BYTES"})
-        assert len(matches) >= 4
 
     def test_grep_source_sandbox_ignores_glob_when_path_is_file(self):
         class _FakeSandbox:

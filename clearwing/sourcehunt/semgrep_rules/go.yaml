@@ -1,0 +1,244 @@
+rules:
+  # ── CWE-863: Cached authorization decisions reused across request scope ──────
+  #
+  # Pattern from CVE-2026-27775 (Gitea): a struct caches a permission check
+  # result (bool field) and short-circuits subsequent checks via that cached
+  # value. If the check is context-dependent (e.g. per-branch, per-resource),
+  # the cached result is stale for different contexts in the same session.
+
+  - id: go-cached-authz-bool-reuse
+    message: >
+      A boolean field appears to cache an authorization decision and is checked
+      before re-evaluating the permission. If the cached result is
+      context-specific (per-resource, per-branch, per-request), reusing it
+      across different contexts constitutes a privilege escalation (CWE-863).
+    severity: WARNING
+    languages: [go]
+    metadata:
+      cwe: "CWE-863"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          if $CTX.$CHECKED_FIELD {
+            return $CTX.$CACHED_FIELD
+          }
+      - metavariable-regex:
+          metavariable: $CHECKED_FIELD
+          regex: "(?i)(checked|cached|verified|done)"
+
+  - id: go-authz-check-missing-resource-param
+    message: >
+      Authorization function called without a resource-specific parameter
+      (branch name, ref, path) in a loop or handler that processes multiple
+      resources. The check may return the same result for all iterations,
+      enabling a bypass via a multi-resource request (CWE-863).
+    severity: WARNING
+    languages: [go]
+    metadata:
+      cwe: "CWE-863"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          for ... {
+            ...
+            $CTX.$CAN_WRITE(...)
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $CAN_WRITE
+          regex: "(?i)(canwrite|canpush|haspermission|checkaccess|assertcan)"
+
+  # ── CWE-22: Path traversal via unsanitized backslashes ────────────────────────
+
+  - id: go-path-join-no-clean
+    message: >
+      filepath.Join or path.Join used with user-supplied input without a
+      subsequent filepath.Clean or containment check. Backslashes or dot-dot
+      segments may traverse outside the intended directory (CWE-22).
+    severity: WARNING
+    languages: [go]
+    metadata:
+      cwe: "CWE-22"
+      confidence: LOW
+    pattern-either:
+      - pattern: filepath.Join($BASE, $UNTRUSTED)
+      - pattern: path.Join($BASE, $UNTRUSTED)
+
+  # ── CWE-295/347: Signature verification that returns true on empty input ─────
+
+  - id: go-verify-empty-return-true
+    message: >
+      Verification function initializes a success variable and iterates over
+      input; if the input is empty, the loop never executes and the function
+      returns success without performing any cryptographic check (CWE-347).
+    severity: ERROR
+    languages: [go]
+    metadata:
+      cwe: "CWE-347"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          $VALID := true
+          for ... {
+            ...
+          }
+          return $VALID
+
+  # ── CWE-362: TOCTOU on shared state without synchronization ──────────────────
+
+  - id: go-toctou-check-then-use
+    message: >
+      A value is read from shared state (map, struct field) and used in a
+      conditional, but the same key/field is read again later without holding
+      a lock between the two reads. The value may change between check and use
+      (CWE-362).
+    severity: WARNING
+    languages: [go]
+    metadata:
+      cwe: "CWE-362"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          if $MAP[$KEY] ... {
+            ...
+            $MAP[$KEY]
+            ...
+          }
+      - pattern-not-inside: |
+          $MU.Lock()
+          ...
+          $MU.Unlock()
+
+  # ── CWE-78: Command injection (from semgrep/semgrep-rules) ─────────────────
+
+  - id: go-dangerous-exec-command
+    message: >
+      OS command constructed with user-controlled input. This can lead to
+      command injection (CWE-78). Use parameterized exec without shell
+      interpolation.
+    severity: ERROR
+    languages: [go]
+    metadata:
+      cwe: "CWE-78"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: ($REQUEST : *http.Request).$ANYTHING
+              - pattern: ($REQUEST : http.Request).$ANYTHING
+          - metavariable-regex:
+              metavariable: $ANYTHING
+              regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+    pattern-sinks:
+      - pattern-either:
+          - pattern: exec.Command($CMD, ...)
+          - pattern: exec.CommandContext($CTX, $CMD, ...)
+          - pattern: syscall.Exec($CMD, ...)
+
+  # ── CWE-89: SQL injection via string formatting ──────────────────────────────
+
+  - id: go-sql-string-formatting
+    message: >
+      SQL query constructed via fmt.Sprintf or string concatenation with
+      user input. Use parameterized queries ($1, ?) instead (CWE-89).
+    severity: ERROR
+    languages: [go]
+    metadata:
+      cwe: "CWE-89"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: ($REQUEST : *http.Request).$ANYTHING
+              - pattern: ($REQUEST : http.Request).$ANYTHING
+          - metavariable-regex:
+              metavariable: $ANYTHING
+              regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fmt.Sprintf("$SQLSTR", ...)
+              - pattern: |
+                  "$SQLSTR" + ...
+          - metavariable-regex:
+              metavariable: $SQLSTR
+              regex: "(?i).*(select|insert|update|delete|drop|alter).*"
+
+  # ── CWE-22: filepath.Clean misuse (from semgrep/semgrep-rules) ──────────────
+
+  - id: go-filepath-clean-misuse
+    message: >
+      filepath.Clean is not a path traversal sanitizer — it only simplifies
+      paths. An attacker can still traverse above the root. Use
+      filepath-securejoin or verify the cleaned path starts with the
+      intended prefix (CWE-22).
+    severity: ERROR
+    languages: [go]
+    metadata:
+      cwe: "CWE-22"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: ($REQUEST : *http.Request).$ANYTHING
+              - pattern: ($REQUEST : http.Request).$ANYTHING
+          - metavariable-regex:
+              metavariable: $ANYTHING
+              regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+    pattern-sinks:
+      - pattern-either:
+          - pattern: filepath.Clean($INPUT)
+          - pattern: path.Clean($INPUT)
+
+  # ── CWE-601: Open redirect (from semgrep/semgrep-rules) ─────────────────────
+
+  - id: go-open-redirect
+    message: >
+      HTTP redirect URL constructed from user input. This can lead to open
+      redirect attacks (CWE-601). Validate the redirect URL against an
+      allowlist of domains.
+    severity: WARNING
+    languages: [go]
+    metadata:
+      cwe: "CWE-601"
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: ($REQUEST : *http.Request).$ANYTHING
+              - pattern: ($REQUEST : http.Request).$ANYTHING
+          - metavariable-regex:
+              metavariable: $ANYTHING
+              regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+    pattern-sinks:
+      - pattern: http.Redirect($W, $REQ, $URL, ...)
+
+  # ── CWE-327: Weak crypto ────────────────────────────────────────────────────
+
+  - id: go-weak-crypto
+    message: >
+      Use of cryptographically broken hash or cipher (MD5, SHA1, DES, RC4).
+      These algorithms are insufficient for security purposes (CWE-327).
+    severity: WARNING
+    languages: [go]
+    metadata:
+      cwe: "CWE-327"
+      confidence: HIGH
+    pattern-either:
+      - pattern: md5.New()
+      - pattern: md5.Sum(...)
+      - pattern: sha1.New()
+      - pattern: sha1.Sum(...)
+      - pattern: des.NewCipher(...)
+      - pattern: rc4.NewCipher(...)
+
+  paths:
+    exclude:
+      - "**/test/**"
+      - "**/*_test.go"
+      - "**/testdata/**"
+      - "**/vendor/**"
