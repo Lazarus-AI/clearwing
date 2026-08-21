@@ -633,6 +633,84 @@ def test_legacy_hunt_checkpoint_defaults_subsystem_status_to_completed():
     assert restored.subsystem_status == "completed"
 
 
+def test_stop_after_hunt_returns_accumulated_hunt_result(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        stop_after="hunt",
+        no_rank=True,
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+        enable_knowledge_graph=False,
+        enable_subsystem_hunt=False,
+    )
+    monkeypatch.setattr(runner, "_ensure_sandbox_factory", lambda *args, **kwargs: None)
+
+    hunt_finding = Finding(id="hunt-1", file="sample.c", severity="high")
+
+    async def fake_hunt(**kwargs):
+        return HuntResult(
+            findings=[hunt_finding],
+            files_hunted=1,
+            spent_per_tier={"A": 1.25, "B": 0.0, "C": 0.0},
+        )
+
+    monkeypatch.setattr(runner, "_hunt", fake_hunt)
+
+    result = runner.run()
+
+    assert [finding.id for finding in result.findings] == ["hunt-1"]
+    assert result.verified_findings == []
+    assert result.exploited_findings == []
+    assert result.files_hunted == 1
+    assert result.spent_per_tier == {"A": 1.25, "B": 0.0, "C": 0.0}
+
+
+def test_stop_after_verify_returns_accumulated_verification_result(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        stop_after="verify",
+        no_rank=True,
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+        enable_knowledge_graph=False,
+        enable_subsystem_hunt=False,
+    )
+    monkeypatch.setattr(runner, "_ensure_sandbox_factory", lambda *args, **kwargs: None)
+
+    hunt_finding = Finding(id="hunt-1", file="sample.c", severity="high")
+    verified_finding = Finding(id="verified-1", file="sample.c", severity="high")
+
+    async def fake_hunt(**kwargs):
+        return HuntResult(
+            findings=[hunt_finding],
+            files_hunted=1,
+            spent_per_tier={"A": 1.25, "B": 0.0, "C": 0.0},
+        )
+
+    async def fake_verify(*args, **kwargs):
+        return VerificationResult(verified=[verified_finding], rejected=[])
+
+    monkeypatch.setattr(runner, "_hunt", fake_hunt)
+    monkeypatch.setattr(runner, "_verify", fake_verify)
+
+    result = runner.run()
+
+    assert [finding.id for finding in result.findings] == ["hunt-1"]
+    assert [finding.id for finding in result.verified_findings] == ["verified-1"]
+    assert result.exploited_findings == []
+    assert result.files_hunted == 1
+
+
 @pytest.mark.asyncio
 async def test_runner_checkpoints_and_restores_verification(tmp_path: Path, monkeypatch):
     finding = Finding(id="finding-1", file="sample.c", severity="high")

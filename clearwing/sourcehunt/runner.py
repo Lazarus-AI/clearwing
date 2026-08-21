@@ -1074,7 +1074,10 @@ class SourceHuntRunner:
             files_ranked = len(files)
             logger.info("Preprocessor enumerated %d files", files_ranked)
             if preprocess_result.callgraph is not None and not preprocess_result.callgraph.empty:
-                logger.info("Callgraph ready  functions=%d", sum(len(v) for v in preprocess_result.callgraph.functions.values()))
+                logger.info(
+                    "Callgraph ready  functions=%d",
+                    sum(len(v) for v in preprocess_result.callgraph.functions.values()),
+                )
             stage_files = [str(file_target.get("path") or "") for file_target in files]
             self._emit_stage(
                 "preprocess",
@@ -1337,11 +1340,30 @@ class SourceHuntRunner:
 
             if self._stop_after == "hunt":
                 logger.info("--stop-after hunt: exiting early")
-                return self._build_quick_result(
+                for stage in ("verify", "exploit"):
+                    self._emit_stage(
+                        stage,
+                        "skipped",
+                        findings_so_far=len(all_findings),
+                        detail="Run stopped after hunt",
+                        files=[str(finding.file or "") for finding in all_findings],
+                        symbols=self._finding_symbols(all_findings),
+                        finding_ids=[finding.id for finding in all_findings],
+                    )
+                return self._finalize_result(
                     start_time=start_time,
                     repo_path=repo_path,
-                    preprocess_result=preprocess_result,
+                    findings=all_findings,
+                    verified=[],
+                    exploited=[],
                     files_ranked=files_ranked,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    findings_pool=findings_pool,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                    subsystem_status=hunt_result.subsystem_status,
                     pipeline_status=pipeline_status,
                 )
 
@@ -1513,11 +1535,29 @@ class SourceHuntRunner:
 
             if self._stop_after == "verify":
                 logger.info("--stop-after verify: exiting early")
-                return self._build_quick_result(
+                self._emit_stage(
+                    "exploit",
+                    "skipped",
+                    findings_so_far=len(all_findings),
+                    detail="Run stopped after verify",
+                    files=[str(finding.file or "") for finding in all_findings],
+                    symbols=self._finding_symbols(all_findings),
+                    finding_ids=[finding.id for finding in all_findings],
+                )
+                return self._finalize_result(
                     start_time=start_time,
                     repo_path=repo_path,
-                    preprocess_result=preprocess_result,
+                    findings=all_findings,
+                    verified=verified,
+                    exploited=[],
                     files_ranked=files_ranked,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    findings_pool=findings_pool,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                    subsystem_status=hunt_result.subsystem_status,
                     pipeline_status=pipeline_status,
                 )
 
@@ -1719,116 +1759,21 @@ class SourceHuntRunner:
                 finding_ids=[finding.id for finding in all_findings],
             )
 
-            # 6. Report
-            self._emit_stage(
-                "report",
-                "started",
-                findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-            )
-            assert self._spend_ledger is not None
-            ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
-            if ledger_tier_spend:
-                spent_per_tier = {
-                    tier: ledger_tier_spend.get(tier, 0.0) for tier in ("A", "B", "C")
-                }
-            ledger_band_spend = self._spend_ledger.spent_by("band", stage="hunt")
-            if band_stats is not None and ledger_band_spend:
-                for band in ("fast", "standard", "deep"):
-                    band_stats[f"{band}_cost"] = ledger_band_spend.get(band, 0.0)
-            ledger_subsystem_spend = self._spend_ledger.spent_by("stage").get("subsystem_hunt", 0.0)
-            if ledger_subsystem_spend:
-                subsystem_spent = ledger_subsystem_spend
-
-            run_status = (
-                "budget_exhausted"
-                if self._budget_exhausted() or hunt_result.subsystem_status == "budget_exhausted"
-                else "completed"
-            )
-            if run_status == "budget_exhausted":
-                pipeline_status.record(
-                    "budget",
-                    StageOutcome.SKIPPED,
-                    fallback_description=(
-                        "Dollar cap reached; partial results retained"
-                        if self._budget_exhausted()
-                        else "Subsystem hunt budget exhausted; partial results retained"
-                    ),
-                )
-            budget_summary = self._finalize_spend_ledger(run_status)
-            _pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
-            _subsystem_stats = (
-                {"subsystems_hunted": subsystems_hunted, "subsystem_spent_usd": subsystem_spent}
-                if subsystems_hunted > 0
-                else None
-            )
-            output_paths = self._write_report(
-                findings=all_findings,
-                verified=verified,
-                spent_per_tier=spent_per_tier,
-                band_stats=band_stats,
-                pool_stats=_pool_stats,
-                subsystem_stats=_subsystem_stats,
-                pipeline_status=pipeline_status,
-                budget_summary=budget_summary,
-            )
-
-            report_status = "degraded" if self._last_reporting_error else "completed"
-            self._emit_stage(
-                "report",
-                report_status,
-                findings_so_far=len(all_findings),
-                cost_usd=budget_summary["total_spent"],
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-                error=self._last_reporting_error,
-            )
-            self._finalize_instrumentation(run_status)
-            output_paths.update(
-                {
-                    "instrumentation": str(self._instrumentation.summary_path),
-                    "instrumentation_events": str(self._instrumentation.events_path),
-                }
-            )
-
-            duration = time.monotonic() - start_time
-            exit_findings = all_findings if self.no_verify else verified
-            return SourceHuntResult(
-                exit_code=(
-                    0
-                    if self._stop_after
-                    else (
-                        3
-                        if run_status == "budget_exhausted"
-                        else self._exit_code(exit_findings)
-                    )
-                ),
-                repo_url=self.repo_url,
+            return self._finalize_result(
+                start_time=start_time,
                 repo_path=repo_path,
                 findings=all_findings,
-                verified_findings=verified,
-                exploited_findings=exploited,
+                verified=verified,
+                exploited=exploited,
                 files_ranked=files_ranked,
                 files_hunted=files_hunted,
-                duration_seconds=round(duration, 2),
-                cost_usd=budget_summary["total_spent"],
                 spent_per_tier=spent_per_tier,
-                tokens_used=budget_summary["total_tokens"],
-                output_paths=output_paths,
-                checkpoint=(
-                    self._checkpoint.model_dump(mode="json")
-                    if self._checkpoint is not None
-                    else None
-                ),
-                session_id=self._session_id,
+                band_stats=band_stats,
+                findings_pool=findings_pool,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
+                subsystem_status=hunt_result.subsystem_status,
                 pipeline_status=pipeline_status,
-                status=run_status,
-                budget_usd=self.budget_usd,
             )
         finally:
             if self._spend_ledger is not None:
@@ -3119,6 +3064,135 @@ class SourceHuntRunner:
             ),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
+            status=run_status,
+            budget_usd=self.budget_usd,
+        )
+
+    def _finalize_result(
+        self,
+        *,
+        start_time: float,
+        repo_path: str,
+        findings: list[Finding],
+        verified: list[Finding],
+        exploited: list[Finding],
+        files_ranked: int,
+        files_hunted: int,
+        spent_per_tier: dict[str, float],
+        band_stats: dict[str, Any] | None,
+        findings_pool: Any,
+        subsystems_hunted: int,
+        subsystem_spent_usd: float,
+        subsystem_status: str,
+        pipeline_status: PipelineStatus,
+    ) -> SourceHuntResult:
+        """Write final outputs and preserve the pipeline state accumulated so far."""
+        finding_files = [str(finding.file or "") for finding in findings]
+        finding_symbols = self._finding_symbols(findings)
+        finding_ids = [finding.id for finding in findings]
+        self._emit_stage(
+            "report",
+            "started",
+            findings_so_far=len(findings),
+            files=finding_files,
+            symbols=finding_symbols,
+            finding_ids=finding_ids,
+        )
+        assert self._spend_ledger is not None
+        ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
+        if ledger_tier_spend:
+            spent_per_tier = {tier: ledger_tier_spend.get(tier, 0.0) for tier in ("A", "B", "C")}
+        ledger_band_spend = self._spend_ledger.spent_by("band", stage="hunt")
+        if band_stats is not None and ledger_band_spend:
+            for band in ("fast", "standard", "deep"):
+                band_stats[f"{band}_cost"] = ledger_band_spend.get(band, 0.0)
+        ledger_subsystem_spend = self._spend_ledger.spent_by("stage").get("subsystem_hunt", 0.0)
+        if ledger_subsystem_spend:
+            subsystem_spent_usd = ledger_subsystem_spend
+
+        run_status = (
+            "budget_exhausted"
+            if self._budget_exhausted() or subsystem_status == "budget_exhausted"
+            else "completed"
+        )
+        if run_status == "budget_exhausted":
+            pipeline_status.record(
+                "budget",
+                StageOutcome.SKIPPED,
+                fallback_description=(
+                    "Dollar cap reached; partial results retained"
+                    if self._budget_exhausted()
+                    else "Subsystem hunt budget exhausted; partial results retained"
+                ),
+            )
+        budget_summary = self._finalize_spend_ledger(run_status)
+        pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
+        subsystem_stats = (
+            {
+                "subsystems_hunted": subsystems_hunted,
+                "subsystem_spent_usd": subsystem_spent_usd,
+            }
+            if subsystems_hunted > 0
+            else None
+        )
+        output_paths = self._write_report(
+            findings=findings,
+            verified=verified,
+            spent_per_tier=spent_per_tier,
+            band_stats=band_stats,
+            pool_stats=pool_stats,
+            subsystem_stats=subsystem_stats,
+            pipeline_status=pipeline_status,
+            budget_summary=budget_summary,
+        )
+        report_status = "degraded" if self._last_reporting_error else "completed"
+        self._emit_stage(
+            "report",
+            report_status,
+            findings_so_far=len(findings),
+            cost_usd=budget_summary["total_spent"],
+            files=finding_files,
+            symbols=finding_symbols,
+            finding_ids=finding_ids,
+            error=self._last_reporting_error,
+        )
+        self._finalize_instrumentation(run_status)
+        output_paths.update(
+            {
+                "instrumentation": str(self._instrumentation.summary_path),
+                "instrumentation_events": str(self._instrumentation.events_path),
+            }
+        )
+
+        return SourceHuntResult(
+            exit_code=(
+                0
+                if self._stop_after
+                else (
+                    3
+                    if run_status == "budget_exhausted"
+                    else self._exit_code(findings if self.no_verify else verified)
+                )
+            ),
+            repo_url=self.repo_url,
+            repo_path=repo_path,
+            findings=findings,
+            verified_findings=verified,
+            exploited_findings=exploited,
+            files_ranked=files_ranked,
+            files_hunted=files_hunted,
+            duration_seconds=round(time.monotonic() - start_time, 2),
+            cost_usd=budget_summary["total_spent"],
+            spent_per_tier=spent_per_tier,
+            tokens_used=budget_summary["total_tokens"],
+            output_paths=output_paths,
+            checkpoint=(
+                self._checkpoint.model_dump(mode="json") if self._checkpoint is not None else None
+            ),
+            session_id=self._session_id,
+            subsystems_hunted=subsystems_hunted,
+            subsystem_spent_usd=subsystem_spent_usd,
+            pipeline_status=pipeline_status,
             status=run_status,
             budget_usd=self.budget_usd,
         )
