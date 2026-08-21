@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from clearwing.core.events import EventBus
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
 
@@ -200,6 +201,10 @@ class Ranker:
                     "Ranker progress %d/%d chunks completed",
                     completed,
                     total_chunks,
+                )
+                EventBus().emit_message(
+                    f"ranking progress  {completed}/{total_chunks} chunks ranked",
+                    "info",
                 )
         except BudgetExceeded:
             for task in tasks:
