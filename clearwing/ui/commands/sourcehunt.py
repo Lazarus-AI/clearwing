@@ -1320,7 +1320,7 @@ def _handle_machine(descriptor: int) -> int:
         request, routing = channel.read_start()
         print(f"sourcehunt machine-fd request fields: {sorted(request)}", file=sys.stderr)
         parsed = _machine_request(request)
-        workspace = channel.workspace or {}
+        workspace = _machine_workspace(channel.workspace)
         install_runtime_routing(routing)
         provider_manager = ProviderManager.from_config(routing)
         result = asyncio.run(
@@ -1361,6 +1361,22 @@ def _handle_machine(descriptor: int) -> int:
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
     finally:
         channel.close()
+
+
+def _machine_workspace(value: dict[str, Any] | None) -> dict[str, str]:
+    """Validate host-owned workspace paths received outside the guest request."""
+    if value is None:
+        return {}
+    allowed = {"local_path", "output_dir", "checkpoint_path"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"unknown workspace field(s): {', '.join(unknown)}")
+    workspace: dict[str, str] = {}
+    for key, path in value.items():
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise ValueError(f"workspace {key} must be an absolute path")
+        workspace[key] = path
+    return workspace
 
 
 def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
