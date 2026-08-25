@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-import os
+import threading
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 from clearwing.core.events import EventBus, EventType
 
-from .phoenix import phoenix_exporter_from_env
 from .metrics import MetricsCollector
-from .tracer import ConsoleExporter, InMemoryExporter, Tracer
+from .otel import configure_telemetry, force_flush, get_tracer, telemetry_configured
 
 logger = logging.getLogger(__name__)
 
@@ -35,48 +35,40 @@ class ObservabilityIntegration:
         print(obs.metrics.format_prometheus())
 
     For env-driven auto-wiring at process startup, prefer
-    :meth:`bootstrap_from_env` — it is a no-op unless Phoenix env vars are set.
+    :meth:`bootstrap_from_env` — it is a no-op unless OTLP export is configured.
     """
 
     # Process-wide singleton established by :meth:`bootstrap_from_env` so
     # startup hooks in the CLI and webui don't double-subscribe. Tests may
     # clear this by calling ``disconnect()``, which unsets the reference.
-    _singleton: ClassVar["ObservabilityIntegration | None"] = None
+    _singleton: ClassVar[ObservabilityIntegration | None] = None
+    _singleton_lock: ClassVar[threading.Lock] = threading.Lock()
 
-    def __init__(self, debug: bool = False, exporters: list = None):
-        if exporters is None:
-            exporters = []
-            if debug:
-                exporters.append(ConsoleExporter())
-            if phoenix_exp := phoenix_exporter_from_env():
-                exporters.append(phoenix_exp)
-        self._in_memory = InMemoryExporter()
-        exporters.append(self._in_memory)
-
-        self.tracer = Tracer(service_name="clearwing", exporters=exporters)
+    def __init__(self, *, exporters: list | None = None):
+        self.provider = configure_telemetry(exporters=exporters)
+        self.tracer = get_tracer("clearwing")
         self.metrics = MetricsCollector()
         self._connected = False
-        self._handlers = {}
+        self._handlers: dict[EventType, Callable[[Any], None]] = {}
 
     @classmethod
-    def bootstrap_from_env(cls) -> "ObservabilityIntegration | None":
-        """Idempotently instantiate + connect when Phoenix env vars are set.
+    def bootstrap_from_env(cls) -> ObservabilityIntegration | None:
+        """Idempotently instantiate and connect when OTLP export is configured.
 
         Returns the shared singleton, or ``None`` if
-        ``PHOENIX_ENDPOINT`` / ``PHOENIX_PROJECT`` are unset. Safe to call
-        from every process entry point (CLI ``main()``, FastAPI
-        ``create_app()``, machine-fd subcommand); subsequent calls return the
-        already-connected instance without re-subscribing to the EventBus.
+        Standard ``OTEL_*`` variables are preferred; Phoenix variables remain
+        compatibility aliases. Safe to call from every process entry point;
+        subsequent calls return the same EventBus integration.
         """
-        if cls._singleton is not None:
-            return cls._singleton
-        if not os.environ.get("PHOENIX_ENDPOINT") or not os.environ.get("PHOENIX_PROJECT"):
+        if not telemetry_configured():
             return None
-        instance = cls()
-        instance.connect()
-        cls._singleton = instance
-        logger.info("ObservabilityIntegration bootstrapped from env")
-        return instance
+        with cls._singleton_lock:
+            if cls._singleton is None:
+                instance = cls()
+                instance.connect()
+                cls._singleton = instance
+                logger.info("ObservabilityIntegration bootstrapped from env")
+            return cls._singleton
 
     def connect(self) -> None:
         """Subscribe to EventBus events."""
@@ -96,7 +88,6 @@ class ObservabilityIntegration:
             bus.subscribe(event_type, handler)
 
         self._connected = True
-        self.tracer.new_trace()
 
     def disconnect(self) -> None:
         """Unsubscribe from EventBus events and flush."""
@@ -107,17 +98,12 @@ class ObservabilityIntegration:
         for event_type, handler in self._handlers.items():
             bus.unsubscribe(event_type, handler)
 
-        self.tracer.shutdown()
+        force_flush()
         self._connected = False
         # Release the bootstrap singleton so a follow-up bootstrap can create
         # a fresh instance (primarily useful for tests).
         if type(self)._singleton is self:
             type(self)._singleton = None
-
-    @property
-    def spans(self) -> list:
-        """Get all recorded spans."""
-        return self._in_memory.get_spans()
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -148,37 +134,11 @@ class ObservabilityIntegration:
         model = data.get("model", "unknown")
         input_tokens = int(data.get("input_tokens", 0) or 0)
         output_tokens = int(data.get("output_tokens", 0) or 0)
-        cached_tokens = int(data.get("cached_tokens", 0) or 0)
-
         self.metrics.increment("llm_calls_total", labels={"model": model})
         self.metrics.increment("input_tokens_total", value=float(input_tokens))
         self.metrics.increment("output_tokens_total", value=float(output_tokens))
         self.metrics.set_gauge("total_cost_usd", data.get("total_cost_usd", 0.0))
 
-        # Emit a synthetic span so Arize Phoenix sees per-call LLM telemetry.
-        # Attribute names follow the OpenInference semantic conventions —
-        # https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md
-        # — so Phoenix renders the span in its LLM view rather than as a
-        # generic "internal" span.
-        import time
-
-        now = time.time()
-        elapsed_ms = data.get("elapsed_ms", 0) or 0
-        elapsed_s = elapsed_ms / 1000.0
-        attributes = {
-            "openinference.span.kind": "LLM",
-            "llm.model_name": model,
-            "llm.provider": data.get("provider", "unknown"),
-            "llm.token_count.prompt": input_tokens,
-            "llm.token_count.completion": output_tokens,
-            "llm.token_count.total": input_tokens + output_tokens,
-            "llm.token_count.cached": cached_tokens,
-            "llm.cost_usd": data.get("total_cost_usd", 0.0),
-        }
-        with self.tracer.span("llm_call", attributes=attributes) as s:
-            # Backdate start so the span duration reflects actual call latency.
-            if elapsed_s > 0:
-                s.start_time = now - elapsed_s
 
     def _on_flag_found(self, data: Any) -> None:
         self.metrics.increment("flags_found_total")

@@ -118,7 +118,7 @@ class CostTracker:
         *,
         elapsed_ms: float | None = None,
         provider: str | None = None,
-    ) -> None:
+    ) -> float:
         """Record token usage for a single LLM call and update the running cost.
 
         If *model* is not present in the pricing table the default Sonnet
@@ -128,8 +128,8 @@ class CostTracker:
 
         ``elapsed_ms`` (wall-clock latency of the call) and ``provider`` are
         optional; when supplied they ride along in the ``COST_UPDATE`` payload
-        so ``ObservabilityIntegration`` can attach them to the synthetic
-        Phoenix LLM span. Keyword-only to keep call sites explicit and future
+        for UI and metrics consumers. OTel spans are emitted directly at the
+        LLM boundary. Keyword-only to keep call sites explicit and future
         additions non-breaking.
         """
         cost = self.estimate_cost(input_tokens, output_tokens, model, cached_tokens)
@@ -155,6 +155,7 @@ class CostTracker:
             )
         except Exception:
             pass  # telemetry should never break the caller
+        return cost
 
     def record_tool_call(self, tool_name: str, duration_ms: int) -> None:
         """Record a tool invocation and its wall-clock duration."""

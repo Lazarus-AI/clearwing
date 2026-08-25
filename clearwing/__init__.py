@@ -12,10 +12,12 @@ def main():
     from .observability.integration import ObservabilityIntegration
     from .ui.cli import CLI
 
-    # Auto-wire Phoenix / OTLP tracing when PHOENIX_ENDPOINT is set. No-op
-    # otherwise, so plain `clearwing …` invocations without the env vars pay
-    # zero cost.
-    ObservabilityIntegration.bootstrap_from_env()
-
-    cli = CLI()
-    cli.run()
+    # Auto-wire standard OTLP tracing when configured. Phoenix environment
+    # variables remain accepted as compatibility aliases.
+    observability = ObservabilityIntegration.bootstrap_from_env()
+    try:
+        cli = CLI()
+        cli.run()
+    finally:
+        if observability is not None:
+            observability.disconnect()

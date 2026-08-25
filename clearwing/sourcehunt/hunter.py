@@ -34,6 +34,7 @@ from clearwing.llm import (
     last_finish_reason,
 )
 from clearwing.llm.budget import spend_metadata
+from clearwing.observability.otel import get_oi_tracer, llm_span, record_llm_result
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
@@ -41,6 +42,7 @@ from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
 
 
 
@@ -1441,6 +1443,7 @@ class NativeHunter:
             return "max_steps"
         return None
 
+    @tracer.agent(name="sourcehunt.hunter")
     async def arun(self) -> HunterRunResult:
         user_msg = (
             self.initial_user_message
@@ -1537,16 +1540,34 @@ class NativeHunter:
                     messages = await self.summarizer.summarize(messages, self.llm)
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
-                import time as _time
-
-                _llm_start = _time.perf_counter()
-                response = await self.llm.achat(
-                    messages=messages,
-                    system=self.prompt,
-                    tools=self.tools,
-                    max_tokens=24000,
-                )
-                _llm_elapsed_ms = (_time.perf_counter() - _llm_start) * 1000.0
+                provider_name = getattr(self.llm, "provider_name", None)
+                with llm_span(model=self.llm.model_name, provider=provider_name) as span:
+                    response = await self.llm.achat(
+                        messages=messages,
+                        system=self.prompt,
+                        tools=self.tools,
+                        max_tokens=24000,
+                    )
+                    input_tokens = response.usage.prompt_tokens or 0
+                    output_tokens = response.usage.completion_tokens or 0
+                    details = getattr(response.usage, "prompt_tokens_details", None)
+                    cached_tokens = (
+                        (getattr(details, "cached_tokens", None) or 0) if details else 0
+                    )
+                    call_cost = _estimate_cost_usd(
+                        input_tokens,
+                        output_tokens,
+                        self.llm.model_name,
+                        cached_tokens,
+                    )
+                    record_llm_result(
+                        span,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_tokens=cached_tokens,
+                        cost_usd=call_cost,
+                        response_model=response.provider_model_name,
+                    )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate
@@ -1579,26 +1600,16 @@ class NativeHunter:
             # Older genai-pyo3 responses and lightweight test doubles may not
             # expose prompt_tokens_details at all. Treat that the same as a
             # response where nothing was cache-served.
-            details = getattr(response.usage, "prompt_tokens_details", None)
-            cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
-            _prompt_toks = response.usage.prompt_tokens or 0
-            _completion_toks = response.usage.completion_tokens or 0
-            total_cost_usd += _estimate_cost_usd(
-                _prompt_toks,
-                _completion_toks,
-                self.llm.model_name,
-                cached_tokens,
-            )
-            # Also push through the singleton so ObservabilityIntegration
-            # emits a Phoenix LLM span for this hunter call.
-            if _prompt_toks or _completion_toks:
+            total_cost_usd += call_cost
+            # Keep process-wide cost/UI metrics separate from the OTel span,
+            # which is emitted directly around the model request above.
+            if input_tokens or output_tokens:
                 CostTracker().record_llm_call(
-                    _prompt_toks,
-                    _completion_toks,
+                    input_tokens,
+                    output_tokens,
                     self.llm.model_name,
                     cached_tokens=cached_tokens,
-                    elapsed_ms=_llm_elapsed_ms,
-                    provider=getattr(self.llm, "provider_name", None),
+                    provider=provider_name,
                 )
 
             last_assistant_text = response.first_text or ""

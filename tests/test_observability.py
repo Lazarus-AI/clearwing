@@ -352,11 +352,6 @@ class TestObservabilityIntegration:
         assert obs.metrics is not None
         assert obs._connected is False
 
-    def test_init_debug(self):
-        obs = ObservabilityIntegration(debug=True)
-        # Should have ConsoleExporter + InMemoryExporter
-        assert len(obs.tracer._exporters) == 2
-
     def test_connect_disconnect(self):
         obs = ObservabilityIntegration()
         obs.connect()
@@ -431,66 +426,10 @@ class TestObservabilityIntegration:
         obs._on_error({"error": "something broke"})
         assert obs.metrics.get_counter("errors_total") == 1.0
 
-    def test_spans_property(self):
-        obs = ObservabilityIntegration()
-        assert obs.spans == []
-
-    def test_phoenix_disabled_by_default(self):
-        """PhoenixExporter not attached when env vars absent."""
-        obs = ObservabilityIntegration()
-        # Only InMemoryExporter present (no Phoenix without PHOENIX_ENDPOINT)
-        assert len(obs.tracer._exporters) == 1
-
-    def test_cost_update_emits_llm_span(self):
-        """cost_update event creates an llm_call span with OpenInference attrs."""
-        obs = ObservabilityIntegration()
-        obs._on_cost_update({
-            "model": "claude-opus-4-6",
-            "provider": "anthropic",
-            "input_tokens": 2000,
-            "output_tokens": 400,
-            "cached_tokens": 500,
-            "total_cost_usd": 0.12,
-            "elapsed_ms": 1500,
-        })
-        obs.tracer.flush()
-        llm_spans = obs._in_memory.get_spans("llm_call")
-        assert len(llm_spans) == 1
-        s = llm_spans[0]
-        # OpenInference semantic conventions:
-        # https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md
-        assert s.attributes["openinference.span.kind"] == "LLM"
-        assert s.attributes["llm.model_name"] == "claude-opus-4-6"
-        assert s.attributes["llm.provider"] == "anthropic"
-        assert s.attributes["llm.token_count.prompt"] == 2000
-        assert s.attributes["llm.token_count.completion"] == 400
-        assert s.attributes["llm.token_count.total"] == 2400
-        assert s.attributes["llm.token_count.cached"] == 500
-        assert s.attributes["llm.cost_usd"] == 0.12
-
-    def test_cost_update_records_elapsed_and_provider(self):
-        """The emitted LLM span's duration reflects elapsed_ms."""
-        obs = ObservabilityIntegration()
-        obs._on_cost_update({
-            "model": "claude-sonnet-4-6",
-            "provider": "anthropic",
-            "input_tokens": 100,
-            "output_tokens": 50,
-            "total_cost_usd": 0.001,
-            "elapsed_ms": 1234,
-        })
-        obs.tracer.flush()
-        llm_spans = obs._in_memory.get_spans("llm_call")
-        assert len(llm_spans) == 1
-        s = llm_spans[0]
-        assert s.attributes["llm.provider"] == "anthropic"
-        # duration_ms should be within a small tolerance of elapsed_ms (span
-        # closed roughly at "now"; start backdated by elapsed_ms).
-        assert abs(s.duration_ms - 1234) < 500
-
     def test_bootstrap_from_env_noop_without_endpoint(self, monkeypatch):
         monkeypatch.delenv("PHOENIX_ENDPOINT", raising=False)
         monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
         # Clear any singleton left over from a prior test.
         if ObservabilityIntegration._singleton is not None:
             ObservabilityIntegration._singleton.disconnect()
@@ -499,6 +438,9 @@ class TestObservabilityIntegration:
         assert ObservabilityIntegration._singleton is None
 
     def test_bootstrap_from_env_connects_when_endpoint_set(self, monkeypatch):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        monkeypatch.setattr("clearwing.observability.otel._otlp_exporter", InMemorySpanExporter)
         monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
         monkeypatch.setenv("PHOENIX_PROJECT", "clearwing-test")
         if ObservabilityIntegration._singleton is not None:
@@ -514,6 +456,9 @@ class TestObservabilityIntegration:
                 first.disconnect()
 
     def test_bootstrap_from_env_disconnect_cleans_up(self, monkeypatch):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        monkeypatch.setattr("clearwing.observability.otel._otlp_exporter", InMemorySpanExporter)
         monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
         monkeypatch.setenv("PHOENIX_PROJECT", "clearwing-test")
         if ObservabilityIntegration._singleton is not None:
@@ -529,73 +474,3 @@ class TestObservabilityIntegration:
         finally:
             if second is not None:
                 second.disconnect()
-
-    def test_phoenix_span_kind_derived_from_openinference(self):
-        """PhoenixExporter's _to_readable_span picks OTel kind from attrs."""
-        from opentelemetry.trace import SpanKind
-
-        from clearwing.observability.phoenix import _span_kind_from_openinference
-        from clearwing.observability.tracer import Span
-
-        llm_span = Span(
-            trace_id="t1",
-            span_id="s1",
-            name="llm_call",
-            attributes={"openinference.span.kind": "LLM"},
-        )
-        assert _span_kind_from_openinference(llm_span) == SpanKind.CLIENT
-
-        tool_span = Span(
-            trace_id="t1",
-            span_id="s2",
-            name="tool",
-            attributes={"openinference.span.kind": "TOOL"},
-        )
-        assert _span_kind_from_openinference(tool_span) == SpanKind.CLIENT
-
-        chain_span = Span(
-            trace_id="t1",
-            span_id="s3",
-            name="chain",
-            attributes={"openinference.span.kind": "CHAIN"},
-        )
-        assert _span_kind_from_openinference(chain_span) == SpanKind.INTERNAL
-
-        unset_span = Span(trace_id="t1", span_id="s4", name="unset")
-        assert _span_kind_from_openinference(unset_span) == SpanKind.INTERNAL
-
-
-# ---------------------------------------------------------------------------
-# PhoenixExporter tests
-# ---------------------------------------------------------------------------
-
-
-class TestPhoenixExporter:
-    def test_construct(self):
-        from clearwing.observability.phoenix import PhoenixExporter
-
-        exporter = PhoenixExporter(endpoint="http://localhost:6006", project_name="test")
-        exporter.shutdown()
-
-    def test_from_env_returns_none_without_endpoint(self, monkeypatch):
-        from clearwing.observability.phoenix import phoenix_exporter_from_env
-
-        monkeypatch.delenv("PHOENIX_ENDPOINT", raising=False)
-        monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
-        assert phoenix_exporter_from_env() is None
-
-    def test_from_env_returns_none_without_project(self, monkeypatch):
-        from clearwing.observability.phoenix import phoenix_exporter_from_env
-
-        monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
-        monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
-        assert phoenix_exporter_from_env() is None
-
-    def test_from_env_returns_exporter_when_both_set(self, monkeypatch):
-        from clearwing.observability.phoenix import phoenix_exporter_from_env
-
-        monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
-        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing")
-        exporter = phoenix_exporter_from_env()
-        assert exporter is not None
-        exporter.shutdown()

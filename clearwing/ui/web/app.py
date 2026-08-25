@@ -55,8 +55,8 @@ def create_app():
         allow_headers=["*"],
     )
 
-    # Auto-wire Phoenix / OTLP tracing when PHOENIX_ENDPOINT is set. Flush the
-    # OTel batch processor on graceful shutdown so nothing gets dropped.
+    # Auto-wire standard OTLP tracing when configured and flush the SDK batch
+    # processor on graceful shutdown so nothing gets dropped.
     _obs = ObservabilityIntegration.bootstrap_from_env()
     if _obs is not None:
         @app.on_event("shutdown")
