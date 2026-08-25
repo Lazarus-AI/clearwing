@@ -46,8 +46,10 @@ class ExecuteInput(ToolInputModel):
 
 class ReadFileInput(ToolInputModel):
     path: str = Field(description="Absolute path in the container.")
-    offset: int = Field(default=0, description="Line offset (0-based, default 0).")
-    limit: int = Field(default=2000, description="Max lines to return (default 2000).")
+    offset: int = Field(default=0, description="Line offset (0-based, default 0). Or use start_line (1-based).")
+    limit: int = Field(default=2000, description="Max lines to return (default 2000). Or use end_line with start_line.")
+    start_line: int | None = Field(default=None, description="Alias — 1-based line number to start at. Overrides offset if set.")
+    end_line: int | None = Field(default=None, description="Alias — 1-based inclusive end line. Requires start_line.")
 
 
 class WriteFileInput(ToolInputModel):
@@ -125,12 +127,30 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "duration_seconds": round(result.duration_seconds, 2),
         }
 
-    def read_file(path: str, offset: int = 0, limit: int = 2000, **_: object) -> str:
+    def read_file(
+        path: str,
+        offset: int = 0,
+        limit: int = 2000,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        **_: object,
+    ) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
+        # Accept both idioms. Model naturally reaches for start_line/end_line
+        # (the prompt used to advertise them); swallowing them via **_ made the
+        # tool silently return lines 1-2000 and looked like a tool bug.
+        if start_line is not None:
+            offset = start_line - 1
+            if end_line is not None:
+                limit = max(1, end_line - start_line + 1)
         start = offset + 1
         end = offset + limit
-
+        # Previously this was `sed ... | cat -n`, which numbers output
+        # starting from 1 regardless of offset — a hunter asking for
+        # lines 101-150 got back "line 1..line 50" and then reasoned
+        # about the wrong line numbers when reporting findings. Use awk
+        # with NR directly so the emitted line numbers match the file.
         cmd = (
             f"awk -v s={start} -v e={end} "
             f"'NR>=s && NR<=e {{ printf \"%6d\\t%s\\n\", NR, $0 }}' "
@@ -139,13 +159,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
             return f"error reading {path}: {result.stderr.strip()}"
-
-        output = result.stdout
-        lines_returned = output.count("\n")
-        if lines_returned >= limit:
-            next_offset = offset + limit
-            output += f"\n[continues — next: read_file(\"{path}\", offset={next_offset})]"
-        return output
+        return result.stdout
 
     def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:
@@ -297,8 +311,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         NativeToolSpec(
             name="read_file",
             description=(
-                "Read lines from a file. Most files fit in one call (limit=2000). "
-                "For large files, read sequentially — the tool suggests the next offset."
+                "Read lines from a file in the container. "
+                "Parameters: path (required), offset (line offset, default 0), "
+                "limit (max lines, default 2000). No other parameters exist."
             ),
             schema=ReadFileInput.model_json_schema(),
             handler=read_file,
