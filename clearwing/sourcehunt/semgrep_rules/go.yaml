@@ -48,22 +48,6 @@ rules:
           metavariable: $CAN_WRITE
           regex: "(?i)(canwrite|canpush|haspermission|checkaccess|assertcan)"
 
-  # ── CWE-22: Path traversal via unsanitized backslashes ────────────────────────
-
-  - id: go-path-join-no-clean
-    message: >
-      filepath.Join or path.Join used with user-supplied input without a
-      subsequent filepath.Clean or containment check. Backslashes or dot-dot
-      segments may traverse outside the intended directory (CWE-22).
-    severity: WARNING
-    languages: [go]
-    metadata:
-      cwe: "CWE-22"
-      confidence: LOW
-    pattern-either:
-      - pattern: filepath.Join($BASE, $UNTRUSTED)
-      - pattern: path.Join($BASE, $UNTRUSTED)
-
   # ── CWE-295/347: Signature verification that returns true on empty input ─────
 
   - id: go-verify-empty-return-true
@@ -216,23 +200,3 @@ rules:
               regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
     pattern-sinks:
       - pattern: http.Redirect($W, $REQ, $URL, ...)
-
-  # ── CWE-327: Weak crypto ────────────────────────────────────────────────────
-
-  - id: go-weak-crypto
-    message: >
-      Use of cryptographically broken hash or cipher (MD5, SHA1, DES, RC4).
-      These algorithms are insufficient for security purposes (CWE-327).
-    severity: WARNING
-    languages: [go]
-    metadata:
-      cwe: "CWE-327"
-      confidence: HIGH
-    pattern-either:
-      - pattern: md5.New()
-      - pattern: md5.Sum(...)
-      - pattern: sha1.New()
-      - pattern: sha1.Sum(...)
-      - pattern: des.NewCipher(...)
-      - pattern: rc4.NewCipher(...)
-

@@ -153,16 +153,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             f" ({function})" if function else "",
             f" — {note[:120]}" if note else "",
         )
-        # Echo the full accumulated trace back into the conversation so the
-        # growing dataflow path stays part of the message sequence the model
-        # reasons over before calling record_finding.
-        lines = [f"Trace step {n} recorded. Trace so far ({n} step(s)):"]
-        for i, s in enumerate(ctx.trace_steps, 1):
-            loc = f"{s.file}:{s.line}"
-            fn = f" {s.function}()" if s.function else ""
-            note_str = f" — {s.note}" if s.note else ""
-            lines.append(f"  {i}. {loc}{fn}{note_str}")
-        return "\n".join(lines)
+        return f"Trace step {n} recorded."
 
     def record_finding(
         file: str,

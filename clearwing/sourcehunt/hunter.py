@@ -396,25 +396,16 @@ reconsider whether the bug is real or interesting."""
 
 HUNTER_EXECUTION_RULES = """
 Execution rules:
-- Start with find_security_issues on the target file, then read the flagged lines.
+- This is a single-file hunt. Start with the target file, not a broad directory listing.
+- Only use list_source_tree when you need to locate a concretely named related file or directory.
 - By step 3, form at least one concrete candidate hypothesis tied to a function, field, buffer, or array.
 - Prefer narrow grep_source queries over broad regex sweeps across large directories.
+- If a grep result is dominated by static tables, scan constants, or generic arithmetic noise, refine the query immediately.
 - Keep read_source_file windows tight, usually 40-120 lines around the suspicious code.
+- If a tool result is summarized or truncated, narrow the next request instead of repeating the same broad call.
 - Once you have a plausible candidate, validate it with compile/run/fuzz tools when realistic, or explain exactly why static evidence is sufficient.
+- Do not spend the final step on marginal confirmation. If the mechanism is already coherent, use record_finding.
 - By the last 2 steps, either call record_finding or state explicitly why the evidence is still insufficient.
-
-Example investigation (ideal flow):
-
-  1. find_security_issues("src/parser/decode.c")
-     → returns: line 87 CWE-787, line 203 CWE-190
-  2. read_source_file("src/parser/decode.c", start_line=80, end_line=100)
-     → sees memcpy with user-supplied length
-  3. flag_potential(file="src/parser/decode.c", line=87, note="memcpy length from untrusted header field", hypothesis="CWE-120 heap overflow")
-  4. grep_source("parse_header", path="src/parser/")
-     → finds caller in src/parser/input.c:44
-  5. read_source_file("src/parser/input.c", start_line=30, end_line=60)
-     → confirms: length read from network packet, no bounds check before passing to decode
-  6. record_finding(file="src/parser/decode.c", line_number=87, ...)
 """
 
 
@@ -931,38 +922,6 @@ Rules:
   "field==2" but your PoC sets "field=1", resolve the contradiction before
   calling record_finding.
 - The streamed trace must contain at least one ENTRY step and one SINK step.
-
-## Using callgraph tools for cross-function tracing
-
-When you find a dangerous sink or an interesting entry point, use `lookup_callers`
-and `lookup_callees` to trace data flow across function boundaries:
-
-- **Found a sink?** → `lookup_callers(file, function)` to find who passes data in.
-  Then `read_file` on each caller to check whether user input reaches the sink
-  without sanitization.
-- **Found an entry point?** → `lookup_callees(file, function)` to map where user
-  input propagates. Follow the chain until you hit a dangerous operation.
-- **Complex call chains?** → `list_functions(file)` first to orient yourself, then
-  iteratively expand with `lookup_callees`/`lookup_callers` at each hop.
-
-These tools query a pre-built callgraph — they are instant and cheap. Prefer them
-over grepping or guessing at interprocedural flow.
-
-## Verification discipline
-
-Before reading code, build a private queue of every dangerous operation visible
-in the file listing or initial context: sinks, casts, copies, allocations,
-arithmetic on untrusted values, ownership transfers, and boundary crossings.
-Trace each queue entry; do not let a detailed investigation of one erase the
-others from your working set.
-
-When evaluating a potential finding, apply the lossless principle: a source-backed
-lead must survive into your submission unless the actual source AFFIRMATIVELY
-disproves its invariant or reachability. Absence of an external callee, buffer
-declaration, or implementation is uncertainty to record, not affirmative disproof.
-
-Keep different primitive flaws separate. Do not drop a secondary finding merely
-because another nearby candidate seems more severe.
 """
 
 
@@ -1037,17 +996,10 @@ The source tree at /workspace is a writable copy — modify source, add debug pr
 ASan is enabled by default. UBSan is also available.
 
 Tools:
-- find_security_issues(path): Scan for known vulnerability patterns. Start here.
-- get_threat_context(pattern): Get expert knowledge on what goes wrong with a code pattern (e.g. "parser", "crypto", "auth_check").
 - execute(command): Run any shell command. gcc, gdb, strace, valgrind, make are all available.
-- read_file(path, limit=2000): Read a file. Use large ranges — most files fit in one read (limit=2000). Do NOT scroll in overlapping 500-line chunks.
+- read_file(path): Read a file from the container.
 - write_file(path, contents): Write a file in the container.
-- lookup_callers(func_name): Find every function that calls func_name.
-- lookup_callees(func_name): Find every function called by func_name.
-- read_function(name): Read a function body by exact name.
-- flag_potential(file, line, note, hypothesis): Bookmark a suspicious line for later.
-- dismiss_potential(potential_id, resolution): Remove a lead only when source evidence rules it out.
-- record_trace_step(file, line, function, note): Record one step in the vulnerability dataflow trace.
+- record_trace_step(file, line, function, code_snippet, note): Record one step in the vulnerability dataflow trace as you read code. Build the trace incrementally from attacker entry to sink.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
 
 Project: {project_name}
@@ -1055,57 +1007,8 @@ File: {file_path}
 Language: {language}
 Tags: {tags}
 {seeded_crash_block}{semgrep_hints_block}{specialist_focus}
-Strategy: SCAN BROADLY, THEN DIG DEEP.
-Do NOT hyper-focus on the first interesting line you see. First do a cursory sweep of the whole file to identify ALL candidate spots, then prioritize and investigate the strongest leads.
-
-Phase 1 — Survey (first 3-5 tool calls):
-  - find_security_issues on the file
-  - get_threat_context for the code pattern
-  - Skim the file structure (read_file or list_functions) to understand what it does
-  - flag_potential for every suspicious spot you notice
-  - If you don't know what a function does and can't determine its behavior from
-    context, flag it with priority="unknown" — e.g. "don't know what
-    wc_ecc_verify_hash_ex does or what it returns"
-
-Phase 2 — Trace backward from sink to source (remaining budget):
-  - Pick the highest-confidence flagged potential (the SINK)
-  - lookup_callers(sink_function) → who passes data in?
-  - lookup_callers(caller) → chain backward until you hit a public entry point
-  - read_function on each node to confirm data flows through unchecked
-  - record_finding with the full trace once you have source→sink evidence
-  - Move to the next flagged potential if time remains
-
-Build the trace BACKWARD (sink → source) using callgraph tools. Do NOT scroll
-through large files hoping to spot connections — use lookup_callers/lookup_callees
-to navigate, and read_function for targeted confirmation.
-
-When you find a vulnerability, call record_finding then move on. Don't re-verify recorded findings. Partial results are valuable — if you find a primitive but can't build a full exploit, record it anyway.
-
-Example investigation (ideal flow):
-
-  1. find_security_issues("/workspace/src/parser/decode.c")
-     → returns: line 87 CWE-787, line 203 CWE-190
-  2. get_threat_context("parser")
-     → returns: expert brief on parser vulns — length fields, integer overflow in sizes, etc.
-  3. flag_potential(file="src/parser/decode.c", line=87, hypothesis="CWE-120 heap overflow")
-  4. read_function("decode_frame")
-     → sees memcpy with user-supplied length at line 87
-  5. lookup_callers("decode_frame")
-     → finds caller parse_input_packet in src/parser/input.c
-  6. read_function("parse_input_packet")
-     → confirms: length from network, no bounds check before calling decode_frame
-  7. lookup_callers("parse_input_packet")
-     → called from handle_connection (entry point, attacker-controlled)
-  8. record_finding(file="src/parser/decode.c", line_number=87, ...)
-
+When you find a vulnerability, call record_finding. Partial results are valuable — if you find a primitive but can't build a full exploit, record it anyway.
 If you find nothing after thorough analysis, say so explicitly.
-
-Potential tracking:
-  - If source evidence affirmatively rules out a flagged lead, call
-    dismiss_potential with a resolution explaining why it is safe.
-  - Do not dismiss an inconclusive lead. Remaining potentials are preserved as
-    unresolved SITREP items, not reported as vulnerabilities.
-  - When you confirm a vulnerability, call record_finding.
 """
 
 _DEEP_SPECIALIST_FOCUS = {

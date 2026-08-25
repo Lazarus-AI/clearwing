@@ -1324,10 +1324,6 @@ class SourceHuntRunner:
                 except Exception:
                     logger.debug("Behavior monitor failed", exc_info=True)
 
-            # Promote static findings into the all_findings list so depth=quick
-            # output is still useful when no hunter llm is available
-            all_findings = self._merge_static_findings(all_findings, preprocess_result)
-
             # 3.5. Persist findings to historical DB (spec 005)
             # Skip when running under campaign — campaign handles bulk ingestion.
             if historical_db is not None and all_findings and self._injected_findings_pool is None:

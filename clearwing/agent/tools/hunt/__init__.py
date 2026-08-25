@@ -11,10 +11,9 @@ Public entry points:
 
 Internal layout:
     sandbox.py    — HunterContext dataclass + sanitizer-variant routing
-    discovery.py  — read_source_file, list_source_tree, grep_source, semgrep_scan
+    discovery.py  — read_source_file, list_source_tree, grep_source, find_callers
     analysis.py   — compile_file, run_with_sanitizer, write_test_case, fuzz_harness
-    reporting.py  — record_trace_step, record_finding
-    potentials.py — flag_potential
+    reporting.py  — record_finding
 
 Phase 5a–d split these out of the 791-LOC hunter_tools.py god file.
 The per-module `build_*_tools(ctx)` factories are composed here; the
@@ -71,7 +70,7 @@ def build_propagation_auditor_tools(ctx: HunterContext) -> list:
     Tier C auditors don't compile or run — they grep and reason about
     downstream usages of definitions. This subset keeps them cheap and
     on-task: discovery tools (read_source_file, list_source_tree,
-    grep_source) + record_finding.
+    grep_source, find_callers) + record_finding.
     """
     tools = [
         *build_discovery_tools(ctx),

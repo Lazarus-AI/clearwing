@@ -32,7 +32,6 @@ from .pool_query import build_pool_query_tools
 from .potentials import build_potential_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext
-from .threat_context import build_threat_context_tool
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +262,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="lookup_callers",
                 description=(
-                    "Returns every function that calls func_name, grouped by file with line ranges."
+                    "Returns every function in the codebase that calls func_name, "
+                    "grouped by file with start/end line ranges."
                 ),
                 schema=LookupCallersInput.model_json_schema(),
                 handler=lookup_callers,
@@ -271,7 +271,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="lookup_callees",
                 description=(
-                    "Returns every function called by func_name, grouped by file with line ranges."
+                    "Returns every function called by func_name, grouped by defining file "
+                    "with line ranges."
                 ),
                 schema=LookupCalleesInput.model_json_schema(),
                 handler=lookup_callees,
@@ -279,8 +280,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="list_functions",
                 description=(
-                    "List all functions in a file with start/end line numbers. "
-                    "Optional filter= narrows by keyword."
+                    "Returns all functions defined in a file with start/end line numbers. "
+                    "Use filter= to search by keyword (tokens split on non-alphanumerics "
+                    "and camelCase boundaries)."
                 ),
                 schema=ListFunctionsInput.model_json_schema(),
                 handler=list_functions,
@@ -288,7 +290,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="read_function",
                 description=(
-                    "Read a function body by exact name. Returns file, line range, and source."
+                    "Read a function body by exact name. Returns {file, start_line, "
+                    "end_line, body}. On miss: did_you_mean suggestions. On ambiguity: "
+                    "candidate list."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
                 handler=read_function,
@@ -325,7 +329,6 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             handler=write_file,
         ),
         semgrep_tool,
-        build_threat_context_tool(ctx),
         *reporting_tools,
         *build_potential_tools(ctx),
         *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),

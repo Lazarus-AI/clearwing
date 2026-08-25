@@ -162,7 +162,6 @@ max-complexity = 15
 "clearwing/agent/runtime.py" = ["C901"]
 "clearwing/agent/tools/hunt/analysis.py" = ["C901"]
 "clearwing/agent/tools/hunt/discovery.py" = ["C901"]
-"clearwing/agent/tools/hunt/deep_agent.py" = ["C901"]
 "clearwing/sourcehunt/pool.py" = ["C901"]
 "clearwing/sourcehunt/hunter.py" = ["C901"]
 "clearwing/sourcehunt/preprocessor.py" = ["C901"]

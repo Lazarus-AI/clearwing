@@ -36,8 +36,6 @@ _recent_status: deque[dict] = deque(maxlen=6)
 _recent_traces: deque[dict] = deque(maxlen=6)
 # Ring buffer of recent execute commands
 _recent_execs: deque[dict] = deque(maxlen=6)
-# Ring buffer of recent callgraph tool calls (lookup_callers, lookup_callees, list_functions, read_function)
-_recent_callgraph: deque[dict] = deque(maxlen=6)
 
 
 def _fmt_tokens(n: int | None) -> str:
@@ -240,20 +238,6 @@ def _build_panel(
                 )
             )
 
-    if _recent_callgraph:
-        renderables.append(Rule(style="dim"))
-        for cg in _recent_callgraph:
-            hunter = cg.get("hunter_target", "?")
-            tool = cg.get("tool_name", "?")
-            func = cg.get("func_name") or cg.get("path") or cg.get("name") or ""
-            renderables.append(
-                Text.assemble(
-                    (f"[{hunter}] ", "dim cyan"),
-                    (f"{tool}", "bold green"),
-                    (f"({func})", ""),
-                )
-            )
-
     _append_trace_and_status(renderables)
 
     return Panel(
@@ -301,17 +285,15 @@ def llm_activity_panel(
     def _on_read(data):
         if not isinstance(data, dict):
             return
-        tool_name = data.get("tool_name") or data.get("tool", "")
-        if tool_name in ("read_source_file", "read_file"):
+        if data.get("tool_name") in ("read_source_file", "read_file"):
             _recent_reads.append(data)
-        elif tool_name == "execute":
+        elif data.get("tool_name") == "execute":
             _recent_execs.append(data)
-        elif tool_name in ("lookup_callers", "lookup_callees", "list_functions", "read_function"):
-            _recent_callgraph.append(data)
         else:
+            tool = data.get("tool_name") or data.get("tool", "?")
             hunter = data.get("hunter_target") or data.get("args", {}).get("hunter_target", "")
             logging.getLogger("clearwing.sourcehunt.live").info(
-                "[%s] tool: %s", hunter or "agent", tool_name,
+                "[%s] tool: %s", hunter or "agent", tool,
             )
 
     def _on_status(data):
@@ -353,6 +335,5 @@ def llm_activity_panel(
         _recent_status.clear()
         _recent_traces.clear()
         _recent_execs.clear()
-        _recent_callgraph.clear()
         root.handlers = saved_handlers
         root.setLevel(saved_level)
