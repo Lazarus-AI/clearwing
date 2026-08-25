@@ -1046,6 +1046,7 @@ Tools:
 - lookup_callees(func_name): Find every function called by func_name.
 - read_function(name): Read a function body by exact name.
 - flag_potential(file, line, note, hypothesis): Bookmark a suspicious line for later.
+- update_potential(potential_id, status, resolution): Mark a lead clear or unknown.
 - record_trace_step(file, line, function, note): Record one step in the vulnerability dataflow trace.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
 
@@ -1101,7 +1102,7 @@ If you find nothing after thorough analysis, say so explicitly.
 
 Function-level tracking:
   - When you finish investigating a function and it's clean, call
-    flag_potential with priority="clear" and hypothesis explaining WHY it's safe.
+    update_potential with status="clear" and a resolution explaining WHY it's safe.
   - When you find something, record_finding covers it.
   - The sitrep shows your coverage: cleared functions, open leads, unknowns.
   - If a function is already marked clear, don't revisit it unless new context
@@ -1676,11 +1677,11 @@ class NativeHunter:
                 )
                 # Show investigation state so the model knows what's done/remaining
                 all_potentials = self.ctx.potentials
-                cleared = [p for p in all_potentials if p.get("priority") == "clear"]
-                unknowns = [p for p in all_potentials if p.get("priority") == "unknown"]
+                cleared = [p for p in all_potentials if p.get("status") == "clear"]
+                unknowns = [p for p in all_potentials if p.get("status") == "unknown"]
                 leads = [
                     p for p in all_potentials
-                    if p.get("status") == "open" and p.get("priority") not in ("clear", "unknown")
+                    if p.get("status") == "open"
                 ]
                 if leads:
                     sitrep += "\n  Open leads:"

@@ -277,6 +277,8 @@ class Preprocessor:
 
     # Static-analysis hits sample this many lines from each file for tagging
     _CONTENT_SAMPLE_BYTES = 16 * 1024
+    _LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD = 2000
+    _LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD = 2000
 
     def __init__(
         self,
@@ -340,10 +342,55 @@ class Preprocessor:
         source_files = list(self._analyzer._iter_source_files(repo_path))
         logger.info("Preprocessor: found %d source files", len(source_files))
         imports_by_budget = self.max_imports_by_files
+        large_repo = len(source_files) > self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD
+        if len(source_files) > self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD:
+            imports_by_budget = 0
+            logger.info(
+                "Large repo detected (%d source files); skipping imports_by scans",
+                len(source_files),
+            )
         build_callgraph = self.build_callgraph
         propagate_reachability = self.propagate_reachability
         run_taint = self.run_taint
         callgraph_seed_files: list[str] | None = None
+        if large_repo:
+            if build_callgraph or propagate_reachability:
+                if self.subsystem_paths:
+                    seed = self._expand_subsystem_files(repo_path, self.subsystem_paths)
+                    if seed:
+                        logger.info(
+                            "Large repo (%d files); seeding callgraph from %d subsystem files",
+                            len(source_files),
+                            len(seed),
+                        )
+                        callgraph_seed_files = seed
+                    else:
+                        logger.info(
+                            "Large repo detected (%d source files); skipping callgraph/reachability",
+                            len(source_files),
+                        )
+                        build_callgraph = False
+                        propagate_reachability = False
+                else:
+                    logger.info(
+                        "Large repo detected (%d source files); skipping callgraph/reachability",
+                        len(source_files),
+                    )
+                    build_callgraph = False
+                    propagate_reachability = False
+            if run_taint:
+                if self.subsystem_paths and callgraph_seed_files:
+                    logger.info(
+                        "Large repo (%d files); seeding taint analysis from %d subsystem files",
+                        len(source_files),
+                        len(callgraph_seed_files),
+                    )
+                else:
+                    logger.info(
+                        "Large repo detected (%d source files); skipping taint analysis",
+                        len(source_files),
+                    )
+                    run_taint = False
 
         # Enumerate source files and build FileTarget entries
         file_targets: list[FileTarget] = []

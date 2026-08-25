@@ -9,6 +9,7 @@ base keyed by pattern category.
 from __future__ import annotations
 
 import logging
+import re
 
 from pydantic import Field
 
@@ -270,7 +271,7 @@ def _resolve_static(context: str) -> str | None:
     if key in _ALIASES:
         return THREAT_KNOWLEDGE[_ALIASES[key]]
     for alias, target in _ALIASES.items():
-        if alias in key:
+        if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", key):
             return THREAT_KNOWLEDGE[target]
     return None
 

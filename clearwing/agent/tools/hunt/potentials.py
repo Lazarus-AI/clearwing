@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Literal, NotRequired, TypedDict
 
 from pydantic import Field
 
@@ -16,6 +17,22 @@ from clearwing.llm import NativeToolSpec, ToolInputModel
 from .sandbox import HunterContext
 
 logger = logging.getLogger(__name__)
+
+
+PotentialPriority = Literal["high", "medium", "low"]
+PotentialStatus = Literal["open", "unknown", "clear"]
+ResolvedPotentialStatus = Literal["unknown", "clear"]
+
+
+class Potential(TypedDict):
+    id: str
+    file: str
+    line: int
+    note: str
+    hypothesis: str
+    priority: PotentialPriority
+    status: PotentialStatus
+    resolution: NotRequired[str]
 
 
 class FlagPotentialInput(ToolInputModel):
@@ -35,7 +52,7 @@ class FlagPotentialInput(ToolInputModel):
             "passed directly to memcpy without validation.'"
         )
     )
-    priority: str = Field(
+    priority: PotentialPriority = Field(
         default="medium",
         description=(
             "high — directly violates a security invariant; investigate next. "
@@ -45,8 +62,15 @@ class FlagPotentialInput(ToolInputModel):
     )
 
 
-
-
+class UpdatePotentialInput(ToolInputModel):
+    potential_id: str = Field(description="ID returned by flag_potential.")
+    status: ResolvedPotentialStatus = Field(
+        description=(
+            "unknown — investigated but evidence remains inconclusive. "
+            "clear — investigated and ruled out."
+        )
+    )
+    resolution: str = Field(description="One sentence explaining the resulting state.")
 def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
 
     def flag_potential(
@@ -54,10 +78,10 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         line: int,
         note: str,
         hypothesis: str,
-        priority: str = "medium",
+        priority: PotentialPriority = "medium",
         **_: object,
     ) -> str:
-        entry = {
+        entry: Potential = {
             "id": uuid.uuid4().hex[:8],
             "file": file,
             "line": line,
@@ -68,8 +92,26 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         }
         ctx.potentials.append(entry)
         open_count = sum(1 for p in ctx.potentials if p["status"] == "open")
-        logger.info("FLAGGED %s:%d [%s] %s", file, line, priority, note[:120])
-        return f"Flagged {file}:{line} as potential [{entry['id']}]. Queue: {open_count} open."
+        logger.info("FLAGGED %s:%d [%s/open] %s", file, line, priority, note[:120])
+        return (
+            f"Flagged {file}:{line} as potential [{entry['id']}] "
+            f"({priority}/open). Queue: {open_count} open."
+        )
+
+    def update_potential(
+        potential_id: str,
+        status: ResolvedPotentialStatus,
+        resolution: str,
+        **_: object,
+    ) -> str:
+        for potential in ctx.potentials:
+            if potential.get("id") == potential_id:
+                if potential.get("status") != "open":
+                    return f"Potential [{potential_id}] is already {potential['status']}."
+                potential["status"] = status
+                potential["resolution"] = resolution
+                return f"Potential [{potential_id}] marked {status}: {resolution}"
+        return f"No potential found with id={potential_id}"
 
     return [
         NativeToolSpec(
@@ -87,5 +129,15 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             ),
             schema=FlagPotentialInput.model_json_schema(),
             handler=flag_potential,
+        ),
+        NativeToolSpec(
+            name="update_potential",
+            description=(
+                "Resolve a previously flagged potential after investigating it. "
+                "Use status='clear' when it is ruled out or status='unknown' when "
+                "the available evidence is still inconclusive."
+            ),
+            schema=UpdatePotentialInput.model_json_schema(),
+            handler=update_potential,
         ),
     ]

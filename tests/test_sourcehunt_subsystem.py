@@ -311,6 +311,38 @@ def test_build_subsystem_hunter_agent_tools():
     assert "record_finding" in tool_names
 
 
+@pytest.mark.asyncio
+async def test_subsystem_runner_accumulates_potential_states(monkeypatch, tmp_path):
+    subsystem = SubsystemTarget(
+        name="test_sub",
+        root_path="src/parser",
+        files=[_ft("src/parser/main.c", 4.0)],
+    )
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(subsystems=[subsystem], repo_path=str(tmp_path), llm=MagicMock())
+    )
+    potentials = [
+        {
+            "id": "lead-1",
+            "file": "src/parser/main.c",
+            "line": 12,
+            "note": "unclear length",
+            "hypothesis": "CWE-787",
+            "priority": "high",
+            "status": "unknown",
+            "resolution": "callee unavailable",
+        }
+    ]
+
+    async def fake_run(*args, **kwargs):
+        return [], 0.0, 0, "completed", potentials
+
+    monkeypatch.setattr(runner, "_run_one_subsystem", fake_run)
+
+    assert await runner.arun() == []
+    assert runner.all_potentials == potentials
+
+
 def test_build_subsystem_hunter_agent_max_steps():
     from clearwing.sourcehunt.hunter import build_subsystem_hunter_agent
 
@@ -443,7 +475,7 @@ async def test_subsystem_hunt_runner_preserves_budget_exhaustion(monkeypatch):
     )
 
     async def budget_exhausted(*args, **kwargs):
-        return [], 1.0, 10, "budget_exhausted"
+        return [], 1.0, 10, "budget_exhausted", []
 
     monkeypatch.setattr(runner, "_run_one_subsystem", budget_exhausted)
 
@@ -461,6 +493,7 @@ def test_subsystem_budget_stop_marks_sourcehunt_run_incomplete(monkeypatch, tmp_
         def __init__(self, config):
             self.total_spent = 1.0
             self.budget_exhausted = True
+            self.all_potentials = []
 
         async def arun(self):
             return []

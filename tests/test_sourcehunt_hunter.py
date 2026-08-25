@@ -363,6 +363,7 @@ class TestBuildHunterAgent:
             "record_finding",
             "find_security_issues",
             "flag_potential",
+            "update_potential",
         }
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
@@ -412,6 +413,7 @@ class TestBuildHunterAgent:
             "record_finding",
             "find_security_issues",
             "flag_potential",
+            "update_potential",
         }
         assert "compile_file" not in tool_names
         assert "run_with_sanitizer" not in tool_names
