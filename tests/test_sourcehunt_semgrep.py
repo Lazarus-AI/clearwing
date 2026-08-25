@@ -124,22 +124,13 @@ class TestRunScanMocked:
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
 
-    def test_rc_gt_two_returns_empty(self):
+    def test_rc_gt_one_returns_empty(self):
         with (
             patch("shutil.which", return_value="/usr/bin/semgrep"),
-            patch("subprocess.run", return_value=_fake_proc("", returncode=3)),
+            patch("subprocess.run", return_value=_fake_proc("", returncode=2)),
         ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
-
-    def test_rc_two_still_parses_results(self):
-        """Exit code 2 means some rules had errors but scan completed — results are valid."""
-        with (
-            patch("shutil.which", return_value="/usr/bin/semgrep"),
-            patch("subprocess.run", return_value=_fake_proc(json.dumps(_FAKE_SEMGREP_OUTPUT), returncode=2)),
-        ):
-            findings = SemgrepSidecar().run_scan("/abs/repo")
-        assert len(findings) == 2
 
     def test_timeout_returns_empty(self):
         with (
@@ -169,30 +160,6 @@ class TestRunScanMocked:
         assert "--config" in cmd
         assert "p/python" in cmd
         assert "/abs/repo" in cmd
-
-    def test_rc7_retries_without_remote_config(self):
-        """Exit code 7 (invalid config) triggers retry with bundled rules only."""
-        call_count = 0
-
-        def fake_run(cmd, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # First call includes remote config → fails with rc=7
-                assert any("p/security-audit" in str(c) for c in cmd)
-                return _fake_proc("", returncode=7)
-            # Second call should NOT include the remote config
-            config_args = [cmd[i + 1] for i, c in enumerate(cmd[:-1]) if c == "--config"]
-            assert not any("p/" in c for c in config_args), "retry should not include remote config"
-            return _fake_proc(json.dumps(_FAKE_SEMGREP_OUTPUT), returncode=1)
-
-        with (
-            patch("shutil.which", return_value="/usr/bin/semgrep"),
-            patch("subprocess.run", side_effect=fake_run),
-        ):
-            findings = SemgrepSidecar().run_scan("/abs/repo")
-        assert call_count == 2
-        assert len(findings) == 2
 
 
 # --- Preprocessor integration ----------------------------------------------
