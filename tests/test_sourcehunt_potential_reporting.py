@@ -4,7 +4,7 @@ from pathlib import Path
 from clearwing.sourcehunt.reporter import write_sourcehunt_report
 
 
-def test_json_report_preserves_potential_states(tmp_path) -> None:
+def test_json_report_preserves_unresolved_potentials(tmp_path) -> None:
     potentials = [
         {
             "id": "lead-1",
@@ -13,18 +13,6 @@ def test_json_report_preserves_potential_states(tmp_path) -> None:
             "note": "unchecked length",
             "hypothesis": "CWE-787",
             "priority": "high",
-            "status": "clear",
-            "resolution": "validated by the caller",
-        },
-        {
-            "id": "lead-2",
-            "file": "src/path.c",
-            "line": 7,
-            "note": "unclear normalization",
-            "hypothesis": "CWE-22",
-            "priority": "medium",
-            "status": "unknown",
-            "resolution": "platform behavior unavailable",
         },
     ]
 

@@ -1046,7 +1046,7 @@ Tools:
 - lookup_callees(func_name): Find every function called by func_name.
 - read_function(name): Read a function body by exact name.
 - flag_potential(file, line, note, hypothesis): Bookmark a suspicious line for later.
-- update_potential(potential_id, status, resolution): Mark a lead clear or unknown.
+- dismiss_potential(potential_id, resolution): Remove a lead only when source evidence rules it out.
 - record_trace_step(file, line, function, note): Record one step in the vulnerability dataflow trace.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
 
@@ -1100,13 +1100,12 @@ Example investigation (ideal flow):
 
 If you find nothing after thorough analysis, say so explicitly.
 
-Function-level tracking:
-  - When you finish investigating a function and it's clean, call
-    update_potential with status="clear" and a resolution explaining WHY it's safe.
-  - When you find something, record_finding covers it.
-  - The sitrep shows your coverage: cleared functions, open leads, unknowns.
-  - If a function is already marked clear, don't revisit it unless new context
-    (e.g. a caller you didn't know about) changes the picture.
+Potential tracking:
+  - If source evidence affirmatively rules out a flagged lead, call
+    dismiss_potential with a resolution explaining why it is safe.
+  - Do not dismiss an inconclusive lead. Remaining potentials are preserved as
+    unresolved SITREP items, not reported as vulnerabilities.
+  - When you confirm a vulnerability, call record_finding.
 """
 
 _DEEP_SPECIALIST_FOCUS = {
@@ -1675,24 +1674,13 @@ class NativeHunter:
                     f"  Files visited: {visited_list}\n"
                     f"{budget_note}{diversity_note}"
                 )
-                # Show investigation state so the model knows what's done/remaining
-                all_potentials = self.ctx.potentials
-                cleared = [p for p in all_potentials if p.get("status") == "clear"]
-                unknowns = [p for p in all_potentials if p.get("status") == "unknown"]
-                leads = [
-                    p for p in all_potentials
-                    if p.get("status") == "open"
-                ]
-                if leads:
-                    sitrep += "\n  Open leads:"
-                    for p in leads:
+                # The queue contains only leads that have not been ruled out.
+                if self.ctx.potentials:
+                    sitrep += "\n  Unresolved leads (not validated findings):"
+                    for p in self.ctx.potentials:
                         sitrep += (
                             f"\n    [{p['priority']}] {p['file']}:{p['line']} — {p['hypothesis']}"
                         )
-                if unknowns:
-                    sitrep += f"\n  Unknown ({len(unknowns)} functions with unclear behavior)"
-                if cleared:
-                    sitrep += f"\n  Cleared: {len(cleared)} functions investigated, no vuln found"
                 # Coverage note: how many files in the subsystem haven't been opened yet
                 if self.ctx.subsystem is not None:
                     subsystem_files = {ft.get("path", "") for ft in self.ctx.subsystem.files}

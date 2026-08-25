@@ -312,7 +312,7 @@ def test_build_subsystem_hunter_agent_tools():
 
 
 @pytest.mark.asyncio
-async def test_subsystem_runner_accumulates_potential_states(monkeypatch, tmp_path):
+async def test_subsystem_runner_accumulates_unresolved_potentials(monkeypatch, tmp_path):
     subsystem = SubsystemTarget(
         name="test_sub",
         root_path="src/parser",
@@ -329,8 +329,6 @@ async def test_subsystem_runner_accumulates_potential_states(monkeypatch, tmp_pa
             "note": "unclear length",
             "hypothesis": "CWE-787",
             "priority": "high",
-            "status": "unknown",
-            "resolution": "callee unavailable",
         }
     ]
 

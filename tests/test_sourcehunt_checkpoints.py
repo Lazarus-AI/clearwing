@@ -107,7 +107,7 @@ def test_preprocess_result_round_trips_nested_types(tmp_path: Path):
     assert restored == result
 
 
-def test_hunt_checkpoint_round_trips_potential_states() -> None:
+def test_hunt_checkpoint_round_trips_unresolved_potentials() -> None:
     potentials = [
         {
             "id": "lead-1",
@@ -116,8 +116,6 @@ def test_hunt_checkpoint_round_trips_potential_states() -> None:
             "note": "unchecked length",
             "hypothesis": "CWE-787",
             "priority": "high",
-            "status": "unknown",
-            "resolution": "callee body unavailable",
         }
     ]
     result = HuntResult(
@@ -133,8 +131,8 @@ def test_hunt_checkpoint_round_trips_potential_states() -> None:
 
     assert restored is not None
     assert restored.potentials == potentials
-    restored.potentials[0]["status"] = "clear"
-    assert checkpoint.result.potentials[0]["status"] == "unknown"
+    restored.potentials[0]["note"] = "changed"
+    assert checkpoint.result.potentials[0]["note"] == "unchecked length"
 
 
 def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path: Path):

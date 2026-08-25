@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, TypedDict
 
 from pydantic import Field
 
@@ -20,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 PotentialPriority = Literal["high", "medium", "low"]
-PotentialStatus = Literal["open", "unknown", "clear"]
-ResolvedPotentialStatus = Literal["unknown", "clear"]
 
 
 class Potential(TypedDict):
@@ -31,8 +29,6 @@ class Potential(TypedDict):
     note: str
     hypothesis: str
     priority: PotentialPriority
-    status: PotentialStatus
-    resolution: NotRequired[str]
 
 
 class FlagPotentialInput(ToolInputModel):
@@ -62,15 +58,13 @@ class FlagPotentialInput(ToolInputModel):
     )
 
 
-class UpdatePotentialInput(ToolInputModel):
+class DismissPotentialInput(ToolInputModel):
     potential_id: str = Field(description="ID returned by flag_potential.")
-    status: ResolvedPotentialStatus = Field(
-        description=(
-            "unknown — investigated but evidence remains inconclusive. "
-            "clear — investigated and ruled out."
-        )
+    resolution: str = Field(
+        description="One sentence explaining the source evidence that ruled out the lead."
     )
-    resolution: str = Field(description="One sentence explaining the resulting state.")
+
+
 def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
 
     def flag_potential(
@@ -88,29 +82,23 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             "note": note,
             "hypothesis": hypothesis,
             "priority": priority,
-            "status": "open",
         }
         ctx.potentials.append(entry)
-        open_count = sum(1 for p in ctx.potentials if p["status"] == "open")
-        logger.info("FLAGGED %s:%d [%s/open] %s", file, line, priority, note[:120])
+        logger.info("FLAGGED %s:%d [%s] %s", file, line, priority, note[:120])
         return (
             f"Flagged {file}:{line} as potential [{entry['id']}] "
-            f"({priority}/open). Queue: {open_count} open."
+            f"({priority}). Queue: {len(ctx.potentials)} unresolved."
         )
 
-    def update_potential(
+    def dismiss_potential(
         potential_id: str,
-        status: ResolvedPotentialStatus,
         resolution: str,
         **_: object,
     ) -> str:
-        for potential in ctx.potentials:
+        for index, potential in enumerate(ctx.potentials):
             if potential.get("id") == potential_id:
-                if potential.get("status") != "open":
-                    return f"Potential [{potential_id}] is already {potential['status']}."
-                potential["status"] = status
-                potential["resolution"] = resolution
-                return f"Potential [{potential_id}] marked {status}: {resolution}"
+                ctx.potentials.pop(index)
+                return f"Potential [{potential_id}] ruled out: {resolution}"
         return f"No potential found with id={potential_id}"
 
     return [
@@ -131,13 +119,12 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             handler=flag_potential,
         ),
         NativeToolSpec(
-            name="update_potential",
+            name="dismiss_potential",
             description=(
-                "Resolve a previously flagged potential after investigating it. "
-                "Use status='clear' when it is ruled out or status='unknown' when "
-                "the available evidence is still inconclusive."
+                "Remove a flagged potential only after source evidence affirmatively rules it out. "
+                "Do not dismiss an inconclusive lead; unresolved leads are preserved in the SITREP."
             ),
-            schema=UpdatePotentialInput.model_json_schema(),
-            handler=update_potential,
+            schema=DismissPotentialInput.model_json_schema(),
+            handler=dismiss_potential,
         ),
     ]

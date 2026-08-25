@@ -2,7 +2,7 @@ from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 
 
-def test_potential_lifecycle_open_to_clear(tmp_path) -> None:
+def test_dismiss_potential_removes_ruled_out_lead(tmp_path) -> None:
     ctx = HunterContext(repo_path=str(tmp_path))
     tools = {tool.name: tool for tool in build_potential_tools(ctx)}
 
@@ -17,23 +17,20 @@ def test_potential_lifecycle_open_to_clear(tmp_path) -> None:
     )
     potential_id = ctx.potentials[0]["id"]
 
-    assert "Queue: 1 open" in result
-    assert ctx.potentials[0]["status"] == "open"
+    assert "Queue: 1 unresolved" in result
 
-    updated = tools["update_potential"].invoke(
+    dismissed = tools["dismiss_potential"].invoke(
         {
             "potential_id": potential_id,
-            "status": "clear",
             "resolution": "caller checks the length before dispatch",
         }
     )
 
-    assert "marked clear" in updated
-    assert ctx.potentials[0]["status"] == "clear"
-    assert ctx.potentials[0]["resolution"] == "caller checks the length before dispatch"
+    assert "ruled out" in dismissed
+    assert ctx.potentials == []
 
 
-def test_potential_cannot_be_resolved_twice(tmp_path) -> None:
+def test_dismissed_potential_cannot_be_dismissed_twice(tmp_path) -> None:
     ctx = HunterContext(repo_path=str(tmp_path))
     tools = {tool.name: tool for tool in build_potential_tools(ctx)}
     tools["flag_potential"].invoke(
@@ -45,12 +42,10 @@ def test_potential_cannot_be_resolved_twice(tmp_path) -> None:
         }
     )
     potential_id = ctx.potentials[0]["id"]
-    args = {"potential_id": potential_id, "status": "unknown", "resolution": "no caller found"}
+    args = {"potential_id": potential_id, "resolution": "caller validates the length"}
 
-    tools["update_potential"].invoke(args)
-    result = tools["update_potential"].invoke(
-        {**args, "status": "clear", "resolution": "later ruled out"}
-    )
+    tools["dismiss_potential"].invoke(args)
+    result = tools["dismiss_potential"].invoke(args)
 
-    assert "already unknown" in result
-    assert ctx.potentials[0]["status"] == "unknown"
+    assert "No potential found" in result
+    assert ctx.potentials == []
