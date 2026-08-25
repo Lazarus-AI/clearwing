@@ -29,7 +29,10 @@ from genai_pyo3 import (
     Tool,
     Usage,
 )
+from openinference.instrumentation import get_input_attributes, get_output_attributes
 from pydantic import BaseModel, ConfigDict, RootModel
+
+from clearwing.observability.otel import get_oi_tracer
 
 from .budget import (
     BudgetExceeded,
@@ -39,6 +42,101 @@ from .budget import (
 )
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
+
+
+def _trace_llm_output(response: ChatResponse) -> dict[str, Any]:
+    """Serialize a native response and add Phoenix/OpenInference usage fields."""
+    serialized = response.to_dict() if hasattr(response, "to_dict") else repr(response)
+    attributes = dict(get_output_attributes(serialized))
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        input_tokens = usage.prompt_tokens or 0
+        output_tokens = usage.completion_tokens or 0
+        details = usage.prompt_tokens_details
+        cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+        attributes.update(
+            {
+                "gen_ai.usage.input_tokens": input_tokens,
+                "gen_ai.usage.output_tokens": output_tokens,
+                "llm.token_count.prompt": input_tokens,
+                "llm.token_count.completion": output_tokens,
+                "llm.token_count.total": input_tokens + output_tokens,
+                "llm.token_count.cached": cached_tokens,
+            }
+        )
+    provider_model_name = getattr(response, "provider_model_name", None)
+    if provider_model_name:
+        attributes["gen_ai.response.model"] = provider_model_name
+    return attributes
+
+
+def _trace_genai_input(
+    model: str, request: ChatRequest, options: ChatOptions
+) -> dict[str, Any]:
+    """Serialize the effective genai-pyo3 request without client credentials."""
+    return dict(
+        get_input_attributes(
+            {
+                "model": model,
+                "system": request.system,
+                "messages": [message.to_dict() for message in request.messages()],
+                "tools": [
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "schema": json.loads(tool.schema_json),
+                    }
+                    for tool in (request.tools or [])
+                ],
+                "options": {
+                    "temperature": options.temperature,
+                    "top_p": options.top_p,
+                    "max_tokens": options.max_tokens,
+                    "reasoning_effort": options.reasoning_effort,
+                    "response_json_mode": options.response_json_mode,
+                    "response_json_spec": str(options.response_json_spec)
+                    if options.response_json_spec is not None
+                    else None,
+                    "capture_reasoning_content": options.capture_reasoning_content,
+                },
+            }
+        )
+    )
+
+
+class _TracedGenAIClient:
+    """Trace the exact request objects handed to the native genai-pyo3 client."""
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    @tracer.llm(
+        name="genai_pyo3.achat",
+        process_input=_trace_genai_input,
+        process_output=_trace_llm_output,
+    )
+    async def achat(
+        self, model: str, request: ChatRequest, options: ChatOptions
+    ) -> ChatResponse:
+        return await self._client.achat(model, request, options)
+
+    @tracer.llm(
+        name="genai_pyo3.achat_via_stream",
+        process_input=_trace_genai_input,
+        process_output=_trace_llm_output,
+    )
+    async def achat_via_stream(
+        self, model: str, request: ChatRequest, options: ChatOptions
+    ) -> ChatResponse:
+        return await self._client.achat_via_stream(model, request, options)
+
+    @tracer.llm(name="genai_pyo3.astream_chat", process_input=_trace_genai_input)
+    async def astream_chat(self, model: str, request: ChatRequest, options: ChatOptions):
+        return await self._client.astream_chat(model, request, options)
 
 # Set by every ChatResponse builder to the provider's finish/stop reason for
 # the most recent completion in this async Task. Read via last_finish_reason()
@@ -602,6 +700,7 @@ class AsyncLLMClient:
             )
         )
 
+    @tracer.chain(name="llm.chat")
     async def achat(
         self,
         *,
@@ -799,6 +898,7 @@ class AsyncLLMClient:
                     )
         return response
 
+    @tracer.chain(name="llm.chat")
     async def achat_stream(
         self,
         *,
@@ -1075,14 +1175,19 @@ class AsyncLLMClient:
         return temperature, max_tokens
 
     def _build_client(self, client_cls):
+        def traced(client):
+            return _TracedGenAIClient(client)
+
         # anthropic_oauth bypasses the normal auth resolver entirely —
         # with_request_override sends only our explicit headers (Bearer
         # token + beta flags), avoiding the ANTHROPIC_API_KEY env lookup.
         if self.provider_name == "anthropic_oauth":
-            return client_cls.with_request_override(
-                "anthropic",
-                self._anthropic_oauth_url,
-                self._default_headers or {},
+            return traced(
+                client_cls.with_request_override(
+                    "anthropic",
+                    self._anthropic_oauth_url,
+                    self._default_headers or {},
+                )
             )
 
         # openai_codex (ChatGPT OAuth) is the openai_resp adapter pointed at
@@ -1100,7 +1205,9 @@ class AsyncLLMClient:
             headers = dict(self._default_headers or {})
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            return client_cls.with_request_override("openai_resp", responses_url, headers)
+            return traced(
+                client_cls.with_request_override("openai_resp", responses_url, headers)
+            )
 
         rust_provider = self.provider_name
         default_headers = self._default_headers
@@ -1108,31 +1215,37 @@ class AsyncLLMClient:
         if base_url:
             base_url = base_url if base_url.endswith("/") else f"{base_url}/"
             if self.api_key:
-                return client_cls.with_api_key_and_base_url(
+                return traced(
+                    client_cls.with_api_key_and_base_url(
+                        rust_provider,
+                        self.api_key,
+                        base_url,
+                        default_headers=default_headers,
+                        connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                        read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                        timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
+                    )
+                )
+            return traced(
+                client_cls.with_base_url(
                     rust_provider,
-                    self.api_key,
                     base_url,
                     default_headers=default_headers,
                     connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
                     read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
                     timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
                 )
-            return client_cls.with_base_url(
-                rust_provider,
-                base_url,
-                default_headers=default_headers,
-                connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
             )
         if self.api_key:
-            return client_cls.with_api_key(
-                rust_provider,
-                self.api_key,
-                default_headers=default_headers,
-                connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
+            return traced(
+                client_cls.with_api_key(
+                    rust_provider,
+                    self.api_key,
+                    default_headers=default_headers,
+                    connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                    timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
+                )
             )
         raise RuntimeError(
             f"Cannot build LLM client for model={self.model_name} "

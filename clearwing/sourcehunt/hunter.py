@@ -34,6 +34,7 @@ from clearwing.llm import (
     last_finish_reason,
 )
 from clearwing.llm.budget import spend_metadata
+from clearwing.observability.otel import get_oi_tracer
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
@@ -41,6 +42,7 @@ from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
 
 
 
@@ -1441,6 +1443,7 @@ class NativeHunter:
             return "max_steps"
         return None
 
+    @tracer.agent(name="sourcehunt.hunter")
     async def arun(self) -> HunterRunResult:
         user_msg = (
             self.initial_user_message
@@ -1537,11 +1540,24 @@ class NativeHunter:
                     messages = await self.summarizer.summarize(messages, self.llm)
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
+                provider_name = getattr(self.llm, "provider_name", None)
                 response = await self.llm.achat(
                     messages=messages,
                     system=self.prompt,
                     tools=self.tools,
                     max_tokens=24000,
+                )
+                input_tokens = response.usage.prompt_tokens or 0
+                output_tokens = response.usage.completion_tokens or 0
+                details = getattr(response.usage, "prompt_tokens_details", None)
+                cached_tokens = (
+                    (getattr(details, "cached_tokens", None) or 0) if details else 0
+                )
+                call_cost = _estimate_cost_usd(
+                    input_tokens,
+                    output_tokens,
+                    self.llm.model_name,
+                    cached_tokens,
                 )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
@@ -1575,14 +1591,17 @@ class NativeHunter:
             # Older genai-pyo3 responses and lightweight test doubles may not
             # expose prompt_tokens_details at all. Treat that the same as a
             # response where nothing was cache-served.
-            details = getattr(response.usage, "prompt_tokens_details", None)
-            cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
-            total_cost_usd += _estimate_cost_usd(
-                response.usage.prompt_tokens or 0,
-                response.usage.completion_tokens or 0,
-                self.llm.model_name,
-                cached_tokens,
-            )
+            total_cost_usd += call_cost
+            # Keep process-wide cost/UI metrics separate from the OTel span,
+            # which is emitted directly around the model request above.
+            if input_tokens or output_tokens:
+                CostTracker().record_llm_call(
+                    input_tokens,
+                    output_tokens,
+                    self.llm.model_name,
+                    cached_tokens=cached_tokens,
+                    provider=provider_name,
+                )
 
             last_assistant_text = response.first_text or ""
             last_reasoning_content = response.reasoning_content or ""

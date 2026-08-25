@@ -27,6 +27,7 @@ from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.budget import BudgetExceeded, SpendLedger
 from clearwing.llm.native import AsyncLLMClient
+from clearwing.observability.otel import get_oi_tracer
 from clearwing.providers import (
     ProviderManager,
     resolve_llm_endpoint,
@@ -80,6 +81,7 @@ from .variant_loop import (
 from .verifier import Verifier, apply_verifier_result
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
 
 
 @dataclass
@@ -1047,6 +1049,7 @@ class SourceHuntRunner:
         os.replace(temporary, manifest_path)
         proof_result.output_paths.update(outputs)
 
+    @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
         if self._flow == "proof":
             try:
@@ -2321,6 +2324,7 @@ class SourceHuntRunner:
             }
         ]
 
+    @tracer.chain(name="Hunt")
     async def _hunt(
         self,
         *,
@@ -2726,6 +2730,7 @@ class SourceHuntRunner:
                 error={"type": type(exc).__name__, "message": str(exc)},
             )
 
+    @tracer.chain(name="Preprocess")
     def _preprocess(self) -> PreprocessResult:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
@@ -2777,6 +2782,7 @@ class SourceHuntRunner:
         self._dump_checkpoint()
         return result
 
+    @tracer.chain(name="Rank")
     async def _rank(
         self,
         files: list[FileTarget],
