@@ -34,7 +34,11 @@ def telemetry_configured() -> bool:
     """Return whether environment configuration requests OTLP tracing."""
     if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
         return False
-    return bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or os.environ.get("PHOENIX_ENDPOINT"))
+    return bool(
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        or os.environ.get("PHOENIX_ENDPOINT")
+    )
 
 
 def configure_telemetry(
@@ -81,8 +85,24 @@ def configure_telemetry(
 def _otlp_exporter() -> SpanExporter:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
+    # Let the exporter resolve the standard endpoint and header variables,
+    # including their signal-specific variants. They take precedence over the
+    # Phoenix compatibility aliases below.
+    if os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
+    ):
+        return OTLPSpanExporter()
+
     if endpoint := os.environ.get("PHOENIX_ENDPOINT"):
-        return OTLPSpanExporter(endpoint=f"{endpoint.rstrip('/')}/v1/traces")
+        kwargs: dict[str, object] = {"endpoint": f"{endpoint.rstrip('/')}/v1/traces"}
+        standard_headers_configured = bool(
+            os.environ.get("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+            or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+        )
+        if api_key := os.environ.get("PHOENIX_API_KEY"):
+            if not standard_headers_configured:
+                kwargs["headers"] = {"api_key": api_key}
+        return OTLPSpanExporter(**kwargs)
     return OTLPSpanExporter()
 
 

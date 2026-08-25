@@ -1049,6 +1049,7 @@ class SourceHuntRunner:
         os.replace(temporary, manifest_path)
         proof_result.output_paths.update(outputs)
 
+    @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
         if self._flow == "proof":
             try:
@@ -2323,6 +2324,7 @@ class SourceHuntRunner:
             }
         ]
 
+    @tracer.chain(name="Hunt")
     async def _hunt(
         self,
         *,
@@ -2728,7 +2730,7 @@ class SourceHuntRunner:
                 error={"type": type(exc).__name__, "message": str(exc)},
             )
 
-    @tracer.chain(name="sourcehunt.preprocess")
+    @tracer.chain(name="Preprocess")
     def _preprocess(self) -> PreprocessResult:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
@@ -2780,6 +2782,7 @@ class SourceHuntRunner:
         self._dump_checkpoint()
         return result
 
+    @tracer.chain(name="Rank")
     async def _rank(
         self,
         files: list[FileTarget],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
@@ -93,11 +94,48 @@ def test_openinference_decorators_hide_inputs_and_outputs(spans):
 
 def test_standard_and_phoenix_environment_detection(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.delenv("PHOENIX_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
     assert otel.telemetry_configured() is False
 
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
     assert otel.telemetry_configured() is True
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
+    assert otel.telemetry_configured() is True
     monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
     assert otel.telemetry_configured() is False
+
+
+def test_phoenix_api_key_becomes_otlp_header(monkeypatch):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_HEADERS", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", raising=False)
+    monkeypatch.setenv("PHOENIX_ENDPOINT", "https://phoenix.example")
+    monkeypatch.setenv("PHOENIX_API_KEY", "secret-key")
+
+    with patch(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+    ) as exporter:
+        otel._otlp_exporter()
+
+    exporter.assert_called_once_with(
+        endpoint="https://phoenix.example/v1/traces",
+        headers={"api_key": "secret-key"},
+    )
+
+
+def test_standard_otlp_configuration_takes_precedence_over_phoenix(monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://otel.example/v1/traces")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=standard")
+    monkeypatch.setenv("PHOENIX_ENDPOINT", "https://phoenix.example")
+    monkeypatch.setenv("PHOENIX_API_KEY", "phoenix-key")
+
+    with patch(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
+    ) as exporter:
+        otel._otlp_exporter()
+
+    exporter.assert_called_once_with()

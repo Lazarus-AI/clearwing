@@ -700,7 +700,7 @@ class AsyncLLMClient:
             )
         )
 
-    @tracer.llm(name="llm.chat", process_output=_trace_llm_output)
+    @tracer.chain(name="llm.chat")
     async def achat(
         self,
         *,
@@ -898,7 +898,7 @@ class AsyncLLMClient:
                     )
         return response
 
-    @tracer.llm(name="llm.chat", process_output=_trace_llm_output)
+    @tracer.chain(name="llm.chat")
     async def achat_stream(
         self,
         *,

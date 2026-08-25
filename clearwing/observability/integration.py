@@ -28,7 +28,7 @@ class ObservabilityIntegration:
 
         from clearwing.observability.integration import ObservabilityIntegration
 
-        obs = ObservabilityIntegration(debug=True)
+        obs = ObservabilityIntegration()
         obs.connect()  # subscribes to EventBus
         # ... run agent ...
         obs.disconnect()
