@@ -22,7 +22,7 @@ from clearwing.llm.messages import (
     _coerce_chat_messages,
 )
 from clearwing.llm.native import NativeToolSpec, response_text
-from clearwing.observability.otel import get_oi_tracer, llm_span, record_llm_result
+from clearwing.observability.otel import get_oi_tracer
 from clearwing.observability.telemetry import CostTracker
 from clearwing.safety.audit import AuditLogger
 from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
@@ -262,25 +262,15 @@ class NativeAgentGraph:
         system = "\n\n".join(part for part in (sys_prompt, system) if part) or sys_prompt
 
         provider_name = getattr(self.llm, "provider_name", None)
-        with llm_span(model=self.model_name, provider=provider_name) as span:
-            response = await self.llm.achat_stream(
-                messages=chat_messages,
-                system=system,
-                tools=self.native_tools or None,
-                on_text_delta=self.on_text_delta,
-            )
-            usage = response.usage
-            input_tokens = (usage.prompt_tokens or 0) if usage else 0
-            output_tokens = (usage.completion_tokens or 0) if usage else 0
-            call_cost = CostTracker.estimate_cost(input_tokens, output_tokens, self.model_name)
-            record_llm_result(
-                span,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_usd=call_cost,
-                response_model=response.provider_model_name,
-            )
-
+        response = await self.llm.achat_stream(
+            messages=chat_messages,
+            system=system,
+            tools=self.native_tools or None,
+            on_text_delta=self.on_text_delta,
+        )
+        usage = response.usage
+        input_tokens = (usage.prompt_tokens or 0) if usage else 0
+        output_tokens = (usage.completion_tokens or 0) if usage else 0
         assistant_text = response_text(response)
         # tool_calls are raw genai ToolCall objects (.call_id/.fn_name/
         # .fn_arguments). Store them on the AIMessage so the next turn's

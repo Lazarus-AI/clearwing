@@ -34,7 +34,7 @@ from clearwing.llm import (
     last_finish_reason,
 )
 from clearwing.llm.budget import spend_metadata
-from clearwing.observability.otel import get_oi_tracer, llm_span, record_llm_result
+from clearwing.observability.otel import get_oi_tracer
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
@@ -1541,33 +1541,24 @@ class NativeHunter:
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 provider_name = getattr(self.llm, "provider_name", None)
-                with llm_span(model=self.llm.model_name, provider=provider_name) as span:
-                    response = await self.llm.achat(
-                        messages=messages,
-                        system=self.prompt,
-                        tools=self.tools,
-                        max_tokens=24000,
-                    )
-                    input_tokens = response.usage.prompt_tokens or 0
-                    output_tokens = response.usage.completion_tokens or 0
-                    details = getattr(response.usage, "prompt_tokens_details", None)
-                    cached_tokens = (
-                        (getattr(details, "cached_tokens", None) or 0) if details else 0
-                    )
-                    call_cost = _estimate_cost_usd(
-                        input_tokens,
-                        output_tokens,
-                        self.llm.model_name,
-                        cached_tokens,
-                    )
-                    record_llm_result(
-                        span,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cached_tokens=cached_tokens,
-                        cost_usd=call_cost,
-                        response_model=response.provider_model_name,
-                    )
+                response = await self.llm.achat(
+                    messages=messages,
+                    system=self.prompt,
+                    tools=self.tools,
+                    max_tokens=24000,
+                )
+                input_tokens = response.usage.prompt_tokens or 0
+                output_tokens = response.usage.completion_tokens or 0
+                details = getattr(response.usage, "prompt_tokens_details", None)
+                cached_tokens = (
+                    (getattr(details, "cached_tokens", None) or 0) if details else 0
+                )
+                call_cost = _estimate_cost_usd(
+                    input_tokens,
+                    output_tokens,
+                    self.llm.model_name,
+                    cached_tokens,
+                )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate

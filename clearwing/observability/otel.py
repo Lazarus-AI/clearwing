@@ -19,7 +19,15 @@ logger = logging.getLogger(__name__)
 
 _provider_lock = threading.Lock()
 _provider: TracerProvider | None = None
-_trace_config = TraceConfig(hide_inputs=True, hide_outputs=True)
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+_trace_config = TraceConfig(
+    hide_inputs=not _env_enabled("CLEARWING_TRACE_INPUTS"),
+    hide_outputs=not _env_enabled("CLEARWING_TRACE_OUTPUTS"),
+)
 
 
 def telemetry_configured() -> bool:
