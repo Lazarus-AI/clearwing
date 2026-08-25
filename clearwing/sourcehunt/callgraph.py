@@ -214,6 +214,7 @@ class CallGraph:
     def empty(self) -> bool:
         return not self.functions
 
+
 # --- Builder -----------------------------------------------------------------
 
 
