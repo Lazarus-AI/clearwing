@@ -1,5 +1,6 @@
 """Visualize callgraph in browser."""
 
+import json
 import tempfile
 import webbrowser
 from pathlib import Path
@@ -156,10 +157,8 @@ def _render_html(cg, max_nodes: int = 500) -> str:
         if max_nodes and next_id >= max_nodes:
             break
 
-    import json
-
-    nodes_json = json.dumps(nodes)
-    edges_json = json.dumps(edges)
+    nodes_json = _json_for_script(nodes)
+    edges_json = _json_for_script(edges)
     truncated = max_nodes and next_id >= max_nodes
 
     return f"""\
@@ -215,3 +214,15 @@ document.getElementById('filter').addEventListener('input', function(e) {{
 </script>
 </body>
 </html>"""
+
+
+def _json_for_script(value: object) -> str:
+    """Serialize JSON without allowing data to terminate the script element."""
+    return (
+        json.dumps(value)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
