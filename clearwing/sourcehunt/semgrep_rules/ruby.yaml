@@ -1,0 +1,226 @@
+rules:
+  # ── CWE-347: Signature field extraction before normalization ─────────────────
+  #
+  # Pattern from CVE-2026-46349 (Mastodon): LinkedDataSignature extracts
+  # creator/signature from raw JSON without JSON-LD compaction, enabling
+  # context-confusion attacks where a different key is used for verification
+  # than was included in the signed data.
+
+  - id: ruby-json-field-before-normalize
+    message: >
+      Field extracted from raw JSON/hash before normalization or compaction.
+      If the structure supports multiple key representations (e.g. JSON-LD
+      full IRIs vs compact terms), the extracted value may differ from what
+      was cryptographically signed, enabling forgery (CWE-347).
+    severity: WARNING
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-347"
+      confidence: LOW
+    pattern-either:
+      - pattern: $JSON['signature'][$FIELD]
+      - pattern: $JSON.dig('signature', $FIELD)
+
+  # ── CWE-347: Signature verification without expiry check ─────────────────────
+
+  - id: ruby-signature-no-expiry
+    message: >
+      Signature verification proceeds without checking an expiry/timestamp
+      field. Without an expiry check, captured signatures can be replayed
+      indefinitely (CWE-294 replay / CWE-347).
+    severity: WARNING
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-294"
+      confidence: LOW
+    patterns:
+      - pattern-inside: |
+          def $VERIFY(...)
+            ...
+          end
+      - pattern-not-inside: |
+          def $VERIFY(...)
+            ...
+            $EXPIRES ...
+            ...
+          end
+      - metavariable-regex:
+          metavariable: $VERIFY
+          regex: "(?i)(verify|validate|check_signature)"
+
+  # ── CWE-94: eval/send with dynamic input ────────────────────────────────────
+
+  - id: ruby-eval-dynamic
+    message: >
+      eval() or instance_eval called with a non-literal argument. If
+      attacker-controlled data reaches this sink, arbitrary Ruby code
+      executes (CWE-94).
+    severity: ERROR
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-94"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: eval($EXPR)
+          - pattern: instance_eval($EXPR)
+          - pattern: class_eval($EXPR)
+          - pattern: module_eval($EXPR)
+      - pattern-not: eval("...")
+
+  - id: ruby-send-dynamic
+    message: >
+      Object#send called with a non-literal method name. If the name is
+      attacker-controlled, arbitrary methods (including private/protected)
+      can be invoked (CWE-94).
+    severity: WARNING
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-94"
+      confidence: LOW
+    patterns:
+      - pattern: $OBJ.send($METHOD, ...)
+      - pattern-not: $OBJ.send(:..., ...)
+      - pattern-not: $OBJ.send("...", ...)
+
+  # ── CWE-89: SQL injection ────────────────────────────────────────────────────
+
+  - id: ruby-sql-interpolation
+    message: >
+      SQL query constructed with string interpolation. Use parameterized
+      queries (where("col = ?", val)) to prevent SQL injection (CWE-89).
+    severity: ERROR
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-89"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: $MODEL.where("...#{$VAR}...")
+      - pattern: $MODEL.find_by_sql("...#{$VAR}...")
+      - pattern: 'ActiveRecord::Base.connection.execute("...#{$VAR}...")'
+
+  # ── CWE-918: SSRF via unvalidated URL fetch ─────────────────────────────────
+
+  - id: ruby-ssrf-open-uri
+    message: >
+      URI.open or Net::HTTP called with a user-supplied URL without
+      allowlisting. May enable SSRF to internal services (CWE-918).
+    severity: WARNING
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-918"
+      confidence: LOW
+    pattern-either:
+      - pattern: URI.open($URL)
+      - pattern: "Net::HTTP.get(URI($URL))"
+      - pattern: HTTParty.get($URL)
+
+  # ── CWE-94: Tainted eval from params/cookies (semgrep/semgrep-rules) ────────
+
+  - id: ruby-tainted-eval
+    message: >
+      User input from params or cookies flows into eval/class_eval/
+      instance_eval/module_eval. This enables arbitrary Ruby code execution
+      (CWE-94).
+    severity: ERROR
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-94"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: params
+          - pattern: cookies
+    pattern-sinks:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: $X.class_eval(...)
+          - pattern: $X.instance_eval(...)
+          - pattern: $X.module_eval(...)
+
+  # ── CWE-502: Unsafe deserialization from params (semgrep/semgrep-rules) ─────
+
+  - id: ruby-tainted-deserialization
+    message: >
+      User input flows into Marshal.load, CSV.load, or Oj.object_load. These
+      can execute arbitrary code on crafted input (CWE-502). Use JSON.parse
+      instead.
+    severity: ERROR
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-502"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: params
+          - pattern: cookies
+    pattern-sinks:
+      - pattern-either:
+          - pattern: Marshal.load(...)
+          - pattern: Marshal.restore(...)
+          - pattern: CSV.load(...)
+          - pattern: Oj.object_load(...)
+          - pattern: Oj.load(...)
+          - pattern: YAML.load(...)
+
+  # ── CWE-78: Command injection from params ───────────────────────────────────
+
+  - id: ruby-tainted-system
+    message: >
+      User input flows into system/exec/backtick command execution. This
+      enables arbitrary OS command execution (CWE-78). Use parameterized
+      system() calls or Shellwords.escape.
+    severity: ERROR
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-78"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: params
+          - pattern: cookies
+    pattern-sinks:
+      - pattern-either:
+          - pattern: system(...)
+          - pattern: exec(...)
+          - pattern: IO.popen(...)
+          - pattern: Open3.capture2(...)
+          - pattern: Open3.capture3(...)
+
+  # ── CWE-352: Missing CSRF protection ────────────────────────────────────────
+
+  - id: ruby-missing-csrf-protection
+    message: >
+      Controller does not include protect_from_forgery or has it disabled
+      with null_session. This allows cross-site request forgery (CWE-352).
+    severity: WARNING
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-352"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: skip_before_action :verify_authenticity_token
+      - pattern: "protect_from_forgery with: :null_session"
+
+  # ── CWE-327: Weak hash algorithms ──────────────────────────────────────────
+
+  - id: ruby-weak-hash
+    message: >
+      Use of MD5 or SHA1 which are cryptographically broken. Use SHA-256
+      or stronger for security purposes (CWE-327).
+    severity: WARNING
+    languages: [ruby]
+    metadata:
+      cwe: "CWE-327"
+      confidence: HIGH
+    pattern-either:
+      - pattern: "Digest::MD5.hexdigest(...)"
+      - pattern: "Digest::MD5.digest(...)"
+      - pattern: "Digest::SHA1.hexdigest(...)"
+      - pattern: "Digest::SHA1.digest(...)"
+      - pattern: "OpenSSL::Digest::MD5.new(...)"
+      - pattern: "OpenSSL::Digest::SHA1.new(...)"
+

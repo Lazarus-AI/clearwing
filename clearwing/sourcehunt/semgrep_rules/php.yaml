@@ -1,0 +1,222 @@
+rules:
+  # ── CWE-79: Serialization bypass via unencoded output ────────────────────────
+  #
+  # Pattern from CVE-2026-47345 (TYPO3 html-sanitizer): parent class method
+  # writes attribute values via raw output without encoding; child class
+  # overrides most methods but misses one, allowing XSS.
+
+  - id: php-raw-output-without-encoding
+    message: >
+      Raw string output written without HTML encoding in a serialization or
+      rendering context. If the value originates from user input, this enables
+      XSS (CWE-79). Use htmlspecialchars() or an equivalent encoder.
+    severity: WARNING
+    languages: [php]
+    metadata:
+      cwe: "CWE-79"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: $THIS->wr($NODE->nodeValue)
+      - pattern: $THIS->wr($VALUE)
+      - pattern: echo $VAR;
+      - pattern: print $VAR;
+
+  - id: php-echo-in-html-context
+    message: >
+      Variable echoed directly in what appears to be an HTML context without
+      htmlspecialchars or htmlentities. Potential XSS (CWE-79).
+    severity: WARNING
+    languages: [php]
+    metadata:
+      cwe: "CWE-79"
+      confidence: LOW
+    patterns:
+      - pattern: echo $VAR;
+      - pattern-not: echo htmlspecialchars($VAR, ...);
+      - pattern-not: echo htmlentities($VAR, ...);
+
+  # ── CWE-79: Missing override of parent serialization methods ─────────────────
+
+  - id: php-parent-method-not-overridden
+    message: >
+      Class extends a serialization/rendering parent but does not override a
+      method that outputs raw content. The inherited method may write user data
+      without encoding, bypassing the child's sanitization (CWE-79).
+    severity: WARNING
+    languages: [php]
+    metadata:
+      cwe: "CWE-79"
+      confidence: LOW
+    patterns:
+      - pattern: |
+          class $CHILD extends $PARENT {
+            ...
+          }
+      - pattern-not: |
+          class $CHILD extends $PARENT {
+            ...
+            function namespaceAttrs(...) { ... }
+            ...
+          }
+
+  # ── CWE-94: eval/assert with dynamic input ──────────────────────────────────
+
+  - id: php-eval-dynamic
+    message: >
+      eval() or assert() called with a non-literal argument. If attacker-
+      controlled data reaches this sink, arbitrary PHP code executes (CWE-94).
+    severity: ERROR
+    languages: [php]
+    metadata:
+      cwe: "CWE-94"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: eval($EXPR)
+          - pattern: assert($EXPR)
+      - pattern-not: eval("...")
+      - pattern-not: assert("...")
+
+  # ── CWE-89: SQL injection via string concatenation ───────────────────────────
+
+  - id: php-sql-concat
+    message: >
+      SQL query constructed via string concatenation with a variable. Use
+      parameterized queries or prepared statements to prevent SQL injection
+      (CWE-89).
+    severity: ERROR
+    languages: [php]
+    metadata:
+      cwe: "CWE-89"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: $DB->query("..." . $VAR . "...")
+      - pattern: mysqli_query($CONN, "..." . $VAR . "...")
+      - pattern: $PDO->exec("..." . $VAR . "...")
+
+  # ── CWE-502: Unsafe deserialization ──────────────────────────────────────────
+
+  - id: php-unserialize
+    message: >
+      unserialize() called on potentially untrusted data. This can lead to
+      arbitrary object instantiation and code execution (CWE-502). Use
+      json_decode or pass allowed_classes option.
+    severity: ERROR
+    languages: [php]
+    metadata:
+      cwe: "CWE-502"
+      confidence: MEDIUM
+    patterns:
+      - pattern: unserialize($DATA)
+      - pattern-not: unserialize($DATA, ["allowed_classes" => ...])
+
+  # ── CWE-78: Command injection (from semgrep/semgrep-rules taint) ─────────────
+
+  - id: php-tainted-exec
+    message: >
+      User input from $_GET/$_POST/$_COOKIE/$_REQUEST flows into a command
+      execution function. This enables arbitrary command execution (CWE-78).
+      Use escapeshellarg()/escapeshellcmd() or avoid shell execution.
+    severity: ERROR
+    languages: [php]
+    metadata:
+      cwe: "CWE-78"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_COOKIE
+          - pattern: $_REQUEST
+          - pattern: file_get_contents('php://input')
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: escapeshellcmd(...)
+          - pattern: escapeshellarg(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: exec(...)
+          - pattern: system(...)
+          - pattern: passthru(...)
+          - pattern: proc_open(...)
+          - pattern: popen(...)
+          - pattern: shell_exec(...)
+
+  # ── CWE-89: SQL injection taint (from semgrep/semgrep-rules) ────────────────
+
+  - id: php-tainted-sql
+    message: >
+      User data flows into a manually-constructed SQL string. Use prepared
+      statements or parameterized queries to prevent SQL injection (CWE-89).
+    severity: ERROR
+    languages: [php]
+    metadata:
+      cwe: "CWE-89"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_COOKIE
+          - pattern: $_REQUEST
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: mysqli_real_escape_string(...)
+          - pattern: $MYSQLI->real_escape_string(...)
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  "...$EXPR..."
+              - metavariable-regex:
+                  metavariable: $EXPR
+                  regex: "(?is).*\\b(select|delete|insert|create|update|alter|drop)\\b.*"
+          - patterns:
+              - pattern: sprintf($SQLSTR, ...)
+              - metavariable-regex:
+                  metavariable: $SQLSTR
+                  regex: "(?is).*\\b(select|delete|insert|create|update|alter|drop)\\b.*"
+
+  # ── CWE-22: File inclusion with user input ──────────────────────────────────
+
+  - id: php-file-inclusion
+    message: >
+      User input used in file inclusion (include/require). This can lead to
+      local or remote file inclusion, enabling code execution (CWE-98).
+    severity: ERROR
+    languages: [php]
+    metadata:
+      cwe: "CWE-98"
+      confidence: MEDIUM
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+    pattern-sinks:
+      - pattern-either:
+          - pattern: include($PATH)
+          - pattern: include_once($PATH)
+          - pattern: require($PATH)
+          - pattern: require_once($PATH)
+
+  # ── CWE-327: Weak crypto ────────────────────────────────────────────────────
+
+  - id: php-weak-crypto
+    message: >
+      Use of deprecated/insecure cryptographic function (mcrypt, md5 for
+      passwords, weak OpenSSL cipher). Use modern alternatives (CWE-327).
+    severity: WARNING
+    languages: [php]
+    metadata:
+      cwe: "CWE-327"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: mcrypt_encrypt(...)
+      - pattern: mcrypt_decrypt(...)
+      - pattern: md5($PASSWORD)
+      - pattern: sha1($PASSWORD)
+
