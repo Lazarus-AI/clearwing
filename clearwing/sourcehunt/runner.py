@@ -20,8 +20,11 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+from opentelemetry import trace as otel_trace
 
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
@@ -1051,6 +1054,14 @@ class SourceHuntRunner:
 
     @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
+        self._run_started_at = datetime.now(timezone.utc).isoformat()
+        span_context = otel_trace.get_current_span().get_span_context()
+        self._otel_trace_id = (
+            f"{span_context.trace_id:032x}" if span_context.is_valid else None
+        )
+        self._otel_span_id = (
+            f"{span_context.span_id:016x}" if span_context.is_valid else None
+        )
         if self._flow == "proof":
             try:
                 return await self._arun_proof_flow()
@@ -3387,6 +3398,9 @@ class SourceHuntRunner:
                 subsystem_stats=subsystem_stats,
                 pipeline_status=pipeline_status,
                 budget_summary=budget_summary,
+                trace_id=getattr(self, "_otel_trace_id", None),
+                run_started_at=getattr(self, "_run_started_at", None),
+                run_ended_at=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)
