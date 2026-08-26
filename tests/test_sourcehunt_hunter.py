@@ -26,6 +26,7 @@ from clearwing.agent.tools.hunt import (
     _normalize_path,
     _parse_rg_output,
     _parse_sanitizer_report,
+    build_analysis_tools,
     build_hunter_tools,
 )
 from clearwing.sandbox.container import ExecResult
@@ -396,15 +397,13 @@ class TestBuildHunterAgent:
             "read_source_file",
             "list_source_tree",
             "grep_source",
-            "compile_file",
-            "run_with_sanitizer",
-            "write_test_case",
-            "fuzz_harness",
             "record_trace_step",
             "record_finding",
             "find_security_issues",
             "flag_potential",
+            "update_potential",
             "dismiss_potential",
+            "defer_potential",
         }
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
@@ -454,7 +453,9 @@ class TestBuildHunterAgent:
             "record_finding",
             "find_security_issues",
             "flag_potential",
+            "update_potential",
             "dismiss_potential",
+            "defer_potential",
         }
         assert "compile_file" not in tool_names
         assert "run_with_sanitizer" not in tool_names
@@ -658,7 +659,7 @@ class TestHunterToolsHostFallback:
 
     def test_compile_file_without_sandbox_returns_error(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         compile_tool = next(t for t in tools if t.name == "compile_file")
         result = compile_tool.invoke({"file_path": "src/codec_a.c"})
         assert result["success"] is False
@@ -666,14 +667,14 @@ class TestHunterToolsHostFallback:
 
     def test_run_with_sanitizer_without_sandbox_returns_error(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         run = next(t for t in tools if t.name == "run_with_sanitizer")
         result = run.invoke({"binary": "/scratch/x"})
         assert result["crashed"] is False
 
     def test_write_test_case_basename_only(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         write = next(t for t in tools if t.name == "write_test_case")
         # Path with slash → rejected by basename validation before sandbox check
         out = write.invoke({"filename": "../etc/passwd", "content": "x"})
@@ -688,7 +689,7 @@ class TestHunterToolsHostFallback:
     def test_fuzz_harness_without_sandbox_returns_no_sandbox(self):
         """v0.4: fuzz_harness is fully implemented but still requires a sandbox."""
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke({"target_function": "decode_frame_a"})
         assert result["status"] == "no_sandbox"
