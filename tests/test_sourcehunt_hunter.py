@@ -37,10 +37,50 @@ from clearwing.sourcehunt.hunter import (
     _live_tool_result_summary,
     _memory_safety_heuristic_hints,
     _tool_output_text,
+    _tool_requires_active_potential,
     build_hunter_agent,
 )
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "./configure && make -j4",
+        "apt-get install -y libonig-dev",
+        "CFLAGS=-fsanitize=address make",
+        "timeout 60 ./jq '.' input.json",
+        "python3 -c 'import subprocess; subprocess.run([\"./jq\"])'",
+        "pytest -q",
+        "afl-fuzz -i seeds -o findings ./target",
+    ],
+)
+def test_dynamic_execute_requires_active_potential(command: str) -> None:
+    assert _tool_requires_active_potential("execute", {"command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg -n 'jvp_string_append' src",
+        "sed -n '300,360p' src/jv.c",
+        "git log --oneline -5 -- src/jv.c",
+        "python3 -c 'print(2 + 2)'",
+    ],
+)
+def test_static_exploration_execute_does_not_require_potential(command: str) -> None:
+    assert not _tool_requires_active_potential("execute", {"command": command})
+
+
+def test_dedicated_dynamic_tools_require_active_potential() -> None:
+    for tool_name in (
+        "compile_file",
+        "run_with_sanitizer",
+        "write_test_case",
+        "fuzz_harness",
+    ):
+        assert _tool_requires_active_potential(tool_name, {})
 
 
 def _make_file_target(path: str, tier: str = "B", **kwargs) -> dict:
@@ -883,6 +923,28 @@ class TestToolOutputSummary:
             },
         )
         assert summary == "lookup_callees entry → 2 resolved, 1 unresolved"
+
+    def test_live_serena_result_includes_arguments_and_short_text(self):
+        summary = _live_tool_result_summary(
+            "serena_find_symbol",
+            {
+                "name_path_pattern": "gdi_CacheToSurface",
+                "relative_path": "libfreerdp/gdi/gfx.c",
+                "include_body": True,
+            },
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Found gdi_CacheToSurface at libfreerdp/gdi/gfx.c:1700",
+                    }
+                ]
+            },
+        )
+
+        assert "name_path_pattern='gdi_CacheToSurface'" in summary
+        assert "relative_path='libfreerdp/gdi/gfx.c'" in summary
+        assert "Found gdi_CacheToSurface" in summary
 
     def test_list_source_tree_is_summarized(self):
         summary = _tool_output_text(

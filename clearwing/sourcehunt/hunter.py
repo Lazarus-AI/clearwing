@@ -1230,6 +1230,11 @@ bookmark, not a claim that the issue is confirmed. Enrich it with
 `update_potential` as source evidence accumulates. Do not reread the whole
 target file to reconstruct candidates already preserved in the potential queue.
 
+Dynamic verification requires an active potential. Before building the project,
+installing dependencies, running the target or tests, enabling sanitizers, or
+fuzzing, first call `flag_potential` with the concrete source-level hypothesis.
+Build setup counts as verification, not exploration.
+
 Not a finding (skip these):
 - Missing NULL check on trusted-caller pointers (robustness, not security)
 - "Could hypothetically" without a concrete arithmetic/comparison anchor
@@ -1829,6 +1834,13 @@ class NativeHunter:
                         tool_arguments["potential_id"] = active_potential_id
                     potentials_before = len(self.ctx.potentials)
                     findings_before = len(self.ctx.findings)
+                    dynamic_verification_blocked = (
+                        active_potential_id is None
+                        and _tool_requires_active_potential(
+                            tool_call.fn_name,
+                            tool_arguments,
+                        )
+                    )
 
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
@@ -1879,7 +1891,31 @@ class NativeHunter:
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
 
-                    if skipped:
+                    if dynamic_verification_blocked:
+                        tool_output = {
+                            "error": (
+                                "dynamic verification requires an active potential. "
+                                "Flag the concrete source-level hypothesis with "
+                                "flag_potential before building, installing dependencies, "
+                                "running the target or tests, using sanitizers, or fuzzing."
+                            )
+                        }
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                                "dynamic_verification_blocked": True,
+                            },
+                        )
+                    elif skipped:
                         total_repeated_skips += 1
                         tool_output = {
                             "error": (
@@ -1979,20 +2015,25 @@ class NativeHunter:
                             )
                         ):
                             exploration_calls_since_checkpoint += 1
+                    live_summary = _live_tool_result_summary(
+                        tool_call.fn_name,
+                        tool_arguments,
+                        tool_output,
+                    )
+                    if tool_call.fn_name.startswith("serena_"):
+                        logger.info("[%s] SERENA → %s", self.ctx.file_path, live_summary)
                     EventBus().emit(
                         EventType.TOOL_RESULT,
                         {
                             "tool": tool_call.fn_name,
                             "tool_name": tool_call.fn_name,
                             "hunter_target": self.ctx.file_path,
-                            "summary": _live_tool_result_summary(
-                                tool_call.fn_name,
-                                tool_arguments,
-                                tool_output,
-                            ),
+                            "arguments": tool_arguments,
+                            "summary": live_summary,
                             "is_error": _tool_result_is_error(tool_output),
                             "content_length": len(tool_summary),
                             "repeated_skip": skipped,
+                            "dynamic_verification_blocked": dynamic_verification_blocked,
                         },
                     )
                     messages.append(
@@ -2305,13 +2346,22 @@ class NativeHunter:
                 )
                 return result
             else:
+                event_data = {
+                    "tool_name": tool_call.fn_name,
+                    "hunter_target": self.ctx.file_path,
+                    "sandbox_id": sandbox_id,
+                }
+                if tool_call.fn_name.startswith("serena_"):
+                    event_data["arguments"] = arguments
+                    logger.info(
+                        "[%s] SERENA %s(%s)",
+                        self.ctx.file_path,
+                        tool_call.fn_name.removeprefix("serena_"),
+                        _compact_tool_arguments(arguments),
+                    )
                 EventBus().emit(
                     EventType.TOOL_START,
-                    {
-                        "tool_name": tool_call.fn_name,
-                        "hunter_target": self.ctx.file_path,
-                        "sandbox_id": sandbox_id,
-                    },
+                    event_data,
                 )
             return await tool.ainvoke(arguments)
         except Exception as exc:
@@ -2429,8 +2479,67 @@ def _tool_result_is_error(value: Any) -> bool:
     return False
 
 
+_DYNAMIC_VERIFICATION_TOOLS = {
+    "compile_file",
+    "run_with_sanitizer",
+    "write_test_case",
+    "fuzz_harness",
+}
+
+_DYNAMIC_VERIFICATION_COMMAND = re.compile(
+    r"(?:"
+    r"\b(?:apt(?:-get)?|apk|dnf|yum)\s+(?:install|add|update)\b|"
+    r"\b(?:pip3?|uv)\s+(?:install|add)\b|"
+    r"\b(?:npm|pnpm|yarn|cargo)\s+(?:install|add)\b|"
+    r"\b(?:autoreconf|autogen|cmake|meson|ninja|make|ctest)\b|"
+    r"(?:^|&&\s*|\|\|\s*|[;|]\s*|\btimeout\s+\d+\s+)(?:\./|/workspace/)[\w.-]+|"
+    r"\b(?:cargo|go)\s+(?:build|test|run|fuzz)\b|"
+    r"\b(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)\b|"
+    r"(?:address|undefined|memory|thread)sanitizer|"
+    r"\b(?:asan|ubsan|msan|tsan)_options\b|"
+    r"-fsanitize(?:=|\b)|"
+    r"\b(?:afl(?:-fuzz|\+\+)?|honggfuzz|libfuzzer|cargo-fuzz|pytest)\b|"
+    r"\bsubprocess\.(?:run|popen|call)\b|"
+    r"\b(?:fuzz|fuzzer|fuzzing)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _tool_requires_active_potential(tool_name: str, arguments: dict[str, Any]) -> bool:
+    """Return whether a tool call performs dynamic verification rather than exploration."""
+    if tool_name in _DYNAMIC_VERIFICATION_TOOLS:
+        return True
+    if tool_name != "execute":
+        return False
+    return bool(_DYNAMIC_VERIFICATION_COMMAND.search(str(arguments.get("command", ""))))
+
+
+def _compact_tool_arguments(arguments: dict[str, Any], limit: int = 240) -> str:
+    rendered = ", ".join(
+        f"{key}={value!r}"
+        for key, value in arguments.items()
+        if value not in (None, "", [], -1)
+    )
+    return _clip_text(rendered, limit).replace("\n", " ")
+
+
 def _live_tool_result_summary(tool_name: str, arguments: dict[str, Any], value: Any) -> str:
     """Produce one useful live-status line without echoing source or raw JSON."""
+    if tool_name.startswith("serena_"):
+        params = _compact_tool_arguments(arguments, 160)
+        result_text = ""
+        if isinstance(value, dict):
+            for item in value.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "text":
+                    result_text = str(item.get("text") or "")
+                    break
+        if not result_text:
+            result_text = _tool_output_text(tool_name, arguments, value)
+        result_text = " ".join(result_text.split())
+        call = f"{tool_name}({params})" if params else f"{tool_name}()"
+        return f"{call} → {_clip_text(result_text, 220)}"
+
     if tool_name in {"read_file", "read_source_file"} and isinstance(value, str):
         path = str(arguments.get("path", "?"))
         numbered = [

@@ -170,13 +170,15 @@ def _append_latest_reasoning_and_result(renderables: list[Any]) -> None:
     if _latest_result:
         item = _latest_result[-1]
         failed = bool(item.get("is_error"))
+        is_serena = str(item.get("tool_name") or item.get("tool") or "").startswith(
+            "serena_"
+        )
+        label = "error      " if failed else ("serena     " if is_serena else "result     ")
+        style = "bold red" if failed else ("bold magenta" if is_serena else "bold green")
         renderables.append(
             Text.assemble(
                 (f"{item.get('ts', '')} ", "dim"),
-                (
-                    "error      " if failed else "result     ",
-                    "bold red" if failed else "bold green",
-                ),
+                (label, style),
                 (str(item.get("summary") or "")[:240], ""),
             )
         )
