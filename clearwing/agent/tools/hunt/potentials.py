@@ -619,7 +619,9 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
             description=(
                 "Resolve a flagged potential as dismissed only after source evidence satisfies "
                 "one of its recorded disproof conditions. The dismissed lead remains in the "
-                "audit history. Do not dismiss an inconclusive lead; defer it instead."
+                "audit history. A validation check is sufficient disproof only when it dominates "
+                "every subsequent attacker-controlled mutation and every security-sensitive use "
+                "across all reachable states. Do not dismiss an inconclusive lead; defer it instead."
             ),
             schema=DismissPotentialInput.model_json_schema(),
             handler=dismiss_potential,

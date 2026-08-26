@@ -1238,6 +1238,10 @@ particular ask only these high-value questions:
   parameter relationships all enforced, including across provider dispatch?
 - Lifecycle/state: can a value change after it was validated, activated, cached,
   or made security-sensitive, and is it revalidated before later consumption?
+  A validation check disproves a candidate only if it dominates every subsequent
+  attacker-controlled mutation and every security-sensitive use, across all
+  reachable states. Map validation, mutation, and use by lifecycle stage before
+  treating an earlier check as proof of safety.
 - Branch/configuration: does every feature flag and error path preserve the same
   confidentiality, integrity, authorization, and indistinguishable-failure property?
 - Authorization: is the decision scoped to the exact actor, resource, operation,

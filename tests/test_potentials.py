@@ -199,6 +199,16 @@ def test_dismissal_without_recorded_disproof_is_rejected(tmp_path) -> None:
     assert ctx.potential_history == []
 
 
+def test_dismiss_tool_requires_lifecycle_dominance_instructions(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    description = tools["dismiss_potential"].description
+    assert "dominates every subsequent attacker-controlled mutation" in description
+    assert "every security-sensitive use" in description
+    assert "all reachable states" in description
+
+
 def test_malformed_potential_arguments_are_rejected_before_state_mutation(tmp_path) -> None:
     ctx = HunterContext(repo_path=str(tmp_path))
     tools = {tool.name: tool for tool in build_potential_tools(ctx)}
