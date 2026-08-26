@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from opentelemetry import trace as otel_trace
+
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.budget import BudgetExceeded, SpendLedger
@@ -1084,6 +1086,10 @@ class SourceHuntRunner:
 
     @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
+        span_context = otel_trace.get_current_span().get_span_context()
+        self._otel_trace_id = (
+            f"{span_context.trace_id:032x}" if span_context.is_valid else None
+        )
         if self._flow == "proof":
             try:
                 return await self._arun_proof_flow()
@@ -2801,10 +2807,20 @@ class SourceHuntRunner:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
+        eager_callgraph = (
+            self.depth != "quick"
+            and self._preprocessing
+            and not (self._enable_serena and self._agent_mode == "deep")
+        )
+        if not eager_callgraph and self._enable_serena and self.depth != "quick":
+            logger.info(
+                "Eager callgraph skipped because Serena navigation is enabled; "
+                "built-in callgraph tools will not be attached"
+            )
         options = {
             "tag_files": True,
-            "build_callgraph": self.depth != "quick" and self._preprocessing,
-            "propagate_reachability": self.depth != "quick" and self._preprocessing,
+            "build_callgraph": eager_callgraph,
+            "propagate_reachability": eager_callgraph,
             "run_semgrep": self.depth != "quick" and self._preprocessing,
             "run_taint": self.depth != "quick" and self._preprocessing,
             "respect_gitignore": self._respect_gitignore,
@@ -3458,6 +3474,7 @@ class SourceHuntRunner:
                 pipeline_status=pipeline_status,
                 budget_summary=budget_summary,
                 potentials=potentials,
+                trace_id=getattr(self, "_otel_trace_id", None),
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)

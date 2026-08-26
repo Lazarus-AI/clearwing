@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -16,6 +18,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_SERENA_IMAGE = "ghcr.io/oraios/serena:latest"
 SERENA_PROJECT_PATH = "/workspace"
 SERENA_DATA_PATH = "/serena-data"
+SERENA_MAX_SEARCH_RESULT_CHARS = 32_000
+SERENA_SEARCH_TOOLS = {"find_referencing_symbols", "find_symbol", "search_for_pattern"}
 
 # Sourcehunt is an analysis workflow. Do not expose Serena's editing, shell,
 # memory-writing, or project-switching capabilities to hunters.
@@ -63,6 +67,11 @@ class SerenaSession:
             '"/serena-data/projects/$projectFolderName/.serena"\n'
             "trusted_project_path_patterns:\n"
             '  - "/workspace"\n'
+            "ignored_paths:\n"
+            '  - "npm/**"\n'
+            '  - "dist/**"\n'
+            '  - "build/**"\n'
+            '  - "**/*min.js"\n'
             "projects: []\n"
             "web_dashboard: false\n"
             "web_dashboard_open_on_launch: false\n"
@@ -196,7 +205,42 @@ class SerenaSession:
         def invoke(**arguments: Any) -> Any:
             if self._client is None:
                 raise RuntimeError("Serena session is closed")
-            return self._client.call_tool(remote_name, arguments)
+            result = self._client.call_tool(remote_name, arguments)
+            if remote_name in SERENA_SEARCH_TOOLS:
+                serialized_result = json.dumps(result, ensure_ascii=False, default=str)
+                result_chars = len(serialized_result)
+                serena_rejected = "answer is too long" in serialized_result.lower()
+                reported_size = re.search(r"\(([\d,]+) characters\)", serialized_result)
+                if reported_size:
+                    result_chars = int(reported_size.group(1).replace(",", ""))
+                if result_chars > SERENA_MAX_SEARCH_RESULT_CHARS or serena_rejected:
+                    supplied_path = arguments.get("relative_path") or arguments.get(
+                        "paths_include_glob"
+                    )
+                    path_advice = (
+                        "Narrow relative_path/paths_include_glob to a smaller source directory "
+                        "or file. "
+                        if not supplied_path
+                        else "Narrow the supplied path or split the query by symbol/pattern. "
+                    )
+                    return {
+                        "status": "query_too_broad",
+                        "error": (
+                            f"Serena {remote_name} produced {result_chars:,} characters, "
+                            f"above the {SERENA_MAX_SEARCH_RESULT_CHARS:,}-character safety "
+                            "limit; no matches were returned to model context. "
+                            f"{path_advice}Exclude minified/generated files and prefer an "
+                            "exact symbol or definition pattern."
+                        ),
+                        "result_chars": result_chars,
+                        "result_limit_chars": SERENA_MAX_SEARCH_RESULT_CHARS,
+                        "retry": {
+                            "relative_path": "specific/source/path",
+                            "paths_include_glob": "src/**/*.{c,cc,cpp,go,rs,py,js}",
+                            "pattern": "one exact symbol or definition pattern",
+                        },
+                    }
+            return result
 
         return NativeToolSpec(
             name=f"serena_{remote_name}",

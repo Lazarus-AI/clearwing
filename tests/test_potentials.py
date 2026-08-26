@@ -68,7 +68,7 @@ def test_defer_potential_preserves_missing_evidence(tmp_path) -> None:
     ]
 
 
-def test_dismiss_potential_removes_ruled_out_lead(tmp_path) -> None:
+def test_dismiss_potential_preserves_auditable_ruled_out_lead(tmp_path) -> None:
     ctx = HunterContext(repo_path=str(tmp_path))
     tools = {tool.name: tool for tool in build_potential_tools(ctx)}
 
@@ -101,11 +101,17 @@ def test_dismiss_potential_removes_ruled_out_lead(tmp_path) -> None:
         {
             "potential_id": potential_id,
             "resolution": "caller checks the length before dispatch",
+            "disproof_condition": "Every caller bounds the length before dispatch",
+            "evidence": ["src/caller.c:88 checks length <= sizeof(destination)"],
         }
     )
 
     assert "ruled out" in dismissed
     assert ctx.potentials == []
+    assert ctx.potential_history[0]["status"] == "dismissed"
+    assert ctx.potential_history[0]["resolution_evidence"] == [
+        "src/caller.c:88 checks length <= sizeof(destination)"
+    ]
 
 
 def test_dismissed_potential_cannot_be_dismissed_twice(tmp_path) -> None:
@@ -123,13 +129,44 @@ def test_dismissed_potential_cannot_be_dismissed_twice(tmp_path) -> None:
         }
     )
     potential_id = ctx.potentials[0]["id"]
-    args = {"potential_id": potential_id, "resolution": "caller validates the length"}
+    args = {
+        "potential_id": potential_id,
+        "resolution": "caller validates the length",
+        "disproof_condition": "All reachable callers validate the length",
+        "evidence": ["src/caller.c:88 validates the length"],
+    }
 
     tools["dismiss_potential"].invoke(args)
     result = tools["dismiss_potential"].invoke(args)
 
     assert "No potential found" in result
     assert ctx.potentials == []
+
+
+def test_dismissal_without_recorded_disproof_is_rejected(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+    tools["flag_potential"].invoke(
+        {
+            "file": "src/parser.c",
+            "line": 42,
+            "hypothesis": "length may exceed the destination",
+            "disproof_conditions": ["All callers validate the length"],
+        }
+    )
+
+    result = tools["dismiss_potential"].invoke(
+        {
+            "potential_id": ctx.potentials[0]["id"],
+            "resolution": "looks safe",
+            "disproof_condition": "No crash was observed",
+            "evidence": ["src/parser.c:42 looks safe"],
+        }
+    )
+
+    assert "not dismissed" in result
+    assert len(ctx.potentials) == 1
+    assert ctx.potential_history == []
 
 
 def test_malformed_potential_arguments_are_rejected_before_state_mutation(tmp_path) -> None:

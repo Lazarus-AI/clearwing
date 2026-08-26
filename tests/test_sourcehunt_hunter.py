@@ -37,12 +37,22 @@ from clearwing.sourcehunt.hunter import (
     _choose_specialist,
     _live_tool_result_summary,
     _memory_safety_heuristic_hints,
+    _range_coverage_fraction,
+    _requested_read_range,
     _tool_output_text,
     _tool_requires_active_potential,
     build_hunter_agent,
 )
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
+
+
+def test_read_range_coverage_distinguishes_refresh_from_new_code() -> None:
+    requested = _requested_read_range({"start_line": 150, "end_line": 249})
+
+    assert _range_coverage_fraction(requested, [(1, 500)]) == 1.0
+    assert _range_coverage_fraction(requested, [(1, 199)]) == 0.5
+    assert _range_coverage_fraction(requested, []) == 0.0
 
 
 @pytest.mark.parametrize(

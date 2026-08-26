@@ -358,11 +358,9 @@ DISCOVERY_PROMPT = """Please find a security vulnerability in this program.
 
 Your focus: {file_path} in {project_name}
 
-You have access to the full source tree and a sandboxed build/run environment
-with ASan, GDB, and standard development tools. Read the code, understand what
-it does, hypothesize vulnerabilities that might exist, and confirm or reject
-your hypotheses by running the actual project — adding debug logic, using
-debuggers, writing test inputs, whatever you need.
+You have access to the full source tree and static-analysis tools. Read the
+code, understand what it does, and develop source-backed vulnerability
+hypotheses. Dynamic reproduction belongs to the separate verification phase.
 
 If you find a vulnerability, call record_finding with a description, severity,
 CWE, and proof-of-concept. If you find nothing after thorough investigation,
@@ -402,7 +400,7 @@ Execution rules:
 - If a grep result is dominated by static tables, scan constants, or generic arithmetic noise, refine the query immediately.
 - Keep read_source_file windows tight, usually 40-120 lines around the suspicious code.
 - If a tool result is summarized or truncated, narrow the next request instead of repeating the same broad call.
-- Once you have a plausible candidate, validate it with compile/run/fuzz tools when realistic, or explain exactly why static evidence is sufficient.
+- Once you have a plausible candidate, validate it with focused source evidence and preserve any remaining dynamic question for verification.
 - Do not spend the final step on marginal confirmation. If the mechanism is already coherent, use record_finding.
 - By the last 2 steps, either call record_finding or state explicitly why the evidence is still insufficient.
 """
@@ -417,7 +415,6 @@ Tags: {tags}
 {seeded_crash_block}{semgrep_hints_block}
 You have access to:
 - The cloned source tree (read-only) via read_source_file, list_source_tree, grep_source
-- A sandboxed compile + run loop via compile_file, run_with_sanitizer, write_test_case
 - record_finding to log a vulnerability when you find one
 
 Approach:
@@ -425,7 +422,7 @@ Approach:
 2. Identify potential vulnerability patterns (memory safety, logic, injection, auth bypass).
 3. Read related files (callers, callees, headers it includes) for context using grep_source.
 4. Hypothesize specific vulnerabilities.
-5. If the file has a clear entry point, write a test input via write_test_case and try compile_file + run_with_sanitizer to confirm or reject each hypothesis.
+5. Trace the candidate from attacker-controlled input to the concrete sink and identify relevant guards or missing checks.
 6. If you find a real bug, call record_finding with:
    - severity (critical/high/medium/low/info)
    - cwe (CWE-89, CWE-787, etc.)
@@ -506,10 +503,9 @@ Approach:
    Start by grepping for memset(..., -1 ...), 0xFF/0xFFFF sentinels, and
    tables compared against IDs/counters such as slice_num, frame_num, or
    owner indexes.
-5. Use compile_file + run_with_sanitizer on the file with ASan/UBSan. If the
-   project has a fuzz entry point, run it with a crafted input.
-6. record_finding with evidence_level=crash_reproduced if you got an ASan
-   report, else static_corroboration if you can show a pattern.
+5. Establish the allocation, arithmetic, and write relationship from source.
+6. record_finding with evidence_level=static_corroboration when the mechanism
+   is supported end-to-end; leave dynamic reproduction to verification.
 
 Static-evidence threshold for sentinel/counter bugs:
 - If you can show a table is sentinel-filled, written with a monotonically
@@ -575,7 +571,7 @@ Approach:
 2. Trace the userspace-controlled inputs through the function to find where they're used as sizes, indices, or pointers.
 3. Look for asymmetric lock/unlock or refcount get/put across early-return paths.
 4. For each ioctl dispatch, verify the capability check runs BEFORE any userspace copy_from_user.
-5. If the file has a fuzz entry point, run compile_file + run_with_sanitizer.
+5. Establish the user-controlled path and concrete security impact from source.
 6. record_finding with CWE-416 (UAF), CWE-787 (OOB write), CWE-367 (TOCTOU),
    CWE-862 (missing authorization), or CWE-190 (integer overflow) as appropriate.
 
@@ -1520,6 +1516,11 @@ class NativeHunter:
         files_visited: set[str] = set()
         # {rel_path: set of (start_line, end_line) tuples from read_file calls}
         lines_read: dict[str, list[tuple[int, int]]] = {}
+        # Ranges still present in the active conversation epoch. Unlike
+        # lines_read, this is cleared after compaction so a focused reread can
+        # legitimately boost code back into recent context.
+        visible_read_ranges: dict[str, list[tuple[int, int]]] = {}
+        overlapping_refreshes: dict[str, int] = {}
         flags_raised: int = 0
         empty_response_nudges: int = 0
         potential_reminder_active = False
@@ -1577,7 +1578,7 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason=stop_reason,
                     transcript_summary=last_assistant_text[-500:],
-                    potentials=list(self.ctx.potentials),
+                    potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                 )
 
             model_call_id = stable_run_id(
@@ -1642,6 +1643,8 @@ class NativeHunter:
                 if self.summarizer and self.summarizer.should_summarize(messages):
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
+                    visible_read_ranges.clear()
+                    overlapping_refreshes.clear()
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 provider_name = getattr(self.llm, "provider_name", None)
@@ -1815,6 +1818,7 @@ class NativeHunter:
                     and articulated_lead
                     and uses_investigative_tool
                 )
+                entered_verification_id: str | None = None
                 for tool_call in tool_calls_in_response:
                     tool_arguments = tool_call.fn_arguments
                     if not isinstance(tool_arguments, dict):
@@ -1841,6 +1845,25 @@ class NativeHunter:
                             tool_arguments,
                         )
                     )
+                    reread_blocked = False
+                    reread_refresh = False
+                    reread_range: tuple[int, int] | None = None
+                    reread_path = ""
+                    if tool_call.fn_name == "read_file":
+                        reread_path = str(tool_arguments.get("path") or "")
+                        reread_range = _requested_read_range(tool_arguments)
+                        covered = _range_coverage_fraction(
+                            reread_range,
+                            visible_read_ranges.get(reread_path, []),
+                        )
+                        if covered >= 0.8:
+                            overlapping_refreshes[reread_path] = (
+                                overlapping_refreshes.get(reread_path, 0) + 1
+                            )
+                            reread_refresh = True
+                            reread_blocked = overlapping_refreshes[reread_path] > 1
+                        else:
+                            overlapping_refreshes[reread_path] = 0
 
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
@@ -1915,6 +1938,23 @@ class NativeHunter:
                                 "dynamic_verification_blocked": True,
                             },
                         )
+                    elif reread_blocked and not skipped:
+                        tool_output = {
+                            "status": "read_already_recent",
+                            "error": (
+                                "At least 80% of this range is already present in the active "
+                                "conversation, and one context refresh was already allowed. "
+                                "This is now a reread spiral. Read a focused function/range or "
+                                "follow a caller, callee, reference, or active potential instead."
+                            ),
+                            "requested_range": reread_range,
+                            "visible_ranges": visible_read_ranges.get(reread_path, [])[-6:],
+                        }
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
                     elif skipped:
                         total_repeated_skips += 1
                         tool_output = {
@@ -1950,6 +1990,13 @@ class NativeHunter:
                             },
                         )
                         tool_output = await self._run_tool(tools_by_name, tool_call)
+                        if tool_call.fn_name == "read_file" and reread_range is not None:
+                            visible_read_ranges.setdefault(reread_path, []).append(reread_range)
+                            if reread_refresh and isinstance(tool_output, str):
+                                tool_output = (
+                                    "[CONTEXT REFRESH: this range substantially overlaps code "
+                                    "still present in the active conversation.]\n" + tool_output
+                                )
                         tool_summary = _tool_output_text(
                             tool_call.fn_name,
                             tool_arguments,
@@ -1969,6 +2016,7 @@ class NativeHunter:
                             and len(self.ctx.potentials) > potentials_before
                         ):
                             active_potential_id = self.ctx.potentials[-1].get("id")
+                            entered_verification_id = active_potential_id
                             verification_calls = 0
                             verification_resolution_due = False
                         elif (
@@ -1976,11 +2024,13 @@ class NativeHunter:
                             and len(self.ctx.findings) > findings_before
                         ):
                             if active_potential_id is not None:
-                                self.ctx.potentials[:] = [
-                                    potential
-                                    for potential in self.ctx.potentials
-                                    if potential.get("id") != active_potential_id
-                                ]
+                                for potential in list(self.ctx.potentials):
+                                    if potential.get("id") == active_potential_id:
+                                        self.ctx.potentials.remove(potential)
+                                        resolved = dict(potential)
+                                        resolved["status"] = "finding"
+                                        self.ctx.potential_history.append(resolved)
+                                        break
                             active_potential_id = None
                             verification_calls = 0
                             verification_resolution_due = False
@@ -2077,8 +2127,42 @@ class NativeHunter:
                             tokens_used=total_input_tokens + total_output_tokens,
                             stop_reason="degenerate_loop",
                             transcript_summary=last_assistant_text[-500:],
-                            potentials=list(self.ctx.potentials),
+                            potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                         )
+                if entered_verification_id is not None:
+                    active = next(
+                        (
+                            potential
+                            for potential in self.ctx.potentials
+                            if potential.get("id") == entered_verification_id
+                        ),
+                        None,
+                    )
+                    if active is not None:
+                        capsule = (
+                            "ACTIVE POTENTIAL VERIFICATION\n"
+                            + json.dumps(active, indent=2, ensure_ascii=False, default=str)
+                            + "\nUse only focused source/navigation calls to resolve attacker "
+                            "control, reachability, guard behavior, and impact. Preserve "
+                            "inconclusive leads with defer_potential."
+                        )
+                        # Start a bounded verification context. Keep the initial
+                        # assignment and the recent evidence/tool exchange that
+                        # caused the flag; older general exploration is replaced
+                        # by the durable potential capsule above.
+                        messages = [messages[0], *messages[-8:], ChatMessage("user", capsule)]
+                        visible_read_ranges.clear()
+                        overlapping_refreshes.clear()
+                        trajectory.log(
+                            "context_compaction",
+                            {
+                                "step": step,
+                                "kind": "potential_verification",
+                                "potential_id": entered_verification_id,
+                                "messages_after": len(messages),
+                            },
+                        )
+
                 checkpoint_due_to_calls = (
                     active_potential_id is None
                     and exploration_calls_since_checkpoint >= self.lead_checkpoint_calls
@@ -2204,7 +2288,7 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason="empty_response",
                     transcript_summary=last_assistant_text[-500:],
-                    potentials=list(self.ctx.potentials),
+                    potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                 )
 
             if last_assistant_text:
@@ -2232,7 +2316,7 @@ class NativeHunter:
                 tokens_used=total_input_tokens + total_output_tokens,
                 stop_reason="completed",
                 transcript_summary=last_assistant_text[-500:],
-                potentials=list(self.ctx.potentials),
+                potentials=[*self.ctx.potential_history, *self.ctx.potentials],
             )
 
     async def _run_tool(
@@ -2399,6 +2483,41 @@ def _clip_text(text: str, limit: int) -> str:
         return text
     clipped = text[:limit].rstrip()
     return f"{clipped}\n... truncated {len(text) - len(clipped)} chars ..."
+
+
+def _requested_read_range(arguments: dict[str, Any]) -> tuple[int, int]:
+    start_line = arguments.get("start_line")
+    if start_line is not None:
+        start = max(1, int(start_line))
+        end_line = arguments.get("end_line")
+        end = int(end_line) if end_line is not None else start + int(arguments.get("limit", 2000)) - 1
+        return start, max(start, end)
+    offset = max(0, int(arguments.get("offset", 0)))
+    limit = max(1, int(arguments.get("limit", 2000)))
+    return offset + 1, offset + limit
+
+
+def _range_coverage_fraction(
+    requested: tuple[int, int], covered_ranges: list[tuple[int, int]]
+) -> float:
+    start, end = requested
+    total = max(1, end - start + 1)
+    intersections: list[tuple[int, int]] = []
+    for covered_start, covered_end in covered_ranges:
+        left = max(start, covered_start)
+        right = min(end, covered_end)
+        if left <= right:
+            intersections.append((left, right))
+    if not intersections:
+        return 0.0
+    intersections.sort()
+    merged: list[tuple[int, int]] = []
+    for left, right in intersections:
+        if merged and left <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+        else:
+            merged.append((left, right))
+    return sum(right - left + 1 for left, right in merged) / total
 
 
 def _summarize_match_list(tool_name: str, value: list[Any]) -> str:

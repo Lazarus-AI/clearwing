@@ -101,6 +101,14 @@ class DismissPotentialInput(ToolInputModel):
     resolution: str = Field(
         description="One sentence explaining the source evidence that ruled out the lead."
     )
+    disproof_condition: str = Field(
+        description="Exact previously recorded disproof condition satisfied by the evidence."
+    )
+    evidence: list[str] = Field(
+        min_length=1,
+        max_length=4,
+        description="Source citations such as path:line plus the fact established there.",
+    )
 
 
 class DeferPotentialInput(ToolInputModel):
@@ -113,7 +121,20 @@ class DeferPotentialInput(ToolInputModel):
     )
 
 
-def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
+def _dismissal_validation_error(
+    potential: dict, disproof_condition: str, evidence: list[str]
+) -> str | None:
+    if disproof_condition not in (potential.get("disproof_conditions") or []):
+        return (
+            "disproof_condition must exactly match one recorded on the potential. "
+            "Defer it if evidence is inconclusive."
+        )
+    if not evidence or not all(":" in item for item in evidence):
+        return "cite at least one repository path and line as path:line."
+    return None
+
+
+def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: C901
 
     def flag_potential(
         file: str,
@@ -166,11 +187,26 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     def dismiss_potential(
         potential_id: str,
         resolution: str,
+        disproof_condition: str,
+        evidence: list[str],
         **_: object,
     ) -> str:
         for index, potential in enumerate(ctx.potentials):
             if potential.get("id") == potential_id:
-                ctx.potentials.pop(index)
+                if error := _dismissal_validation_error(
+                    potential, disproof_condition, evidence
+                ):
+                    return f"Potential [{potential_id}] not dismissed: {error}"
+                resolved = ctx.potentials.pop(index)
+                resolved.update(
+                    {
+                        "status": "dismissed",
+                        "resolution": resolution,
+                        "satisfied_disproof_condition": disproof_condition,
+                        "resolution_evidence": evidence,
+                    }
+                )
+                ctx.potential_history.append(resolved)
                 return f"Potential [{potential_id}] ruled out: {resolution}"
         return f"No potential found with id={potential_id}"
 
@@ -221,8 +257,9 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         NativeToolSpec(
             name="dismiss_potential",
             description=(
-                "Remove a flagged potential only after source evidence affirmatively rules it out. "
-                "Do not dismiss an inconclusive lead; unresolved leads are preserved in the SITREP."
+                "Resolve a flagged potential as dismissed only after source evidence satisfies "
+                "one of its recorded disproof conditions. The dismissed lead remains in the "
+                "audit history. Do not dismiss an inconclusive lead; defer it instead."
             ),
             schema=DismissPotentialInput.model_json_schema(),
             handler=dismiss_potential,

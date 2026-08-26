@@ -711,7 +711,6 @@ class AsyncLLMClient:
             )
         )
 
-    @tracer.chain(name="llm.chat")
     async def achat(
         self,
         *,
@@ -903,7 +902,6 @@ class AsyncLLMClient:
                     )
         return response
 
-    @tracer.chain(name="llm.chat")
     async def achat_stream(
         self,
         *,

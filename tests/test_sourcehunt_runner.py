@@ -73,6 +73,34 @@ def test_runner_degrades_when_serena_cannot_start(tmp_path):
     assert runner._serena_tools == []
 
 
+def test_serena_deep_run_skips_eager_callgraph(tmp_path):
+    runner = SourceHuntRunner(
+        repo_url="test",
+        local_path=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        depth="deep",
+        agent_mode="deep",
+        enable_serena=True,
+        sandbox_factory=MagicMock(),
+    )
+    runner._checkpoint = MagicMock()
+    runner._checkpoint.preprocess = None
+    preprocess_result = MagicMock()
+    with (
+        patch("clearwing.sourcehunt.runner.Preprocessor") as preprocessor_cls,
+        patch("clearwing.sourcehunt.runner.PreprocessCheckpoint.from_result") as checkpoint,
+        patch.object(runner, "_dump_checkpoint"),
+    ):
+        preprocessor_cls.return_value.run.return_value = preprocess_result
+        checkpoint.return_value = MagicMock()
+
+        assert runner._preprocess() is preprocess_result
+
+    kwargs = preprocessor_cls.call_args.kwargs
+    assert kwargs["build_callgraph"] is False
+    assert kwargs["propagate_reachability"] is False
+
+
 def _ranker_response(files: list[str]) -> str:
     """Build a JSON response covering the listed files."""
     entries = []

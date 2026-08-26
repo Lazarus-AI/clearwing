@@ -35,6 +35,7 @@ def write_sourcehunt_report(
     pipeline_status: PipelineStatus | None = None,
     budget_summary: dict[str, Any] | None = None,
     potentials: list[dict] | None = None,
+    trace_id: str | None = None,
 ) -> dict[str, str]:
     """Write the requested formats. Returns {format: filesystem_path}."""
     formats = formats or ["sarif", "markdown", "json"]
@@ -84,6 +85,8 @@ def write_sourcehunt_report(
             "findings": findings,
             "verified_findings": verified_findings,
         }
+        if trace_id:
+            json_data["trace_id"] = trace_id
         if band_stats:
             json_data["band_stats"] = band_stats
         if pool_stats:

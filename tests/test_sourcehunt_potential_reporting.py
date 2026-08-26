@@ -45,3 +45,20 @@ def test_json_report_omits_empty_potential_collection(tmp_path) -> None:
 
     report = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
     assert "potentials" not in report
+
+
+def test_json_report_includes_sourcehunt_trace_id(tmp_path) -> None:
+    trace_id = "656901efba4302f09db3999290711fb0"
+    paths = write_sourcehunt_report(
+        output_dir=str(tmp_path),
+        session_id="session",
+        repo_url="example/repo",
+        findings=[],
+        verified_findings=[],
+        spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+        formats=["json"],
+        trace_id=trace_id,
+    )
+
+    report = json.loads(Path(paths["json"]).read_text(encoding="utf-8"))
+    assert report["trace_id"] == trace_id

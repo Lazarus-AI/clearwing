@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from clearwing.sourcehunt.serena import SerenaSession
+from clearwing.sourcehunt.serena import SERENA_MAX_SEARCH_RESULT_CHARS, SerenaSession
 
 
 def _fake_client() -> MagicMock:
@@ -57,7 +57,10 @@ def test_serena_session_launches_official_image_and_filters_writes(
         str(arg) for arg in args if str(arg).endswith(":/serena-data")
     )
     config = Path(state_mount.removesuffix(":/serena-data"), "serena_config.yml")
-    assert "projects: []" in config.read_text()
+    config_text = config.read_text()
+    assert "projects: []" in config_text
+    assert '  - "npm/**"' in config_text
+    assert '  - "**/*min.js"' in config_text
     assert "--project /workspace" in args[-1]
     assert factory.call_args.kwargs == {
         "initialize_timeout": 300.0,
@@ -91,6 +94,42 @@ def test_serena_native_tool_forwards_to_shared_client(tmp_path) -> None:
     assert result["content"][0]["text"] == "found"
     session.close()
     client.close.assert_called_once()
+
+
+def test_serena_rejects_overly_broad_search_without_returning_matches(tmp_path) -> None:
+    client = _fake_client()
+    client.call_tool.return_value = {
+        "content": [{"type": "text", "text": "x" * (SERENA_MAX_SEARCH_RESULT_CHARS + 1)}]
+    }
+    session = SerenaSession(str(tmp_path), client_factory=MagicMock(return_value=client))
+    tool = session.start()[0]
+
+    result = tool.invoke({"name_path_pattern": "Queue"})
+
+    assert result["status"] == "query_too_broad"
+    assert "no matches were returned" in result["error"]
+    assert "x" * 100 not in str(result)
+    session.close()
+
+
+def test_serena_normalizes_its_own_too_long_response(tmp_path) -> None:
+    client = _fake_client()
+    client.call_tool.return_value = {
+        "content": [
+            {
+                "type": "text",
+                "text": "The answer is too long (354881 characters). Adjust your query.",
+            }
+        ]
+    }
+    session = SerenaSession(str(tmp_path), client_factory=MagicMock(return_value=client))
+    tool = session.start()[0]
+
+    result = tool.invoke({"name_path_pattern": "modInverse"})
+
+    assert result["status"] == "query_too_broad"
+    assert result["result_chars"] == 354881
+    session.close()
 
 
 def test_serena_start_failure_closes_process(tmp_path) -> None:
