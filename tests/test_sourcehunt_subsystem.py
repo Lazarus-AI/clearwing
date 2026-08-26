@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.llm import NativeToolSpec
 from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.state import FileTarget, StageOutcome, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
@@ -221,6 +222,11 @@ def test_subsystem_prompt_includes_file_listing():
     assert "net/ipv4/udp.c" in prompt
     assert "net_ipv4" in prompt
     assert "linux" in prompt
+    assert "Survey before committing" in prompt
+    assert "For each major security boundary, build an invariant map" in prompt
+    assert "Lifecycle/state" in prompt
+    assert "dominates every subsequent" in prompt
+    assert "Map validation, mutation, and use by lifecycle stage" in prompt
 
 
 def test_subsystem_prompt_cross_file_calls():
@@ -284,6 +290,44 @@ def test_subsystem_prompt_entry_points():
     assert "protocol_parser" in prompt
 
 
+def test_subsystem_prompt_has_generic_cross_platform_path_threat_advice():
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    subsystem = SubsystemTarget(
+        name="archive_extraction",
+        root_path="src/extract",
+        files=[_ft("src/extract/archive.c", 4.0)],
+    )
+
+    prompt = _build_subsystem_prompt(subsystem, "extractor")
+
+    assert "Path confinement" in prompt
+    assert "drive/UNC roots" in prompt
+    assert "compact interpretation matrix" in prompt
+    assert "every supported target platform" in prompt
+    assert "backslash traversal" not in prompt.lower()
+
+
+def test_subsystem_prompt_has_allocation_access_extent_threat_advice():
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    subsystem = SubsystemTarget(
+        name="buffer_processing",
+        root_path="src/buffer",
+        files=[_ft("src/buffer/copy.c", 4.0)],
+    )
+
+    prompt = _build_subsystem_prompt(subsystem, "processor")
+    normalized = " ".join(prompt.split())
+
+    assert "Allocation/access extent" in normalized
+    assert "expressions used for validation, allocation, and access" in normalized
+    assert "live bounds of every object" in normalized
+    assert "required inequalities" in normalized
+    assert "values actually consumed at the sink" in normalized
+    assert "gdi_CacheToSurface" not in normalized
+
+
 # ---------------------------------------------------------------------------
 # build_subsystem_hunter_agent
 # ---------------------------------------------------------------------------
@@ -309,6 +353,73 @@ def test_build_subsystem_hunter_agent_tools():
     assert "execute" in tool_names
     assert "read_file" in tool_names
     assert "record_finding" in tool_names
+
+
+def test_build_subsystem_hunter_agent_keeps_callgraph_navigation(
+    monkeypatch,
+):
+    from clearwing.sourcehunt import hunter as hunter_module
+
+    def tool(name: str) -> NativeToolSpec:
+        return NativeToolSpec(name=name, description=name, schema={}, handler=lambda: None)
+
+    callgraph_tools = [
+        tool("lookup_callers"),
+        tool("lookup_callees"),
+        tool("list_functions"),
+        tool("read_function"),
+    ]
+    monkeypatch.setattr(
+        hunter_module,
+        "build_deep_agent_tools",
+        lambda ctx: [tool("execute"), *callgraph_tools],
+    )
+    subsystem = SubsystemTarget(
+        name="test_sub",
+        root_path="src/parser",
+        files=[_ft("src/parser/main.c", 4.0)],
+    )
+
+    built, _ = hunter_module.build_subsystem_hunter_agent(
+        subsystem=subsystem,
+        repo_path="/tmp/repo",
+        sandbox=None,
+        llm=MagicMock(),
+        session_id="test-session",
+        callgraph=MagicMock(functions={}, calls_out={}, defined_in={}),
+    )
+
+    assert {item.name for item in callgraph_tools} <= {item.name for item in built.tools}
+
+
+@pytest.mark.asyncio
+async def test_subsystem_runner_accumulates_unresolved_potentials(monkeypatch, tmp_path):
+    subsystem = SubsystemTarget(
+        name="test_sub",
+        root_path="src/parser",
+        files=[_ft("src/parser/main.c", 4.0)],
+    )
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(subsystems=[subsystem], repo_path=str(tmp_path), llm=MagicMock())
+    )
+    potentials = [
+        {
+            "id": "lead-1",
+            "file": "src/parser/main.c",
+            "line": 12,
+            "note": "unclear length",
+            "hypothesis": "CWE-787",
+            "priority": "high",
+        }
+    ]
+
+    async def fake_run(*args, **kwargs):
+        return [], 0.0, 0, "completed", potentials
+
+    monkeypatch.setattr(runner, "_run_one_subsystem", fake_run)
+
+    assert await runner.arun() == []
+    assert runner.all_potentials == potentials
 
 
 def test_build_subsystem_hunter_agent_max_steps():
@@ -443,7 +554,7 @@ async def test_subsystem_hunt_runner_preserves_budget_exhaustion(monkeypatch):
     )
 
     async def budget_exhausted(*args, **kwargs):
-        return [], 1.0, 10, "budget_exhausted"
+        return [], 1.0, 10, "budget_exhausted", []
 
     monkeypatch.setattr(runner, "_run_one_subsystem", budget_exhausted)
 
@@ -461,6 +572,7 @@ def test_subsystem_budget_stop_marks_sourcehunt_run_incomplete(monkeypatch, tmp_
         def __init__(self, config):
             self.total_spent = 1.0
             self.budget_exhausted = True
+            self.all_potentials = []
 
         async def arun(self):
             return []

@@ -107,6 +107,34 @@ def test_preprocess_result_round_trips_nested_types(tmp_path: Path):
     assert restored == result
 
 
+def test_hunt_checkpoint_round_trips_unresolved_potentials() -> None:
+    potentials = [
+        {
+            "id": "lead-1",
+            "file": "sample.c",
+            "line": 2,
+            "note": "unchecked length",
+            "hypothesis": "CWE-787",
+            "priority": "high",
+        }
+    ]
+    result = HuntResult(
+        findings=[],
+        spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+        potentials=potentials,
+    )
+    checkpoint = HuntCheckpoint.from_result(result, options={"depth": "deep"})
+
+    restored = HuntCheckpoint.model_validate_json(checkpoint.model_dump_json()).restore(
+        options={"depth": "deep"}
+    )
+
+    assert restored is not None
+    assert restored.potentials == potentials
+    restored.potentials[0]["note"] = "changed"
+    assert checkpoint.result.potentials[0]["note"] == "unchecked length"
+
+
 def test_preprocess_checkpoint_trusts_current_source_and_rebinds_paths(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()

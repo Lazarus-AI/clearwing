@@ -3,11 +3,10 @@
 Public entry points:
 - `HunterContext`                  — the mutable per-hunter state (sandbox,
                                       findings list, specialist, session_id).
-- `build_hunter_tools(ctx)`        — the full 9-tool set for memory_safety /
-                                      logic_auth / general specialists.
-- `build_propagation_auditor_tools(ctx)` — the narrower Tier C subset that
-                                      drops the sandboxed build+execute tools
-                                      (compile/run/fuzz/write_test_case).
+- `build_hunter_tools(ctx)`        — the static-analysis tool set for
+                                      memory_safety / logic_auth / general
+                                      specialists.
+- `build_propagation_auditor_tools(ctx)` — the Tier C static-analysis set.
 
 Internal layout:
     sandbox.py    — HunterContext dataclass + sanitizer-variant routing
@@ -49,14 +48,13 @@ from .sandbox import HunterContext, _parse_variant_arg
 
 
 def build_hunter_tools(ctx: HunterContext) -> list:
-    """Full hunter tool set for memory_safety / logic_auth / general specialists.
+    """Static hunter tool set for memory_safety / logic_auth / general specialists.
 
-    Composes discovery + analysis + reporting into a single flat list
-    in the order the legacy hunter_tools.py closure emitted them.
+    Dynamic compile/run/test/fuzz tools belong to verification, not hunting.
+    Their builder remains exported for verifier and focused-tool callers.
     """
     tools = [
         *build_discovery_tools(ctx),
-        *build_analysis_tools(ctx),
         *build_reporting_tools(ctx),
     ]
     if ctx.findings_pool is not None:
@@ -65,12 +63,9 @@ def build_hunter_tools(ctx: HunterContext) -> list:
 
 
 def build_propagation_auditor_tools(ctx: HunterContext) -> list:
-    """Narrower tool set for Tier C propagation auditors.
+    """Static tool set for Tier C propagation auditors.
 
-    Tier C auditors don't compile or run — they grep and reason about
-    downstream usages of definitions. This subset keeps them cheap and
-    on-task: discovery tools (read_source_file, list_source_tree,
-    grep_source, find_callers) + record_finding.
+    Tier C auditors grep and reason about downstream usages of definitions.
     """
     tools = [
         *build_discovery_tools(ctx),

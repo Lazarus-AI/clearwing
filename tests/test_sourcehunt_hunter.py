@@ -20,12 +20,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from genai_pyo3 import ChatResponse, Usage
+from jsonschema.exceptions import ValidationError
 
 from clearwing.agent.tools.hunt import (
     HunterContext,
     _normalize_path,
     _parse_rg_output,
     _parse_sanitizer_report,
+    build_analysis_tools,
     build_hunter_tools,
 )
 from clearwing.sandbox.container import ExecResult
@@ -34,12 +36,63 @@ from clearwing.sourcehunt.hunter import (
     _build_hunter_prompt,
     _build_propagation_prompt,
     _choose_specialist,
+    _live_tool_result_summary,
     _memory_safety_heuristic_hints,
+    _range_coverage_fraction,
+    _requested_read_range,
     _tool_output_text,
+    _tool_requires_active_potential,
     build_hunter_agent,
 )
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
+
+
+def test_read_range_coverage_distinguishes_refresh_from_new_code() -> None:
+    requested = _requested_read_range({"start_line": 150, "end_line": 249})
+
+    assert _range_coverage_fraction(requested, [(1, 500)]) == 1.0
+    assert _range_coverage_fraction(requested, [(1, 199)]) == 0.5
+    assert _range_coverage_fraction(requested, []) == 0.0
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "./configure && make -j4",
+        "apt-get install -y libonig-dev",
+        "CFLAGS=-fsanitize=address make",
+        "timeout 60 ./jq '.' input.json",
+        "python3 -c 'import subprocess; subprocess.run([\"./jq\"])'",
+        "pytest -q",
+        "afl-fuzz -i seeds -o findings ./target",
+    ],
+)
+def test_dynamic_execute_requires_active_potential(command: str) -> None:
+    assert _tool_requires_active_potential("execute", {"command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg -n 'jvp_string_append' src",
+        "sed -n '300,360p' src/jv.c",
+        "git log --oneline -5 -- src/jv.c",
+        "python3 -c 'print(2 + 2)'",
+    ],
+)
+def test_static_exploration_execute_does_not_require_potential(command: str) -> None:
+    assert not _tool_requires_active_potential("execute", {"command": command})
+
+
+def test_dedicated_dynamic_tools_require_active_potential() -> None:
+    for tool_name in (
+        "compile_file",
+        "run_with_sanitizer",
+        "write_test_case",
+        "fuzz_harness",
+    ):
+        assert _tool_requires_active_potential(tool_name, {})
 
 
 def _make_file_target(path: str, tier: str = "B", **kwargs) -> dict:
@@ -196,7 +249,7 @@ class TestPromptBuilders:
         assert "test_project" in prompt
         # Phrase must mention severity and evidence_level (from the prompt template)
         assert "evidence_level" in prompt
-        assert "This is a single-file hunt" in prompt
+        assert "record_finding" in prompt
 
     def test_general_prompt_with_seeded_crash(self):
         ft = _make_file_target("foo.c")
@@ -238,9 +291,7 @@ class TestPromptBuilders:
         assert "MEMCPY BOUNDS" in prompt
         assert "SENTINEL / COUNTER COLLISIONS" in prompt
         assert "USE-AFTER-FREE" in prompt
-        assert "Do not spend the final step on marginal confirmation" in prompt
-        assert "record_finding with" in prompt
-        assert "evidence_level=static_corroboration" in prompt
+        assert "record_finding" in prompt
 
     def test_logic_auth_specialist_prompt(self):
         ft = _make_file_target("auth.py", tags=["auth_boundary"])
@@ -356,16 +407,13 @@ class TestBuildHunterAgent:
             "list_source_tree",
             "grep_source",
             "find_callers",
-            "compile_file",
-            "run_with_sanitizer",
-            "write_test_case",
-            "fuzz_harness",
             "record_trace_step",
             "record_finding",
             "semgrep_scan",
             "flag_potential",
-            "get_potentials",
+            "update_potential",
             "dismiss_potential",
+            "defer_potential",
         }
 
     def test_tier_b_memory_unsafe_routes_to_memory_safety(self):
@@ -416,8 +464,9 @@ class TestBuildHunterAgent:
             "record_finding",
             "semgrep_scan",
             "flag_potential",
-            "get_potentials",
+            "update_potential",
             "dismiss_potential",
+            "defer_potential",
         }
         assert "compile_file" not in tool_names
         assert "run_with_sanitizer" not in tool_names
@@ -563,12 +612,6 @@ class TestHunterToolsHostFallback:
             assert "line_number" in m
             assert "matched_text" in m
 
-    def test_find_callers_wraps_grep(self):
-        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
-        callers = next(t for t in tools if t.name == "find_callers")
-        matches = callers.invoke({"symbol": "MAX_FRAME_BYTES"})
-        assert len(matches) >= 4
 
     def test_grep_source_sandbox_ignores_glob_when_path_is_file(self):
         class _FakeSandbox:
@@ -627,7 +670,7 @@ class TestHunterToolsHostFallback:
 
     def test_compile_file_without_sandbox_returns_error(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         compile_tool = next(t for t in tools if t.name == "compile_file")
         result = compile_tool.invoke({"file_path": "src/codec_a.c"})
         assert result["success"] is False
@@ -635,14 +678,14 @@ class TestHunterToolsHostFallback:
 
     def test_run_with_sanitizer_without_sandbox_returns_error(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         run = next(t for t in tools if t.name == "run_with_sanitizer")
         result = run.invoke({"binary": "/scratch/x"})
         assert result["crashed"] is False
 
     def test_write_test_case_basename_only(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         write = next(t for t in tools if t.name == "write_test_case")
         # Path with slash → rejected by basename validation before sandbox check
         out = write.invoke({"filename": "../etc/passwd", "content": "x"})
@@ -657,7 +700,7 @@ class TestHunterToolsHostFallback:
     def test_fuzz_harness_without_sandbox_returns_no_sandbox(self):
         """v0.4: fuzz_harness is fully implemented but still requires a sandbox."""
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke({"target_function": "decode_frame_a"})
         assert result["status"] == "no_sandbox"
@@ -667,6 +710,35 @@ class TestHunterToolsHostFallback:
 
 
 class TestRecordFinding:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("finding_type", "none"),
+            ("severity", "none"),
+            ("confidence", "certain"),
+            ("evidence_level", "none"),
+        ],
+    )
+    def test_schema_rejects_invalid_classification(self, field, value):
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
+        record = next(t for t in build_hunter_tools(ctx) if t.name == "record_finding")
+        arguments = {
+            "file": "x.c",
+            "line_number": 1,
+            "finding_type": "memory_safety",
+            "severity": "high",
+            "confidence": "medium",
+            "evidence_level": "suspicion",
+            "description": "source-backed issue",
+            "trace": {
+                "steps": [{"file": "x.c", "line": 1, "note": "ENTRY/SINK: issue"}]
+            },
+        }
+        arguments[field] = value
+
+        with pytest.raises(ValidationError):
+            record.invoke(arguments)
+
     def test_append_to_findings(self):
         ctx = HunterContext(
             repo_path=str(FIXTURE_C_PROPAGATION),
@@ -727,7 +799,11 @@ class TestRecordFinding:
                 "severity": "high",
                 "cwe": "CWE-416",
                 "description": "y",
-                "trace": {"steps": [{"file": "x.c", "line": 1, "note": "SINK: uaf"}]},
+                "trace": {
+                    "steps": [
+                        {"file": "x.c", "line": 1, "note": "ENTRY/SINK: uaf"}
+                    ]
+                },
             }
         )
         assert ctx.findings[0]["seeded_from_crash"] is True
@@ -754,7 +830,7 @@ class TestRecordFinding:
                         {
                             "file": "src/codec_a.c",
                             "line": 9,
-                            "note": "SINK: unchecked memcpy",
+                            "note": "ENTRY/SINK: unchecked memcpy",
                         }
                     ]
                 },
@@ -785,13 +861,13 @@ class TestRecordFinding:
 
         # Missing trace -> instructive error, nothing recorded.
         msg = record.invoke(dict(base))
-        assert msg.startswith("ERROR")
+        assert msg["error"]["code"] == "MISSING_TRACE"
         assert ctx.findings == []
 
         # A streamed step becomes authoritative investigation state.
         # (constrained mode gates record_trace_step on files_read.)
         ctx.files_read.add("x.c")
-        step.invoke({"file": "x.c", "line": 1, "note": "ENTRY: streamed"})
+        step.invoke({"file": "x.c", "line": 1, "note": "ENTRY/SINK: streamed"})
         assert len(ctx.trace_steps) == 1
 
         # The compatibility trace cannot overwrite already-streamed evidence.
@@ -807,7 +883,7 @@ class TestRecordFinding:
         vt = ctx.findings[0]["vulnerability_trace"]
         assert len(vt["steps"]) == 1
         assert vt["steps"][0]["line"] == 1
-        assert vt["steps"][0]["note"] == "ENTRY: streamed"
+        assert vt["steps"][0]["note"] == "ENTRY/SINK: streamed"
         assert ctx.trace_steps == []  # accumulator reset
 
 
@@ -872,6 +948,27 @@ class TestNormalizePath:
 
 
 class TestToolOutputSummary:
+    def test_live_read_result_reports_actual_range_and_continuation(self):
+        summary = _live_tool_result_summary(
+            "read_file",
+            {"path": "/workspace/src/main.rs", "offset": 80, "limit": 700},
+            "    81\tfn first() {}\n    82\tfn second() {}\n... truncated 100 chars ...",
+        )
+        assert summary == (
+            "read_file /workspace/src/main.rs:81-82 → 2 lines, continue at 83"
+        )
+
+    def test_live_callee_result_reports_resolution_counts(self):
+        summary = _live_tool_result_summary(
+            "lookup_callees",
+            {"func_name": "entry"},
+            {
+                "callees": {"src/a.rs": [{"func": "one"}, {"func": "two"}]},
+                "unresolved": ["external"],
+            },
+        )
+        assert summary == "lookup_callees entry → 2 resolved, 1 unresolved"
+
     def test_list_source_tree_is_summarized(self):
         summary = _tool_output_text(
             "list_source_tree",

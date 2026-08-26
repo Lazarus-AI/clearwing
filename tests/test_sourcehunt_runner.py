@@ -19,14 +19,32 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from genai_pyo3 import ChatResponse
 
+from clearwing.sourcehunt.checkpoints import HuntResult
 from clearwing.sourcehunt.pool import assign_tier
 from clearwing.sourcehunt.preprocessor import Preprocessor
 from clearwing.sourcehunt.ranker import Ranker
 from clearwing.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
-from clearwing.sourcehunt.state import StageOutcome
+from clearwing.sourcehunt.state import Finding, StageOutcome
 
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
+
+
+def _mock_hunt_result() -> HuntResult:
+    return HuntResult(
+        findings=[
+            Finding(
+                id="sql-injection",
+                file="app.py",
+                severity="high",
+                confidence="high",
+                evidence_level="static_corroboration",
+                verified=False,
+            )
+        ],
+        files_hunted=1,
+        spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+    )
 
 
 def test_runner_is_available_from_the_public_sourcehunt_package():
@@ -188,6 +206,7 @@ class TestStandardDepth:
             verifier_llm=_make_verifier_llm(),
             no_exploit=True,  # exploiter not needed for this test
         )
+        runner._ensure_sandbox_factory = MagicMock()
         result = runner.run()
         assert isinstance(result, SourceHuntResult)
         assert result.files_ranked == 4
@@ -253,6 +272,7 @@ class TestStandardDepth:
             verifier_llm=_make_verifier_llm(),
             no_exploit=True,
         )
+        runner._ensure_sandbox_factory = MagicMock()
         result = runner.run()
         # Manifest exists and has spent_per_tier
         manifest_path = Path(result.output_paths["manifest"])
@@ -295,10 +315,12 @@ class TestNoVerify:
             enable_knowledge_graph=False,
             enable_findings_pool=False,
             enable_behavior_monitor=False,
+            sandbox_factory=MagicMock(),
         )
         runner._emit_stage = lambda stage, status, **data: stage_events.append(
             (stage, status, data)
         )
+        runner._hunt = AsyncMock(return_value=_mock_hunt_result())
 
         result = runner.run()
 
@@ -464,7 +486,9 @@ class TestAdversarialVerifierDefault:
             enable_mechanism_memory=False,
             enable_patch_oracle=False,
             enable_variant_loop=False,
+            sandbox_factory=MagicMock(),
         )
+        runner._hunt = AsyncMock(return_value=_mock_hunt_result())
         runner.run()
         # Find the call whose system prompt contains STEEL-MAN
         found_adversarial = False

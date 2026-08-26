@@ -10,6 +10,7 @@ import pytest
 from genai_pyo3 import ToolCall
 
 from clearwing.agent.tools.hunt import build_reporting_tools
+from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.llm.native import NativeToolSpec
 from clearwing.sourcehunt.hunter import NativeHunter
@@ -23,12 +24,12 @@ class FakeUsage:
 
 
 class FakeResponse:
-    def __init__(self, text="", tool_calls_list=None, usage=None):
+    def __init__(self, text="", tool_calls_list=None, usage=None, reasoning_content=None):
         self._text = text
         self._tool_calls = tool_calls_list or []
         self.usage = usage or FakeUsage()
         self.provider_model_name = "test-model"
-        self.reasoning_content = None
+        self.reasoning_content = reasoning_content
 
     @property
     def first_text(self):
@@ -69,6 +70,178 @@ def _make_hunter(agent_mode="constrained", max_steps=20, budget_usd=0.0):
         budget_usd=budget_usd,
     )
     return hunter, llm
+
+
+@pytest.mark.asyncio
+async def test_hunter_reminds_model_to_preserve_articulated_potential():
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=5)
+    llm.achat.side_effect = [
+        FakeResponse(
+            reasoning_content="Let me verify the read-only deploy key bypass hypothesis.",
+            tool_calls_list=[_make_tool_call("execute", {"notes": "verify"})],
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    hunter.tools[0].name = "execute"
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        await hunter.arun()
+
+    second_messages = llm.achat.call_args_list[1].kwargs["messages"]
+    serialized = [message.to_dict() for message in second_messages]
+    assert any(
+        "Call flag_potential now" in str(message.get("content", "")) for message in serialized
+    )
+
+
+@pytest.mark.asyncio
+async def test_hunter_checkpoints_after_four_investigative_calls_without_potential():
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=7)
+    hunter.tools[0].name = "execute"
+    llm.achat.side_effect = [
+        *[
+            FakeResponse(
+                reasoning_content="Continue mapping the subsystem.",
+                tool_calls_list=[_make_tool_call("execute", {"notes": f"step {index}"})],
+            )
+            for index in ("alpha", "bravo", "charlie", "delta")
+        ],
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        await hunter.arun()
+
+    fifth_messages = llm.achat.call_args_list[4].kwargs["messages"]
+    serialized = [message.to_dict() for message in fifth_messages]
+    checkpoint = next(
+        str(message.get("content", ""))
+        for message in serialized
+        if "LEAD CHECKPOINT" in str(message.get("content", ""))
+    )
+    assert "NO_POTENTIAL" in checkpoint
+    assert "semantic-navigation query" in checkpoint
+
+
+@pytest.mark.asyncio
+async def test_active_potential_does_not_force_resolution_or_hide_navigation_tools():
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=MagicMock())
+
+    tools = [
+        *build_potential_tools(ctx),
+        NativeToolSpec(
+            name="execute",
+            description="execute",
+            schema={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            handler=lambda command, **kwargs: "ok",
+        ),
+    ]
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=tools,
+        ctx=ctx,
+        max_steps=5,
+        agent_mode="deep",
+    )
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "flag_potential",
+                    {
+                        "file": "src/auth.go",
+                        "line": 42,
+                        "hypothesis": "Cached authorization crosses resources.",
+                    },
+                )
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("execute", {"command": "grep auth src/auth.go"})]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        await hunter.arun()
+
+    third_turn_tools = llm.achat.call_args_list[2].kwargs["tools"]
+    third_turn_names = {tool.name for tool in third_turn_tools}
+    assert "execute" in third_turn_names
+    assert {"update_potential", "dismiss_potential", "defer_potential"} <= third_turn_names
+    third_turn_messages = llm.achat.call_args_list[2].kwargs["messages"]
+    assert not any(
+        "Verification budget reached" in str(message.to_dict().get("content", ""))
+        for message in third_turn_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_flagging_potential_preserves_broad_investigation_context():
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=MagicMock())
+    tools = [
+        *build_potential_tools(ctx),
+        NativeToolSpec(
+            name="execute",
+            description="execute",
+            schema={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            handler=lambda command, **kwargs: f"evidence:{command}",
+        ),
+    ]
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=tools,
+        ctx=ctx,
+        max_steps=9,
+        agent_mode="deep",
+    )
+    llm.achat.side_effect = [
+        *[
+            FakeResponse(
+                reasoning_content="Survey another security boundary.",
+                tool_calls_list=[_make_tool_call("execute", {"command": command})],
+            )
+            for command in ("alpha", "bravo", "charlie", "delta", "echo")
+        ],
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "flag_potential",
+                    {
+                        "file": "src/auth.go",
+                        "line": 42,
+                        "hypothesis": "Cached authorization crosses resources.",
+                    },
+                )
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        await hunter.arun()
+
+    post_flag_messages = llm.achat.call_args_list[6].kwargs["messages"]
+    assert any("evidence:alpha" in str(message.to_dict()) for message in post_flag_messages)
 
 
 @pytest.mark.asyncio
@@ -197,7 +370,7 @@ async def test_constrained_mode_throttles_repeated_calls():
     with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
         mock_logger = MagicMock()
         mock_traj.for_hunter.return_value = mock_logger
-        result = await hunter.arun()
+        await hunter.arun()
 
     # In constrained mode, after 3 identical calls the 4th+ should be skipped
     logged = mock_logger.log.call_args_list

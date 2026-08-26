@@ -110,6 +110,10 @@ class RankerConfig:
     # immediately; AsyncLLMClient already handles provider rate-limit retries.
     chunk_max_retries: int = 2
     chunk_retry_backoff_seconds: float = 3.0
+    # Circuit breaker: if this many consecutive chunks return empty (all
+    # retries exhausted), cancel remaining chunks and fall back to heuristics.
+    # Prevents burning tokens when the backend is persistently broken.
+    circuit_breaker_threshold: int = 3
 
 
 # --- Ranker ------------------------------------------------------------------
@@ -179,7 +183,7 @@ class Ranker:
         max_inflight = max(1, min(self.config.max_inflight_chunks, total_chunks))
         semaphore = asyncio.Semaphore(max_inflight)
         scores_by_chunk: list[dict[str, dict[str, Any]]] = [{} for _ in chunks]
-        completed = 0
+        consecutive_failures = 0
 
         async def run_one(
             index: int, chunk: list[FileTarget]
@@ -191,12 +195,38 @@ class Ranker:
                     total_chunks=total_chunks,
                 )
 
+        # Launch all tasks but process results as they come in.
+        # If the circuit breaker trips, cancel remaining tasks.
         tasks = [asyncio.create_task(run_one(index, chunk)) for index, chunk in enumerate(chunks)]
+        completed = 0
         try:
             for future in asyncio.as_completed(tasks):
                 index, scores = await future
                 scores_by_chunk[index] = scores
                 completed += 1
+
+                # Circuit breaker: track consecutive empty results
+                if scores:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= self.config.circuit_breaker_threshold:
+                        remaining = sum(1 for t in tasks if not t.done())
+                        logger.warning(
+                            "Ranker circuit breaker tripped after %d consecutive "
+                            "empty chunks (%d/%d completed, %d cancelled); "
+                            "remaining files will use heuristic fallback",
+                            consecutive_failures,
+                            completed,
+                            total_chunks,
+                            remaining,
+                        )
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        break
+
                 logger.info(
                     "Ranker progress %d/%d chunks completed",
                     completed,
@@ -345,22 +375,22 @@ class Ranker:
                 last_exc = exc
                 if attempt < max_attempts - 1:
                     delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2 ** attempt)
-                    logger.warning(
-                        "Ranker chunk %d/%d attempt %d failed; retrying in %.1fs",
+                    logger.debug(
+                        "Ranker chunk %d/%d attempt %d failed (%s); retrying in %.1fs",
                         idx,
                         total_chunks,
                         attempt + 1,
+                        exc,
                         delay,
-                        exc_info=True,
                     )
                     await asyncio.sleep(delay)
 
         logger.warning(
-            "Ranker chunk %d/%d failed after %d attempts; falling back to heuristics",
+            "Ranker chunk %d/%d failed after %d attempts (%s); falling back to heuristics",
             idx,
             total_chunks,
             max_attempts,
-            exc_info=last_exc,
+            last_exc,
         )
         return {}
 
