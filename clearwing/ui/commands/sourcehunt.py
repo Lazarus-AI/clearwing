@@ -272,8 +272,10 @@ def add_parser(subparsers):
         default=[],
         metavar="PATH",
         dest="subsystem_paths",
-        help="Manually specify a subsystem directory to hunt (repeatable). "
-        "Implies --subsystem-hunt. Example: --subsystem net/ipv4/",
+        help="Manually specify a subsystem to hunt (repeatable). Accepts a "
+        "directory prefix (net/ipv4/), a glob (libavcodec/h264*), or a single "
+        "file — a file path is expanded to that file plus its 1-hop callgraph "
+        "neighborhood (direct callers + callees). Implies --subsystem-hunt.",
     )
     parser.add_argument(
         "--subsystem-max-files",
