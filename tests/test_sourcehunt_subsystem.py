@@ -288,6 +288,44 @@ def test_subsystem_prompt_entry_points():
     assert "protocol_parser" in prompt
 
 
+def test_subsystem_prompt_has_generic_cross_platform_path_threat_advice():
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    subsystem = SubsystemTarget(
+        name="archive_extraction",
+        root_path="src/extract",
+        files=[_ft("src/extract/archive.c", 4.0)],
+    )
+
+    prompt = _build_subsystem_prompt(subsystem, "extractor")
+
+    assert "Path confinement" in prompt
+    assert "drive/UNC roots" in prompt
+    assert "compact interpretation matrix" in prompt
+    assert "every supported target platform" in prompt
+    assert "backslash traversal" not in prompt.lower()
+
+
+def test_subsystem_prompt_has_allocation_access_extent_threat_advice():
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    subsystem = SubsystemTarget(
+        name="buffer_processing",
+        root_path="src/buffer",
+        files=[_ft("src/buffer/copy.c", 4.0)],
+    )
+
+    prompt = _build_subsystem_prompt(subsystem, "processor")
+    normalized = " ".join(prompt.split())
+
+    assert "Allocation/access extent" in normalized
+    assert "expressions used for validation, allocation, and access" in normalized
+    assert "live bounds of every object" in normalized
+    assert "required inequalities" in normalized
+    assert "values actually consumed at the sink" in normalized
+    assert "gdi_CacheToSurface" not in normalized
+
+
 # ---------------------------------------------------------------------------
 # build_subsystem_hunter_agent
 # ---------------------------------------------------------------------------

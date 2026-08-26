@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -114,6 +114,20 @@ def _cost_usd(counts: dict, model: str | None) -> float:
     )
 
 
+def _trace_context_header(
+    trace_context: Callable[[], tuple[str | None, str | None]] | None,
+) -> Text | None:
+    if trace_context is None:
+        return None
+    trace_id, span_id = trace_context()
+    return Text.assemble(
+        ("trace-id ", "dim"),
+        (trace_id or "pending", "bold cyan"),
+        ("  ·  span-id ", "dim"),
+        (span_id or "pending", "bold cyan"),
+    )
+
+
 def _append_trace_and_status(renderables: list[Any]) -> None:
     """Append structured hunter trace and narration rows to the panel."""
 
@@ -188,6 +202,7 @@ def _build_panel(
     budget_usd: float | None = None,
     spend_ledger: Any = None,
     elapsed_seconds: float = 0.0,
+    trace_context: Callable[[], tuple[str | None, str | None]] | None = None,
 ) -> Panel:
     stats = native.recent_call_stats()
     totals = stats["totals"]
@@ -240,7 +255,11 @@ def _build_panel(
         header.append(f"~{_fmt_duration(estimated_remaining)}", style="bold blue")
         header.append(" (budget pace)", style="dim blue")
 
-    renderables: list = [header]
+    renderables: list = []
+    trace_header = _trace_context_header(trace_context)
+    if trace_header is not None:
+        renderables.extend((trace_header, Rule(style="dim")))
+    renderables.append(header)
 
     if budget_usd is not None:
         progress = Progress(BarColumn(bar_width=40))
@@ -339,9 +358,15 @@ def _build_panel(
 class _ActivityRenderable:
     """Re-renders on every Live refresh so the panel reflects live totals."""
 
-    def __init__(self, budget_usd: float | None = None, spend_ledger: Any = None) -> None:
+    def __init__(
+        self,
+        budget_usd: float | None = None,
+        spend_ledger: Any = None,
+        trace_context: Callable[[], tuple[str | None, str | None]] | None = None,
+    ) -> None:
         self.budget_usd = budget_usd
         self.spend_ledger = spend_ledger
+        self.trace_context = trace_context
         self.started_at = time.monotonic()
 
     def __rich__(self) -> Panel:
@@ -349,6 +374,7 @@ class _ActivityRenderable:
             self.budget_usd,
             self.spend_ledger,
             elapsed_seconds=time.monotonic() - self.started_at,
+            trace_context=self.trace_context,
         )
 
 
@@ -359,6 +385,7 @@ def llm_activity_panel(
     live: bool = False,
     budget_usd: float | None = None,
     spend_ledger: Any = None,
+    trace_context: Callable[[], tuple[str | None, str | None]] | None = None,
 ) -> Iterator[None]:
     """Pin a live LLM-activity panel while the wrapped block runs.
 
@@ -422,7 +449,7 @@ def llm_activity_panel(
     root.setLevel(logging.INFO)
 
     live_display = Live(
-        _ActivityRenderable(budget_usd, spend_ledger),
+        _ActivityRenderable(budget_usd, spend_ledger, trace_context),
         console=console,
         refresh_per_second=refresh_hz,
         transient=False,

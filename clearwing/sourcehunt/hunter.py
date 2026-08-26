@@ -1242,6 +1242,21 @@ particular ask only these high-value questions:
   confidentiality, integrity, authorization, and indistinguishable-failure property?
 - Authorization: is the decision scoped to the exact actor, resource, operation,
   and current state rather than a cached or neighboring object?
+- Allocation/access extent: for every attacker-controlled size, count, offset,
+  or dimension that reaches a memory operation, map the exact expressions used
+  for validation, allocation, and access against the live bounds of every
+  object involved. State the required inequalities and prove them using the
+  values actually consumed at the sink. Treat differences between validated
+  and consumed values—including clamping, alignment, truncation, casts, and
+  unit conversion—as distinct leads.
+- Path confinement: whenever untrusted path text reaches filesystem operations,
+  enumerate how each relevant layer interprets separators, normalization,
+  drive/UNC roots, repeated separators, and parent components. Compare archive
+  or protocol naming syntax, application validation, filesystem API behavior,
+  and every supported target platform rather than only the analysis host. For
+  traversal candidates, build a compact interpretation matrix and treat
+  validation/execution semantic mismatches as distinct leads instead of stopping
+  after the first bypass.
 
 As soon as you name a possible bypass or security hypothesis, call
 `flag_potential` before doing more than one verification step. Flagging is a
@@ -1636,7 +1651,8 @@ class NativeHunter:
                     sitrep += "\n  Unresolved leads (not validated findings):"
                     for p in self.ctx.potentials:
                         sitrep += (
-                            f"\n    [{p.get('priority', 'medium')}] "
+                            f"\n    [{p.get('priority', 'medium')} "
+                            f"score={p.get('priority_score', 0)}] "
                             f"{p.get('file', '?')}:{p.get('line', '?')} — "
                             f"{p.get('hypothesis', '')}"
                         )
@@ -2037,7 +2053,9 @@ class NativeHunter:
                             tool_call.fn_name == "flag_potential"
                             and len(self.ctx.potentials) > potentials_before
                         ):
-                            active_potential_id = self.ctx.potentials[-1].get("id")
+                            # Potential tools keep the queue in descending computed-priority
+                            # order. Verify the strongest lead, not merely the newest one.
+                            active_potential_id = self.ctx.potentials[0].get("id")
                         elif (
                             tool_call.fn_name == "record_finding"
                             and len(self.ctx.findings) > findings_before
@@ -2046,20 +2064,32 @@ class NativeHunter:
                                 potential.get("id") == active_potential_id
                                 for potential in self.ctx.potentials
                             ):
-                                active_potential_id = None
+                                active_potential_id = (
+                                    self.ctx.potentials[0].get("id")
+                                    if self.ctx.potentials
+                                    else None
+                                )
                         elif tool_call.fn_name == "dismiss_potential":
                             dismissed_id = tool_arguments.get("potential_id")
                             if dismissed_id == active_potential_id and not any(
                                 potential.get("id") == dismissed_id
                                 for potential in self.ctx.potentials
                             ):
-                                active_potential_id = None
+                                active_potential_id = (
+                                    self.ctx.potentials[0].get("id")
+                                    if self.ctx.potentials
+                                    else None
+                                )
                         elif (
                             tool_call.fn_name == "defer_potential"
                             and tool_arguments.get("potential_id") == active_potential_id
                             and str(tool_output).startswith("Deferred potential")
                         ):
-                            active_potential_id = None
+                            active_potential_id = (
+                                self.ctx.potentials[0].get("id")
+                                if self.ctx.potentials
+                                else None
+                            )
                         elif (
                             active_potential_id is None
                             and (

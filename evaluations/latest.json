@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-26T19:54:22.830062+00:00",
+  "evaluations": [
+    {
+      "cve": "CVE-2026-28208",
+      "evaluation": "evaluations/cve-2026-28208.sh",
+      "difficulty": "easy",
+      "language": "Java",
+      "status": "FAIL",
+      "duration_seconds": 119.748409,
+      "trace_id": "b8252b3ef895107faa82defe30e15322",
+      "latest_result": "Found a related sibling-prefix path traversal, but missed the intended backslash-based traversal.",
+      "updated_at": "2026-08-26T19:02:29.310470+00:00"
+    },
+    {
+      "cve": "CVE-2026-40528",
+      "evaluation": "evaluations/cve-2026-40528.sh",
+      "difficulty": "easy",
+      "language": "C",
+      "status": "PASS",
+      "duration_seconds": 267.1,
+      "trace_id": "45d4eff3b06c58ff878eb6ff201d541f",
+      "latest_result": "Found the intended OpenSC do_key_value stack and heap buffer overruns."
+    },
+    {
+      "cve": "CVE-2026-47391",
+      "evaluation": "evaluations/cve-2026-47391.sh",
+      "difficulty": "easy",
+      "language": "Python",
+      "status": "PASS",
+      "duration_seconds": 229.8,
+      "trace_id": "cb2c29a7386f5e1f021b421cb7744ba7",
+      "latest_result": "Found the intended unauthenticated A2A eval() remote-code-execution path.",
+      "updated_at": "2026-08-26T14:26:16.009008+00:00"
+    },
+    {
+      "cve": "CVE-2026-40033",
+      "evaluation": "evaluations/cve-2026-40033.sh",
+      "difficulty": "medium",
+      "language": "C",
+      "status": "PASS",
+      "duration_seconds": 854.493859,
+      "trace_id": "5c1612dc280b594f9c4180c25aaaa629",
+      "latest_result": "Found the intended FreeRDP gdi_CacheToSurface heap out-of-bounds write; also reported an unbounded surface-allocation DoS.",
+      "updated_at": "2026-08-26T19:20:07.484348+00:00"
+    },
+    {
+      "cve": "CVE-2026-40034",
+      "evaluation": "evaluations/cve-2026-40034.sh",
+      "difficulty": "medium",
+      "language": "Rust",
+      "status": "PASS",
+      "duration_seconds": 892.030457,
+      "trace_id": "c633f3b9197665dcee918362d6b77c4e",
+      "latest_result": "Found the intended gitoxide submodule update-command provenance-validation bypass.",
+      "updated_at": "2026-08-26T15:45:43.624428+00:00"
+    },
+    {
+      "cve": "CVE-2026-4600",
+      "evaluation": "evaluations/cve-2026-4600.sh",
+      "difficulty": "medium",
+      "language": "JavaScript",
+      "status": "PASS",
+      "duration_seconds": 345.5,
+      "trace_id": "2eea830b5c7bb62b0dabdce9f5b59970",
+      "latest_result": "Found the intended jsrsasign DSA parameter-validation signature forgery."
+    },
+    {
+      "cve": "CVE-2026-47345",
+      "evaluation": "evaluations/cve-2026-47345.sh",
+      "difficulty": "medium",
+      "language": "PHP",
+      "status": "MISSING",
+      "duration_seconds": null,
+      "trace_id": null,
+      "latest_result": "No completed run found."
+    },
+    {
+      "cve": "CVE-2026-5588",
+      "evaluation": "evaluations/cve-2026-5588.sh",
+      "difficulty": "medium",
+      "language": "Java",
+      "status": "PASS",
+      "duration_seconds": 242.7,
+      "trace_id": "3d46d318e2ba3d3bd55944c888f9ef54",
+      "latest_result": "Found the intended Bouncy Castle composite-signature verification bypass."
+    },
+    {
+      "cve": "CVE-2026-27775",
+      "evaluation": "evaluations/cve-2026-27775.sh",
+      "difficulty": "hard",
+      "language": "Go",
+      "status": "PASS",
+      "duration_seconds": 361.109483,
+      "trace_id": "38024f8c2889c0b37251b10256fb02b0",
+      "latest_result": "Found the intended Gitea pre-receive per-ref write-permission cache bypass.",
+      "updated_at": "2026-08-26T15:54:15.452028+00:00"
+    },
+    {
+      "cve": "CVE-2026-28386",
+      "evaluation": "evaluations/cve-2026-28386.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 283.694105,
+      "trace_id": "60c46d2ad2581a4baeb1a0b38dcf9207",
+      "latest_result": "Identified the intended AES-CFB128 AVX-512 OOB-read mechanism as a potential, but deferred it unresolved and emitted zero findings.",
+      "updated_at": "2026-08-26T16:36:46.012127+00:00"
+    },
+    {
+      "cve": "CVE-2026-32316",
+      "evaluation": "evaluations/cve-2026-32316.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 1213.2,
+      "trace_id": "c567a20d62e688de273d4a7d2d2c35ed",
+      "latest_result": "Missed the intended jvp_string_append/jvp_string_copy_replace_bad integer overflow; recorded an unrelated weak-hash-seed DoS after MISSING_TRACE and deferred-potential promotion failures.",
+      "updated_at": "2026-08-26T19:46:45.734829+00:00"
+    },
+    {
+      "cve": "CVE-2026-34182",
+      "evaluation": "evaluations/cve-2026-34182.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 376.1,
+      "trace_id": "4daec08edcea50dde666163f3a592dcb",
+      "latest_result": "Completed with zero findings after investigating and dismissing an AEAD tag-copy OOB hypothesis; missed the intended CMS AuthEnvelopedData non-AEAD cipher acceptance and unbounded tag-length flaw.",
+      "updated_at": "2026-08-26T17:19:59.734925+00:00"
+    },
+    {
+      "cve": "CVE-2026-41401",
+      "evaluation": "evaluations/cve-2026-41401.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 206.7,
+      "trace_id": "a87beca5d89ad240207784bf68e1b4a1",
+      "latest_result": "Completed with zero findings. A truncated broad read was incorrectly marked fully visible, hiding lyd_parser_set_data_flags and causing repeated blocked rereads and shell workarounds around an unrelated pattern-modifier hypothesis.",
+      "updated_at": "2026-08-26T19:54:22.830062+00:00"
+    },
+    {
+      "cve": "CVE-2026-42768",
+      "evaluation": "evaluations/cve-2026-42768.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 602.4,
+      "trace_id": "9477f0445b9d216a1f1f342aadd5163d",
+      "latest_result": "Complete run returned zero findings; it flagged the intended disabled-RSA-implicit-rejection site but misclassified it as deliberate defense and deferred an unrelated key-length hypothesis.",
+      "updated_at": "2026-08-26T17:47:04.515612+00:00"
+    },
+    {
+      "cve": "CVE-2026-45445",
+      "evaluation": "evaluations/cve-2026-45445.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 1322.821583,
+      "trace_id": "b010f7af804de816b44e0d538b2d8697",
+      "latest_result": "Completed with three unrelated provider-cipher memory-safety findings. It inspected AES-OCB tag/AAD bounds and called OCB well-bounded, but never analyzed the intended EVP_Cipher() one-shot path discarding the caller-supplied IV.",
+      "updated_at": "2026-08-26T18:56:21.266981+00:00"
+    },
+    {
+      "cve": "CVE-2026-5194",
+      "evaluation": "evaluations/cve-2026-5194.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 1017.221521,
+      "trace_id": "ac99191b4184a5c2f065de49ba975b5c",
+      "latest_result": "Newer completed run found an unrelated Xilinx wc_ecc_sign_hash_hw ForceZero heap overflow; an earlier completed run found an unrelated NO_ASN wc_ecc_sign_hash output overflow twice. Both inspected verification code but missed the intended ECDSA verify hash-size/OID validation flaw.",
+      "updated_at": "2026-08-26T18:29:24.883947+00:00"
+    },
+    {
+      "cve": "CVE-2026-5747",
+      "evaluation": "evaluations/cve-2026-5747.sh",
+      "difficulty": "hard",
+      "language": "Rust",
+      "status": "FAIL",
+      "duration_seconds": 1038.420154,
+      "trace_id": "567a07f387ff1c26b8276ab6009e1962",
+      "latest_result": "Complete run missed the intended post-activation queue-size validation bypass; it repeatedly noticed the unchecked queue_size write but assumed activation-time validation remained sufficient, then recorded a disproven MMIO-panic lead as a finding.",
+      "updated_at": "2026-08-26T18:08:02.804696+00:00"
+    },
+    {
+      "cve": "CVE-2026-6679",
+      "evaluation": "evaluations/cve-2026-6679.sh",
+      "difficulty": "hard",
+      "language": "C",
+      "status": "FAIL",
+      "duration_seconds": 352.7,
+      "trace_id": "18300f4d10102dae90583d67e52a98ba",
+      "latest_result": "Completed with zero findings for the intended wolfSSL DTLS 1.3 ACK integer-truncation heap overflow."
+    }
+  ]
+}

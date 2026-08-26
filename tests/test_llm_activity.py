@@ -5,6 +5,7 @@ from clearwing.ui.llm_activity import (
     _fmt_duration,
     _reasoning_preview,
     _timestamped_event,
+    _trace_context_header,
 )
 
 
@@ -41,3 +42,25 @@ def test_reasoning_preview_prefers_latest_paragraph() -> None:
 def test_reasoning_preview_keeps_the_recent_tail_when_long() -> None:
     preview = _reasoning_preview("x" * 300, limit=40)
     assert preview == "…" + "x" * 39
+
+
+def test_trace_context_header_displays_root_hunt_ids() -> None:
+    header = _trace_context_header(
+        lambda: (
+            "656901efba4302f09db3999290711fb0",
+            "8f1b7ac92e644691",
+        )
+    )
+
+    assert header is not None
+    assert header.plain == (
+        "trace-id 656901efba4302f09db3999290711fb0"
+        "  ·  span-id 8f1b7ac92e644691"
+    )
+
+
+def test_trace_context_header_shows_pending_until_root_span_starts() -> None:
+    header = _trace_context_header(lambda: (None, None))
+
+    assert header is not None
+    assert header.plain == "trace-id pending  ·  span-id pending"

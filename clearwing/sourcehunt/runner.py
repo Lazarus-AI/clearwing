@@ -831,6 +831,10 @@ class SourceHuntRunner:
             live=self._live,
             budget_usd=self.budget_usd or None,
             spend_ledger=self._spend_ledger,
+            trace_context=lambda: (
+                getattr(self, "_otel_trace_id", None),
+                getattr(self, "_otel_span_id", None),
+            ),
         ):
             return asyncio.run(self.arun())
 
@@ -1096,6 +1100,9 @@ class SourceHuntRunner:
         span_context = otel_trace.get_current_span().get_span_context()
         self._otel_trace_id = (
             f"{span_context.trace_id:032x}" if span_context.is_valid else None
+        )
+        self._otel_span_id = (
+            f"{span_context.span_id:016x}" if span_context.is_valid else None
         )
         if self._flow == "proof":
             try:
