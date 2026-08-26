@@ -1,5 +1,8 @@
 #!/bin/bash
-set -eu
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/blind-checkout.sh"
 
 if [[ -z "${1:-}" ]]; then
   echo "usage: $0 <model>" >&2
@@ -16,18 +19,22 @@ CASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUN_HOME="$CASE_DIR/.clearwing-home-$$"
 RUN_TRACE="$CASE_DIR/trajectories-$$"
 
-TARGET="../FFmpeg/"
+SOURCE_REPOSITORY="${FFMPEG_DIR:-../FFmpeg}"
+SOURCE_COMMIT="$(git -C "$SOURCE_REPOSITORY" rev-parse HEAD)"
+TARGET="$(mktemp -d -t source-snapshot-XXXX)"
+blind_checkout "" "$SOURCE_COMMIT" "$TARGET" "$SOURCE_REPOSITORY"
 
 mkdir -p "$RUN_HOME" "$RUN_TRACE"
 
 CLEARWING_HOME="$RUN_HOME" \
 CLEARWING_SOURCEHUNT_TRACE_DIR="$RUN_TRACE" \
-clearwing sourcehunt $TARGET \
+clearwing sourcehunt "$TARGET" \
     --base-url "$BASE_URL" \
     --api-key "$API_KEY" \
     --model "$1" \
     --depth deep \
     --agent-mode deep \
+    --serena \
     --shard-entry-points \
     --seed-cves \
     --elaborate-pipeline \
