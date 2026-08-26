@@ -213,6 +213,7 @@ class HuntPoolConfig:
     findings_pool: Any = None  # FindingsPool | None — spec 005
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
+    semantic_tools: list[Any] = field(default_factory=list)
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -843,6 +844,7 @@ class HunterPool:
             entry_point=entry_point,
             seed_context=seed_context,
             findings_pool=self.config.findings_pool,
+            semantic_tools=self.config.semantic_tools,
         )
         self._configure_hunter_context(result, work_item_id)
         return result

@@ -136,6 +136,8 @@ class CallGraph:
     func_calls_out: dict[str, dict[str, set[str]]] = field(
         default_factory=partial(defaultdict, partial(defaultdict, set))
     )
+    indexed_files: set[str] = field(default_factory=set)
+    repository_complete: bool = False
     _file_callers: dict[str, set[str]] | None = field(default=None, repr=False)
 
     def _build_file_callers(self) -> None:
@@ -214,6 +216,35 @@ class CallGraph:
     def empty(self) -> bool:
         return not self.functions
 
+    def merge_from(self, other: CallGraph) -> None:
+        """Merge an incrementally built graph into this graph.
+
+        Lazy semantic-navigation tools use this to add a small number of
+        newly discovered definition files without rebuilding the repository
+        graph. Existing function metadata is de-duplicated by location.
+        """
+        for file, names in other.functions.items():
+            self.functions[file].update(names)
+        for file, names in other.calls_out.items():
+            self.calls_out[file].update(names)
+        for name, files in other.defined_in.items():
+            self.defined_in[name].update(files)
+        for file, infos in other.function_info.items():
+            existing = {
+                (info.name, info.start_line, info.end_line) for info in self.function_info[file]
+            }
+            self.function_info[file].extend(
+                info
+                for info in infos
+                if (info.name, info.start_line, info.end_line) not in existing
+            )
+        for file, functions in other.func_calls_out.items():
+            for function, callees in functions.items():
+                self.func_calls_out[file][function].update(callees)
+        self.indexed_files.update(other.indexed_files)
+        self.repository_complete = self.repository_complete or other.repository_complete
+        self._file_callers = None
+
 
 # --- Builder -----------------------------------------------------------------
 
@@ -246,6 +277,7 @@ class CallGraphBuilder:
             logger.debug("CallGraphBuilder.build: no grammars available")
             return graph
 
+        repository_complete = files is None
         if files is None:
             files = list(self._walk_repo(repo_path))
 
@@ -275,11 +307,14 @@ class CallGraphBuilder:
 
         n_funcs = sum(len(v) for v in graph.functions.values())
         n_edges = sum(len(v) for v in graph.calls_out.values())
-        logger.info("Callgraph done  parsed=%d/%d  functions=%d  edges=%d", parsed, total, n_funcs, n_edges)
+        logger.info(
+            "Callgraph done  parsed=%d/%d  functions=%d  edges=%d", parsed, total, n_funcs, n_edges
+        )
         EventBus().emit_message(
             f"callgraph done  parsed={parsed}/{total}  functions={n_funcs}  edges={n_edges}",
             "info",
         )
+        graph.repository_complete = repository_complete and parsed == total
         return graph
 
     # --- internals ----------------------------------------------------------
@@ -330,6 +365,7 @@ class CallGraphBuilder:
         parser = self._get_parser(lang_name)
         tree = parser.parse(source)
         rel_path = Path(os.path.relpath(abs_path, repo_path)).as_posix()
+        graph.indexed_files.add(rel_path)
 
         def_types = _FUNCTION_DEF_NODE_TYPES.get(lang_name, set())
         call_types = _FUNCTION_CALL_NODE_TYPES.get(lang_name, set())

@@ -18,6 +18,7 @@ from typing import Any, Literal
 from urllib.parse import urljoin
 
 import aiohttp
+import jsonschema
 from genai_pyo3 import (
     ChatMessage,
     ChatOptions,
@@ -71,9 +72,7 @@ def _trace_llm_output(response: ChatResponse) -> dict[str, Any]:
     return attributes
 
 
-def _trace_genai_input(
-    model: str, request: ChatRequest, options: ChatOptions
-) -> dict[str, Any]:
+def _trace_genai_input(model: str, request: ChatRequest, options: ChatOptions) -> dict[str, Any]:
     """Serialize the effective genai-pyo3 request without client credentials."""
     return dict(
         get_input_attributes(
@@ -119,9 +118,7 @@ class _TracedGenAIClient:
         process_input=_trace_genai_input,
         process_output=_trace_llm_output,
     )
-    async def achat(
-        self, model: str, request: ChatRequest, options: ChatOptions
-    ) -> ChatResponse:
+    async def achat(self, model: str, request: ChatRequest, options: ChatOptions) -> ChatResponse:
         return await self._client.achat(model, request, options)
 
     @tracer.llm(
@@ -138,6 +135,7 @@ class _TracedGenAIClient:
     async def astream_chat(self, model: str, request: ChatRequest, options: ChatOptions):
         return await self._client.astream_chat(model, request, options)
 
+
 # Set by every ChatResponse builder to the provider's finish/stop reason for
 # the most recent completion in this async Task. Read via last_finish_reason()
 # — hunter uses it to explain why a response arrived empty (length vs stop vs
@@ -149,6 +147,7 @@ _LAST_FINISH_REASON: ContextVar[str | None] = ContextVar("last_finish_reason", d
 def last_finish_reason() -> str | None:
     """Provider finish/stop reason for the last completion in this Task."""
     return _LAST_FINISH_REASON.get()
+
 
 # Per-file hunter runs can legitimately take up to ~a day against a slow local
 # model (large tier-A budgets, big files), so the socket-level read timeout
@@ -267,9 +266,12 @@ _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 # Models that default to "low" reasoning_effort. deepseek-v4-flash has no
 # "medium" tier (only low/high/xhigh/max), so the usual "medium" default is
 # invalid; low also avoids reasoning tokens starving the output-token cap.
+# Qwen 3.8 variants use low to keep smaller-model investigations moving rather
+# than spending their budget on long internal deliberation.
 # Case-insensitive substring match on the model name.
 _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
     "deepseek-v4-flash",
+    "qwen3.8",
 )
 
 # Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
@@ -277,9 +279,7 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
 # Everything else supports it, so we capture reasoning by default and only skip
 # for names matching this list. Case-insensitive substring match on the model
 # name. Add new offenders here as they surface.
-_REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
-    "gpt-5.3-codex-spark",
-)
+_REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = ("gpt-5.3-codex-spark",)
 
 # Truncation-retry policy. Under a dollar budget the applied output cap is
 # known locally; a response whose completion_tokens reached that cap AND
@@ -345,7 +345,9 @@ def _is_root_model_type(schema_model: type[BaseModel]) -> bool:
 
 def _validate_schema_response(schema_model: type[BaseModel], text: str) -> BaseModel:
     if not text or not text.strip():
-        raise ValueError("LLM returned empty response; expected JSON matching " + schema_model.__name__)
+        raise ValueError(
+            "LLM returned empty response; expected JSON matching " + schema_model.__name__
+        )
     # Strip markdown fences if the model wraps JSON in ```json ... ```
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -373,6 +375,11 @@ class NativeToolSpec:
     handler: Any
 
     async def ainvoke(self, arguments: dict[str, Any]) -> Any:
+        # Provider-side structured tool calling is a generation aid, not a
+        # trust boundary. Some OpenAI-compatible model adapters occasionally
+        # return arguments that violate the advertised schema, so validate
+        # again before invoking a stateful handler.
+        jsonschema.validate(instance=arguments, schema=self.schema)
         if asyncio.iscoroutinefunction(self.handler):
             return await self.handler(**arguments)
         return await asyncio.to_thread(self.handler, **arguments)
@@ -472,9 +479,7 @@ class AsyncLLMClient:
 
             account_id = extract_account_id(self.api_key)
             if not account_id:
-                raise RuntimeError(
-                    "OpenAI OAuth access token is missing the ChatGPT account id."
-                )
+                raise RuntimeError("OpenAI OAuth access token is missing the ChatGPT account id.")
 
             # Store the `.../codex/` base; `_build_client` derives the full
             # `.../codex/responses` URL and passes it (plus the OAuth headers)
@@ -639,9 +644,7 @@ class AsyncLLMClient:
                 for tool in tools or []
             ],
         }
-        serialized_bytes = len(
-            json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        )
+        serialized_bytes = len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
         framing_overhead = 256 + 32 * len(messages) + 64 * len(tools or [])
         return serialized_bytes + framing_overhead
 
@@ -658,9 +661,7 @@ class AsyncLLMClient:
             reservation,
             input_tokens=usage.prompt_tokens,
             output_tokens=usage.completion_tokens,
-            cached_input_tokens=(
-                details.cached_tokens if details is not None else None
-            ),
+            cached_input_tokens=(details.cached_tokens if details is not None else None),
         )
 
     def _fail_spend_call(
@@ -870,14 +871,8 @@ class AsyncLLMClient:
         # answer — e.g. a ranker emitting JSON at a tight cap — and must never
         # be retried, or we'd regenerate valid output and risk over-spending.
         has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
-        if (
-            _truncation_retry < 1
-            and not has_output
-            and _looks_truncated(response, applied_cap)
-        ):
-            escalated = min(
-                applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING
-            )
+        if _truncation_retry < 1 and not has_output and _looks_truncated(response, applied_cap):
+            escalated = min(applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING)
             if escalated > applied_cap:
                 logger.warning(
                     "LLM response for model=%s truncated at output cap "
@@ -1012,10 +1007,7 @@ class AsyncLLMClient:
                         options = self._rebuild_options_without_max_tokens(options)
                         response = await _consume(options)
                     elif self._should_try_openai_http_fallback(exc) and (
-                        not (
-                            self._spend_ledger is not None
-                            and self._spend_ledger.enforcing
-                        )
+                        not (self._spend_ledger is not None and self._spend_ledger.enforcing)
                         or self._is_definitely_unbilled_transport_error(exc)
                     ):
                         logger.debug(
@@ -1034,9 +1026,7 @@ class AsyncLLMClient:
                     else:
                         raise
                 if response is None:
-                    raise RuntimeError(
-                        "LLM stream ended without a terminal usage event"
-                    )
+                    raise RuntimeError("LLM stream ended without a terminal usage event")
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
@@ -1048,9 +1038,8 @@ class AsyncLLMClient:
                 self._format_exc_chain(exc),
             )
             _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
-            if (
-                "without a terminal usage event" in str(exc)
-                and not (self._spend_ledger is not None and self._spend_ledger.enforcing)
+            if "without a terminal usage event" in str(exc) and not (
+                self._spend_ledger is not None and self._spend_ledger.enforcing
             ):
                 return await self.achat(
                     messages=messages,
@@ -1083,14 +1072,8 @@ class AsyncLLMClient:
         # Same fingerprint as achat: retry only a capped turn with no tool call
         # AND no visible text; a text-bearing answer is never a truncation.
         has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
-        if (
-            _truncation_retry < 1
-            and not has_output
-            and _looks_truncated(response, applied_cap)
-        ):
-            escalated = min(
-                applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING
-            )
+        if _truncation_retry < 1 and not has_output and _looks_truncated(response, applied_cap):
+            escalated = min(applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING)
             if escalated > applied_cap:
                 logger.warning(
                     "LLM stream for model=%s truncated at output cap "
@@ -1215,9 +1198,7 @@ class AsyncLLMClient:
             headers = dict(self._default_headers or {})
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            return traced(
-                client_cls.with_request_override("openai_resp", responses_url, headers)
-            )
+            return traced(client_cls.with_request_override("openai_resp", responses_url, headers))
 
         rust_provider = self.provider_name
         default_headers = self._default_headers
@@ -1527,11 +1508,15 @@ class AsyncLLMClient:
                         }
                 elif event_type == "response.function_call_arguments.delta":
                     idx = int(chunk.get("output_index") or 0)
-                    acc = resp_tool_parts.setdefault(idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""})
+                    acc = resp_tool_parts.setdefault(
+                        idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""}
+                    )
                     acc["arguments"] += chunk.get("delta") or ""
                 elif event_type == "response.function_call_arguments.done":
                     idx = int(chunk.get("output_index") or 0)
-                    acc = resp_tool_parts.setdefault(idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""})
+                    acc = resp_tool_parts.setdefault(
+                        idx, {"call_id": chunk.get("call_id") or "", "fn_name": "", "arguments": ""}
+                    )
                     acc["arguments"] = chunk.get("arguments") or acc["arguments"]
                 continue
 
@@ -1619,11 +1604,13 @@ class AsyncLLMClient:
                     elif part_type in ("reasoning", "thinking"):
                         reasoning_parts.append(part.get("text") or part.get("thinking") or "")
             elif item_type == "function_call":
-                tool_calls.append({
-                    "call_id": item.get("call_id") or item.get("id") or "",
-                    "fn_name": item.get("name") or "",
-                    "fn_arguments": self._parse_openai_tool_arguments(item.get("arguments")),
-                })
+                tool_calls.append(
+                    {
+                        "call_id": item.get("call_id") or item.get("id") or "",
+                        "fn_name": item.get("name") or "",
+                        "fn_arguments": self._parse_openai_tool_arguments(item.get("arguments")),
+                    }
+                )
             elif item_type == "reasoning":
                 for summary in item.get("summary") or []:
                     reasoning_parts.append(summary.get("text") or "")
@@ -1652,7 +1639,9 @@ class AsyncLLMClient:
             return "".join(parts)
         return str(content)
 
-    def _openai_tool_calls_from_message(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _openai_tool_calls_from_message(
+        self, tool_calls: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         parsed: list[dict[str, Any]] = []
         for call in tool_calls:
             fn = call.get("function") or {}
@@ -1774,7 +1763,9 @@ class AsyncLLMClient:
             except Exception as exc:
                 is_rate_limit = self._is_rate_limit_error(exc)
                 is_transport = self._is_transient_transport_error(exc)
-                if (not is_rate_limit and not is_transport) or attempt >= self.rate_limit_max_retries:
+                if (
+                    not is_rate_limit and not is_transport
+                ) or attempt >= self.rate_limit_max_retries:
                     raise
 
                 delay = self._retry_delay_seconds(exc, attempt)

@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from clearwing.sourcehunt.serena import SerenaSession
+
+
+def _fake_client() -> MagicMock:
+    client = MagicMock()
+    client.list_tools.return_value = [
+        {
+            "name": "find_symbol",
+            "description": "Find a symbol",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name_path_pattern": {"type": "string"}},
+                "required": ["name_path_pattern"],
+            },
+        },
+        {
+            "name": "replace_symbol_body",
+            "description": "Edit a symbol",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+    ]
+    client.call_tool.return_value = {"content": [{"type": "text", "text": "found"}]}
+    return client
+
+
+def test_serena_session_launches_official_image_and_filters_writes(
+    tmp_path, caplog
+) -> None:
+    caplog.set_level("INFO")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "go.mod").write_text("module example\n")
+    client = _fake_client()
+    factory = MagicMock(return_value=client)
+    session = SerenaSession(str(tmp_path), languages=["go"], client_factory=factory)
+
+    tools = session.start()
+
+    assert "workspace mounted read-only" in caplog.text
+    assert f"{tmp_path.resolve()} -> /workspace" in caplog.text
+    command, args = factory.call_args.args
+    assert command == "docker"
+    assert "ghcr.io/oraios/serena:latest" in args
+    assert "--entrypoint" in args
+    assert "golang-go gopls" in args[-1]
+    assert f"{tmp_path.resolve()}:/workspace:ro" in args
+    assert any(str(arg).endswith(":/serena-data") for arg in args)
+    assert "SERENA_HOME=/serena-data" in args
+    assert "SERENA_USAGE_REPORTING=false" in args
+    state_mount = next(
+        str(arg) for arg in args if str(arg).endswith(":/serena-data")
+    )
+    config = Path(state_mount.removesuffix(":/serena-data"), "serena_config.yml")
+    assert "projects: []" in config.read_text()
+    assert "--project /workspace" in args[-1]
+    assert factory.call_args.kwargs == {
+        "initialize_timeout": 300.0,
+        "request_timeout": 120.0,
+    }
+    assert [tool.name for tool in tools] == ["serena_find_symbol"]
+
+
+def test_serena_bootstraps_clangd_for_c_and_cpp(tmp_path) -> None:
+    client = _fake_client()
+    factory = MagicMock(return_value=client)
+    session = SerenaSession(
+        str(tmp_path), languages=["c", "cpp", "rust", "python"], client_factory=factory
+    )
+
+    session.start()
+
+    args = factory.call_args.args[1]
+    assert "clangd" in args[-1]
+    assert "golang-go" not in args[-1]
+
+
+def test_serena_native_tool_forwards_to_shared_client(tmp_path) -> None:
+    client = _fake_client()
+    session = SerenaSession(str(tmp_path), client_factory=MagicMock(return_value=client))
+    tool = session.start()[0]
+
+    result = tool.invoke({"name_path_pattern": "Queue"})
+
+    client.call_tool.assert_called_once_with("find_symbol", {"name_path_pattern": "Queue"})
+    assert result["content"][0]["text"] == "found"
+    session.close()
+    client.close.assert_called_once()
+
+
+def test_serena_start_failure_closes_process(tmp_path) -> None:
+    client = _fake_client()
+    client.connect.side_effect = RuntimeError("container failed")
+    session = SerenaSession(str(tmp_path), client_factory=MagicMock(return_value=client))
+
+    with pytest.raises(RuntimeError, match="container failed"):
+        session.start()
+
+    client.close.assert_called_once()

@@ -274,6 +274,8 @@ class SourceHuntRunner:
         seed_harness_crashes: bool = False,
         respect_gitignore: bool = False,
         live: bool = False,
+        enable_serena: bool = False,
+        serena_image: str = "ghcr.io/oraios/serena:latest",
         sandbox_cpus: float | None = None,
         *,
         config: SourceHuntConfig | None = None,
@@ -583,6 +585,10 @@ class SourceHuntRunner:
         self._seed_harness_crashes = seed_harness_crashes
         self._respect_gitignore = respect_gitignore
         self._live = live
+        self._enable_serena = enable_serena
+        self._serena_image = serena_image
+        self._serena_session: Any = None
+        self._serena_tools: list[Any] = []
         self._spend_ledger: SpendLedger | None = None
         self._spend_instrumented = False
         self._metered_clients: dict[tuple[int, str], AsyncLLMClient] = {}
@@ -824,6 +830,32 @@ class SourceHuntRunner:
             spend_ledger=self._spend_ledger,
         ):
             return asyncio.run(self.arun())
+
+    def _start_serena(
+        self, repo_path: str, languages: list[str] | tuple[str, ...] = ()
+    ) -> None:
+        """Start the optional run-scoped semantic server without failing the hunt."""
+        if not self._enable_serena or self._effective_agent_mode != "deep":
+            return
+        try:
+            from .serena import SerenaSession
+
+            session = SerenaSession(
+                repo_path,
+                image=self._serena_image,
+                languages=languages,
+            )
+            self._serena_tools = session.start()
+            self._serena_session = session
+            if not self._serena_tools:
+                logger.warning("Serena started but advertised no approved read-only tools")
+        except Exception as exc:
+            self._serena_tools = []
+            self._serena_session = None
+            logger.warning(
+                "Serena unavailable; continuing with built-in navigation: %s",
+                exc,
+            )
 
     async def _arun_proof_flow(self) -> SourceHuntResult:
         """Run the proof-carrying engine and adapt its typed output."""
@@ -1107,6 +1139,29 @@ class SourceHuntRunner:
             _t = time.monotonic()
             self._ensure_sandbox_factory(repo_path, files)
             logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
+            serena_languages = sorted(
+                {
+                    str(file_target.get("language") or "").lower()
+                    for file_target in files
+                    if str(file_target.get("language") or "").strip()
+                }
+            )
+            if self._no_per_file_hunt and self._subsystem_paths:
+                subsystem_languages = {
+                    str(file_target.get("language") or "").lower()
+                    for file_target in files
+                    if str(file_target.get("language") or "").strip()
+                    and any(
+                        str(file_target.get("path") or "") == subsystem_path
+                        or str(file_target.get("path") or "").startswith(
+                            subsystem_path.rstrip("/") + "/"
+                        )
+                        for subsystem_path in self._subsystem_paths
+                    )
+                }
+                if subsystem_languages:
+                    serena_languages = sorted(subsystem_languages)
+            self._start_serena(repo_path, serena_languages)
 
             # 2. Rank
             if self._no_rank:
@@ -1780,6 +1835,13 @@ class SourceHuntRunner:
                 potentials=all_potentials,
             )
         finally:
+            if self._serena_session is not None:
+                try:
+                    await asyncio.to_thread(self._serena_session.close)
+                except Exception:
+                    logger.debug("Serena cleanup failed", exc_info=True)
+                self._serena_session = None
+                self._serena_tools = []
             if self._spend_ledger is not None:
                 self._finalize_spend_ledger("failed")
             self._finalize_instrumentation("failed")
@@ -2459,6 +2521,7 @@ class SourceHuntRunner:
                     findings_pool=findings_pool,
                     trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                     instrumentation=self._instrumentation,
+                    semantic_tools=self._serena_tools,
                 )
             )
             try:
@@ -2689,6 +2752,7 @@ class SourceHuntRunner:
                 max_files_in_prompt=self._subsystem_max_files,
                 trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                 instrumentation=self._instrumentation,
+                semantic_tools=self._serena_tools,
             )
         )
         try:

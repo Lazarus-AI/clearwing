@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import jsonschema
 import pytest
 
 from clearwing.agent.tools.hunt.deep_agent import _OUTPUT_CAP, build_deep_agent_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.sandbox.container import ExecResult
+from clearwing.sourcehunt.callgraph import CallGraphBuilder
 
 
 @pytest.fixture
@@ -42,6 +44,171 @@ def test_build_deep_agent_tools_set(ctx):
     assert {"execute", "read_file", "write_file", "record_finding"} <= names
 
 
+def test_read_function_lazily_indexes_go_definition(tmp_path, mock_sandbox):
+    builder = CallGraphBuilder()
+    if not builder.available:
+        pytest.skip("tree-sitter grammars not installed")
+
+    target = tmp_path / "target.go"
+    target.write_text("package sample\n\nfunc Entry() {}\n", encoding="utf-8")
+    helper = tmp_path / "models" / "helper.go"
+    helper.parent.mkdir()
+    helper.write_text(
+        "package models\n\nfunc CanMaintainerWriteToBranch() bool { return true }\n",
+        encoding="utf-8",
+    )
+    graph = builder.build(str(tmp_path), files=[str(target)])
+    assert "CanMaintainerWriteToBranch" not in graph.defined_in
+
+    ctx = HunterContext(repo_path=str(tmp_path), sandbox=mock_sandbox, callgraph=graph)
+    tools = {tool.name: tool for tool in build_deep_agent_tools(ctx)}
+    result = tools["read_function"].invoke({"name": "CanMaintainerWriteToBranch"})
+
+    assert result["status"] == "found_after_expansion"
+    assert result["file"] == "models/helper.go"
+    assert graph.defined_in["CanMaintainerWriteToBranch"] == {"models/helper.go"}
+
+
+def test_read_function_reports_ambiguous_lazy_go_definitions(tmp_path, mock_sandbox):
+    builder = CallGraphBuilder()
+    if not builder.available:
+        pytest.skip("tree-sitter grammars not installed")
+
+    target = tmp_path / "target.go"
+    target.write_text("package sample\n\nfunc Entry() {}\n", encoding="utf-8")
+    for directory, receiver in (("one", "First"), ("two", "Second")):
+        candidate = tmp_path / directory / "helper.go"
+        candidate.parent.mkdir()
+        candidate.write_text(
+            f"package {directory}\n\ntype {receiver} struct{{}}\n"
+            f"func ({receiver}) Check() bool {{ return true }}\n",
+            encoding="utf-8",
+        )
+    graph = builder.build(str(tmp_path), files=[str(target)])
+    ctx = HunterContext(repo_path=str(tmp_path), sandbox=mock_sandbox, callgraph=graph)
+    tools = {tool.name: tool for tool in build_deep_agent_tools(ctx)}
+
+    result = tools["read_function"].invoke({"name": "Check"})
+
+    assert result["status"] == "ambiguous"
+    assert {candidate["file"] for candidate in result["candidates"]} == {
+        "one/helper.go",
+        "two/helper.go",
+    }
+
+
+def test_read_function_lazily_indexes_rust_definition(tmp_path, mock_sandbox):
+    builder = CallGraphBuilder()
+    if not builder.available:
+        pytest.skip("tree-sitter grammars not installed")
+
+    target = tmp_path / "target.rs"
+    target.write_text("fn entry() {}\n", encoding="utf-8")
+    helper = tmp_path / "src" / "vectors.rs"
+    helper.parent.mkdir()
+    helper.write_text(
+        "impl Device {\n    pub(crate) fn allocate_vectors<T>(&self) -> usize { 4 }\n}\n",
+        encoding="utf-8",
+    )
+    graph = builder.build(str(tmp_path), files=[str(target)])
+    ctx = HunterContext(
+        repo_path=str(tmp_path),
+        file_path="target.rs",
+        sandbox=mock_sandbox,
+        callgraph=graph,
+    )
+    tools = {tool.name: tool for tool in build_deep_agent_tools(ctx)}
+
+    result = tools["read_function"].invoke({"name": "allocate_vectors"})
+
+    assert result["status"] == "found_after_expansion"
+    assert result["file"] == "src/vectors.rs"
+    assert graph.defined_in["allocate_vectors"] == {"src/vectors.rs"}
+
+
+def test_lookup_callers_discloses_partial_coverage(tmp_path, mock_sandbox):
+    builder = CallGraphBuilder()
+    if not builder.available:
+        pytest.skip("tree-sitter grammars not installed")
+
+    target = tmp_path / "target.go"
+    target.write_text("package sample\n\nfunc Entry() {}\n", encoding="utf-8")
+    graph = builder.build(str(tmp_path), files=[str(target)])
+    ctx = HunterContext(repo_path=str(tmp_path), sandbox=mock_sandbox, callgraph=graph)
+    tools = {tool.name: tool for tool in build_deep_agent_tools(ctx)}
+
+    result = tools["lookup_callers"].invoke({"func_name": "Missing"})
+
+    assert result["coverage"] == {
+        "scope": "indexed_files_only",
+        "indexed_file_count": 1,
+        "complete": False,
+    }
+    assert "unindexed files may contain callers" in result["note"]
+
+
+def test_lookup_callees_lazily_indexes_c_definitions(tmp_path, mock_sandbox):
+    builder = CallGraphBuilder()
+    if not builder.available:
+        pytest.skip("tree-sitter grammars not installed")
+
+    target = tmp_path / "target.c"
+    target.write_text(
+        'int helper(int value);\nint entry(int value) { return helper(value) + printf("x"); }\n',
+        encoding="utf-8",
+    )
+    helper = tmp_path / "lib" / "helper.c"
+    helper.parent.mkdir()
+    helper.write_text(
+        "static int unrelated(void) { return 0; }\nint helper(int value) { return value + 1; }\n",
+        encoding="utf-8",
+    )
+    graph = builder.build(str(tmp_path), files=[str(target)])
+    assert "helper" not in graph.defined_in
+    ctx = HunterContext(repo_path=str(tmp_path), sandbox=mock_sandbox, callgraph=graph)
+    tools = {tool.name: tool for tool in build_deep_agent_tools(ctx)}
+
+    result = tools["lookup_callees"].invoke({"func_name": "entry"})
+
+    assert result["callees"] == {
+        "lib/helper.c": [{"func": "helper", "start_line": 2, "end_line": 2}]
+    }
+    assert "printf" in result["unresolved"]
+    assert graph.defined_in["helper"] == {"lib/helper.c"}
+    assert result["coverage"]["indexed_file_count"] == 2
+
+
+def test_lookup_callees_lazily_indexes_rust_definitions(tmp_path, mock_sandbox):
+    builder = CallGraphBuilder()
+    if not builder.available:
+        pytest.skip("tree-sitter grammars not installed")
+
+    target = tmp_path / "target.rs"
+    target.write_text(
+        "fn entry(value: u32) -> u32 { helper(value) + external(value) }\n",
+        encoding="utf-8",
+    )
+    helper = tmp_path / "src" / "helper.rs"
+    helper.parent.mkdir()
+    helper.write_text(
+        "pub(crate) async fn helper<T>(value: u32) -> u32 { value + 1 }\n",
+        encoding="utf-8",
+    )
+    graph = builder.build(str(tmp_path), files=[str(target)])
+    assert "helper" not in graph.defined_in
+    ctx = HunterContext(repo_path=str(tmp_path), sandbox=mock_sandbox, callgraph=graph)
+    tools = {tool.name: tool for tool in build_deep_agent_tools(ctx)}
+
+    result = tools["lookup_callees"].invoke({"func_name": "entry"})
+
+    assert result["callees"] == {
+        "src/helper.rs": [{"func": "helper", "start_line": 1, "end_line": 1}]
+    }
+    assert "external" in result["unresolved"]
+    assert graph.defined_in["helper"] == {"src/helper.rs"}
+    assert result["coverage"]["indexed_file_count"] == 2
+
+
 def test_execute_runs_command(tools, mock_sandbox):
     result = tools["execute"].handler(command="ls -la")
     mock_sandbox.exec.assert_called_once_with("ls -la", timeout=300)
@@ -56,10 +223,10 @@ def test_execute_custom_timeout(tools, mock_sandbox):
     mock_sandbox.exec.assert_called_once_with("make", timeout=600)
 
 
-def test_execute_ignores_unexpected_arguments(tools, mock_sandbox):
-    result = tools["execute"].invoke({"command": "ls -la", "_comment": "list files"})
-    mock_sandbox.exec.assert_called_once_with("ls -la", timeout=300)
-    assert result["exit_code"] == 0
+def test_execute_rejects_unexpected_arguments(tools, mock_sandbox):
+    with pytest.raises(jsonschema.ValidationError):
+        tools["execute"].invoke({"command": "ls -la", "_comment": "list files"})
+    mock_sandbox.exec.assert_not_called()
 
 
 def test_execute_caps_large_output(tools, mock_sandbox):
@@ -108,12 +275,10 @@ def test_read_file_with_offset_limit(tools, mock_sandbox):
     assert "e=60" in cmd
 
 
-def test_read_file_ignores_unexpected_arguments(tools, mock_sandbox):
-    result = tools["read_file"].invoke(
-        {"path": "/workspace/foo.c", "description": "inspect source"}
-    )
-    mock_sandbox.exec.assert_called_once()
-    assert result == "hello\n"
+def test_read_file_rejects_unexpected_arguments(tools, mock_sandbox):
+    with pytest.raises(jsonschema.ValidationError):
+        tools["read_file"].invoke({"path": "/workspace/foo.c", "description": "inspect source"})
+    mock_sandbox.exec.assert_not_called()
 
 
 def test_read_file_uses_absolute_line_numbers(tools, mock_sandbox):
@@ -152,16 +317,17 @@ def test_write_file_creates_dirs(tools, mock_sandbox):
     assert "13 bytes" in result
 
 
-def test_write_file_ignores_unexpected_arguments(tools, mock_sandbox):
-    result = tools["write_file"].invoke(
-        {
-            "path": "/workspace/new/file.c",
-            "contents": "source",
-            "_comment": "create fixture",
-        }
-    )
-    mock_sandbox.write_file.assert_called_once_with("/workspace/new/file.c", b"source")
-    assert result == "Wrote 6 bytes to /workspace/new/file.c"
+def test_write_file_rejects_unexpected_arguments(tools, mock_sandbox):
+    with pytest.raises(jsonschema.ValidationError):
+        tools["write_file"].invoke(
+            {
+                "path": "/workspace/new/file.c",
+                "contents": "source",
+                "_comment": "create fixture",
+            }
+        )
+    mock_sandbox.exec.assert_not_called()
+    mock_sandbox.write_file.assert_not_called()
 
 
 @pytest.mark.parametrize("tool_name", ["execute", "read_file", "write_file"])
@@ -178,7 +344,7 @@ def test_deep_agent_tool_schemas_disallow_extra_properties(tools, tool_name):
     ],
 )
 def test_deep_agent_tools_still_require_declared_arguments(tools, tool_name, arguments):
-    with pytest.raises(TypeError):
+    with pytest.raises(jsonschema.ValidationError):
         tools[tool_name].invoke(arguments)
 
 

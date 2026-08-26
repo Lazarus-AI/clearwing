@@ -34,6 +34,7 @@ from clearwing.sourcehunt.hunter import (
     _build_hunter_prompt,
     _build_propagation_prompt,
     _choose_specialist,
+    _live_tool_result_summary,
     _memory_safety_heuristic_hints,
     _tool_output_text,
     build_hunter_agent,
@@ -862,6 +863,27 @@ class TestNormalizePath:
 
 
 class TestToolOutputSummary:
+    def test_live_read_result_reports_actual_range_and_continuation(self):
+        summary = _live_tool_result_summary(
+            "read_file",
+            {"path": "/workspace/src/main.rs", "offset": 80, "limit": 700},
+            "    81\tfn first() {}\n    82\tfn second() {}\n... truncated 100 chars ...",
+        )
+        assert summary == (
+            "read_file /workspace/src/main.rs:81-82 → 2 lines, continue at 83"
+        )
+
+    def test_live_callee_result_reports_resolution_counts(self):
+        summary = _live_tool_result_summary(
+            "lookup_callees",
+            {"func_name": "entry"},
+            {
+                "callees": {"src/a.rs": [{"func": "one"}, {"func": "two"}]},
+                "unresolved": ["external"],
+            },
+        )
+        assert summary == "lookup_callees entry → 2 resolved, 1 unresolved"
+
     def test_list_source_tree_is_summarized(self):
         summary = _tool_output_text(
             "list_source_tree",

@@ -13,7 +13,7 @@ import fnmatch
 import logging
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +255,7 @@ class SubsystemHuntConfig:
     # Max files enumerated in each subsystem hunt prompt. None = list every file
     # (correct for an explicit scope so the ground-truth file is never hidden).
     max_files_in_prompt: int | None = None
+    semantic_tools: list[Any] = field(default_factory=list)
 
 
 class SubsystemHuntRunner:
@@ -408,6 +409,7 @@ class SubsystemHuntRunner:
                 campaign_hint=self.config.campaign_hint,
                 callgraph=self.config.callgraph,
                 max_files_in_prompt=self.config.max_files_in_prompt,
+                semantic_tools=self.config.semantic_tools,
             )
             ctx.work_item_id = work_item_id
             ctx.instrumentation = instrumentation

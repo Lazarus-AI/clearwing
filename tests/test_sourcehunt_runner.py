@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from genai_pyo3 import ChatResponse
@@ -33,6 +33,44 @@ def test_runner_is_available_from_the_public_sourcehunt_package():
     from clearwing.sourcehunt import SourceHuntRunner as PublicSourceHuntRunner
 
     assert PublicSourceHuntRunner is SourceHuntRunner
+
+
+def test_runner_starts_one_shared_serena_session(tmp_path):
+    tool = MagicMock()
+    runner = SourceHuntRunner(
+        repo_url="test",
+        output_dir=str(tmp_path),
+        agent_mode="deep",
+        enable_serena=True,
+        sandbox_factory=MagicMock(),
+    )
+    with patch("clearwing.sourcehunt.serena.SerenaSession") as session_cls:
+        session_cls.return_value.start.return_value = [tool]
+        runner._start_serena("/tmp/checkout", ["c", "python"])
+
+    session_cls.assert_called_once_with(
+        "/tmp/checkout",
+        image="ghcr.io/oraios/serena:latest",
+        languages=["c", "python"],
+    )
+    assert runner._serena_session is session_cls.return_value
+    assert runner._serena_tools == [tool]
+
+
+def test_runner_degrades_when_serena_cannot_start(tmp_path):
+    runner = SourceHuntRunner(
+        repo_url="test",
+        output_dir=str(tmp_path),
+        agent_mode="deep",
+        enable_serena=True,
+        sandbox_factory=MagicMock(),
+    )
+    with patch("clearwing.sourcehunt.serena.SerenaSession") as session_cls:
+        session_cls.return_value.start.side_effect = RuntimeError("docker unavailable")
+        runner._start_serena("/tmp/checkout")
+
+    assert runner._serena_session is None
+    assert runner._serena_tools == []
 
 
 def _ranker_response(files: list[str]) -> str:

@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import difflib
 import logging
+import os
 import re
 import shlex
+from collections.abc import Callable
+from pathlib import Path
 
 from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
+from clearwing.sourcehunt.callgraph import CallGraph, CallGraphBuilder, FunctionInfo
 
 from .discovery import build_semgrep_tool
 from .pool_query import build_pool_query_tools
@@ -36,6 +40,19 @@ from .sandbox import HunterContext
 logger = logging.getLogger(__name__)
 
 _OUTPUT_CAP = 100_000  # 100 KB cap on stdout/stderr per execute call
+_GO_DEFINITION_CANDIDATE_LIMIT = 20
+_GO_DEFINITION_SCAN_BYTES = 2_000_000
+_LAZY_CALLEE_CANDIDATE_LIMIT = 40
+_GO_SCAN_SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "target",
+    ".venv",
+    "venv",
+}
 
 
 class ExecuteInput(ToolInputModel):
@@ -45,10 +62,20 @@ class ExecuteInput(ToolInputModel):
 
 class ReadFileInput(ToolInputModel):
     path: str = Field(description="Absolute path in the container.")
-    offset: int = Field(default=0, description="Line offset (0-based, default 0). Or use start_line (1-based).")
-    limit: int = Field(default=2000, description="Max lines to return (default 2000). Or use end_line with start_line.")
-    start_line: int | None = Field(default=None, description="Alias — 1-based line number to start at. Overrides offset if set.")
-    end_line: int | None = Field(default=None, description="Alias — 1-based inclusive end line. Requires start_line.")
+    offset: int = Field(
+        default=0, description="Line offset (0-based, default 0). Or use start_line (1-based)."
+    )
+    limit: int = Field(
+        default=2000,
+        description="Max lines to return (default 2000). Or use end_line with start_line.",
+    )
+    start_line: int | None = Field(
+        default=None,
+        description="Alias — 1-based line number to start at. Overrides offset if set.",
+    )
+    end_line: int | None = Field(
+        default=None, description="Alias — 1-based inclusive end line. Requires start_line."
+    )
 
 
 class WriteFileInput(ToolInputModel):
@@ -78,9 +105,7 @@ class ListFunctionsInput(ToolInputModel):
 
 
 class ReadFunctionInput(ToolInputModel):
-    name: str = Field(
-        description="Exact function name to read (e.g. 'foo_bar_baz')."
-    )
+    name: str = Field(description="Exact function name to read (e.g. 'foo_bar_baz').")
 
 
 def _cap_output(text: str, label: str = "output") -> str:
@@ -102,6 +127,264 @@ def _matches(name: str, tokens: list[str]) -> bool:
     low = name.lower()
     return all(t in low for t in tokens)
 
+
+def _find_go_definition_candidates(
+    repo_path: str,
+    name: str,
+    *,
+    limit: int = _GO_DEFINITION_CANDIDATE_LIMIT,
+) -> tuple[list[str], bool]:
+    """Locate Go files that may define ``name`` without reading bodies.
+
+    The regular expression is only a candidate locator. Tree-sitter parses
+    every returned file and remains authoritative for names and line ranges.
+    The boolean reports whether additional candidate files were omitted.
+    """
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        return [], False
+    definition = re.compile(
+        rf"(?m)^\s*func\s+(?:\([^)]*\)\s*)?{re.escape(name)}"
+        rf"(?:\s*\[[^]]*\])?\s*\("
+    )
+    candidates: list[str] = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [directory for directory in dirnames if directory not in _GO_SCAN_SKIP_DIRS]
+        for filename in filenames:
+            if not filename.endswith(".go"):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                if os.path.getsize(path) > _GO_DEFINITION_SCAN_BYTES:
+                    continue
+                source = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not definition.search(source):
+                continue
+            if len(candidates) >= limit:
+                truncated = True
+                continue
+            candidates.append(path)
+    return candidates, truncated
+
+
+def _find_c_definition_candidates(
+    repo_path: str,
+    names: set[str],
+    *,
+    limit: int = _LAZY_CALLEE_CANDIDATE_LIMIT,
+) -> tuple[list[str], bool]:
+    """Locate C files likely to define any exact name; Tree-sitter verifies them."""
+    valid_names = sorted(
+        (name for name in names if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)),
+        key=len,
+        reverse=True,
+    )
+    if not valid_names:
+        return [], False
+    alternatives = "|".join(re.escape(name) for name in valid_names)
+    definition = re.compile(
+        rf"(?ms)^[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*[ \t\n*]+)+"
+        rf"(?:{alternatives})\s*\([^;{{}}]{{0,2000}}\)\s*\{{"
+    )
+    candidates: list[str] = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [directory for directory in dirnames if directory not in _GO_SCAN_SKIP_DIRS]
+        for filename in filenames:
+            if not filename.endswith(".c"):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                if os.path.getsize(path) > _GO_DEFINITION_SCAN_BYTES:
+                    continue
+                source = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not definition.search(source):
+                continue
+            if len(candidates) >= limit:
+                truncated = True
+                continue
+            candidates.append(path)
+    return candidates, truncated
+
+
+def _find_rust_definition_candidates(
+    repo_path: str,
+    names: set[str],
+    *,
+    limit: int = _LAZY_CALLEE_CANDIDATE_LIMIT,
+) -> tuple[list[str], bool]:
+    """Locate Rust files likely to define an exact function name.
+
+    This is deliberately only a cheap candidate locator. Tree-sitter parses
+    every match before it is merged into the callgraph, so modifiers, generics,
+    trait methods, and false-positive text matches do not become graph facts.
+    """
+    valid_names = sorted(
+        (name for name in names if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)),
+        key=len,
+        reverse=True,
+    )
+    if not valid_names:
+        return [], False
+    alternatives = "|".join(re.escape(name) for name in valid_names)
+    definition = re.compile(rf"(?m)\bfn\s+(?:{alternatives})\s*(?:<[^\n{{;]*>)?\s*\(")
+    candidates: list[str] = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(repo_path):
+        dirnames[:] = [directory for directory in dirnames if directory not in _GO_SCAN_SKIP_DIRS]
+        for filename in filenames:
+            if not filename.endswith(".rs"):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                if os.path.getsize(path) > _GO_DEFINITION_SCAN_BYTES:
+                    continue
+                source = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not definition.search(source):
+                continue
+            if len(candidates) >= limit:
+                truncated = True
+                continue
+            candidates.append(path)
+    return candidates, truncated
+
+
+def _function_hits(graph: CallGraph, name: str) -> list[tuple[str, FunctionInfo]]:
+    return [
+        (file, info)
+        for file, infos in graph.function_info.items()
+        for info in infos
+        if info.name == name
+    ]
+
+
+def _read_function_with_lazy_index(
+    ctx: HunterContext,
+    name: str,
+    read_file: Callable[..., str],
+) -> dict:
+    """Read a known function, expanding a partial graph for Go/Rust matches."""
+    graph = ctx.callgraph
+    if graph is None:
+        return {"error": "callgraph not available"}
+
+    hits = _function_hits(graph, name)
+    expanded = False
+    search_truncated = False
+    target_suffix = Path(ctx.file_path or "").suffix.lower()
+    language = "Rust" if target_suffix == ".rs" else "Go"
+    candidate_limit = (
+        _LAZY_CALLEE_CANDIDATE_LIMIT
+        if language == "Rust"
+        else _GO_DEFINITION_CANDIDATE_LIMIT
+    )
+    if not hits:
+        if language == "Rust":
+            candidates, search_truncated = _find_rust_definition_candidates(
+                ctx.repo_path, {name}
+            )
+        else:
+            candidates, search_truncated = _find_go_definition_candidates(ctx.repo_path, name)
+        if candidates:
+            graph.merge_from(CallGraphBuilder().build(ctx.repo_path, files=candidates))
+            hits = _function_hits(graph, name)
+            expanded = bool(hits)
+
+    if not hits:
+        all_names = {info.name for infos in graph.function_info.values() for info in infos}
+        return {
+            "status": "search_limit_reached" if search_truncated else "not_found",
+            "error": f"no {language} function named '{name}' found",
+            "did_you_mean": difflib.get_close_matches(name, all_names, n=5, cutoff=0.6),
+            "candidate_limit": candidate_limit,
+        }
+
+    unique = list(
+        {(file, info.start_line, info.end_line): (file, info) for file, info in hits}.values()
+    )
+    if len(unique) > 1:
+        return {
+            "status": "ambiguous",
+            "error": "ambiguous name; multiple definitions",
+            "candidates": [
+                {"file": file, "start_line": info.start_line, "end_line": info.end_line}
+                for file, info in unique
+            ],
+        }
+
+    file, info = unique[0]
+    body = read_file(
+        f"/workspace/{file}",
+        offset=info.start_line - 1,
+        limit=info.end_line - info.start_line + 1,
+    )
+    return {
+        "status": "found_after_expansion" if expanded else "found",
+        "file": file,
+        "start_line": info.start_line,
+        "end_line": info.end_line,
+        "body": body,
+        **({"search_truncated": True} if search_truncated else {}),
+    }
+
+
+def _callgraph_coverage(graph: CallGraph) -> dict:
+    return {
+        "scope": "repository" if graph.repository_complete else "indexed_files_only",
+        "indexed_file_count": len(graph.indexed_files),
+        "complete": graph.repository_complete,
+    }
+
+
+def _lazy_callee_definitions(
+    ctx: HunterContext,
+    func_name: str,
+) -> tuple[dict[str, list[dict]], list[str], bool]:
+    """Resolve C/Rust outgoing calls to lazily indexed definitions."""
+    graph = ctx.callgraph
+    if graph is None:
+        return {}, [], False
+    called_names = {
+        callee
+        for file in graph.defined_in.get(func_name, set())
+        for callee in graph.func_calls_out.get(file, {}).get(func_name, set())
+    }
+    unresolved = {name for name in called_names if name not in graph.defined_in}
+    caller_files = graph.defined_in.get(func_name, set())
+    suffixes = {Path(file).suffix.lower() for file in caller_files}
+    candidates: list[str] = []
+    truncated = False
+    if ".c" in suffixes or ".h" in suffixes:
+        found, hit_limit = _find_c_definition_candidates(ctx.repo_path, unresolved)
+        candidates.extend(found)
+        truncated = truncated or hit_limit
+    if ".rs" in suffixes:
+        found, hit_limit = _find_rust_definition_candidates(ctx.repo_path, unresolved)
+        candidates.extend(path for path in found if path not in candidates)
+        truncated = truncated or hit_limit
+    if candidates:
+        graph.merge_from(CallGraphBuilder().build(ctx.repo_path, files=candidates))
+
+    definitions: dict[str, list[dict]] = {}
+    for name in sorted(called_names):
+        for file in sorted(graph.defined_in.get(name, set())):
+            for info in graph.function_info.get(file, []):
+                if info.name == name:
+                    definitions.setdefault(file, []).append(
+                        {
+                            "func": name,
+                            "start_line": info.start_line,
+                            "end_line": info.end_line,
+                        }
+                    )
+    still_unresolved = sorted(name for name in called_names if name not in graph.defined_in)
+    return definitions, still_unresolved, truncated
 
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
@@ -174,7 +457,14 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             return {"error": "callgraph not available"}
         result = cg.callers_of(func_name)
         if not result:
-            return {"callers": {}, "note": f"no callers of '{func_name}' found in callgraph"}
+            note = f"no callers of '{func_name}' found"
+            if not cg.repository_complete:
+                note += "; unindexed files may contain callers"
+            return {
+                "callers": {},
+                "coverage": _callgraph_coverage(cg),
+                "note": note,
+            }
         line_index = {
             f: {fi.name: (fi.start_line, fi.end_line) for fi in cg.function_info.get(f, [])}
             for f in result
@@ -182,12 +472,16 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         return {
             "callers": {
                 f: [
-                    {"func": fn, "start_line": line_index[f].get(fn, (None, None))[0],
-                     "end_line": line_index[f].get(fn, (None, None))[1]}
+                    {
+                        "func": fn,
+                        "start_line": line_index[f].get(fn, (None, None))[0],
+                        "end_line": line_index[f].get(fn, (None, None))[1],
+                    }
                     for fn in sorted(callers)
                 ]
                 for f, callers in sorted(result.items())
-            }
+            },
+            "coverage": _callgraph_coverage(cg),
         }
 
     def lookup_callees(func_name: str, **_: object) -> dict:
@@ -195,10 +489,22 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         cg = ctx.callgraph
         if cg is None:
             return {"error": "callgraph not available"}
-        result = cg.callees_of(func_name)
-        if not result:
-            return {"callees": {}, "note": f"'{func_name}' not found in callgraph or calls nothing"}
-        return {"callees": {f: sorted(callees) for f, callees in sorted(result.items())}}
+        definitions, unresolved, truncated = _lazy_callee_definitions(ctx, func_name)
+        if not definitions and not unresolved:
+            note = f"'{func_name}' was not found in indexed files or calls nothing"
+            if not cg.repository_complete:
+                note += "; unindexed definitions may exist"
+            return {
+                "callees": {},
+                "coverage": _callgraph_coverage(cg),
+                "note": note,
+            }
+        return {
+            "callees": definitions,
+            "unresolved": unresolved,
+            **({"search_truncated": True} if truncated else {}),
+            "coverage": _callgraph_coverage(cg),
+        }
 
     def list_functions(path: str, filter: str | None = None, **_: object) -> dict:
         """List all functions defined in a file with their line ranges."""
@@ -226,32 +532,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         list_functions(filter=...) → pick line range → read_file dance.
         On miss, returns did_you_mean suggestions.
         """
-        cg = ctx.callgraph
-        if cg is None:
-            return {"error": "callgraph not available"}
-        hits = [
-            (f, fi)
-            for f, infos in cg.function_info.items()
-            for fi in infos
-            if fi.name == name
-        ]
-        if not hits:
-            all_names = {fi.name for infos in cg.function_info.values() for fi in infos}
-            near = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
-            return {"error": f"no function named '{name}'", "did_you_mean": near}
-        # De-dup identical (file, start, end) — callgraph sometimes double-lists.
-        uniq = list({(f, fi.start_line, fi.end_line): (f, fi) for f, fi in hits}.values())
-        if len(uniq) > 1:
-            return {
-                "error": "ambiguous name; multiple definitions",
-                "candidates": [
-                    {"file": f, "start_line": fi.start_line, "end_line": fi.end_line}
-                    for f, fi in uniq
-                ],
-            }
-        f, fi = uniq[0]
-        body = read_file(f"/workspace/{f}", offset=fi.start_line - 1, limit=fi.end_line - fi.start_line + 1)
-        return {"file": f, "start_line": fi.start_line, "end_line": fi.end_line, "body": body}
+        return _read_function_with_lazy_index(ctx, name, read_file)
 
     reporting_tools = build_reporting_tools(ctx)
 
@@ -271,8 +552,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             NativeToolSpec(
                 name="lookup_callees",
                 description=(
-                    "Returns every function called by func_name, grouped by defining file "
-                    "with line ranges."
+                    "Returns functions called by func_name, grouped by defining file with "
+                    "line ranges. For C and Rust, lazily locates and indexes out-of-file definitions; "
+                    "external or unresolved symbols are listed separately."
                 ),
                 schema=LookupCalleesInput.model_json_schema(),
                 handler=lookup_callees,
@@ -291,8 +573,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
                 name="read_function",
                 description=(
                     "Read a function body by exact name. Returns {file, start_line, "
-                    "end_line, body}. On miss: did_you_mean suggestions. On ambiguity: "
-                    "candidate list."
+                    "end_line, body}. If a Go definition is outside the partial callgraph, "
+                    "locates and indexes it lazily. On ambiguity: candidate list."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
                 handler=read_function,
@@ -306,7 +588,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
         NativeToolSpec(
             name="execute",
             description=(
-                "Run a shell command inside the sandbox container. "
+                "Run a shell command inside the sandbox container. Commands start in "
+                "/workspace; use repository-relative paths and do not prepend "
+                "'cd /workspace'. "
                 "Use for compilation, debugging, running tests, etc."
             ),
             schema=ExecuteInput.model_json_schema(),

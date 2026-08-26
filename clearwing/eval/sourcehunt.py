@@ -736,38 +736,54 @@ async def execute_sourcehunt_run(
         if path and not Path(path).expanduser().is_file():
             raise ValueError(f"{label} does not exist for {case.id}: {path}")
     output_root = Path(output_dir).expanduser().resolve()
-    runner = SourceHuntRunner(
-        repo_url=case.repository,
-        local_path=str(checkout_path),
-        depth="deep",
-        budget_usd=budget_usd,
-        output_dir=str(output_root),
-        output_formats=["sarif", "markdown", "json"],
-        parent_session_id=spec.id,
-        provider_manager=provider_manager,
-        model_override=spec.model,
-        campaign_hint=spec.campaign_hint(),
-        flow=spec.flow,
-        proof_compile_commands=compile_commands,
-        proof_validation_manifest=validation_manifest,
-        proof_scheduler_calibration=scheduler_calibration,
-        proof_learning_registry=learning_registry,
-        proof_max_actions=proof_max_actions,
-        proof_max_model_calls=proof_max_model_calls,
-        proof_max_dynamic_actions=proof_max_dynamic_actions,
-        proof_exploration_fraction=0.0,
-        falsify=True,
-        no_exploit=True,
-        enable_variant_loop=False,
-        enable_mechanism_memory=False,
-        enable_patch_oracle=False,
-        enable_stability_verification=False,
-        enable_knowledge_graph=False,
-        enable_calibration=False,
-        enable_findings_pool=False,
-        enable_behavior_monitor=False,
-    )
-    await runner.arun()
+    with tempfile.TemporaryDirectory(prefix="source-snapshot-") as snapshot:
+        archive = subprocess.Popen(
+            ["git", "-C", str(checkout_path), "archive", "--format=tar", head],
+            stdout=subprocess.PIPE,
+        )
+        assert archive.stdout is not None
+        extracted = subprocess.run(
+            ["tar", "-xf", "-", "-C", snapshot],
+            stdin=archive.stdout,
+            capture_output=True,
+        )
+        archive.stdout.close()
+        archive_exit = archive.wait()
+        if archive_exit != 0 or extracted.returncode != 0:
+            raise RuntimeError(f"Unable to create blind source snapshot for {case.id}")
+
+        runner = SourceHuntRunner(
+            repo_url=case.repository,
+            local_path=snapshot,
+            depth="deep",
+            budget_usd=budget_usd,
+            output_dir=str(output_root),
+            output_formats=["sarif", "markdown", "json"],
+            parent_session_id=spec.id,
+            provider_manager=provider_manager,
+            model_override=spec.model,
+            campaign_hint=spec.campaign_hint(),
+            flow=spec.flow,
+            proof_compile_commands=compile_commands,
+            proof_validation_manifest=validation_manifest,
+            proof_scheduler_calibration=scheduler_calibration,
+            proof_learning_registry=learning_registry,
+            proof_max_actions=proof_max_actions,
+            proof_max_model_calls=proof_max_model_calls,
+            proof_max_dynamic_actions=proof_max_dynamic_actions,
+            proof_exploration_fraction=0.0,
+            falsify=True,
+            no_exploit=True,
+            enable_variant_loop=False,
+            enable_mechanism_memory=False,
+            enable_patch_oracle=False,
+            enable_stability_verification=False,
+            enable_knowledge_graph=False,
+            enable_calibration=False,
+            enable_findings_pool=False,
+            enable_behavior_monitor=False,
+        )
+        await runner.arun()
     return inspect_ablation_session(spec, case, output_root / spec.id)
 
 

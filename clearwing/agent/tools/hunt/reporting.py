@@ -317,10 +317,9 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         NativeToolSpec(
             name="record_trace_step",
             description=(
-                "Record one step in a vulnerability trace. Call this AS YOU "
-                "READ CODE to build an incremental path from attacker input "
-                "to vulnerable sink. The code_snippet MUST be copied from a "
-                "prior read_source_file result."
+                "Record one source-backed step in a vulnerability trace from "
+                "attacker input to vulnerable sink. The code_snippet must be "
+                "copied from a prior source-reading tool result."
             ),
             schema=RecordTraceStepInput.model_json_schema(),
             handler=record_trace_step,

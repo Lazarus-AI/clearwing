@@ -67,6 +67,8 @@ Depths:
 
 ```bash
   [--agent-mode auto|constrained|deep]  # default: auto (derives from --depth)
+  [--serena]                   # shared run-scoped semantic navigation
+  [--serena-image IMAGE]       # default: ghcr.io/oraios/serena:latest
   [--prompt-mode unconstrained|specialist]  # default: unconstrained
   [--campaign-hint OBJECTIVE]   # e.g. "bugs reachable from unauthenticated remote input"
   [--exploit]                   # instruct hunters to write exploits inline
@@ -78,6 +80,11 @@ Depths:
 - **`--prompt-mode`**: `unconstrained` uses a simple discovery prompt
   (Glasswing-style); `specialist` uses prescriptive checklists per CWE
   category.
+- **`--serena`**: for deep-agent runs, starts one Serena MCP container against
+  the current host checkout and shares its read-only symbol and reference tools
+  across all hunters. The checkout is mounted read-only; generated Serena state
+  is isolated in a temporary mount and removed when the run ends. Startup
+  failure degrades to Clearwing's built-in navigation tools.
 
 ### Band promotion & budget (spec 003)
 

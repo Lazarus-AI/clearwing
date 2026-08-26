@@ -207,6 +207,18 @@ def add_parser(subparsers):
         "9-tool hunter, 'deep' forces full-shell agent (default: auto)",
     )
     parser.add_argument(
+        "--serena",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Launch one read-only Serena semantic server for the sourcehunt run",
+    )
+    parser.add_argument(
+        "--serena-image",
+        default="ghcr.io/oraios/serena:latest",
+        metavar="IMAGE",
+        help="Serena container image (default: ghcr.io/oraios/serena:latest)",
+    )
+    parser.add_argument(
         "--prompt-mode",
         choices=["unconstrained", "specialist"],
         default="unconstrained",
@@ -1190,6 +1202,8 @@ def handle(cli, args):
         model_override=args.model,
         provider_manager=provider_manager,
         agent_mode=args.agent_mode,
+        enable_serena=args.serena,
+        serena_image=args.serena_image,
         prompt_mode=args.prompt_mode,
         campaign_hint=args.campaign_hint,
         exploit_mode=args.exploit_mode,
@@ -1337,6 +1351,8 @@ def _handle_machine(descriptor: int) -> int:
                 no_exploit=not parsed["exploit"],
                 flow=parsed["flow"],
                 agent_mode=parsed["agent_mode"],
+                enable_serena=parsed["serena"],
+                serena_image=parsed["serena_image"],
                 no_rank=parsed["no_rank"],
                 no_per_file_hunt=parsed["no_per_file_hunt"],
                 enable_subsystem_hunt=parsed["subsystem_hunt"]
@@ -1372,6 +1388,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "exploit",
         "flow",
         "agent_mode",
+        "serena",
+        "serena_image",
         "no_rank",
         "format",
         "subsystem_hunt",
@@ -1404,6 +1422,12 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "exploit": _boolean(value.get("exploit", True), "exploit"),
         "flow": flow,
         "agent_mode": agent_mode,
+        "serena": _boolean(value.get("serena", False), "serena"),
+        "serena_image": _bounded_text(
+            value.get("serena_image", "ghcr.io/oraios/serena:latest"),
+            "serena_image",
+            512,
+        ),
         "no_rank": _boolean(value.get("no_rank", False), "no_rank"),
         "no_per_file_hunt": _boolean(value.get("no_per_file_hunt", False), "no_per_file_hunt"),
         "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),
