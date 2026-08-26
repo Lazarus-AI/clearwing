@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
+from typing import Literal
 
 from pydantic import Field
 
 from clearwing.core.events import EventBus, EventType
-from clearwing.findings.types import TraceStep, VulnerabilityTrace
+from clearwing.findings.types import EvidenceLevel, Severity, TraceStep, VulnerabilityTrace
 from clearwing.llm import NativeToolSpec, ToolInputModel
 from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.state import Finding
@@ -28,6 +30,55 @@ from clearwing.sourcehunt.state import Finding
 from .sandbox import HunterContext
 
 logger = logging.getLogger(__name__)
+
+FindingType = Literal[
+    "auth_bypass",
+    "authorization_bypass",
+    "buffer_overflow",
+    "code_injection",
+    "command_injection",
+    "crypto_weakness",
+    "cve_variant",
+    "denial_of_service",
+    "double_free",
+    "heap_overflow",
+    "info_leak",
+    "insecure_deserialization",
+    "integer_overflow",
+    "integer_underflow",
+    "logic_error",
+    "memory_safety",
+    "memory_safety_heap_overflow",
+    "nonce_reuse",
+    "oob",
+    "out_of_bounds_read",
+    "out_of_bounds_write",
+    "padding_oracle",
+    "parameter_validation",
+    "path_traversal",
+    "propagation_buffer_size",
+    "propagation_default",
+    "propagation_macro",
+    "propagation_sentinel",
+    "propagation_truncation",
+    "race_condition",
+    "signature_forgery",
+    "sql_injection",
+    "ssrf",
+    "stack_overflow",
+    "timing_side_channel",
+    "truncation",
+    "uaf",
+    "use_after_free",
+    "xss",
+    "xxe",
+    "other",
+]
+Confidence = Literal["high", "medium", "low"]
+
+
+def _tool_error(code: str, message: str) -> dict[str, object]:
+    return {"ok": False, "error": {"code": code, "message": message}}
 
 
 class RecordTraceStepInput(ToolInputModel):
@@ -65,8 +116,8 @@ class CompatibilityTraceInput(ToolInputModel):
 class RecordFindingInput(ToolInputModel):
     file: str
     line_number: int
-    finding_type: str
-    severity: str
+    finding_type: FindingType
+    severity: Severity
     cwe: str = Field(
         default="",
         description=(
@@ -78,8 +129,8 @@ class RecordFindingInput(ToolInputModel):
     code_snippet: str = ""
     crash_evidence: str = ""
     poc: str = ""
-    confidence: str = "medium"
-    evidence_level: str = "suspicion"
+    confidence: Confidence = "medium"
+    evidence_level: EvidenceLevel = "suspicion"
     crypto_protocol: str = ""
     algorithm: str = ""
     crypto_attack_class: str = ""
@@ -123,7 +174,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # it would reject every trace step. Skip the guard in deep mode;
         # downstream validators independently re-verify the assembled trace.
         if ctx.agent_mode != "deep" and file not in ctx.files_read:
-            return f"ERROR: file '{file}' has not been read yet. Call read_source_file first."
+            return _tool_error(
+                "UNREAD_TRACE_SOURCE",
+                f"File '{file}' has not been read yet. Call read_source_file first.",
+            )
         step = TraceStep(
             file=file,
             line=line,
@@ -208,7 +262,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 steps take precedence when present.
         """
         if isinstance(trace, str):
-            trace = json.loads(trace)
+            try:
+                trace = json.loads(trace)
+            except json.JSONDecodeError as exc:
+                return _tool_error("INVALID_TRACE_JSON", f"Invalid trace JSON ({exc}).")
         explicit_steps = trace.get("steps", []) if trace else []
         try:
             authoritative_steps = (
@@ -217,35 +274,48 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 else [TraceStep(**step) for step in explicit_steps]
             )
             if not authoritative_steps:
-                return (
-                    "ERROR: record_finding requires at least one trace step. "
-                    "Call record_trace_step while reading the entry-to-sink path, "
-                    "or pass a compatibility trace."
+                return _tool_error(
+                    "MISSING_TRACE",
+                    "record_finding requires at least one trace step. Call "
+                    "record_trace_step while reading the entry-to-sink path, or "
+                    "pass a compatibility trace.",
+                )
+            notes = "\n".join(step.note for step in authoritative_steps)
+            missing_roles = [
+                role
+                for role in ("ENTRY", "SINK")
+                if re.search(rf"\b{role}\b", notes, re.IGNORECASE) is None
+            ]
+            if missing_roles:
+                return _tool_error(
+                    "INCOMPLETE_TRACE",
+                    "record_finding requires explicit ENTRY and SINK roles in trace "
+                    f"step notes; missing: {', '.join(missing_roles)}.",
                 )
             vuln_trace = VulnerabilityTrace(
                 steps=authoritative_steps,
                 summary=(trace or {}).get("summary", ""),
             )
         except Exception as exc:
-            return (
-                f"ERROR: invalid trace ({exc}). Each step needs at least "
-                "`file` and `line`; optional `function`, `code_snippet`, `note`."
+            return _tool_error(
+                "INVALID_TRACE",
+                f"Invalid trace ({exc}). Each step needs at least `file` and "
+                "`line`; optional `function`, `code_snippet`, `note`.",
             )
         trace_dict = vuln_trace.model_dump()
-        # Reset only after the authoritative steps are stored on the finding.
-        ctx.trace_steps.clear()
 
         duplicate = next(
             (f for f in ctx.findings if f.file == file and f.line_number == line_number),
             None,
         )
         if duplicate is not None:
-            return (
+            return _tool_error(
+                "DUPLICATE_FINDING",
                 f"Finding at {file}:{line_number} was already recorded earlier "
                 f"in this session (finding_type={duplicate.finding_type!r}, "
                 f"severity={duplicate.severity!r}). Skipping this duplicate "
                 "call — if you have new information about a different issue, "
-                "record it at a different line instead of re-reporting this one."
+                "record it at a different line instead of re-reporting this one.",
             )
 
         stable_finding_id = stable_run_id(
@@ -291,6 +361,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             extra=finding_metadata,
         )
         ctx.findings.append(finding)
+        # Consume streamed trace evidence only after every validation and
+        # duplicate check succeeds. A rejected report must not destroy evidence
+        # intended for a later legitimate finding.
+        ctx.trace_steps.clear()
         EventBus().emit(
             EventType.FINDING_RECORDED,
             {

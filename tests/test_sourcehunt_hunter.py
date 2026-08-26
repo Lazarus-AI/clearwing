@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from genai_pyo3 import ChatResponse, Usage
+from jsonschema.exceptions import ValidationError
 
 from clearwing.agent.tools.hunt import (
     HunterContext,
@@ -709,6 +710,35 @@ class TestHunterToolsHostFallback:
 
 
 class TestRecordFinding:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("finding_type", "none"),
+            ("severity", "none"),
+            ("confidence", "certain"),
+            ("evidence_level", "none"),
+        ],
+    )
+    def test_schema_rejects_invalid_classification(self, field, value):
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
+        record = next(t for t in build_hunter_tools(ctx) if t.name == "record_finding")
+        arguments = {
+            "file": "x.c",
+            "line_number": 1,
+            "finding_type": "memory_safety",
+            "severity": "high",
+            "confidence": "medium",
+            "evidence_level": "suspicion",
+            "description": "source-backed issue",
+            "trace": {
+                "steps": [{"file": "x.c", "line": 1, "note": "ENTRY/SINK: issue"}]
+            },
+        }
+        arguments[field] = value
+
+        with pytest.raises(ValidationError):
+            record.invoke(arguments)
+
     def test_append_to_findings(self):
         ctx = HunterContext(
             repo_path=str(FIXTURE_C_PROPAGATION),
@@ -769,7 +799,11 @@ class TestRecordFinding:
                 "severity": "high",
                 "cwe": "CWE-416",
                 "description": "y",
-                "trace": {"steps": [{"file": "x.c", "line": 1, "note": "SINK: uaf"}]},
+                "trace": {
+                    "steps": [
+                        {"file": "x.c", "line": 1, "note": "ENTRY/SINK: uaf"}
+                    ]
+                },
             }
         )
         assert ctx.findings[0]["seeded_from_crash"] is True
@@ -796,7 +830,7 @@ class TestRecordFinding:
                         {
                             "file": "src/codec_a.c",
                             "line": 9,
-                            "note": "SINK: unchecked memcpy",
+                            "note": "ENTRY/SINK: unchecked memcpy",
                         }
                     ]
                 },
@@ -827,13 +861,13 @@ class TestRecordFinding:
 
         # Missing trace -> instructive error, nothing recorded.
         msg = record.invoke(dict(base))
-        assert msg.startswith("ERROR")
+        assert msg["error"]["code"] == "MISSING_TRACE"
         assert ctx.findings == []
 
         # A streamed step becomes authoritative investigation state.
         # (constrained mode gates record_trace_step on files_read.)
         ctx.files_read.add("x.c")
-        step.invoke({"file": "x.c", "line": 1, "note": "ENTRY: streamed"})
+        step.invoke({"file": "x.c", "line": 1, "note": "ENTRY/SINK: streamed"})
         assert len(ctx.trace_steps) == 1
 
         # The compatibility trace cannot overwrite already-streamed evidence.
@@ -849,7 +883,7 @@ class TestRecordFinding:
         vt = ctx.findings[0]["vulnerability_trace"]
         assert len(vt["steps"]) == 1
         assert vt["steps"][0]["line"] == 1
-        assert vt["steps"][0]["note"] == "ENTRY: streamed"
+        assert vt["steps"][0]["note"] == "ENTRY/SINK: streamed"
         assert ctx.trace_steps == []  # accumulator reset
 
 

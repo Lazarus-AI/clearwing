@@ -44,6 +44,10 @@ from .state import FileTarget, Finding, SubsystemTarget
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
 
+_CALLGRAPH_NAVIGATION_TOOL_NAMES = frozenset(
+    {"lookup_callers", "lookup_callees", "list_functions", "read_function"}
+)
+
 
 def _trajectory_base_dir() -> Path:
     raw = os.environ.get("CLEARWING_SOURCEHUNT_TRACE_DIR")
@@ -1391,6 +1395,12 @@ def build_subsystem_hunter_agent(
     )
 
     tools = build_deep_agent_tools(ctx)
+    serena_enabled = any(tool.name.startswith("serena_") for tool in semantic_tools or [])
+    if serena_enabled:
+        # Serena and the native callgraph helpers cover the same navigation
+        # role. Expose one coherent semantic-navigation interface to the model
+        # instead of attaching competing symbol, caller, and function readers.
+        tools = [tool for tool in tools if tool.name not in _CALLGRAPH_NAVIGATION_TOOL_NAMES]
     if semantic_tools:
         tools.extend(semantic_tools)
     if callgraph is not None:
@@ -1399,13 +1409,7 @@ def build_subsystem_hunter_agent(
         cg_tool_names = [
             t.name
             for t in tools
-            if t.name
-            in (
-                "lookup_callers",
-                "lookup_callees",
-                "list_functions",
-                "read_function",
-            )
+            if t.name in _CALLGRAPH_NAVIGATION_TOOL_NAMES
         ]
         logger.info(
             "[%s] callgraph active: functions=%d edges=%d tools=%s",

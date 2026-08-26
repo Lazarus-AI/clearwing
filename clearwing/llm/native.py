@@ -149,16 +149,29 @@ def last_finish_reason() -> str | None:
     return _LAST_FINISH_REASON.get()
 
 
-# Per-file hunter runs can legitimately take up to ~a day against a slow local
-# model (large tier-A budgets, big files), so the socket-level read timeout
-# needs to be long enough to survive that instead of the "Timeout on reading
-# data from socket" errors seen when the underlying genai-pyo3 defaults were
-# left unset. connect_timeout_seconds is kept short-ish since establishing the
-# TCP/TLS connection itself should never take long, even over a flaky
-# link-local hop; it's only widened a bit for headroom.
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %.0fs", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Ignoring non-positive %s=%r; using %.0fs", name, raw, default)
+        return default
+    return value
+
+
+# Bound every provider request. Completed benchmark traces put normal calls
+# well below this limit (18s max in the sampled trace), while still leaving
+# headroom for larger prompts. Operators running unusually slow local models
+# can override it without changing code.
 _LLM_CONNECT_TIMEOUT_SECONDS: float = 60.0
-_LLM_READ_TIMEOUT_SECONDS: float = 86_400.0  # 24h
-_LLM_TOTAL_TIMEOUT_SECONDS: float = 90_000.0  # 25h, headroom over read timeout
+_LLM_TIMEOUT_SECONDS = _positive_float_env("CLEARWING_LLM_TIMEOUT_SECONDS", 60.0)
+_LLM_READ_TIMEOUT_SECONDS: float = _LLM_TIMEOUT_SECONDS
+_LLM_TOTAL_TIMEOUT_SECONDS: float = _LLM_TIMEOUT_SECONDS
 
 
 class ToolInputModel(BaseModel):
@@ -435,6 +448,7 @@ class AsyncLLMClient:
         max_concurrency: int = 4,
         default_system: str = "You are a helpful assistant.",
         rate_limit_max_retries: int = 6,
+        timeout_max_retries: int = 1,
         rate_limit_initial_backoff_seconds: float = 1.0,
         rate_limit_max_backoff_seconds: float = 60.0,
         reasoning_effort: str | None | Literal["auto"] = "auto",
@@ -542,6 +556,7 @@ class AsyncLLMClient:
         # requested maximum before ChatOptions is built.
         self._omit_max_tokens = False
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
+        self.timeout_max_retries = max(0, timeout_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
         self.rate_limit_max_backoff_seconds = max(
             self.rate_limit_initial_backoff_seconds,
@@ -1332,7 +1347,11 @@ class AsyncLLMClient:
             self.base_url if self.base_url.endswith("/") else f"{self.base_url}/",
             "chat/completions",
         )
-        timeout = aiohttp.ClientTimeout(total=600, sock_connect=30, sock_read=300)
+        timeout = aiohttp.ClientTimeout(
+            total=_LLM_TOTAL_TIMEOUT_SECONDS,
+            sock_connect=min(30.0, _LLM_CONNECT_TIMEOUT_SECONDS),
+            sock_read=_LLM_READ_TIMEOUT_SECONDS,
+        )
         if body.get("stream"):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=body, headers=headers) as resp:
@@ -1761,9 +1780,14 @@ class AsyncLLMClient:
             except Exception as exc:
                 is_rate_limit = self._is_rate_limit_error(exc)
                 is_transport = self._is_transient_transport_error(exc)
+                retry_limit = (
+                    min(self.rate_limit_max_retries, self.timeout_max_retries)
+                    if self._is_timeout_error(exc)
+                    else self.rate_limit_max_retries
+                )
                 if (
                     not is_rate_limit and not is_transport
-                ) or attempt >= self.rate_limit_max_retries:
+                ) or attempt >= retry_limit:
                     raise
 
                 delay = self._retry_delay_seconds(exc, attempt)
@@ -1776,7 +1800,7 @@ class AsyncLLMClient:
                     "rate-limited" if is_rate_limit else "transport error",
                     delay,
                     attempt,
-                    self.rate_limit_max_retries,
+                    retry_limit,
                     exc,
                 )
                 await asyncio.sleep(delay)
@@ -1878,6 +1902,11 @@ class AsyncLLMClient:
     def _is_transient_transport_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return any(marker in text for marker in self._TRANSPORT_ERROR_MARKERS)
+
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "timed out" in text or "timeout" in text
 
     # Subset of transport failures that provably occur *before* the request is
     # sent, so the provider never generated or billed. Safe to reroute through

@@ -57,7 +57,7 @@ def test_runner_starts_one_shared_serena_session(tmp_path):
     assert runner._serena_tools == [tool]
 
 
-def test_runner_degrades_when_serena_cannot_start(tmp_path):
+def test_runner_fails_when_serena_cannot_start(tmp_path):
     runner = SourceHuntRunner(
         repo_url="test",
         output_dir=str(tmp_path),
@@ -67,10 +67,42 @@ def test_runner_degrades_when_serena_cannot_start(tmp_path):
     )
     with patch("clearwing.sourcehunt.serena.SerenaSession") as session_cls:
         session_cls.return_value.start.side_effect = RuntimeError("docker unavailable")
-        runner._start_serena("/tmp/checkout")
+        with pytest.raises(RuntimeError, match="Serena startup failed: docker unavailable"):
+            runner._start_serena("/tmp/checkout")
 
     assert runner._serena_session is None
     assert runner._serena_tools == []
+
+
+def test_runner_fails_when_serena_advertises_no_read_only_tools(tmp_path):
+    runner = SourceHuntRunner(
+        repo_url="test",
+        output_dir=str(tmp_path),
+        agent_mode="deep",
+        enable_serena=True,
+        sandbox_factory=MagicMock(),
+    )
+    with patch("clearwing.sourcehunt.serena.SerenaSession") as session_cls:
+        session_cls.return_value.start.return_value = []
+        with pytest.raises(RuntimeError, match="no approved read-only tools"):
+            runner._start_serena("/tmp/checkout")
+
+    session_cls.return_value.close.assert_called_once_with()
+    assert runner._serena_session is None
+    assert runner._serena_tools == []
+
+
+def test_runner_fails_when_serena_is_requested_outside_deep_mode(tmp_path):
+    runner = SourceHuntRunner(
+        repo_url="test",
+        output_dir=str(tmp_path),
+        agent_mode="constrained",
+        enable_serena=True,
+        sandbox_factory=MagicMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="Serena startup requires deep agent mode"):
+        runner._start_serena("/tmp/checkout")
 
 
 def test_serena_deep_run_skips_eager_callgraph(tmp_path):
@@ -254,6 +286,7 @@ class TestStandardDepth:
             verifier_llm=_make_verifier_llm(),
             no_exploit=True,  # exploiter not needed for this test
         )
+        runner._ensure_sandbox_factory = MagicMock()
         result = runner.run()
         assert isinstance(result, SourceHuntResult)
         assert result.files_ranked == 4
@@ -319,6 +352,7 @@ class TestStandardDepth:
             verifier_llm=_make_verifier_llm(),
             no_exploit=True,
         )
+        runner._ensure_sandbox_factory = MagicMock()
         result = runner.run()
         # Manifest exists and has spent_per_tier
         manifest_path = Path(result.output_paths["manifest"])
@@ -362,6 +396,7 @@ class TestNoVerify:
             enable_findings_pool=False,
             enable_behavior_monitor=False,
         )
+        runner._ensure_sandbox_factory = MagicMock()
         runner._emit_stage = lambda stage, status, **data: stage_events.append(
             (stage, status, data)
         )
@@ -531,6 +566,7 @@ class TestAdversarialVerifierDefault:
             enable_patch_oracle=False,
             enable_variant_loop=False,
         )
+        runner._ensure_sandbox_factory = MagicMock()
         runner.run()
         # Find the call whose system prompt contains STEEL-MAN
         found_adversarial = False

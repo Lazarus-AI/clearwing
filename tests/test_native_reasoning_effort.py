@@ -195,6 +195,32 @@ class TestIsUnsupportedReasoningEffortError:
         assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False
 
 
+class TestTimeoutRetryPolicy:
+    def test_timeout_retries_once_then_raises(self):
+        client = AsyncLLMClient(
+            model_name="test-model",
+            provider_name="openai_compat",
+            api_key="sk-test",
+            rate_limit_max_retries=6,
+            timeout_max_retries=1,
+        )
+        calls = 0
+
+        async def always_times_out():
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("request timeout")
+
+        async def no_sleep(_delay):
+            return None
+
+        with patch("clearwing.llm.native.asyncio.sleep", new=no_sleep):
+            with pytest.raises(RuntimeError, match="request timeout"):
+                asyncio.run(client._with_retries(always_times_out))
+
+        assert calls == 2
+
+
 class TestRebuildOptionsWithoutReasoning:
     """Layer 2 helper: reconstruct ChatOptions with reasoning_effort dropped."""
 

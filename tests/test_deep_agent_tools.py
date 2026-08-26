@@ -211,16 +211,27 @@ def test_lookup_callees_lazily_indexes_rust_definitions(tmp_path, mock_sandbox):
 
 def test_execute_runs_command(tools, mock_sandbox):
     result = tools["execute"].handler(command="ls -la")
-    mock_sandbox.exec.assert_called_once_with("ls -la", timeout=300)
+    mock_sandbox.exec.assert_called_once_with("ls -la", timeout=30)
     assert result["exit_code"] == 0
     assert result["stdout"] == "hello\n"
     assert result["timed_out"] is False
     assert "duration_seconds" in result
 
 
-def test_execute_custom_timeout(tools, mock_sandbox):
+def test_execute_custom_shorter_timeout(tools, mock_sandbox):
+    tools["execute"].handler(command="make", timeout=10)
+    mock_sandbox.exec.assert_called_once_with("make", timeout=10)
+
+
+def test_execute_caps_timeout_at_thirty_seconds(tools, mock_sandbox):
     tools["execute"].handler(command="make", timeout=600)
-    mock_sandbox.exec.assert_called_once_with("make", timeout=600)
+    mock_sandbox.exec.assert_called_once_with("make", timeout=30)
+
+
+def test_execute_schema_rejects_timeout_above_thirty_seconds(tools, mock_sandbox):
+    with pytest.raises(jsonschema.ValidationError):
+        tools["execute"].invoke({"command": "make", "timeout": 31})
+    mock_sandbox.exec.assert_not_called()
 
 
 def test_execute_rejects_unexpected_arguments(tools, mock_sandbox):

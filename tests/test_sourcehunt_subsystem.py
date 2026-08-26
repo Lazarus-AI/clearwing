@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from clearwing.llm import NativeToolSpec
 from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.state import FileTarget, StageOutcome, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
@@ -309,6 +310,85 @@ def test_build_subsystem_hunter_agent_tools():
     assert "execute" in tool_names
     assert "read_file" in tool_names
     assert "record_finding" in tool_names
+
+
+def test_build_subsystem_hunter_agent_uses_serena_instead_of_callgraph_navigation(
+    monkeypatch,
+):
+    from clearwing.sourcehunt import hunter as hunter_module
+
+    def tool(name: str) -> NativeToolSpec:
+        return NativeToolSpec(name=name, description=name, schema={}, handler=lambda: None)
+
+    monkeypatch.setattr(
+        hunter_module,
+        "build_deep_agent_tools",
+        lambda ctx: [
+            tool("execute"),
+            tool("lookup_callers"),
+            tool("lookup_callees"),
+            tool("list_functions"),
+            tool("read_function"),
+        ],
+    )
+    subsystem = SubsystemTarget(
+        name="test_sub",
+        root_path="src/parser",
+        files=[_ft("src/parser/main.c", 4.0)],
+    )
+
+    built, _ = hunter_module.build_subsystem_hunter_agent(
+        subsystem=subsystem,
+        repo_path="/tmp/repo",
+        sandbox=None,
+        llm=MagicMock(),
+        session_id="test-session",
+        callgraph=MagicMock(functions={}, calls_out={}, defined_in={}),
+        semantic_tools=[tool("serena_find_symbol"), tool("serena_find_referencing_symbols")],
+    )
+
+    tool_names = [item.name for item in built.tools]
+    assert "execute" in tool_names
+    assert "serena_find_symbol" in tool_names
+    assert "serena_find_referencing_symbols" in tool_names
+    assert not ({"lookup_callers", "lookup_callees", "list_functions", "read_function"} & set(tool_names))
+
+
+def test_build_subsystem_hunter_agent_keeps_callgraph_navigation_without_serena(
+    monkeypatch,
+):
+    from clearwing.sourcehunt import hunter as hunter_module
+
+    def tool(name: str) -> NativeToolSpec:
+        return NativeToolSpec(name=name, description=name, schema={}, handler=lambda: None)
+
+    callgraph_tools = [
+        tool("lookup_callers"),
+        tool("lookup_callees"),
+        tool("list_functions"),
+        tool("read_function"),
+    ]
+    monkeypatch.setattr(
+        hunter_module,
+        "build_deep_agent_tools",
+        lambda ctx: [tool("execute"), *callgraph_tools],
+    )
+    subsystem = SubsystemTarget(
+        name="test_sub",
+        root_path="src/parser",
+        files=[_ft("src/parser/main.c", 4.0)],
+    )
+
+    built, _ = hunter_module.build_subsystem_hunter_agent(
+        subsystem=subsystem,
+        repo_path="/tmp/repo",
+        sandbox=None,
+        llm=MagicMock(),
+        session_id="test-session",
+        callgraph=MagicMock(functions={}, calls_out={}, defined_in={}),
+    )
+
+    assert {item.name for item in callgraph_tools} <= {item.name for item in built.tools}
 
 
 @pytest.mark.asyncio

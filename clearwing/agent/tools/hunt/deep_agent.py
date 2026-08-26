@@ -40,6 +40,7 @@ from .sandbox import HunterContext
 logger = logging.getLogger(__name__)
 
 _OUTPUT_CAP = 100_000  # 100 KB cap on stdout/stderr per execute call
+_HUNT_EXEC_TIMEOUT_SECONDS = 30
 _GO_DEFINITION_CANDIDATE_LIMIT = 20
 _GO_DEFINITION_SCAN_BYTES = 2_000_000
 _LAZY_CALLEE_CANDIDATE_LIMIT = 40
@@ -57,7 +58,12 @@ _GO_SCAN_SKIP_DIRS = {
 
 class ExecuteInput(ToolInputModel):
     command: str = Field(description="Shell command to execute.")
-    timeout: int = Field(default=300, description="Timeout in seconds (default 300).")
+    timeout: int = Field(
+        default=_HUNT_EXEC_TIMEOUT_SECONDS,
+        ge=1,
+        le=_HUNT_EXEC_TIMEOUT_SECONDS,
+        description="Timeout in seconds (maximum 30).",
+    )
 
 
 class ReadFileInput(ToolInputModel):
@@ -397,10 +403,15 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     # file it never saw a read_source_file call for.
     ctx.agent_mode = "deep"
 
-    def execute(command: str, timeout: int = 300, **_: object) -> dict:
+    def execute(
+        command: str,
+        timeout: int = _HUNT_EXEC_TIMEOUT_SECONDS,
+        **_: object,
+    ) -> dict:
         if ctx.sandbox is None:
             return {"error": "no sandbox available"}
-        result = ctx.sandbox.exec(command, timeout=timeout)
+        effective_timeout = min(max(timeout, 1), _HUNT_EXEC_TIMEOUT_SECONDS)
+        result = ctx.sandbox.exec(command, timeout=effective_timeout)
         return {
             "exit_code": result.exit_code,
             "stdout": _cap_output(result.stdout, "stdout"),

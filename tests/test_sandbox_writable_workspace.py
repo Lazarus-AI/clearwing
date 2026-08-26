@@ -142,6 +142,24 @@ class TestHunterSandboxCpuPolicy:
 
 
 class TestSourceHuntSandboxCpuWiring:
+    def test_runner_fails_when_sandbox_cannot_start(self):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        runner = SourceHuntRunner(repo_url="test", depth="deep")
+        manager = MagicMock()
+        manager.build_image.side_effect = RuntimeError("docker unavailable")
+
+        with (
+            patch("clearwing.sourcehunt.runner.HunterSandbox", return_value=manager),
+            pytest.raises(
+                RuntimeError,
+                match="HunterSandbox startup failed: docker unavailable",
+            ),
+        ):
+            runner._ensure_sandbox_factory("/tmp/repo", [{"language": "c"}])
+
+        assert runner.sandbox_factory is None
+
     def test_runner_passes_override_to_manager_and_removes_hardcoded_limit(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
 

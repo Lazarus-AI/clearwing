@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -836,9 +837,12 @@ class SourceHuntRunner:
     def _start_serena(
         self, repo_path: str, languages: list[str] | tuple[str, ...] = ()
     ) -> None:
-        """Start the optional run-scoped semantic server without failing the hunt."""
-        if not self._enable_serena or self._effective_agent_mode != "deep":
+        """Start the requested run-scoped semantic server or fail the run."""
+        if not self._enable_serena:
             return
+        if self._effective_agent_mode != "deep":
+            raise RuntimeError("Serena startup requires deep agent mode")
+        session = None
         try:
             from .serena import SerenaSession
 
@@ -848,16 +852,18 @@ class SourceHuntRunner:
                 languages=languages,
             )
             self._serena_tools = session.start()
-            self._serena_session = session
             if not self._serena_tools:
-                logger.warning("Serena started but advertised no approved read-only tools")
+                raise RuntimeError("Serena advertised no approved read-only tools")
+            self._serena_session = session
         except Exception as exc:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    logger.debug("Could not close failed Serena session", exc_info=True)
             self._serena_tools = []
             self._serena_session = None
-            logger.warning(
-                "Serena unavailable; continuing with built-in navigation: %s",
-                exc,
-            )
+            raise RuntimeError(f"Serena startup failed: {exc}") from exc
 
     async def _arun_proof_flow(self) -> SourceHuntResult:
         """Run the proof-carrying engine and adapt its typed output."""
@@ -1086,6 +1092,7 @@ class SourceHuntRunner:
 
     @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
+        self._run_started_at = datetime.now(timezone.utc).isoformat()
         span_context = otel_trace.get_current_span().get_span_context()
         self._otel_trace_id = (
             f"{span_context.trace_id:032x}" if span_context.is_valid else None
@@ -3002,17 +3009,15 @@ class SourceHuntRunner:
             image_tag = manager.build_image()
         except Exception as exc:
             logger.error(
-                "HunterSandbox unavailable (%s); falling back to host mode. "
-                "Start Docker to enable sanitizer-backed containers.",
+                "HunterSandbox startup failed: %s",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
             EventBus().emit_message(
-                f"WARNING: sandbox unavailable ({exc}); running without container isolation. "
-                "Findings may lack sanitizer corroboration. Start Docker for full coverage.",
-                "warning",
+                f"ERROR: sandbox startup failed ({exc}); aborting sourcehunt.",
+                "error",
             )
-            return
+            raise RuntimeError(f"HunterSandbox startup failed: {exc}") from exc
 
         self._sandbox_manager = manager
         cpu_limit = manager.default_cpu_limit
@@ -3039,7 +3044,7 @@ class SourceHuntRunner:
             self.sandbox_factory = lambda **kw: manager.spawn(
                 writable_workspace=True,
                 memory_mb=kw.pop("memory_mb", 16384),
-                timeout_seconds=kw.pop("timeout_seconds", 600),
+                timeout_seconds=kw.pop("timeout_seconds", 30),
                 runtime=kw.pop("runtime", gvisor_rt),
                 **kw,
             )
@@ -3475,6 +3480,8 @@ class SourceHuntRunner:
                 budget_summary=budget_summary,
                 potentials=potentials,
                 trace_id=getattr(self, "_otel_trace_id", None),
+                run_started_at=getattr(self, "_run_started_at", None),
+                run_ended_at=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)
