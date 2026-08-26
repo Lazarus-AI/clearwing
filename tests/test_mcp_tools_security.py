@@ -119,3 +119,5 @@ class TestMinimalEnvPassedToPopen:
                 client.connect()
         _, kwargs = mock_popen.call_args
         assert kwargs["env"] == {"PATH": "/usr/bin", "HOME": "/tmp"}
+        written = "".join(call.args[0] for call in mock_popen.return_value.stdin.write.call_args_list)
+        assert '"method": "notifications/initialized"' in written

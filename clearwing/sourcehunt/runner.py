@@ -824,6 +824,10 @@ class SourceHuntRunner:
             live=self._live,
             budget_usd=self.budget_usd or None,
             spend_ledger=self._spend_ledger,
+            trace_context=lambda: (
+                getattr(self, "_otel_trace_id", None),
+                getattr(self, "_otel_span_id", None),
+            ),
         ):
             return asyncio.run(self.arun())
 

@@ -77,6 +77,17 @@ class TestAutoResolveReasoningEffort:
         result = AsyncLLMClient._auto_resolve_reasoning_effort("DeepSeek-V4-Flash")
         assert result == "low"
 
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "qwen3.8-27b",
+            "Qwen3.8-32B-Instruct",
+            "qwen/qwen3.8-27b",
+        ],
+    )
+    def test_qwen3_8_variants_resolve_to_low(self, model_name):
+        assert AsyncLLMClient._auto_resolve_reasoning_effort(model_name) == "low"
+
     def test_mistral_resolves_to_none(self):
         result = AsyncLLMClient._auto_resolve_reasoning_effort("mistral-large-2407")
         assert result is None
@@ -182,6 +193,32 @@ class TestIsUnsupportedReasoningEffortError:
         # isn't actually a 400 or "unsupported" message
         exc = RuntimeError("reasoning_effort defaulted to medium for unknown model")
         assert AsyncLLMClient._is_unsupported_reasoning_effort_error(exc) is False
+
+
+class TestTimeoutRetryPolicy:
+    def test_timeout_retries_once_then_raises(self):
+        client = AsyncLLMClient(
+            model_name="test-model",
+            provider_name="openai_compat",
+            api_key="sk-test",
+            rate_limit_max_retries=6,
+            timeout_max_retries=1,
+        )
+        calls = 0
+
+        async def always_times_out():
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("request timeout")
+
+        async def no_sleep(_delay):
+            return None
+
+        with patch("clearwing.llm.native.asyncio.sleep", new=no_sleep):
+            with pytest.raises(RuntimeError, match="request timeout"):
+                asyncio.run(client._with_retries(always_times_out))
+
+        assert calls == 2
 
 
 class TestRebuildOptionsWithoutReasoning:
@@ -310,6 +347,7 @@ class TestAchatStreamRetryOnUnsupportedReasoning:
             "Status: 400 Bad Request. "
             'Body: {"error":{"message":"`reasoning_effort` is not supported"}}'
         )
+
         # A minimal stand-in for genai's StreamEnd (captured_* fields);
         # achat_stream rebuilds a ChatResponse from it via
         # _chat_response_from_stream_end.
@@ -402,17 +440,11 @@ class TestAchatTruncationRetry:
 
     def _run(self, client, fake_policy, *, max_tokens):
         with (
-            patch.object(
-                AsyncLLMClient, "_achat_with_provider_policy", new=fake_policy
-            ),
-            patch.object(
-                AsyncLLMClient, "_build_client", new=lambda self, cls: object()
-            ),
+            patch.object(AsyncLLMClient, "_achat_with_provider_policy", new=fake_policy),
+            patch.object(AsyncLLMClient, "_build_client", new=lambda self, cls: object()),
         ):
             return asyncio.run(
-                client.achat(
-                    messages=[], system=None, tools=None, max_tokens=max_tokens
-                )
+                client.achat(messages=[], system=None, tools=None, max_tokens=max_tokens)
             )
 
     def test_retries_once_with_escalated_cap(self):
@@ -439,9 +471,7 @@ class TestAchatTruncationRetry:
 
         async def fake_policy(self_, client_obj, request, options):
             caps.append(options.max_tokens)
-            return _FakeResponse(
-                completion_tokens=100, tool_calls=[], text='{"results": []}'
-            )
+            return _FakeResponse(completion_tokens=100, tool_calls=[], text='{"results": []}')
 
         result = self._run(client, fake_policy, max_tokens=100)
 
@@ -482,9 +512,7 @@ class TestAchatTruncationRetry:
             caps.append(options.max_tokens)
             # Always truncated at whatever cap was applied → would loop forever
             # if the single-retry guard were missing.
-            return _FakeResponse(
-                completion_tokens=options.max_tokens, tool_calls=[], text=""
-            )
+            return _FakeResponse(completion_tokens=options.max_tokens, tool_calls=[], text="")
 
         self._run(client, fake_policy, max_tokens=100)
 
@@ -522,9 +550,7 @@ class TestAchatTruncationRetry:
 
             return gen()
 
-        fake_client = type(
-            "FakeClient", (), {"astream_chat": staticmethod(fake_stream)}
-        )()
+        fake_client = type("FakeClient", (), {"astream_chat": staticmethod(fake_stream)})()
         responses = [
             _FakeResponse(completion_tokens=100, tool_calls=[], text=""),  # truncated
             _FakeResponse(completion_tokens=50, tool_calls=[], text="ok"),  # under cap
@@ -534,12 +560,8 @@ class TestAchatTruncationRetry:
             return responses.pop(0)
 
         with (
-            patch.object(
-                AsyncLLMClient, "_build_client", new=lambda self, cls: fake_client
-            ),
-            patch.object(
-                AsyncLLMClient, "_chat_response_from_stream_end", new=fake_from_end
-            ),
+            patch.object(AsyncLLMClient, "_build_client", new=lambda self, cls: fake_client),
+            patch.object(AsyncLLMClient, "_chat_response_from_stream_end", new=fake_from_end),
         ):
             result = asyncio.run(
                 client.achat_stream(
