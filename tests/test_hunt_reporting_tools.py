@@ -80,3 +80,62 @@ def test_record_finding_rejects_trace_without_entry_and_sink(tools, ctx):
     assert result["error"]["code"] == "INCOMPLETE_TRACE"
     assert len(ctx.findings) == 0
     assert len(ctx.trace_steps) == 1
+
+
+def test_record_finding_requires_complete_invariant_map_for_flagged_lead(tools, ctx):
+    ctx.potentials.append(
+        {
+            "id": "lead-1",
+            "file": "app.py",
+            "line": 42,
+            "security_invariant": "Queries must keep user input out of SQL syntax.",
+        }
+    )
+    tools["record_trace_step"](
+        file="app.py", line=42, note="ENTRY/SINK: user input reaches SQL execution"
+    )
+
+    result = _record_finding(tools)
+
+    assert result["error"]["code"] == "INCOMPLETE_INVARIANT_MAP"
+    assert len(ctx.findings) == 0
+    assert len(ctx.trace_steps) == 1
+
+
+def test_record_finding_requires_mapped_potential_for_subsystem_hunt(tools, ctx):
+    ctx.require_invariant_map = True
+    tools["record_trace_step"](
+        file="app.py", line=42, note="ENTRY/SINK: user input reaches SQL execution"
+    )
+
+    result = _record_finding(tools)
+
+    assert result["error"]["code"] == "INCOMPLETE_INVARIANT_MAP"
+    assert len(ctx.findings) == 0
+
+
+def test_record_finding_accepts_complete_invariant_map(tools, ctx):
+    ctx.potentials.append(
+        {
+            "id": "lead-1",
+            "file": "app.py",
+            "line": 42,
+            "security_boundary": "database query execution",
+            "security_invariant": "Queries must keep user input out of SQL syntax.",
+            "attacker_inputs": ["user_id"],
+            "required_relationships": ["user_id must be passed as a bound parameter"],
+            "observed_checks": ["no parameter binding occurs"],
+            "missing_checks": ["no rejection or escaping before interpolation"],
+        }
+    )
+    tools["record_trace_step"](
+        file="app.py", line=42, note="ENTRY/SINK: user input reaches SQL execution"
+    )
+
+    result = _record_finding(tools)
+
+    assert "Finding recorded" in result
+    assert len(ctx.findings) == 1
+    assert ctx.potentials == []
+    assert ctx.potential_history[0]["status"] == "confirmed"
+    assert ctx.potential_history[0]["finding_id"] == ctx.findings[0].id

@@ -44,9 +44,14 @@ class Potential(BaseModel):
     line: int
     note: str
     hypothesis: str
+    security_boundary: str = ""
     security_invariant: str
     priority: PotentialPriority
-    status: Literal["unresolved"] = "unresolved"
+    status: Literal["open", "examined", "safe", "unresolved", "confirmed"] = "open"
+    attacker_inputs: list[str] = Field(default_factory=list)
+    required_relationships: list[str] = Field(default_factory=list)
+    observed_checks: list[str] = Field(default_factory=list)
+    missing_checks: list[str] = Field(default_factory=list)
     verification: PotentialVerification = Field(default_factory=PotentialVerification)
     observations: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
@@ -65,6 +70,14 @@ class FlagPotentialInput(ToolInputModel):
     security_invariant: str = Field(
         default="", description="Safety or authorization rule that must hold if the code is secure."
     )
+    security_boundary: str = Field(
+        default="",
+        description="Public entry point, parser, verifier, state transition, or authorization decision.",
+    )
+    attacker_inputs: list[str] = Field(default_factory=list, max_length=6)
+    required_relationships: list[str] = Field(default_factory=list, max_length=6)
+    observed_checks: list[str] = Field(default_factory=list, max_length=6)
+    missing_checks: list[str] = Field(default_factory=list, max_length=6)
     open_questions: list[str] = Field(
         default_factory=list,
         max_length=4,
@@ -92,6 +105,11 @@ class UpdatePotentialInput(ToolInputModel):
         description="One new source-backed fact learned during verification.",
     )
     security_invariant: str | None = Field(default=None)
+    security_boundary: str | None = Field(default=None)
+    attacker_inputs: list[str] | None = Field(default=None, max_length=6)
+    required_relationships: list[str] | None = Field(default=None, max_length=6)
+    observed_checks: list[str] | None = Field(default=None, max_length=6)
+    missing_checks: list[str] | None = Field(default=None, max_length=6)
     open_questions: list[str] | None = Field(default=None, max_length=4)
     disproof_conditions: list[str] | None = Field(default=None, max_length=3)
 
@@ -141,7 +159,12 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
         line: int,
         hypothesis: str,
         note: str = "",
+        security_boundary: str = "",
         security_invariant: str = "",
+        attacker_inputs: list[str] | None = None,
+        required_relationships: list[str] | None = None,
+        observed_checks: list[str] | None = None,
+        missing_checks: list[str] | None = None,
         open_questions: list[str] | None = None,
         disproof_conditions: list[str] | None = None,
         priority: PotentialPriority = "medium",
@@ -153,8 +176,13 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
             line=line,
             note=note or hypothesis,
             hypothesis=hypothesis,
+            security_boundary=security_boundary,
             security_invariant=security_invariant,
             priority=priority,
+            attacker_inputs=attacker_inputs or [],
+            required_relationships=required_relationships or [],
+            observed_checks=observed_checks or [],
+            missing_checks=missing_checks or [],
             open_questions=open_questions or [],
             disproof_conditions=disproof_conditions or [],
         )
@@ -165,7 +193,12 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
     def update_potential(
         potential_id: str,
         observation: str | None = None,
+        security_boundary: str | None = None,
         security_invariant: str | None = None,
+        attacker_inputs: list[str] | None = None,
+        required_relationships: list[str] | None = None,
+        observed_checks: list[str] | None = None,
+        missing_checks: list[str] | None = None,
         open_questions: list[str] | None = None,
         disproof_conditions: list[str] | None = None,
         **_: object,
@@ -175,8 +208,19 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
                 continue
             if observation:
                 potential.setdefault("observations", []).append(observation)
+                potential["status"] = "examined"
+            if security_boundary is not None:
+                potential["security_boundary"] = security_boundary
             if security_invariant is not None:
                 potential["security_invariant"] = security_invariant
+            if attacker_inputs is not None:
+                potential["attacker_inputs"] = attacker_inputs
+            if required_relationships is not None:
+                potential["required_relationships"] = required_relationships
+            if observed_checks is not None:
+                potential["observed_checks"] = observed_checks
+            if missing_checks is not None:
+                potential["missing_checks"] = missing_checks
             if open_questions is not None:
                 potential["open_questions"] = open_questions
             if disproof_conditions is not None:
@@ -200,7 +244,7 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
                 resolved = ctx.potentials.pop(index)
                 resolved.update(
                     {
-                        "status": "dismissed",
+                        "status": "safe",
                         "resolution": resolution,
                         "satisfied_disproof_condition": disproof_condition,
                         "resolution_evidence": evidence,
@@ -216,11 +260,14 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
         missing_evidence: list[str] | None = None,
         **_: object,
     ) -> str:
-        for potential in ctx.potentials:
+        for index, potential in enumerate(ctx.potentials):
             if potential.get("id") != potential_id:
                 continue
-            potential["deferred_reason"] = reason
-            potential["missing_evidence"] = missing_evidence or []
+            resolved = ctx.potentials.pop(index)
+            resolved["status"] = "unresolved"
+            resolved["deferred_reason"] = reason
+            resolved["missing_evidence"] = missing_evidence or []
+            ctx.potential_history.append(resolved)
             return f"Deferred potential [{potential_id}] as unresolved: {reason}"
         return f"No potential found with id={potential_id}"
 
@@ -230,7 +277,9 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
             description=(
                 "Bookmark a concrete security hypothesis immediately, before extended "
                 "verification. Requires only file, line, and hypothesis. Flagging is not "
-                "a claim that the issue is confirmed."
+                "a claim that the issue is confirmed. Add the invariant map when known: "
+                "boundary, attacker inputs, required relationships, observed checks, and "
+                "checks that appear missing."
             ),
             schema=FlagPotentialInput.model_json_schema(),
             handler=flag_potential,
@@ -239,7 +288,8 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
             name="update_potential",
             description=(
                 "Add source-backed evidence or neutral verification criteria to an existing "
-                "potential as the investigation progresses."
+                "potential as the investigation progresses. Complete its invariant map before "
+                "promoting it to a finding."
             ),
             schema=UpdatePotentialInput.model_json_schema(),
             handler=update_potential,

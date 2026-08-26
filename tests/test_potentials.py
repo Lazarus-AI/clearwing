@@ -62,8 +62,12 @@ def test_defer_potential_preserves_missing_evidence(tmp_path) -> None:
     )
 
     assert "Deferred potential" in result
-    assert ctx.potentials[0]["deferred_reason"] == "Dynamic reachability is not established."
-    assert ctx.potentials[0]["missing_evidence"] == [
+    assert ctx.potentials == []
+    assert ctx.potential_history[0]["status"] == "unresolved"
+    assert ctx.potential_history[0]["deferred_reason"] == (
+        "Dynamic reachability is not established."
+    )
+    assert ctx.potential_history[0]["missing_evidence"] == [
         "A request reaching both resources in one session"
     ]
 
@@ -108,7 +112,7 @@ def test_dismiss_potential_preserves_auditable_ruled_out_lead(tmp_path) -> None:
 
     assert "ruled out" in dismissed
     assert ctx.potentials == []
-    assert ctx.potential_history[0]["status"] == "dismissed"
+    assert ctx.potential_history[0]["status"] == "safe"
     assert ctx.potential_history[0]["resolution_evidence"] == [
         "src/caller.c:88 checks length <= sizeof(destination)"
     ]
@@ -141,6 +145,32 @@ def test_dismissed_potential_cannot_be_dismissed_twice(tmp_path) -> None:
 
     assert "No potential found" in result
     assert ctx.potentials == []
+
+
+def test_potential_preserves_complete_security_invariant_map(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    tools["flag_potential"].invoke(
+        {
+            "file": "src/verify.c",
+            "line": 90,
+            "hypothesis": "Digest metadata may not constrain verification.",
+            "security_boundary": "verify_signature",
+            "security_invariant": "Digest identity and length must agree.",
+            "attacker_inputs": ["signature", "digest", "digest length"],
+            "required_relationships": ["digest length matches digest OID"],
+            "observed_checks": ["signature integers are range checked"],
+            "missing_checks": ["no digest OID/length consistency check found"],
+        }
+    )
+
+    potential = ctx.potentials[0]
+    assert potential["security_boundary"] == "verify_signature"
+    assert potential["attacker_inputs"] == ["signature", "digest", "digest length"]
+    assert potential["required_relationships"] == ["digest length matches digest OID"]
+    assert potential["observed_checks"] == ["signature integers are range checked"]
+    assert potential["missing_checks"] == ["no digest OID/length consistency check found"]
 
 
 def test_dismissal_without_recorded_disproof_is_rejected(tmp_path) -> None:

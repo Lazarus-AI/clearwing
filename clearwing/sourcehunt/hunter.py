@@ -1224,10 +1224,30 @@ You have full shell access, starting in /workspace. Use repository-relative path
 Your mission is to find exploitable vulnerabilities in this subsystem — \
 single-file bugs and cross-file bugs alike.
 
+Survey before committing: identify the major security boundaries and inspect
+representative entry points before spending most of the hunt on one lead.
+Preserve several plausible candidates when they exist; if only one survives the
+survey, say why. Do not let an easy local memory sink erase unresolved protocol,
+lifecycle, verification, authorization, or configuration questions.
+
+For each major security boundary, build an invariant map in the relevant
+potential: the attacker-controlled inputs, relationships that must hold between
+them, checks the code actually performs, and checks that appear missing. In
+particular ask only these high-value questions:
+- Verification/protocol: are type, algorithm/OID, length, encoding, key, and
+  parameter relationships all enforced, including across provider dispatch?
+- Lifecycle/state: can a value change after it was validated, activated, cached,
+  or made security-sensitive, and is it revalidated before later consumption?
+- Branch/configuration: does every feature flag and error path preserve the same
+  confidentiality, integrity, authorization, and indistinguishable-failure property?
+- Authorization: is the decision scoped to the exact actor, resource, operation,
+  and current state rather than a cached or neighboring object?
+
 As soon as you name a possible bypass or security hypothesis, call
 `flag_potential` before doing more than one verification step. Flagging is a
 bookmark, not a claim that the issue is confirmed. Enrich it with
-`update_potential` as source evidence accumulates. Do not reread the whole
+`update_potential` and its invariant-map fields as source evidence accumulates.
+`record_finding` requires a complete map. Do not reread the whole
 target file to reconstruct candidates already preserved in the potential queue.
 
 Dynamic verification requires an active potential. Before building the project,
@@ -1392,6 +1412,7 @@ def build_subsystem_hunter_agent(
         findings_pool=findings_pool,
         callgraph=callgraph,
         subsystem=subsystem,
+        require_invariant_map=True,
     )
 
     tools = build_deep_agent_tools(ctx)
@@ -1483,7 +1504,6 @@ class NativeHunter:
     budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
-    potential_verification_calls: int = 6
     lead_checkpoint_calls: int = 4
     summarizer: ContextSummarizer | None = field(default=None)
 
@@ -1530,8 +1550,6 @@ class NativeHunter:
         potential_reminder_active = False
         exploration_calls_since_checkpoint = 0
         active_potential_id: str | None = None
-        verification_calls = 0
-        verification_resolution_due = False
 
         synthesis_injected = False
         step = 0
@@ -1631,6 +1649,17 @@ class NativeHunter:
                         disproof = p.get("disproof_conditions") or []
                         if disproof:
                             sitrep += "\n      disproof: " + "; ".join(disproof[:3])
+                        missing_checks = p.get("missing_checks") or []
+                        if missing_checks:
+                            sitrep += "\n      missing checks: " + "; ".join(missing_checks[:4])
+                if self.ctx.potential_history:
+                    history_counts: dict[str, int] = {}
+                    for p in self.ctx.potential_history:
+                        status = str(p.get("status", "examined"))
+                        history_counts[status] = history_counts.get(status, 0) + 1
+                    sitrep += "\n  Durable investigation history: " + ", ".join(
+                        f"{status}={count}" for status, count in sorted(history_counts.items())
+                    )
                 # Coverage note: how many files in the subsystem haven't been opened yet
                 if self.ctx.subsystem is not None:
                     subsystem_files = {ft.get("path", "") for ft in self.ctx.subsystem.files}
@@ -1663,17 +1692,6 @@ class NativeHunter:
                         tool
                         for tool in active_tools
                         if tool.name not in inactive_potential_tools
-                    ]
-                if verification_resolution_due:
-                    resolution_tool_names = {
-                        "record_trace_step",
-                        "record_finding",
-                        "update_potential",
-                        "dismiss_potential",
-                        "defer_potential",
-                    }
-                    active_tools = [
-                        tool for tool in self.tools if tool.name in resolution_tool_names
                     ]
                 response = await self.llm.achat(
                     messages=messages,
@@ -1822,7 +1840,6 @@ class NativeHunter:
                     and articulated_lead
                     and uses_investigative_tool
                 )
-                entered_verification_id: str | None = None
                 for tool_call in tool_calls_in_response:
                     tool_arguments = tool_call.fn_arguments
                     if not isinstance(tool_arguments, dict):
@@ -1831,6 +1848,7 @@ class NativeHunter:
                         active_potential_id is not None
                         and tool_call.fn_name
                         in {"update_potential", "dismiss_potential", "defer_potential"}
+                        and not tool_arguments.get("potential_id")
                         and any(
                             potential.get("id") == active_potential_id
                             for potential in self.ctx.potentials
@@ -2020,24 +2038,15 @@ class NativeHunter:
                             and len(self.ctx.potentials) > potentials_before
                         ):
                             active_potential_id = self.ctx.potentials[-1].get("id")
-                            entered_verification_id = active_potential_id
-                            verification_calls = 0
-                            verification_resolution_due = False
                         elif (
                             tool_call.fn_name == "record_finding"
                             and len(self.ctx.findings) > findings_before
                         ):
-                            if active_potential_id is not None:
-                                for potential in list(self.ctx.potentials):
-                                    if potential.get("id") == active_potential_id:
-                                        self.ctx.potentials.remove(potential)
-                                        resolved = dict(potential)
-                                        resolved["status"] = "finding"
-                                        self.ctx.potential_history.append(resolved)
-                                        break
-                            active_potential_id = None
-                            verification_calls = 0
-                            verification_resolution_due = False
+                            if not any(
+                                potential.get("id") == active_potential_id
+                                for potential in self.ctx.potentials
+                            ):
+                                active_potential_id = None
                         elif tool_call.fn_name == "dismiss_potential":
                             dismissed_id = tool_arguments.get("potential_id")
                             if dismissed_id == active_potential_id and not any(
@@ -2045,22 +2054,12 @@ class NativeHunter:
                                 for potential in self.ctx.potentials
                             ):
                                 active_potential_id = None
-                                verification_calls = 0
-                                verification_resolution_due = False
                         elif (
                             tool_call.fn_name == "defer_potential"
                             and tool_arguments.get("potential_id") == active_potential_id
                             and str(tool_output).startswith("Deferred potential")
                         ):
                             active_potential_id = None
-                            verification_calls = 0
-                            verification_resolution_due = False
-                        elif active_potential_id is not None and (
-                            tool_call.fn_name in investigative_tool_names
-                            or tool_call.fn_name == "query_findings_pool"
-                            or tool_call.fn_name.startswith("serena_")
-                        ):
-                            verification_calls += 1
                         elif (
                             active_potential_id is None
                             and (
@@ -2133,40 +2132,6 @@ class NativeHunter:
                             transcript_summary=last_assistant_text[-500:],
                             potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                         )
-                if entered_verification_id is not None:
-                    active = next(
-                        (
-                            potential
-                            for potential in self.ctx.potentials
-                            if potential.get("id") == entered_verification_id
-                        ),
-                        None,
-                    )
-                    if active is not None:
-                        capsule = (
-                            "ACTIVE POTENTIAL VERIFICATION\n"
-                            + json.dumps(active, indent=2, ensure_ascii=False, default=str)
-                            + "\nUse only focused source/navigation calls to resolve attacker "
-                            "control, reachability, guard behavior, and impact. Preserve "
-                            "inconclusive leads with defer_potential."
-                        )
-                        # Start a bounded verification context. Keep the initial
-                        # assignment and the recent evidence/tool exchange that
-                        # caused the flag; older general exploration is replaced
-                        # by the durable potential capsule above.
-                        messages = [messages[0], *messages[-8:], ChatMessage("user", capsule)]
-                        visible_read_ranges.clear()
-                        overlapping_refreshes.clear()
-                        trajectory.log(
-                            "context_compaction",
-                            {
-                                "step": step,
-                                "kind": "potential_verification",
-                                "potential_id": entered_verification_id,
-                                "messages_after": len(messages),
-                            },
-                        )
-
                 checkpoint_due_to_calls = (
                     active_potential_id is None
                     and exploration_calls_since_checkpoint >= self.lead_checkpoint_calls
@@ -2194,30 +2159,6 @@ class NativeHunter:
                             "trigger": "language"
                             if should_remind_about_potential
                             else "investigative_call_budget",
-                        },
-                    )
-                if (
-                    active_potential_id is not None
-                    and not verification_resolution_due
-                    and verification_calls >= self.potential_verification_calls
-                ):
-                    verification_resolution_due = True
-                    resolution_prompt = (
-                        f"Verification budget reached for potential [{active_potential_id}] "
-                        f"after {verification_calls} investigative tool calls. Using the "
-                        "evidence already collected, decide now: record_finding if the source "
-                        "supports it; dismiss_potential only if source evidence rules it out; "
-                        "or defer_potential with the exact missing evidence if it remains "
-                        "unresolved. General exploration tools are paused for this lead."
-                    )
-                    messages.append(ChatMessage("user", resolution_prompt))
-                    trajectory.log(
-                        "nudge",
-                        {
-                            "step": step,
-                            "kind": "potential_verification_budget",
-                            "potential_id": active_potential_id,
-                            "verification_calls": verification_calls,
                         },
                     )
                 continue

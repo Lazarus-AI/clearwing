@@ -52,6 +52,7 @@ class HunterContext:
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
     potentials: list[dict] = field(default_factory=list)  # investigation queue for flag_potential tool
     potential_history: list[dict] = field(default_factory=list)  # resolved leads retained for audit
+    require_invariant_map: bool = False  # subsystem findings must promote a mapped potential
     callgraph: object | None = None  # CallGraph from preprocessor (avoiding circular import)
     subsystem: object | None = None  # SubsystemSpec; set for subsystem hunters only
     llm: object | None = None  # AsyncLLMClient for sub-calls (threat context, etc.)

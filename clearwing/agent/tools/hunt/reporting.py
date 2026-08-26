@@ -76,9 +76,34 @@ FindingType = Literal[
 ]
 Confidence = Literal["high", "medium", "low"]
 
+_INVARIANT_MAP_FIELDS = (
+    "security_boundary",
+    "security_invariant",
+    "attacker_inputs",
+    "required_relationships",
+    "observed_checks",
+    "missing_checks",
+)
+
 
 def _tool_error(code: str, message: str) -> dict[str, object]:
     return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def _completed_invariant_potential(
+    ctx: HunterContext, file: str, potential_id: str = ""
+) -> dict | None:
+    """Return a same-file potential whose security-boundary map is complete."""
+    for potential in reversed(ctx.potentials):
+        if potential_id and potential.get("id") != potential_id:
+            continue
+        if str(potential.get("file", "")).removeprefix("/workspace/") != file.removeprefix(
+            "/workspace/"
+        ):
+            continue
+        if all(potential.get(field) for field in _INVARIANT_MAP_FIELDS):
+            return potential
+    return None
 
 
 class RecordTraceStepInput(ToolInputModel):
@@ -126,6 +151,10 @@ class RecordFindingInput(ToolInputModel):
         ),
     )
     description: str
+    potential_id: str = Field(
+        default="",
+        description="ID of the completed invariant-mapped potential being promoted.",
+    )
     code_snippet: str = ""
     crash_evidence: str = ""
     poc: str = ""
@@ -215,6 +244,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         finding_type: str,
         severity: str,
         description: str,
+        potential_id: str = "",
         cwe: str = "",
         code_snippet: str = "",
         crash_evidence: str = "",
@@ -304,6 +334,19 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             )
         trace_dict = vuln_trace.model_dump()
 
+        # Direct/legacy reporting callers may not use the potential queue. Once
+        # a hunt does use it, however, promotion must come from a same-file lead
+        # with an explicit security-contract map rather than a sink-only hunch.
+        promoted_potential = _completed_invariant_potential(ctx, file, potential_id)
+        if (ctx.require_invariant_map or ctx.potentials) and promoted_potential is None:
+            return _tool_error(
+                "INCOMPLETE_INVARIANT_MAP",
+                "Before record_finding, update a potential in this file with its security "
+                "boundary, security invariant, attacker inputs, required relationships, "
+                "observed checks, and missing checks. Pass potential_id when more than one "
+                "lead exists.",
+            )
+
         duplicate = next(
             (f for f in ctx.findings if f.file == file and f.line_number == line_number),
             None,
@@ -361,6 +404,12 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             extra=finding_metadata,
         )
         ctx.findings.append(finding)
+        if promoted_potential is not None:
+            ctx.potentials.remove(promoted_potential)
+            confirmed = dict(promoted_potential)
+            confirmed["status"] = "confirmed"
+            confirmed["finding_id"] = finding.id
+            ctx.potential_history.append(confirmed)
         # Consume streamed trace evidence only after every validation and
         # duplicate check succeeds. A rejected report must not destroy evidence
         # intended for a later legitimate finding.

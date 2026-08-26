@@ -222,6 +222,9 @@ def test_subsystem_prompt_includes_file_listing():
     assert "net/ipv4/udp.c" in prompt
     assert "net_ipv4" in prompt
     assert "linux" in prompt
+    assert "Survey before committing" in prompt
+    assert "For each major security boundary, build an invariant map" in prompt
+    assert "Lifecycle/state" in prompt
 
 
 def test_subsystem_prompt_cross_file_calls():
