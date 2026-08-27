@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from clearwing.providers.binding import (
+    AgentLimits,
+    BindingValidationError,
+    InferenceProfile,
+    ModelCapabilities,
+    ReasoningSupport,
+    capabilities_for,
+    model_family,
+    validate_agent_limits,
+    validate_inference,
+)
 from clearwing.providers.catalog import (
     PROVIDER_PRESETS as KNOWN_PROVIDERS,
 )
@@ -24,6 +35,15 @@ from clearwing.providers.manager import (
     ProviderConfig,
     ProviderManager,
 )
+from clearwing.providers.roles import (
+    ROLES,
+    TASK_ROLES,
+    Role,
+    RoleAssignment,
+    Tier,
+    recommend_roles,
+    role_for_task,
+)
 from clearwing.providers.runtime import (
     install_runtime_routing,
     runtime_routing,
@@ -45,6 +65,24 @@ __all__ = [
     "ModelRoute",
     "PROVIDER_PRESETS",
     "DEFAULT_ROUTES",
+    # Model roles (vendor-neutral capability layer)
+    "Tier",
+    "Role",
+    "ROLES",
+    "TASK_ROLES",
+    "RoleAssignment",
+    "recommend_roles",
+    "role_for_task",
+    # Capabilities / inference bindings
+    "InferenceProfile",
+    "AgentLimits",
+    "validate_agent_limits",
+    "ModelCapabilities",
+    "ReasoningSupport",
+    "BindingValidationError",
+    "capabilities_for",
+    "model_family",
+    "validate_inference",
     # One-run process provider routing
     "install_runtime_routing",
     "runtime_routing",
