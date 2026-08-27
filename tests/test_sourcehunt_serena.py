@@ -81,6 +81,48 @@ def test_serena_bootstraps_clangd_for_c_and_cpp(tmp_path) -> None:
     args = factory.call_args.args[1]
     assert "clangd" in args[-1]
     assert "golang-go" not in args[-1]
+    state_mount = next(
+        str(arg) for arg in args if str(arg).endswith(":/serena-data")
+    )
+    project_config = Path(
+        state_mount.removesuffix(":/serena-data"),
+        "projects",
+        "workspace",
+        ".serena",
+        "project.yml",
+    ).read_text()
+    assert project_config.count("  - cpp\n") == 1
+    assert "  - c\n" not in project_config
+    assert 'project_name: "workspace"' in project_config
+    assert "language_servers:\n  - cpp\n" in project_config
+    assert "ls_specific_settings:\n  cpp:\n" in project_config
+    assert "compile_commands_dir: /serena-data/compile-db" in project_config
+    assert "ls_path: /usr/bin/clangd" in project_config
+
+
+def test_serena_project_config_preserves_other_detected_languages(tmp_path) -> None:
+    client = _fake_client()
+    factory = MagicMock(return_value=client)
+    session = SerenaSession(
+        str(tmp_path), languages=["c", "go", "python"], client_factory=factory
+    )
+
+    session.start()
+
+    args = factory.call_args.args[1]
+    state_mount = next(
+        str(arg) for arg in args if str(arg).endswith(":/serena-data")
+    )
+    project_config = Path(
+        state_mount.removesuffix(":/serena-data"),
+        "projects",
+        "workspace",
+        ".serena",
+        "project.yml",
+    ).read_text()
+    assert "  - cpp\n" in project_config
+    assert "  - go\n" in project_config
+    assert "  - python\n" in project_config
 
 
 def test_serena_native_tool_forwards_to_shared_client(tmp_path) -> None:

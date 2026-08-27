@@ -62,7 +62,8 @@ class SerenaSession:
         if self._client is not None:
             return self.tools
         self._project_state = tempfile.TemporaryDirectory(prefix="clearwing-serena-")
-        Path(self._project_state.name, "serena_config.yml").write_text(
+        state_path = Path(self._project_state.name)
+        state_path.joinpath("serena_config.yml").write_text(
             "project_serena_folder_location: "
             '"/serena-data/projects/$projectFolderName/.serena"\n'
             "trusted_project_path_patterns:\n"
@@ -76,6 +77,7 @@ class SerenaSession:
             "web_dashboard: false\n"
             "web_dashboard_open_on_launch: false\n"
         )
+        self._write_project_config(state_path)
         logger.info(
             "Starting Serena; workspace mounted read-only: %s -> %s "
             "(language-server indexing may take a few minutes)",
@@ -165,6 +167,30 @@ class SerenaSession:
             self._project_state.cleanup()
             self._project_state = None
             raise
+
+    def _write_project_config(self, state_path: Path) -> None:
+        """Write the project config Serena resolves for the /workspace mount."""
+        serena_languages = sorted(
+            {"cpp" if language in {"c", "cpp"} else language for language in self.languages}
+        )
+        project_dir = state_path / "projects" / Path(SERENA_PROJECT_PATH).name / ".serena"
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        lines = [
+            'project_name: "workspace"',
+            "language_servers:" if serena_languages else "language_servers: []",
+        ]
+        lines.extend(f"  - {language}" for language in serena_languages)
+        if "cpp" in serena_languages:
+            lines.extend(
+                [
+                    "ls_specific_settings:",
+                    "  cpp:",
+                    f"    compile_commands_dir: {SERENA_DATA_PATH}/compile-db",
+                    "    ls_path: /usr/bin/clangd",
+                ]
+            )
+        project_dir.joinpath("project.yml").write_text("\n".join(lines) + "\n")
 
     def _normalize_languages(self, languages: Iterable[str] | None) -> set[str]:
         aliases = {"c++": "cpp", "py": "python", "golang": "go"}
