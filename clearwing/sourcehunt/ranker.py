@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from clearwing.core.events import EventBus
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
 
@@ -201,6 +202,10 @@ class Ranker:
                     completed,
                     total_chunks,
                 )
+                EventBus().emit_message(
+                    f"ranking progress  {completed}/{total_chunks} chunks ranked",
+                    "info",
+                )
         except BudgetExceeded:
             for task in tasks:
                 if not task.done():
@@ -301,6 +306,7 @@ class Ranker:
                             user=user_msg,
                             schema_model=RankedFileScoreResponse,
                             schema_name="ranked_file_score_response",
+                            max_tokens=16000,
                         ),
                         timeout=self.config.llm_timeout_seconds,
                     )
@@ -310,6 +316,7 @@ class Ranker:
                         user=user_msg,
                         schema_model=RankedFileScoreResponse,
                         schema_name="ranked_file_score_response",
+                        max_tokens=16000,
                     )
                 elapsed = asyncio.get_running_loop().time() - started_at
                 logger.info(

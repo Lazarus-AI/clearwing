@@ -34,14 +34,15 @@ from .analysis import (
     _parse_sanitizer_report,
     build_analysis_tools,
 )
+from .deep_agent import build_deep_agent_tools
 from .discovery import (
     _container_path,
     _grep_python_fallback,
     _normalize_path,
     _parse_rg_output,
     build_discovery_tools,
+    build_semgrep_tool,
 )
-from .deep_agent import build_deep_agent_tools
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext, _parse_variant_arg
@@ -88,6 +89,7 @@ __all__ = [
     "build_propagation_auditor_tools",
     # Per-domain builders (for callers that want a narrower tool set)
     "build_discovery_tools",
+    "build_semgrep_tool",
     "build_analysis_tools",
     "build_reporting_tools",
     "build_pool_query_tools",

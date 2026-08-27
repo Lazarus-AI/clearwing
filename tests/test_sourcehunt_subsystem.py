@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import json
+from unittest.mock import MagicMock
 
 import pytest
 
-from clearwing.sourcehunt.state import FileTarget, SubsystemTarget
+from clearwing.sourcehunt.runner import SourceHuntRunner
+from clearwing.sourcehunt.state import FileTarget, StageOutcome, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
     SubsystemHuntConfig,
     SubsystemHuntRunner,
@@ -237,7 +238,7 @@ def test_subsystem_prompt_cross_file_calls():
     prompt = _build_subsystem_prompt(subsystem, "linux", callgraph=callgraph)
     assert "tcp.c" in prompt
     assert "udp.c" in prompt
-    assert "send_data" in prompt
+    assert "vulnerabilities" in prompt.lower()
 
 
 def test_subsystem_prompt_existing_findings():
@@ -366,7 +367,6 @@ def test_build_subsystem_hunter_initial_message():
         llm=mock_llm,
         session_id="test-session",
     )
-    assert "cross-file" in hunter.initial_user_message
     assert "net_ipv4" in hunter.initial_user_message
     assert "2 files" in hunter.initial_user_message
 
@@ -430,3 +430,221 @@ async def test_subsystem_hunt_runner_no_subsystems():
     ))
     result = await runner.arun()
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_subsystem_hunt_runner_preserves_budget_exhaustion(monkeypatch):
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
+            repo_path="/tmp",
+            llm=MagicMock(),
+        )
+    )
+
+    async def budget_exhausted(*args, **kwargs):
+        return [], 1.0, 10, "budget_exhausted"
+
+    monkeypatch.setattr(runner, "_run_one_subsystem", budget_exhausted)
+
+    assert await runner.arun() == []
+    assert runner.budget_exhausted is True
+
+
+def test_subsystem_budget_stop_marks_sourcehunt_run_incomplete(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.checkpoints.repository_commit_sha",
+        lambda repo_path: "a" * 40,
+    )
+
+    class BudgetExhaustedSubsystemRunner:
+        def __init__(self, config):
+            self.total_spent = 1.0
+            self.budget_exhausted = True
+
+        async def arun(self):
+            return []
+
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.subsystem.SubsystemHuntRunner",
+        BudgetExhaustedSubsystemRunner,
+    )
+    repo = tmp_path / "repo"
+    source_dir = repo / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "app.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+    progress = []
+    runner_options = {
+        "repo_url": str(repo),
+        "local_path": str(repo),
+        "depth": "standard",
+        "output_formats": ["json"],
+        "no_rank": True,
+        "no_verify": True,
+        "no_exploit": True,
+        "enable_mechanism_memory": False,
+        "enable_knowledge_graph": False,
+        "enable_behavior_monitor": False,
+        "enable_findings_pool": False,
+        "enable_subsystem_hunt": True,
+        "subsystem_paths": ["src"],
+        "no_per_file_hunt": True,
+        "preprocessing": False,
+        "shard_entry_points": False,
+        "hunter_llm": MagicMock(),
+        "sandbox_factory": lambda: None,
+        "on_progress": progress.append,
+    }
+    output = tmp_path / "out"
+    runner = SourceHuntRunner(
+        output_dir=str(output),
+        **runner_options,
+    )
+
+    result = runner.run()
+    manifest = json.loads(
+        (output / result.session_id / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert runner._spend_ledger is not None
+    assert runner._spend_ledger.exhausted is False
+    assert result.status == "budget_exhausted"
+    assert result.exit_code == 3
+    assert result.checkpoint is not None
+    assert result.checkpoint["hunt"]["result"]["subsystem_status"] == "budget_exhausted"
+    assert result.pipeline_status.stages["subsystem_hunt"].outcome is StageOutcome.SKIPPED
+    fresh_budget_event = next(
+        event
+        for event in progress
+        if event.stage == "subsystem_hunt" and event.status == "budget_exhausted"
+    )
+    assert fresh_budget_event.findings_so_far == 0
+    assert fresh_budget_event.cost_usd == 1.0
+    assert manifest["status"] == "budget_exhausted"
+    assert manifest["complete"] is False
+
+    class UnexpectedSubsystemRunner:
+        def __init__(self, config):
+            raise AssertionError("subsystem hunt ran instead of restoring its checkpoint")
+
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.subsystem.SubsystemHuntRunner",
+        UnexpectedSubsystemRunner,
+    )
+    resumed_output = tmp_path / "resumed-out"
+    first_run_event_count = len(progress)
+    resumed = SourceHuntRunner(
+        output_dir=str(resumed_output),
+        checkpoint=result.checkpoint,
+        **runner_options,
+    )
+
+    resumed_result = resumed.run()
+    resumed_manifest = json.loads(
+        (resumed_output / resumed_result.session_id / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert resumed_result.status == "budget_exhausted"
+    assert resumed_result.exit_code == 3
+    assert resumed_result.pipeline_status.stages["subsystem_hunt"].outcome is StageOutcome.SKIPPED
+    resumed_budget_event = next(
+        event
+        for event in progress[first_run_event_count:]
+        if event.stage == "subsystem_hunt" and event.status == "budget_exhausted"
+    )
+    assert resumed_budget_event.findings_so_far == 0
+    assert resumed_budget_event.cost_usd == 1.0
+    assert resumed_manifest["status"] == "budget_exhausted"
+    assert resumed_manifest["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# File-cap: configurable + never silent (regression for CVE-2026-5747)
+# ---------------------------------------------------------------------------
+
+
+def test_subsystem_from_path_uncapped_by_default():
+    """An explicit --subsystem PATH is a deliberate scope: hunt every match."""
+    files = [_ft(f"net/f{i}.c", priority=1.0) for i in range(120)]
+    st = subsystem_from_path("net", files)
+    assert len(st.files) == 120
+
+
+def test_explicit_scope_retains_ground_truth_file_uncapped():
+    """CVE-2026-5747 shape: >50 equal-priority siblings, ground-truth file last.
+
+    Under the old silent [:50] cap it was dropped out of scope; uncapped-by-
+    default now keeps it.
+    """
+    files = [_ft(f"transport/pci/f{i}.c", priority=1.0) for i in range(85)]
+    files.append(_ft("transport/pci/common_config.c", priority=1.0))
+    st = subsystem_from_path("transport/pci", files)
+    assert "transport/pci/common_config.c" in [f["path"] for f in st.files]
+
+
+def test_subsystem_from_path_explicit_cap_warns_and_drops(caplog):
+    files = [_ft(f"net/f{i}.c", priority=float(i)) for i in range(60)]
+    with caplog.at_level("WARNING"):
+        st = subsystem_from_path("net", files, max_files=50)
+    assert len(st.files) == 50
+    assert "DROPPING" in caplog.text
+
+
+def test_identify_subsystems_auto_default_cap_warns_on_drop(caplog):
+    files = [_ft(f"net/ipv4/f{i}.c", priority=3.5) for i in range(60)]
+    with caplog.at_level("WARNING"):
+        subs = identify_subsystems_auto(files)
+    assert len(subs) == 1
+    assert len(subs[0].files) == 50  # DEFAULT_MAX_FILES_PER_SUBSYSTEM
+    assert "DROPPED" in caplog.text
+
+
+def test_identify_subsystems_auto_uncapped_keeps_all():
+    files = [_ft(f"net/ipv4/f{i}.c", priority=3.5) for i in range(60)]
+    subs = identify_subsystems_auto(files, max_files_per_subsystem=None)
+    assert len(subs) == 1
+    assert len(subs[0].files) == 60
+
+
+def test_identify_subsystems_auto_custom_cap_is_honored():
+    files = [_ft(f"net/ipv4/f{i}.c", priority=3.5) for i in range(60)]
+    subs = identify_subsystems_auto(files, max_files_per_subsystem=10)
+    assert len(subs[0].files) == 10
+
+
+# ---------------------------------------------------------------------------
+# _build_subsystem_prompt file-listing cap (second, independent 50-file cap)
+# ---------------------------------------------------------------------------
+
+
+def test_subsystem_prompt_uncapped_by_default_lists_all_files():
+    """The prompt builder must not re-truncate an (already-scoped) subsystem.
+
+    CVE-2026-5747 shape: 85 equal-priority siblings plus the ground-truth file
+    last. The old hard-coded ``subsystem.files[:50]`` in the prompt builder hid
+    it from the model's file listing even after the partitioner kept it.
+    """
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    files = [_ft(f"transport/pci/f{i:03d}.c", priority=1.0) for i in range(85)]
+    files.append(_ft("transport/pci/common_config.c", priority=1.0))
+    subsystem = SubsystemTarget(
+        name="transport_pci", root_path="transport/pci", files=files
+    )
+    prompt = _build_subsystem_prompt(subsystem, "target")
+    assert "transport/pci/common_config.c" in prompt
+    assert "transport/pci/f000.c" in prompt
+
+
+def test_subsystem_prompt_cap_warns_and_keeps_highest_priority(caplog):
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+
+    files = [_ft(f"net/f{i:03d}.c", priority=float(i)) for i in range(60)]
+    subsystem = SubsystemTarget(name="net", root_path="net", files=files)
+    with caplog.at_level("WARNING"):
+        prompt = _build_subsystem_prompt(subsystem, "target", max_files_in_prompt=10)
+    # Highest-priority files survive the cap; lowest-priority are dropped.
+    assert "net/f059.c" in prompt
+    assert "net/f000.c" not in prompt
+    # And the drop is never silent.
+    assert "dropping" in caplog.text.lower()

@@ -35,6 +35,10 @@ class BudgetConfig:
     elaboration_cap: str = "10%"
     subsystem_budget_usd: float = 0.0
     subsystem_max_parallel: int = 4
+    # Per-subsystem file cap. None = library default (50 for auto detection;
+    # uncapped for an explicit --subsystem PATH). Raise it, or set to 0/None to
+    # disable, so ground-truth files aren't dropped out of scope.
+    subsystem_max_files: int | None = None
 
 
 @dataclass(frozen=True)
@@ -137,3 +141,4 @@ class SourceHuntConfig:
     features: FeatureFlags = field(default_factory=FeatureFlags)
     tuning: HuntTuning = field(default_factory=HuntTuning)
     proof: ProofConfig = field(default_factory=ProofConfig)
+    checkpoint: dict[str, Any] | str | None = None

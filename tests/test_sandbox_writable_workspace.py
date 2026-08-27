@@ -163,10 +163,6 @@ class TestSourceHuntSandboxCpuWiring:
             repo_path="/tmp/repo",
             languages=["c"],
             deep_agent_mode=True,
-            extra_packages=["python3-pip"],
-            post_install_commands=[
-                "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true"
-            ],
             default_cpus=1.5,
         )
         assert runner.sandbox_factory is not None
@@ -339,7 +335,7 @@ class TestHunterSandboxWritableWorkspace:
                 with patch.object(SandboxContainer, "exec", return_value=MagicMock(exit_code=0)):
                     sb = manager.spawn(writable_workspace=True)
 
-        # Check no read-only workspace mount
+        # Check no read-only workspace mount (copy-based, not bind-mounted)
         for mount in sb.config.mounts:
             host, container, mode = mount
             if container == "/workspace":

@@ -116,7 +116,13 @@ def current_spend_metadata() -> dict[str, Any]:
 class SpendLedger:
     """Concurrency-safe, progressively persisted spend ledger for one run."""
 
-    DEFAULT_MAX_OUTPUT_TOKENS = 4096
+    # Per-call output-token ceiling applied when a dollar budget is enforced.
+    # This is only a per-call cap, not a spend limit — the affordability clamp
+    # in `reserve_call` still bounds total spend, so a larger value cannot
+    # overspend. It was 4096, which starved reasoning models: their reasoning
+    # tokens alone could exhaust the cap, truncating the decisive turn before it
+    # emitted any tool call or answer. 32768 leaves room for reasoning + output.
+    DEFAULT_MAX_OUTPUT_TOKENS = 32768
     _EPSILON = 1e-9
 
     def __init__(
@@ -635,6 +641,7 @@ class SpendLedger:
 
         # Version aliases in provider catalogs often omit a dated suffix or
         # select a nearby point release with the same family pricing.
+        alias_matched = False
         if matched_key is None:
             family_aliases = (
                 ("claude-sonnet-4", "claude-sonnet-4-6"),
@@ -645,10 +652,16 @@ class SpendLedger:
             for family, key in family_aliases:
                 if family in normalized and key in pricing_table:
                     matched_key = key
+                    alias_matched = True
                     break
 
+        # Only enforce the Anthropic-direct requirement when pricing was
+        # inferred via a family alias — a direct table match means the caller
+        # explicitly configured the model name (e.g. routing claude-opus-4-6
+        # through a LiteLLM gateway), so we trust it.
         if (
             strict
+            and alias_matched
             and matched_key is not None
             and matched_key.startswith("claude-")
             and provider not in {"anthropic", "anthropic_oauth"}

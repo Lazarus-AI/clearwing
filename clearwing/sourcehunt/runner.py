@@ -28,6 +28,7 @@ from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.budget import BudgetExceeded, SpendLedger
 from clearwing.llm.native import AsyncLLMClient
+from clearwing.observability.otel import get_oi_tracer
 from clearwing.providers import (
     ProviderManager,
     resolve_llm_endpoint,
@@ -35,6 +36,17 @@ from clearwing.providers import (
 from clearwing.reporting.safety import redact_tree
 
 from ..sandbox.hunter_sandbox import HunterSandbox
+from .checkpoints import (
+    ExploitationCheckpoint,
+    ExploitationResult,
+    HuntCheckpoint,
+    HuntResult,
+    PreprocessCheckpoint,
+    RankCheckpoint,
+    SourceHuntCheckpoint,
+    VerificationCheckpoint,
+    VerificationResult,
+)
 from .config import SourceHuntConfig
 from .disclosure import (
     DisclosureGenerator,
@@ -73,6 +85,7 @@ from .variant_loop import (
 from .verifier import Verifier, apply_verifier_result
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
 
 
 @dataclass
@@ -92,6 +105,7 @@ class SourceHuntResult:
     spent_per_tier: dict[str, float]
     tokens_used: int
     output_paths: dict[str, str] = field(default_factory=dict)
+    checkpoint: dict[str, Any] | None = None
     session_id: str = ""
     subsystems_hunted: int = 0
     subsystem_spent_usd: float = 0.0
@@ -235,6 +249,8 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
+        checkpoint: dict[str, Any] | str | None = None,
+        checkpoint_path: str | Path | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
         prompt_mode: str = "unconstrained",  # "unconstrained" | "specialist"
         campaign_hint: str | None = None,
@@ -253,6 +269,7 @@ class SourceHuntRunner:
         no_rank: bool = False,
         subsystem_budget_usd: float = 0.0,
         subsystem_max_parallel: int = 4,
+        subsystem_max_files: int | None = None,
         enable_behavior_monitor: bool = True,
         enable_artifact_store: bool = False,
         gvisor_runtime: str | None = None,
@@ -278,6 +295,7 @@ class SourceHuntRunner:
         retain_incomplete_certificates: bool = True,
         emit_rejection_certificates: bool = True,
         falsify: bool = True,
+        stop_after: str | None = None,
         on_progress: SourceHuntProgressCallback | None = None,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
@@ -313,6 +331,11 @@ class SourceHuntRunner:
             )
             subsystem_max_parallel = (
                 subsystem_max_parallel if subsystem_max_parallel != 4 else b.subsystem_max_parallel
+            )
+            subsystem_max_files = (
+                subsystem_max_files
+                if subsystem_max_files is not None
+                else getattr(b, "subsystem_max_files", None)
             )
             # Output params
             output_dir = output_dir if output_dir is not None else (o.output_dir or None)
@@ -436,6 +459,7 @@ class SourceHuntRunner:
                 emit_rejection_certificates and p.emit_rejection_certificates
             )
             falsify = falsify and p.falsify
+            checkpoint = checkpoint if checkpoint is not None else config.checkpoint
 
         if not repo_url:
             raise ValueError(
@@ -446,6 +470,8 @@ class SourceHuntRunner:
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
+        if checkpoint is not None and flow != "legacy":
+            raise ValueError("checkpoint restoration is currently supported only for legacy flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -516,6 +542,17 @@ class SourceHuntRunner:
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        self._checkpoint_path = (
+            Path(checkpoint_path)
+            if checkpoint_path is not None
+            else Path(self.output_dir) / self._session_id / "checkpoint.json"
+        )
+        if checkpoint is not None:
+            self._checkpoint = SourceHuntCheckpoint.from_input(checkpoint)
+        elif self._checkpoint_path.is_file():
+            self._checkpoint = SourceHuntCheckpoint.from_file(self._checkpoint_path)
+        else:
+            self._checkpoint = None
         self._agent_mode_override = agent_mode
         self._prompt_mode = prompt_mode
         self._campaign_hint = campaign_hint
@@ -532,8 +569,13 @@ class SourceHuntRunner:
         self._subsystem_paths = subsystem_paths
         self._no_per_file_hunt = no_per_file_hunt
         self._no_rank = no_rank
+        self._stop_after = stop_after
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
+        # None = library default (DEFAULT_MAX_FILES_PER_SUBSYSTEM for auto
+        # detection; uncapped for an explicit --subsystem PATH). An operator
+        # override raises/removes the per-subsystem file cap for both paths.
+        self._subsystem_max_files = subsystem_max_files
         self._injected_findings_pool = None
         self._injected_historical_db = None
         self._enable_behavior_monitor = enable_behavior_monitor
@@ -572,6 +614,11 @@ class SourceHuntRunner:
         self._run_started_at: str | None = None
         self._run_started_monotonic: float | None = None
         self._resolved_model_roles: dict[str, dict[str, str]] = {}
+
+    def _dump_checkpoint(self) -> None:
+        if self._checkpoint is None:
+            return
+        self._checkpoint.dump(self._checkpoint_path)
 
     @staticmethod
     def _check_runtime_available(runtime: str | None) -> str | None:
@@ -1009,6 +1056,7 @@ class SourceHuntRunner:
         os.replace(temporary, manifest_path)
         proof_result.output_paths.update(outputs)
 
+    @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
         self._run_started_at = datetime.now(timezone.utc).isoformat()
         self._run_started_monotonic = time.monotonic()
@@ -1037,43 +1085,48 @@ class SourceHuntRunner:
             files = preprocess_result.file_targets
             files_ranked = len(files)
             logger.info("Preprocessor enumerated %d files", files_ranked)
+            if preprocess_result.callgraph is not None and not preprocess_result.callgraph.empty:
+                logger.info(
+                    "Callgraph ready  functions=%d",
+                    sum(len(v) for v in preprocess_result.callgraph.functions.values()),
+                )
             stage_files = [str(file_target.get("path") or "") for file_target in files]
             self._emit_stage(
                 "preprocess",
                 "completed",
-                detail=f"Enumerated {files_ranked} files",
+                detail=(
+                    f"Restored {files_ranked} files from checkpoint"
+                    if self._preprocess_restored
+                    else f"Enumerated {files_ranked} files"
+                ),
                 files=stage_files,
             )
-            self._ensure_sandbox_factory(repo_path, files)
 
-            # 2. Rank — unless depth=quick AND no LLM available, or --no-rank
-            ranker_llm = (
-                None
-                if self._no_rank
-                else self._get_native_client(
-                    "ranker",
-                    self.ranker_llm,
-                    budget_stage="rank",
+            if self._stop_after == "preprocess":
+                logger.info("--stop-after preprocess: exiting early")
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                    pipeline_status=pipeline_status,
                 )
-            )
-            self._emit_stage(
-                "rank",
-                "started",
-                detail=f"{len(files)} files",
-                files=stage_files,
-            )
+
+            _t = time.monotonic()
+            self._ensure_sandbox_factory(repo_path, files)
+            logger.info("Sandbox factory ready in %.2fs", time.monotonic() - _t)
+
+            # 2. Rank
             if self._no_rank:
                 logger.info("Ranker skipped (--no-rank); assigning default priority scores")
-                for ft in files:
-                    ft["surface"] = ft.get("surface") or 3
-                    ft["influence"] = ft.get("influence") or 2
-                    ft["reachability"] = ft.get("reachability") or 3
-                    ft["priority"] = (
-                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                    )
+                self._emit_stage(
+                    "rank",
+                    "started",
+                    detail=f"{len(files)} files",
+                    files=stage_files,
+                )
                 pipeline_status.record_degraded(
-                    "ranker",
-                    "All files assigned default priority scores (--no-rank)",
+                    "ranker", "All files assigned default priority scores (--no-rank)"
                 )
                 self._emit_stage(
                     "rank",
@@ -1081,85 +1134,19 @@ class SourceHuntRunner:
                     detail="Skipped (--no-rank)",
                     files=stage_files,
                 )
-            elif ranker_llm is not None and files:
-                logger.info("Ranker starting on %d files", len(files))
-                try:
-                    ranker_config = RankerConfig()
-                    if not self._preprocessing:
-                        ranker_config.include_static_hints = False
-                        ranker_config.include_imports_by = False
-                    if ranker_llm.provider_name in ("openai_resp", "openai_codex"):
-                        ranker_config.chunk_size = 30
-                        ranker_config.max_inflight_chunks = self.max_parallel
-                        logger.info(
-                            "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
-                            ranker_llm.provider_name,
-                            ranker_config.chunk_size,
-                            ranker_config.max_inflight_chunks,
-                        )
-                    await Ranker(ranker_llm, ranker_config).arank(files)
-                    logger.info("Ranker completed")
-                    pipeline_status.record_succeeded("ranker")
-                    self._emit_stage(
-                        "rank",
-                        "completed",
-                        detail=f"Ranked {len(files)} files",
-                        files=stage_files,
-                    )
-                except BudgetExceeded:
-                    logger.info("Ranker stopped because the run budget is exhausted")
-                    pipeline_status.record(
-                        "ranker",
-                        StageOutcome.SKIPPED,
-                        fallback_description="Budget exhausted; remaining files use heuristic ranks",
-                    )
-                    self._emit_stage(
-                        "rank",
-                        "budget_exhausted",
-                        detail="Using heuristic ranks",
-                        files=stage_files,
-                    )
-                except Exception:
-                    logger.warning("Ranker failed", exc_info=True)
-                    pipeline_status.record_degraded(
-                        "ranker",
-                        "All files assigned default priority scores (surface=3, influence=2)",
-                    )
-                    self._emit_stage(
-                        "rank",
-                        "degraded",
-                        detail="Default priority scores used",
-                        files=stage_files,
-                    )
+                self._apply_rank_fallbacks(files)
             else:
-                logger.info("Ranker skipped; no LLM available")
-                pipeline_status.record_degraded(
-                    "ranker",
-                    "All files assigned default priority scores (surface=3, influence=2)",
-                )
-                # Fallback: assign reasonable defaults so tier assignment still works
-                for ft in files:
-                    ft["surface"] = ft.get("surface") or 3
-                    ft["influence"] = ft.get("influence") or 2
-                    ft["reachability"] = ft.get("reachability") or 3
-                    ft["priority"] = (
-                        ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
-                    )
-                self._emit_stage(
-                    "rank",
-                    "degraded",
-                    detail="No ranker model available; default priority scores used",
-                    files=stage_files,
-                )
+                files = await self._rank(files, pipeline_status, stage_files)
+            preprocess_result.file_targets = files
 
-            # Ensure a partial/failed rank pass still leaves every file
-            # schedulable by the deterministic fallback.
-            for ft in files:
-                ft["surface"] = ft.get("surface") or 3
-                ft["influence"] = ft.get("influence") or 2
-                ft["reachability"] = ft.get("reachability") or 3
-                ft["priority"] = ft.get("priority") or (
-                    ft["surface"] * 0.5 + ft["influence"] * 0.2 + ft["reachability"] * 0.3
+            if self._stop_after == "rank":
+                logger.info("--stop-after rank: exiting early")
+                return self._build_quick_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    preprocess_result=preprocess_result,
+                    files_ranked=files_ranked,
+                    pipeline_status=pipeline_status,
                 )
 
             # depth=quick exits here with the static_findings as-is
@@ -1304,161 +1291,24 @@ class SourceHuntRunner:
                     historical_db = None
 
             # 3. Tiered hunt
-            hunter_llm = self._get_native_client(
-                "hunter",
-                self.hunter_llm,
-                budget_stage="hunt",
+            hunt_result = await self._hunt(
+                files=files,
+                repo_path=repo_path,
+                pipeline_status=pipeline_status,
+                stage_files=stage_files,
+                seeded_by_file=seeded_by_file,
+                semgrep_hints_by_file=semgrep_hints_by_file,
+                entry_points_by_file=entry_points_by_file,
+                seed_corpus_by_file=seed_corpus_by_file,
+                findings_pool=findings_pool,
+                callgraph=preprocess_result.callgraph,
             )
-            all_findings: list[Finding] = []
-            files_hunted = 0
-            spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
-            band_stats: dict | None = None
-            hunt_symbols = sorted(
-                {
-                    str(getattr(entry_point, "function_name", "") or "")
-                    for entry_points in entry_points_by_file.values()
-                    for entry_point in entry_points
-                    if getattr(entry_point, "function_name", "")
-                }
-            )
-
-            if self._no_per_file_hunt:
-                logger.info("Per-file hunt skipped (--no-per-file-hunt)")
-                self._emit_stage(
-                    "hunt",
-                    "skipped",
-                    detail="Per-file hunt disabled",
-                    files=stage_files,
-                    symbols=hunt_symbols,
-                )
-            elif hunter_llm is not None and files and not self._budget_exhausted():
-                self._emit_stage(
-                    "hunt",
-                    "started",
-                    detail=f"{len(files)} files",
-                    files=stage_files,
-                    symbols=hunt_symbols,
-                )
-                logger.info("HunterPool starting on %d files", len(files))
-                pool = HunterPool(
-                    HuntPoolConfig(
-                        files=files,
-                        repo_path=repo_path,
-                        sandbox_factory=self.sandbox_factory,
-                        sandbox_manager=self._sandbox_manager,
-                        hunter_factory=None,
-                        llm=hunter_llm,
-                        max_parallel=self.max_parallel,
-                        budget_usd=self.budget_usd,
-                        tier_budget=self.tier_budget,
-                        session_id_prefix=self._session_id,
-                        seeded_crashes_by_file=seeded_by_file,
-                        semgrep_hints_by_file=semgrep_hints_by_file,
-                        agent_mode=self._effective_agent_mode,
-                        prompt_mode=self._prompt_mode,
-                        campaign_hint=self._campaign_hint,
-                        exploit_mode=self._exploit_mode,
-                        starting_band=self._starting_band,
-                        max_band=self._max_band,
-                        redundancy_override=self._redundancy_override,
-                        entry_points_by_file=entry_points_by_file,
-                        seed_corpus_by_file=seed_corpus_by_file,
-                        shard_entry_points=self._shard_entry_points,
-                        findings_pool=findings_pool,
-                        trajectory_root=(Path(self.output_dir) / self._session_id / "trajectories"),
-                        instrumentation=self._instrumentation,
-                    )
-                )
-                try:
-                    all_findings = await pool.arun()
-                    logger.info("HunterPool completed with %d findings", len(all_findings))
-                    if pool.budget_exhausted or self._budget_exhausted():
-                        pipeline_status.record(
-                            "hunter_pool",
-                            StageOutcome.SKIPPED,
-                            fallback_description="Budget exhausted; partial hunter results retained",
-                        )
-                        self._emit_stage(
-                            "hunt",
-                            "budget_exhausted",
-                            findings_so_far=len(all_findings),
-                            cost_usd=pool.total_spent,
-                            detail=f"{len(all_findings)} partial findings",
-                            files=[str(finding.file or "") for finding in all_findings],
-                            symbols=self._finding_symbols(all_findings),
-                            finding_ids=[finding.id for finding in all_findings],
-                        )
-                    else:
-                        pipeline_status.record_succeeded("hunter_pool")
-                        self._emit_stage(
-                            "hunt",
-                            "completed",
-                            findings_so_far=len(all_findings),
-                            cost_usd=pool.total_spent,
-                            detail=f"{len(all_findings)} findings",
-                            files=[str(finding.file or "") for finding in all_findings],
-                            symbols=self._finding_symbols(all_findings),
-                            finding_ids=[finding.id for finding in all_findings],
-                        )
-                except BudgetExceeded:
-                    logger.info("HunterPool stopped because the run budget is exhausted")
-                    pipeline_status.record(
-                        "hunter_pool",
-                        StageOutcome.SKIPPED,
-                        fallback_description="Budget exhausted; partial hunter results retained",
-                    )
-                    self._emit_stage(
-                        "hunt",
-                        "budget_exhausted",
-                        findings_so_far=len(all_findings),
-                        files=stage_files,
-                        symbols=hunt_symbols,
-                        finding_ids=[finding.id for finding in all_findings],
-                    )
-                except Exception as exc:
-                    logger.warning("HunterPool run failed", exc_info=True)
-                    pipeline_status.record_degraded(
-                        "hunter_pool",
-                        "Hunter phase produced no findings due to error",
-                    )
-                    self._emit_stage(
-                        "hunt",
-                        "degraded",
-                        findings_so_far=len(all_findings),
-                        files=stage_files,
-                        symbols=hunt_symbols,
-                        finding_ids=[finding.id for finding in all_findings],
-                        error={"type": type(exc).__name__, "message": str(exc)},
-                    )
-                spent_per_tier = pool.spent_per_tier
-                band_stats = {
-                    "fast_runs": pool.runs_per_band.get("fast", 0),
-                    "fast_cost": pool.spent_per_band.get("fast", 0.0),
-                    "standard_runs": pool.runs_per_band.get("standard", 0),
-                    "standard_cost": pool.spent_per_band.get("standard", 0.0),
-                    "deep_runs": pool.runs_per_band.get("deep", 0),
-                    "deep_cost": pool.spent_per_band.get("deep", 0.0),
-                    "promotions": pool.promotion_counts,
-                }
-                files_hunted = pool.completed_target_count
-            else:
-                logger.info("HunterPool skipped; no LLM available")
-                if not files:
-                    hunt_status = "skipped"
-                    hunt_detail = "No source files were available"
-                elif self._budget_exhausted():
-                    hunt_status = "budget_exhausted"
-                    hunt_detail = "Run budget was exhausted before hunting"
-                else:
-                    hunt_status = "degraded"
-                    hunt_detail = "No hunter model was available"
-                self._emit_stage(
-                    "hunt",
-                    hunt_status,
-                    detail=hunt_detail,
-                    files=stage_files,
-                    symbols=hunt_symbols,
-                )
+            all_findings = hunt_result.findings
+            files_hunted = hunt_result.files_hunted
+            spent_per_tier = hunt_result.spent_per_tier
+            band_stats = hunt_result.band_stats
+            subsystems_hunted = hunt_result.subsystems_hunted
+            subsystem_spent = hunt_result.subsystem_spent_usd
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
             if self._enable_behavior_monitor and all_findings:
@@ -1500,226 +1350,41 @@ class SourceHuntRunner:
                 finally:
                     historical_db.close()
 
-            # 3.7. Subsystem hunt (spec 006)
-            subsystems_hunted = 0
-            subsystem_spent = 0.0
-            if self._enable_subsystem_hunt and hunter_llm is not None and self._budget_exhausted():
-                logger.info(
-                    "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
-                    self.budget_usd,
-                    self._run_spent_usd(),
-                )
-            elif self._enable_subsystem_hunt and hunter_llm is not None:
-                from .subsystem import (
-                    SubsystemHuntConfig,
-                    identify_subsystems_auto,
-                    subsystem_from_path,
-                )
-                from .subsystem import (
-                    SubsystemHuntRunner as SubsysRunner,
-                )
-
-                subsystem_llm = self._get_native_client(
-                    "hunter",
-                    self.hunter_llm,
-                    budget_stage="subsystem_hunt",
-                )
-
-                subsystem_targets: list = []
-                if self._subsystem_paths:
-                    for sp in self._subsystem_paths:
-                        try:
-                            st = subsystem_from_path(
-                                sp,
-                                files,
-                                callgraph=preprocess_result.callgraph,
-                                entry_points_by_file=entry_points_by_file,
-                            )
-                            subsystem_targets.append(st)
-                        except ValueError:
-                            logger.warning("No files match subsystem path: %s", sp)
-                else:
-                    subsystem_targets = identify_subsystems_auto(
-                        files,
-                        callgraph=preprocess_result.callgraph,
-                        entry_points_by_file=entry_points_by_file,
-                    )
-
-                if subsystem_targets:
-                    subsystem_files = sorted(
-                        {
-                            str(file_target.get("path") or "")
-                            for subsystem in subsystem_targets
-                            for file_target in subsystem.files
-                        }
-                    )
-                    subsystem_symbols = sorted(
-                        {
-                            str(getattr(entry_point, "function_name", "") or "")
-                            for subsystem in subsystem_targets
-                            for entry_point in subsystem.entry_points
-                            if getattr(entry_point, "function_name", "")
-                        }
-                    )
+            if self._stop_after == "hunt":
+                logger.info("--stop-after hunt: exiting early")
+                for stage in ("verify", "exploit"):
                     self._emit_stage(
-                        "subsystem_hunt",
-                        "started",
-                        detail=f"{len(subsystem_targets)} subsystems",
-                        files=subsystem_files,
-                        symbols=subsystem_symbols,
+                        stage,
+                        "skipped",
+                        findings_so_far=len(all_findings),
+                        detail="Run stopped after hunt",
+                        files=[str(finding.file or "") for finding in all_findings],
+                        symbols=self._finding_symbols(all_findings),
+                        finding_ids=[finding.id for finding in all_findings],
                     )
-                    logger.info(
-                        "Subsystem hunt: %d targets identified",
-                        len(subsystem_targets),
-                    )
-                    for st in subsystem_targets:
-                        logger.info(
-                            "  %s (%d files, priority=%.2f)",
-                            st.name,
-                            len(st.files),
-                            st.priority,
-                        )
-                    # Bound the whole subsystem phase to whatever --budget is
-                    # left, split evenly across targets, so 3 subsystems can't
-                    # each burn the internal $100 default ($300 total) past the
-                    # budget the user set. Falls back to the explicit override /
-                    # $100 default only when no --budget is in play.
-                    if self.budget_usd:
-                        assert self._spend_ledger is not None
-                        remaining = self._spend_ledger.remaining_usd or 0.0
-                        per_subsystem_budget = remaining / len(subsystem_targets)
-                        if self._subsystem_budget_usd:
-                            per_subsystem_budget = min(
-                                per_subsystem_budget,
-                                self._subsystem_budget_usd,
-                            )
-                    else:
-                        per_subsystem_budget = self._subsystem_budget_usd or 100.0
-                    subsys_runner = SubsysRunner(
-                        SubsystemHuntConfig(
-                            subsystems=subsystem_targets,
-                            repo_path=repo_path,
-                            sandbox_factory=self.sandbox_factory,
-                            llm=subsystem_llm,
-                            max_parallel=self._subsystem_max_parallel,
-                            budget_per_subsystem_usd=per_subsystem_budget,
-                            findings_pool=findings_pool,
-                            session_id_prefix=f"{self._session_id}-subsys",
-                            sandbox_manager=self._sandbox_manager,
-                            campaign_hint=self._campaign_hint,
-                            callgraph=preprocess_result.callgraph,
-                            trajectory_root=(
-                                Path(self.output_dir) / self._session_id / "trajectories"
-                            ),
-                            instrumentation=self._instrumentation,
-                        )
-                    )
-                    try:
-                        subsys_findings = await subsys_runner.arun()
-                        all_findings.extend(subsys_findings)
-                        subsystems_hunted = len(subsystem_targets)
-                        subsystem_spent = subsys_runner.total_spent
-                        logger.info(
-                            "Subsystem hunt completed: %d findings, $%.4f spent",
-                            len(subsys_findings),
-                            subsystem_spent,
-                        )
-                        self._emit_stage(
-                            "subsystem_hunt",
-                            "completed",
-                            findings_so_far=len(subsys_findings),
-                            cost_usd=subsystem_spent,
-                            files=subsystem_files,
-                            symbols=subsystem_symbols,
-                            finding_ids=[finding.id for finding in subsys_findings],
-                        )
-                    except Exception as exc:
-                        logger.warning("Subsystem hunt failed", exc_info=True)
-                        pipeline_status.record_degraded(
-                            "subsystem_hunt",
-                            "Subsystem hunt failed; only per-file findings available",
-                        )
-                        self._emit_stage(
-                            "subsystem_hunt",
-                            "degraded",
-                            files=subsystem_files,
-                            symbols=subsystem_symbols,
-                            error={"type": type(exc).__name__, "message": str(exc)},
-                        )
+                return self._finalize_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    findings=all_findings,
+                    verified=[],
+                    exploited=[],
+                    files_ranked=files_ranked,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    findings_pool=findings_pool,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                    subsystem_status=hunt_result.subsystem_status,
+                    pipeline_status=pipeline_status,
+                )
 
             # 4. Verify (unless --no-verify)
-            verified: list[Finding] = []
-            rejected: list[Finding] = []
-            verify_status = "completed"
-            self._emit_stage(
-                "verify",
-                "started",
-                findings_so_far=len(all_findings),
-                detail=f"{len(all_findings)} findings to verify",
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+            verification_result = await self._verify(
+                all_findings, repo_path=repo_path, pipeline_status=pipeline_status
             )
-            if not self.no_verify:
-                if self._budget_exhausted():
-                    verify_status = "budget_exhausted"
-                    pipeline_status.record(
-                        "verifier",
-                        StageOutcome.SKIPPED,
-                        fallback_description="Budget exhausted; findings remain unverified",
-                    )
-                else:
-                    verifier_llm = self._get_native_client(
-                        "verifier",
-                        self.verifier_llm,
-                        budget_stage="verify",
-                    )
-                    if verifier_llm is not None:
-                        if self.validator_mode == "v2":
-                            verified, rejected = await self._verify_v2(
-                                verifier_llm,
-                                all_findings,
-                                repo_path,
-                            )
-                        else:
-                            verified = await self._verify_v1(
-                                verifier_llm,
-                                all_findings,
-                                repo_path,
-                            )
-                    else:
-                        verify_status = "degraded"
-                        for f in all_findings:
-                            f["verified"] = True
-                        verified = all_findings
-                        pipeline_status.record_degraded(
-                            "verifier",
-                            "Findings auto-verified without independent review",
-                        )
-            else:
-                for finding in all_findings:
-                    finding["verified"] = False
-                verified = []
-                pipeline_status.record(
-                    "verifier",
-                    StageOutcome.SKIPPED,
-                    fallback_description="Verification skipped (--no-verify)",
-                )
-
-            verify_detail = (
-                "Verification skipped (--no-verify)"
-                if self.no_verify
-                else f"{len(verified)} verified, {len(rejected)} rejected"
-            )
-            self._emit_stage(
-                "verify",
-                verify_status,
-                findings_so_far=len(all_findings),
-                detail=verify_detail,
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-            )
+            verified = verification_result.verified
+            rejected = verification_result.rejected
             if rejected:
                 self._write_rejected_findings(rejected)
 
@@ -1880,83 +1545,41 @@ class SourceHuntRunner:
                 non_poc = [f for f in verified if f not in stability_eligible]
                 verified = stable_verified + non_poc
 
+            if self._stop_after == "verify":
+                logger.info("--stop-after verify: exiting early")
+                self._emit_stage(
+                    "exploit",
+                    "skipped",
+                    findings_so_far=len(all_findings),
+                    detail="Run stopped after verify",
+                    files=[str(finding.file or "") for finding in all_findings],
+                    symbols=self._finding_symbols(all_findings),
+                    finding_ids=[finding.id for finding in all_findings],
+                )
+                return self._finalize_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    findings=all_findings,
+                    verified=verified,
+                    exploited=[],
+                    files_ranked=files_ranked,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    findings_pool=findings_pool,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                    subsystem_status=hunt_result.subsystem_status,
+                    pipeline_status=pipeline_status,
+                )
+
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
-            self._emit_stage(
-                "exploit",
-                "started",
-                findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in verified],
-                symbols=self._finding_symbols(verified),
-                finding_ids=[finding.id for finding in verified],
-            )
-            exploited: list[Finding] = []
+            exploitation_result = await self._exploit(verified, findings_pool=findings_pool)
+            verified = exploitation_result.verified
+            exploited = exploitation_result.exploited
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
             #          critical/high findings with root_cause_explained evidence.
             patched: list[Finding] = []
-            if not self.no_exploit and not self._budget_exhausted():
-                exploiter_llm = self._get_native_client(
-                    "sourcehunt_exploit",
-                    self.exploiter_llm,
-                    budget_stage="exploit",
-                )
-                if exploiter_llm is not None:
-                    eligible = filter_by_evidence(verified, "crash_reproduced")
-                    has_sandbox = (
-                        self._sandbox_manager is not None or self.sandbox_factory is not None
-                    )
-                    if eligible and has_sandbox:
-                        agentic = AgenticExploiter(
-                            llm=exploiter_llm,
-                            sandbox_manager=self._sandbox_manager,
-                            sandbox_factory=self.sandbox_factory,
-                            findings_pool=findings_pool,
-                            budget_band=self._exploit_budget_band,
-                            output_dir=str(self._ensure_output_dir_layout()),
-                            project_name=(
-                                self.repo_url.split("/")[-1] if self.repo_url else "target"
-                            ),
-                        )
-                        for finding in eligible:
-                            if self._budget_exhausted():
-                                logger.info(
-                                    "Exploit phase halted: budget $%.2f exhausted ($%.2f spent)",
-                                    self.budget_usd,
-                                    self._run_spent_usd(),
-                                )
-                                break
-                            try:
-                                exploit_result = await agentic.aattempt(finding)
-                                apply_exploiter_result(finding, exploit_result)
-                                if exploit_result.success:
-                                    exploited.append(finding)
-                                if exploit_result.partial and findings_pool is not None:
-                                    finding["primitive_type"] = (
-                                        exploit_result.primitive_type
-                                        or finding.get("primitive_type", "")
-                                    )
-                                    await findings_pool.add(finding)
-                            except BudgetExceeded:
-                                logger.info("Exploit generation stopped at the run budget")
-                                break
-                            except Exception:
-                                logger.warning(
-                                    "Agentic exploiter failed for %s",
-                                    finding.get("id"),
-                                    exc_info=True,
-                                )
-                    elif eligible:
-                        e = Exploiter(exploiter_llm)
-                        for finding in eligible:
-                            try:
-                                exploit_result = await e.aattempt(finding)
-                                apply_exploiter_result(finding, exploit_result)
-                                if exploit_result.success:
-                                    exploited.append(finding)
-                            except BudgetExceeded:
-                                logger.info("Exploit triage stopped at the run budget")
-                                break
-                            except Exception:
-                                logger.warning("Exploiter failed", exc_info=True)
 
             # 5.25. Stage 1.5: Exploit elaboration (autonomous, opt-in).
             elaborated: list[Finding] = []
@@ -2148,98 +1771,21 @@ class SourceHuntRunner:
                 finding_ids=[finding.id for finding in all_findings],
             )
 
-            # 6. Report
-            self._emit_stage(
-                "report",
-                "started",
-                findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-            )
-            assert self._spend_ledger is not None
-            ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
-            if ledger_tier_spend:
-                spent_per_tier = {
-                    tier: ledger_tier_spend.get(tier, 0.0) for tier in ("A", "B", "C")
-                }
-            ledger_band_spend = self._spend_ledger.spent_by("band", stage="hunt")
-            if band_stats is not None and ledger_band_spend:
-                for band in ("fast", "standard", "deep"):
-                    band_stats[f"{band}_cost"] = ledger_band_spend.get(band, 0.0)
-            ledger_subsystem_spend = self._spend_ledger.spent_by("stage").get("subsystem_hunt", 0.0)
-            if ledger_subsystem_spend:
-                subsystem_spent = ledger_subsystem_spend
-
-            run_status = "budget_exhausted" if self._budget_exhausted() else "completed"
-            if run_status == "budget_exhausted":
-                pipeline_status.record(
-                    "budget",
-                    StageOutcome.SKIPPED,
-                    fallback_description="Dollar cap reached; partial results retained",
-                )
-            budget_summary = self._finalize_spend_ledger(run_status)
-            _pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
-            _subsystem_stats = (
-                {"subsystems_hunted": subsystems_hunted, "subsystem_spent_usd": subsystem_spent}
-                if subsystems_hunted > 0
-                else None
-            )
-            output_paths = self._write_report(
+            return self._finalize_result(
+                start_time=start_time,
                 repo_path=repo_path,
                 findings=all_findings,
                 verified=verified,
-                spent_per_tier=spent_per_tier,
-                band_stats=band_stats,
-                pool_stats=_pool_stats,
-                subsystem_stats=_subsystem_stats,
-                pipeline_status=pipeline_status,
-                budget_summary=budget_summary,
-            )
-
-            report_status = "degraded" if self._last_reporting_error else "completed"
-            self._emit_stage(
-                "report",
-                report_status,
-                findings_so_far=len(all_findings),
-                cost_usd=budget_summary["total_spent"],
-                files=[str(finding.file or "") for finding in all_findings],
-                symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
-                error=self._last_reporting_error,
-            )
-            self._finalize_instrumentation(run_status)
-            output_paths.update(
-                {
-                    "instrumentation": str(self._instrumentation.summary_path),
-                    "instrumentation_events": str(self._instrumentation.events_path),
-                }
-            )
-
-            duration = time.monotonic() - start_time
-            exit_findings = all_findings if self.no_verify else verified
-            return SourceHuntResult(
-                exit_code=(
-                    3 if run_status == "budget_exhausted" else self._exit_code(exit_findings)
-                ),
-                repo_url=self.repo_url,
-                repo_path=repo_path,
-                findings=all_findings,
-                verified_findings=verified,
-                exploited_findings=exploited,
+                exploited=exploited,
                 files_ranked=files_ranked,
                 files_hunted=files_hunted,
-                duration_seconds=round(duration, 2),
-                cost_usd=budget_summary["total_spent"],
                 spent_per_tier=spent_per_tier,
-                tokens_used=budget_summary["total_tokens"],
-                output_paths=output_paths,
-                session_id=self._session_id,
+                band_stats=band_stats,
+                findings_pool=findings_pool,
                 subsystems_hunted=subsystems_hunted,
                 subsystem_spent_usd=subsystem_spent,
+                subsystem_status=hunt_result.subsystem_status,
                 pipeline_status=pipeline_status,
-                status=run_status,
-                budget_usd=self.budget_usd,
             )
         finally:
             if self._spend_ledger is not None:
@@ -2366,6 +1912,180 @@ class SourceHuntRunner:
             )
         except Exception:
             logger.debug("gh pr create failed", exc_info=True)
+
+    async def _exploit(self, verified: list[Finding], *, findings_pool: Any) -> ExploitationResult:
+        """Run or restore the completed exploitation stage."""
+
+        options = {
+            "no_exploit": self.no_exploit,
+            "exploit_budget_band": self._exploit_budget_band,
+            "agent_mode": self._effective_agent_mode,
+        }
+        self._exploitation_restored = False
+        self._emit_stage(
+            "exploit",
+            "started",
+            findings_so_far=len(verified),
+            files=[str(finding.file or "") for finding in verified],
+            symbols=self._finding_symbols(verified),
+            finding_ids=[finding.id for finding in verified],
+        )
+        if self._checkpoint is not None and self._checkpoint.exploitation is not None:
+            restored = self._checkpoint.exploitation.restore(options=options)
+            if restored is None:
+                raise ValueError("exploitation checkpoint is invalid or incompatible with this run")
+            self._exploitation_restored = True
+            self._emit_stage(
+                "exploit",
+                "completed",
+                findings_so_far=len(restored.exploited),
+                detail=f"Restored {len(restored.exploited)} exploited findings from checkpoint",
+                finding_ids=[finding.id for finding in restored.exploited],
+            )
+            return restored
+
+        result = ExploitationResult(verified=verified, exploited=[])
+        if not self.no_exploit and not self._budget_exhausted():
+            exploiter_llm = self._get_native_client(
+                "sourcehunt_exploit", self.exploiter_llm, budget_stage="exploit"
+            )
+            if exploiter_llm is not None:
+                eligible = filter_by_evidence(result.verified, "crash_reproduced")
+                has_sandbox = self._sandbox_manager is not None or self.sandbox_factory is not None
+                if eligible and has_sandbox:
+                    exploiter = AgenticExploiter(
+                        llm=exploiter_llm,
+                        sandbox_manager=self._sandbox_manager,
+                        sandbox_factory=self.sandbox_factory,
+                        findings_pool=findings_pool,
+                        budget_band=self._exploit_budget_band,
+                        output_dir=str(self._ensure_output_dir_layout()),
+                        project_name=self.repo_url.split("/")[-1] if self.repo_url else "target",
+                    )
+                else:
+                    exploiter = Exploiter(exploiter_llm)
+                for finding in eligible:
+                    if self._budget_exhausted():
+                        break
+                    try:
+                        exploit_result = await exploiter.aattempt(finding)
+                        apply_exploiter_result(finding, exploit_result)
+                        if exploit_result.success:
+                            result.exploited.append(finding)
+                        if has_sandbox and exploit_result.partial and findings_pool is not None:
+                            finding["primitive_type"] = (
+                                exploit_result.primitive_type or finding.get("primitive_type", "")
+                            )
+                            await findings_pool.add(finding)
+                    except BudgetExceeded:
+                        logger.info("Exploitation stopped at the run budget")
+                        break
+                    except Exception:
+                        logger.warning("Exploiter failed for %s", finding.id, exc_info=True)
+        if self._checkpoint is None:
+            raise RuntimeError("exploitation requires a preprocessing checkpoint")
+        self._checkpoint.exploitation = ExploitationCheckpoint.from_result(result, options=options)
+        self._dump_checkpoint()
+        self._emit_stage(
+            "exploit",
+            "completed" if not self._budget_exhausted() else "budget_exhausted",
+            findings_so_far=len(result.exploited),
+            detail=f"{len(result.exploited)} exploited findings",
+            finding_ids=[finding.id for finding in result.exploited],
+        )
+        return result
+
+    async def _verify(
+        self,
+        findings: list[Finding],
+        *,
+        repo_path: str,
+        pipeline_status: PipelineStatus,
+    ) -> VerificationResult:
+        """Run or restore the completed verification stage."""
+
+        options = {
+            "no_verify": self.no_verify,
+            "validator_mode": self.validator_mode,
+            "adversarial_verifier": self.adversarial_verifier,
+            "adversarial_threshold": self.adversarial_threshold,
+            "enable_patch_oracle": self.enable_patch_oracle,
+        }
+        self._verification_restored = False
+        self._emit_stage(
+            "verify",
+            "started",
+            findings_so_far=len(findings),
+            detail=f"{len(findings)} findings to verify",
+            files=[str(finding.file or "") for finding in findings],
+            symbols=self._finding_symbols(findings),
+            finding_ids=[finding.id for finding in findings],
+        )
+        if self._checkpoint is not None and self._checkpoint.verification is not None:
+            restored = self._checkpoint.verification.restore(options=options)
+            if restored is None:
+                raise ValueError("verification checkpoint is invalid or incompatible with this run")
+            self._verification_restored = True
+            pipeline_status.record_succeeded("verifier")
+            result = restored
+            result.status = "completed"
+            detail = f"Restored {len(result.verified)} verified findings from checkpoint"
+        else:
+            result = VerificationResult(verified=[], rejected=[])
+            if self.no_verify:
+                for finding in findings:
+                    finding["verified"] = False
+                pipeline_status.record(
+                    "verifier",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Verification skipped (--no-verify)",
+                )
+            elif self._budget_exhausted():
+                result.status = "budget_exhausted"
+                pipeline_status.record(
+                    "verifier",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; findings remain unverified",
+                )
+            else:
+                verifier_llm = self._get_native_client(
+                    "verifier", self.verifier_llm, budget_stage="verify"
+                )
+                if verifier_llm is None:
+                    result.status = "degraded"
+                    for finding in findings:
+                        finding["verified"] = True
+                    result.verified = findings
+                    pipeline_status.record_degraded(
+                        "verifier", "Findings auto-verified without independent review"
+                    )
+                elif self.validator_mode == "v2":
+                    result.verified, result.rejected = await self._verify_v2(
+                        verifier_llm, findings, repo_path
+                    )
+                else:
+                    result.verified = await self._verify_v1(verifier_llm, findings, repo_path)
+            if self._checkpoint is None:
+                raise RuntimeError("verification requires a preprocessing checkpoint")
+            self._checkpoint.verification = VerificationCheckpoint.from_result(
+                result, options=options
+            )
+            self._dump_checkpoint()
+            detail = (
+                "Verification skipped (--no-verify)"
+                if self.no_verify
+                else f"{len(result.verified)} verified, {len(result.rejected)} rejected"
+            )
+        self._emit_stage(
+            "verify",
+            result.status,
+            findings_so_far=len(findings),
+            detail=detail,
+            files=[str(finding.file or "") for finding in findings],
+            symbols=self._finding_symbols(findings),
+            finding_ids=[finding.id for finding in findings],
+        )
+        return result
 
     async def _verify_v1(
         self,
@@ -2612,22 +2332,569 @@ class SourceHuntRunner:
             }
         ]
 
+    @tracer.chain(name="Hunt")
+    async def _hunt(
+        self,
+        *,
+        files: list[FileTarget],
+        repo_path: str,
+        pipeline_status: PipelineStatus,
+        stage_files: list[str],
+        seeded_by_file: dict[str, dict],
+        semgrep_hints_by_file: dict[str, list[dict]],
+        entry_points_by_file: dict,
+        seed_corpus_by_file: dict,
+        findings_pool: Any,
+        callgraph: Any,
+    ) -> HuntResult:
+        """Run or restore per-file and subsystem source hunting."""
+
+        options = {
+            "no_per_file_hunt": self._no_per_file_hunt,
+            "agent_mode": self._effective_agent_mode,
+            "prompt_mode": self._prompt_mode,
+            "campaign_hint": self._campaign_hint,
+            "exploit_mode": self._exploit_mode,
+            "starting_band": self._starting_band,
+            "max_band": self._max_band,
+            "redundancy_override": self._redundancy_override,
+            "shard_entry_points": self._shard_entry_points,
+            "max_parallel": self.max_parallel,
+            "enable_subsystem_hunt": self._enable_subsystem_hunt,
+            "subsystem_paths": sorted(self._subsystem_paths or []),
+            "subsystem_budget_usd": self._subsystem_budget_usd,
+            "subsystem_max_parallel": self._subsystem_max_parallel,
+        }
+        self._hunt_restored = False
+        hunt_symbols = sorted(
+            {
+                str(getattr(entry_point, "function_name", "") or "")
+                for entry_points in entry_points_by_file.values()
+                for entry_point in entry_points
+                if getattr(entry_point, "function_name", "")
+            }
+        )
+        if self._checkpoint is not None and self._checkpoint.hunt is not None:
+            restored = self._checkpoint.hunt.restore(options=options)
+            if restored is None:
+                raise ValueError("hunt checkpoint is invalid or incompatible with this run")
+            self._hunt_restored = True
+            pipeline_status.record_succeeded("hunter_pool")
+            self._emit_stage(
+                "hunt",
+                "completed",
+                findings_so_far=len(restored.findings),
+                detail=f"Restored {len(restored.findings)} findings from checkpoint",
+                files=[str(finding.file or "") for finding in restored.findings],
+                symbols=self._finding_symbols(restored.findings),
+                finding_ids=[finding.id for finding in restored.findings],
+            )
+            if self._enable_subsystem_hunt:
+                if restored.subsystem_status == "budget_exhausted":
+                    pipeline_status.record(
+                        "subsystem_hunt",
+                        StageOutcome.SKIPPED,
+                        fallback_description=(
+                            "Budget exhausted; partial subsystem results retained"
+                        ),
+                    )
+                elif restored.subsystem_status == "degraded":
+                    pipeline_status.record_degraded(
+                        "subsystem_hunt",
+                        "Subsystem hunt failed; only per-file findings available",
+                    )
+                elif restored.subsystem_status == "completed":
+                    pipeline_status.record_succeeded("subsystem_hunt")
+                self._emit_stage(
+                    "subsystem_hunt",
+                    restored.subsystem_status,
+                    findings_so_far=len(restored.findings),
+                    cost_usd=restored.subsystem_spent_usd,
+                    detail=(
+                        f"Restored {restored.subsystems_hunted} hunted subsystems from checkpoint"
+                    ),
+                )
+            return restored
+
+        result = HuntResult(
+            findings=[],
+            files_hunted=0,
+            spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+        )
+        hunter_llm = self._get_native_client("hunter", self.hunter_llm, budget_stage="hunt")
+        if self._no_per_file_hunt:
+            logger.info("Per-file hunt skipped (--no-per-file-hunt)")
+            self._emit_stage(
+                "hunt",
+                "skipped",
+                detail="Per-file hunt disabled",
+                files=stage_files,
+                symbols=hunt_symbols,
+            )
+        elif hunter_llm is not None and files and not self._budget_exhausted():
+            self._emit_stage(
+                "hunt",
+                "started",
+                detail=f"{len(files)} files",
+                files=stage_files,
+                symbols=hunt_symbols,
+            )
+            pool = HunterPool(
+                HuntPoolConfig(
+                    files=files,
+                    repo_path=repo_path,
+                    sandbox_factory=self.sandbox_factory,
+                    sandbox_manager=self._sandbox_manager,
+                    hunter_factory=None,
+                    llm=hunter_llm,
+                    max_parallel=self.max_parallel,
+                    budget_usd=self.budget_usd,
+                    tier_budget=self.tier_budget,
+                    session_id_prefix=self._session_id,
+                    seeded_crashes_by_file=seeded_by_file,
+                    semgrep_hints_by_file=semgrep_hints_by_file,
+                    agent_mode=self._effective_agent_mode,
+                    prompt_mode=self._prompt_mode,
+                    campaign_hint=self._campaign_hint,
+                    exploit_mode=self._exploit_mode,
+                    starting_band=self._starting_band,
+                    max_band=self._max_band,
+                    redundancy_override=self._redundancy_override,
+                    entry_points_by_file=entry_points_by_file,
+                    seed_corpus_by_file=seed_corpus_by_file,
+                    shard_entry_points=self._shard_entry_points,
+                    findings_pool=findings_pool,
+                    trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
+                    instrumentation=self._instrumentation,
+                )
+            )
+            try:
+                result.findings = await pool.arun()
+                if pool.budget_exhausted or self._budget_exhausted():
+                    pipeline_status.record(
+                        "hunter_pool",
+                        StageOutcome.SKIPPED,
+                        fallback_description="Budget exhausted; partial hunter results retained",
+                    )
+                    self._emit_stage(
+                        "hunt",
+                        "budget_exhausted",
+                        findings_so_far=len(result.findings),
+                        cost_usd=pool.total_spent,
+                        detail=f"{len(result.findings)} partial findings",
+                        files=[str(finding.file or "") for finding in result.findings],
+                        symbols=self._finding_symbols(result.findings),
+                        finding_ids=[finding.id for finding in result.findings],
+                    )
+                else:
+                    pipeline_status.record_succeeded("hunter_pool")
+                    self._emit_stage(
+                        "hunt",
+                        "completed",
+                        findings_so_far=len(result.findings),
+                        cost_usd=pool.total_spent,
+                        detail=f"{len(result.findings)} findings",
+                        files=[str(finding.file or "") for finding in result.findings],
+                        symbols=self._finding_symbols(result.findings),
+                        finding_ids=[finding.id for finding in result.findings],
+                    )
+            except BudgetExceeded:
+                logger.info("HunterPool stopped because the run budget is exhausted")
+                pipeline_status.record(
+                    "hunter_pool",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; partial hunter results retained",
+                )
+                self._emit_stage(
+                    "hunt",
+                    "budget_exhausted",
+                    findings_so_far=len(result.findings),
+                    files=stage_files,
+                    symbols=hunt_symbols,
+                    finding_ids=[finding.id for finding in result.findings],
+                )
+            except Exception as exc:
+                logger.warning("HunterPool run failed", exc_info=True)
+                pipeline_status.record_degraded(
+                    "hunter_pool", "Hunter phase produced no findings due to error"
+                )
+                self._emit_stage(
+                    "hunt",
+                    "degraded",
+                    findings_so_far=len(result.findings),
+                    files=stage_files,
+                    symbols=hunt_symbols,
+                    finding_ids=[finding.id for finding in result.findings],
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
+            result.spent_per_tier = pool.spent_per_tier
+            result.band_stats = {
+                "fast_runs": pool.runs_per_band.get("fast", 0),
+                "fast_cost": pool.spent_per_band.get("fast", 0.0),
+                "standard_runs": pool.runs_per_band.get("standard", 0),
+                "standard_cost": pool.spent_per_band.get("standard", 0.0),
+                "deep_runs": pool.runs_per_band.get("deep", 0),
+                "deep_cost": pool.spent_per_band.get("deep", 0.0),
+                "promotions": pool.promotion_counts,
+            }
+            result.files_hunted = pool.completed_target_count
+        else:
+            logger.info("HunterPool skipped; no LLM available")
+            if not files:
+                hunt_status = "skipped"
+                hunt_detail = "No source files were available"
+            elif self._budget_exhausted():
+                hunt_status = "budget_exhausted"
+                hunt_detail = "Run budget was exhausted before hunting"
+            else:
+                hunt_status = "degraded"
+                hunt_detail = "No hunter model was available"
+            self._emit_stage(
+                "hunt",
+                hunt_status,
+                detail=hunt_detail,
+                files=stage_files,
+                symbols=hunt_symbols,
+            )
+
+        await self._hunt_subsystems(
+            result,
+            files=files,
+            repo_path=repo_path,
+            callgraph=callgraph,
+            entry_points_by_file=entry_points_by_file,
+            findings_pool=findings_pool,
+            pipeline_status=pipeline_status,
+        )
+
+        if self._checkpoint is None:
+            raise RuntimeError("hunting requires a preprocessing checkpoint")
+        self._checkpoint.hunt = HuntCheckpoint.from_result(result, options=options)
+        self._dump_checkpoint()
+        return result
+
+    async def _hunt_subsystems(
+        self,
+        result: HuntResult,
+        *,
+        files: list[FileTarget],
+        repo_path: str,
+        callgraph: Any,
+        entry_points_by_file: dict,
+        findings_pool: Any,
+        pipeline_status: PipelineStatus,
+    ) -> None:
+        """Run the subsystem portion of the hunt into the shared phase result."""
+
+        if not self._enable_subsystem_hunt:
+            return
+        if self._budget_exhausted():
+            result.subsystem_status = "budget_exhausted"
+            pipeline_status.record(
+                "subsystem_hunt",
+                StageOutcome.SKIPPED,
+                fallback_description="Budget exhausted before subsystem hunting",
+            )
+            self._emit_stage(
+                "subsystem_hunt",
+                "budget_exhausted",
+                cost_usd=self._run_spent_usd(),
+                detail="Run budget was exhausted before subsystem hunting",
+            )
+            logger.info(
+                "Subsystem hunt skipped: budget $%.2f exhausted ($%.2f spent)",
+                self.budget_usd,
+                self._run_spent_usd(),
+            )
+            return
+        subsystem_llm = self._get_native_client(
+            "hunter", self.hunter_llm, budget_stage="subsystem_hunt"
+        )
+        if subsystem_llm is None:
+            logger.info("Subsystem hunt skipped; no hunter model available")
+            return
+
+        from .subsystem import (
+            SubsystemHuntConfig,
+            SubsystemHuntRunner,
+            identify_subsystems_auto,
+            subsystem_from_path,
+        )
+
+        subsystem_targets: list = []
+        if self._subsystem_paths:
+            for path in self._subsystem_paths:
+                try:
+                    subsystem_targets.append(
+                        subsystem_from_path(
+                            path,
+                            files,
+                            callgraph=callgraph,
+                            entry_points_by_file=entry_points_by_file,
+                            max_files=self._subsystem_max_files,
+                        )
+                    )
+                except ValueError:
+                    logger.warning("No files match subsystem path: %s", path)
+        else:
+            auto_kwargs: dict = {}
+            if self._subsystem_max_files is not None:
+                auto_kwargs["max_files_per_subsystem"] = self._subsystem_max_files
+            subsystem_targets = identify_subsystems_auto(
+                files,
+                callgraph=callgraph,
+                entry_points_by_file=entry_points_by_file,
+                **auto_kwargs,
+            )
+        if not subsystem_targets:
+            return
+
+        subsystem_files = sorted(
+            {
+                str(file_target.get("path") or "")
+                for subsystem in subsystem_targets
+                for file_target in subsystem.files
+            }
+        )
+        subsystem_symbols = sorted(
+            {
+                str(getattr(entry_point, "function_name", "") or "")
+                for subsystem in subsystem_targets
+                for entry_point in subsystem.entry_points
+                if getattr(entry_point, "function_name", "")
+            }
+        )
+        self._emit_stage(
+            "subsystem_hunt",
+            "started",
+            detail=f"{len(subsystem_targets)} subsystems",
+            files=subsystem_files,
+            symbols=subsystem_symbols,
+        )
+        if self.budget_usd:
+            assert self._spend_ledger is not None
+            per_subsystem_budget = (self._spend_ledger.remaining_usd or 0.0) / len(
+                subsystem_targets
+            )
+            if self._subsystem_budget_usd:
+                per_subsystem_budget = min(per_subsystem_budget, self._subsystem_budget_usd)
+        else:
+            per_subsystem_budget = self._subsystem_budget_usd or 100.0
+        subsystem_runner = SubsystemHuntRunner(
+            SubsystemHuntConfig(
+                subsystems=subsystem_targets,
+                repo_path=repo_path,
+                sandbox_factory=self.sandbox_factory,
+                llm=subsystem_llm,
+                max_parallel=self._subsystem_max_parallel,
+                budget_per_subsystem_usd=per_subsystem_budget,
+                findings_pool=findings_pool,
+                session_id_prefix=f"{self._session_id}-subsys",
+                sandbox_manager=self._sandbox_manager,
+                campaign_hint=self._campaign_hint,
+                callgraph=callgraph,
+                max_files_in_prompt=self._subsystem_max_files,
+                trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
+                instrumentation=self._instrumentation,
+            )
+        )
+        try:
+            subsystem_findings = await subsystem_runner.arun()
+            result.findings.extend(subsystem_findings)
+            result.subsystems_hunted = len(subsystem_targets)
+            result.subsystem_spent_usd = subsystem_runner.total_spent
+            result.subsystem_status = (
+                "budget_exhausted" if subsystem_runner.budget_exhausted else "completed"
+            )
+            if result.subsystem_status == "budget_exhausted":
+                pipeline_status.record(
+                    "subsystem_hunt",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; partial subsystem results retained",
+                )
+            else:
+                pipeline_status.record_succeeded("subsystem_hunt")
+            self._emit_stage(
+                "subsystem_hunt",
+                result.subsystem_status,
+                findings_so_far=len(subsystem_findings),
+                cost_usd=result.subsystem_spent_usd,
+                files=subsystem_files,
+                symbols=subsystem_symbols,
+                finding_ids=[finding.id for finding in subsystem_findings],
+            )
+        except Exception as exc:
+            result.subsystem_status = "degraded"
+            logger.warning("Subsystem hunt failed", exc_info=True)
+            pipeline_status.record_degraded(
+                "subsystem_hunt",
+                "Subsystem hunt failed; only per-file findings available",
+            )
+            self._emit_stage(
+                "subsystem_hunt",
+                "degraded",
+                files=subsystem_files,
+                symbols=subsystem_symbols,
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+
+    @tracer.chain(name="Preprocess")
     def _preprocess(self) -> PreprocessResult:
         # v0.2: enable callgraph + reachability + Semgrep by default at
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
+        options = {
+            "tag_files": True,
+            "build_callgraph": self.depth != "quick" and self._preprocessing,
+            "propagate_reachability": self.depth != "quick" and self._preprocessing,
+            "run_semgrep": self.depth != "quick" and self._preprocessing,
+            "run_taint": self.depth != "quick" and self._preprocessing,
+            "respect_gitignore": self._respect_gitignore,
+            "subsystem_paths": sorted(self._subsystem_paths or []),
+        }
+        self._preprocess_restored = False
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
-            tag_files=True,
-            build_callgraph=(self.depth != "quick" and self._preprocessing),
-            propagate_reachability=(self.depth != "quick" and self._preprocessing),
-            run_semgrep=(self.depth != "quick" and self._preprocessing),
-            run_taint=(self.depth != "quick" and self._preprocessing),
+            tag_files=options["tag_files"],
+            build_callgraph=options["build_callgraph"],
+            propagate_reachability=options["propagate_reachability"],
+            run_semgrep=options["run_semgrep"],
+            run_taint=options["run_taint"],
             respect_gitignore=self._respect_gitignore,
+            subsystem_paths=self._subsystem_paths,
         )
-        return self._preprocessor.run()
+        repo_path: str | None = None
+        if self._checkpoint is not None and self._checkpoint.preprocess is not None:
+            repo_path = self._preprocessor.resolve_repository()
+            restored = self._checkpoint.preprocess.restore(repo_path=repo_path, options=options)
+            if restored is not None:
+                self._preprocess_restored = True
+                logger.info("Restored preprocess result from session %s", self._session_id)
+                return restored
+            if self._stop_after == "preprocess":
+                logger.warning(
+                    "Stale preprocess checkpoint does not match current options; re-running"
+                )
+                self._checkpoint.preprocess = None
+            else:
+                raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
+
+        result = self._preprocessor.run(repo_path=repo_path)
+        preprocess_checkpoint = PreprocessCheckpoint.from_result(result, options=options)
+        if self._checkpoint is None:
+            self._checkpoint = SourceHuntCheckpoint(preprocess=preprocess_checkpoint)
+        else:
+            self._checkpoint.preprocess = preprocess_checkpoint
+        self._dump_checkpoint()
+        return result
+
+    @tracer.chain(name="Rank")
+    async def _rank(
+        self,
+        files: list[FileTarget],
+        pipeline_status: PipelineStatus,
+        stage_files: list[str],
+    ) -> list[FileTarget]:
+        """Rank files or restore the completed ranking stage from the checkpoint."""
+
+        options = {
+            "preprocessing": self._preprocessing,
+        }
+        self._rank_restored = False
+        self._emit_stage("rank", "started", detail=f"{len(files)} files", files=stage_files)
+
+        if self._checkpoint is not None and self._checkpoint.rank is not None:
+            restored = self._checkpoint.rank.restore(files, options=options)
+            if restored is None:
+                raise ValueError("rank checkpoint is invalid or incompatible with this run")
+            self._rank_restored = True
+            pipeline_status.record_succeeded("ranker")
+            self._emit_stage(
+                "rank",
+                "completed",
+                detail=f"Restored {len(restored)} ranked files from checkpoint",
+                files=stage_files,
+            )
+            logger.info("Restored rank result from session %s", self._session_id)
+            return restored
+
+        ranker_llm = self._get_native_client("ranker", self.ranker_llm, budget_stage="rank")
+        if ranker_llm is not None and files:
+            logger.info("Ranker starting on %d files", len(files))
+            try:
+                ranker_config = RankerConfig()
+                if not self._preprocessing:
+                    ranker_config.include_static_hints = False
+                    ranker_config.include_imports_by = False
+                if ranker_llm.provider_name in ("openai_resp", "openai_codex", "openai"):
+                    ranker_config.chunk_size = 30
+                    ranker_config.max_inflight_chunks = self.max_parallel
+                    logger.info(
+                        "Ranker tuned for %s backend: chunk_size=%d max_inflight_chunks=%d",
+                        ranker_llm.provider_name,
+                        ranker_config.chunk_size,
+                        ranker_config.max_inflight_chunks,
+                    )
+                await Ranker(ranker_llm, ranker_config).arank(files)
+                logger.info("Ranker completed")
+                pipeline_status.record_succeeded("ranker")
+                self._emit_stage(
+                    "rank", "completed", detail=f"Ranked {len(files)} files", files=stage_files
+                )
+            except BudgetExceeded:
+                logger.info("Ranker stopped because the run budget is exhausted")
+                pipeline_status.record(
+                    "ranker",
+                    StageOutcome.SKIPPED,
+                    fallback_description="Budget exhausted; remaining files use heuristic ranks",
+                )
+                self._emit_stage(
+                    "rank", "budget_exhausted", detail="Using heuristic ranks", files=stage_files
+                )
+            except Exception:
+                logger.warning("Ranker failed", exc_info=True)
+                pipeline_status.record_degraded(
+                    "ranker",
+                    "All files assigned default priority scores (surface=3, influence=2)",
+                )
+                self._emit_stage(
+                    "rank", "degraded", detail="Default priority scores used", files=stage_files
+                )
+        else:
+            logger.info("Ranker skipped; no LLM available")
+            pipeline_status.record_degraded(
+                "ranker", "All files assigned default priority scores (surface=3, influence=2)"
+            )
+            self._emit_stage(
+                "rank",
+                "degraded",
+                detail="No ranker model available; default priority scores used",
+                files=stage_files,
+            )
+
+        # A partial or failed rank pass is still a completed stage once
+        # every file has deterministic fallback scores.
+        self._apply_rank_fallbacks(files)
+
+        if self._checkpoint is None:
+            raise RuntimeError("ranking requires a preprocessing checkpoint")
+        self._checkpoint.rank = RankCheckpoint.from_result(files, options=options)
+        self._dump_checkpoint()
+        return files
+
+    @staticmethod
+    def _apply_rank_fallbacks(files: list[FileTarget]) -> None:
+        """Ensure every file has deterministic scores when ranking is unavailable."""
+
+        for target in files:
+            target["surface"] = target.get("surface") or 3
+            target["influence"] = target.get("influence") or 2
+            target["reachability"] = target.get("reachability") or 3
+            target["priority"] = target.get("priority") or (
+                target["surface"] * 0.5 + target["influence"] * 0.2 + target["reachability"] * 0.3
+            )
 
     def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
         if self.depth == "quick":
@@ -2656,22 +2923,24 @@ class SourceHuntRunner:
                 repo_path=repo_path,
                 languages=languages,
                 deep_agent_mode=use_deep,
-                extra_packages=["python3-pip"],
-                post_install_commands=[
-                    "pip3 install --break-system-packages pyjwt requests cryptography pycryptodome || true",
-                ],
                 default_cpus=self._sandbox_cpus,
             )
             image_tag = manager.build_image()
         except Exception as exc:
-            logger.warning(
+            logger.error(
                 "HunterSandbox unavailable (%s); falling back to host mode. "
                 "Start Docker to enable sanitizer-backed containers.",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
+            EventBus().emit_message(
+                f"WARNING: sandbox unavailable ({exc}); running without container isolation. "
+                "Findings may lack sanitizer corroboration. Start Docker for full coverage.",
+                "warning",
+            )
             return
 
+        self._sandbox_manager = manager
         cpu_limit = manager.default_cpu_limit
         available_cpus = manager.available_cpus
         logger.info(
@@ -2691,7 +2960,6 @@ class SourceHuntRunner:
                 aggregate_limit,
                 available_cpus,
             )
-        self._sandbox_manager = manager
         gvisor_rt = self._gvisor_runtime
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(
@@ -2789,7 +3057,11 @@ class SourceHuntRunner:
         )
         duration = time.monotonic() - start_time
         return SourceHuntResult(
-            exit_code=(3 if run_status == "budget_exhausted" else self._exit_code(all_findings)),
+            exit_code=(
+                0
+                if self._stop_after
+                else (3 if run_status == "budget_exhausted" else self._exit_code(all_findings))
+            ),
             repo_url=self.repo_url,
             repo_path=repo_path,
             findings=all_findings,
@@ -2802,8 +3074,141 @@ class SourceHuntRunner:
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
             tokens_used=budget_summary["total_tokens"],
             output_paths=output_paths,
+            checkpoint=(
+                self._checkpoint.model_dump(mode="json") if self._checkpoint is not None else None
+            ),
             session_id=self._session_id,
             pipeline_status=pipeline_status or PipelineStatus(),
+            status=run_status,
+            budget_usd=self.budget_usd,
+        )
+
+    def _finalize_result(
+        self,
+        *,
+        start_time: float,
+        repo_path: str,
+        findings: list[Finding],
+        verified: list[Finding],
+        exploited: list[Finding],
+        files_ranked: int,
+        files_hunted: int,
+        spent_per_tier: dict[str, float],
+        band_stats: dict[str, Any] | None,
+        findings_pool: Any,
+        subsystems_hunted: int,
+        subsystem_spent_usd: float,
+        subsystem_status: str,
+        pipeline_status: PipelineStatus,
+    ) -> SourceHuntResult:
+        """Write final outputs and preserve the pipeline state accumulated so far."""
+        finding_files = [str(finding.file or "") for finding in findings]
+        finding_symbols = self._finding_symbols(findings)
+        finding_ids = [finding.id for finding in findings]
+        self._emit_stage(
+            "report",
+            "started",
+            findings_so_far=len(findings),
+            files=finding_files,
+            symbols=finding_symbols,
+            finding_ids=finding_ids,
+        )
+        assert self._spend_ledger is not None
+        ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
+        if ledger_tier_spend:
+            spent_per_tier = {tier: ledger_tier_spend.get(tier, 0.0) for tier in ("A", "B", "C")}
+        ledger_band_spend = self._spend_ledger.spent_by("band", stage="hunt")
+        if band_stats is not None and ledger_band_spend:
+            for band in ("fast", "standard", "deep"):
+                band_stats[f"{band}_cost"] = ledger_band_spend.get(band, 0.0)
+        ledger_subsystem_spend = self._spend_ledger.spent_by("stage").get("subsystem_hunt", 0.0)
+        if ledger_subsystem_spend:
+            subsystem_spent_usd = ledger_subsystem_spend
+
+        run_status = (
+            "budget_exhausted"
+            if self._budget_exhausted() or subsystem_status == "budget_exhausted"
+            else "completed"
+        )
+        if run_status == "budget_exhausted":
+            pipeline_status.record(
+                "budget",
+                StageOutcome.SKIPPED,
+                fallback_description=(
+                    "Dollar cap reached; partial results retained"
+                    if self._budget_exhausted()
+                    else "Subsystem hunt budget exhausted; partial results retained"
+                ),
+            )
+        budget_summary = self._finalize_spend_ledger(run_status)
+        pool_stats = findings_pool.pool_stats() if findings_pool is not None else None
+        subsystem_stats = (
+            {
+                "subsystems_hunted": subsystems_hunted,
+                "subsystem_spent_usd": subsystem_spent_usd,
+            }
+            if subsystems_hunted > 0
+            else None
+        )
+        output_paths = self._write_report(
+            repo_path=repo_path,
+            findings=findings,
+            verified=verified,
+            spent_per_tier=spent_per_tier,
+            band_stats=band_stats,
+            pool_stats=pool_stats,
+            subsystem_stats=subsystem_stats,
+            pipeline_status=pipeline_status,
+            budget_summary=budget_summary,
+        )
+        report_status = "degraded" if self._last_reporting_error else "completed"
+        self._emit_stage(
+            "report",
+            report_status,
+            findings_so_far=len(findings),
+            cost_usd=budget_summary["total_spent"],
+            files=finding_files,
+            symbols=finding_symbols,
+            finding_ids=finding_ids,
+            error=self._last_reporting_error,
+        )
+        self._finalize_instrumentation(run_status)
+        output_paths.update(
+            {
+                "instrumentation": str(self._instrumentation.summary_path),
+                "instrumentation_events": str(self._instrumentation.events_path),
+            }
+        )
+
+        return SourceHuntResult(
+            exit_code=(
+                0
+                if self._stop_after
+                else (
+                    3
+                    if run_status == "budget_exhausted"
+                    else self._exit_code(findings if self.no_verify else verified)
+                )
+            ),
+            repo_url=self.repo_url,
+            repo_path=repo_path,
+            findings=findings,
+            verified_findings=verified,
+            exploited_findings=exploited,
+            files_ranked=files_ranked,
+            files_hunted=files_hunted,
+            duration_seconds=round(time.monotonic() - start_time, 2),
+            cost_usd=budget_summary["total_spent"],
+            spent_per_tier=spent_per_tier,
+            tokens_used=budget_summary["total_tokens"],
+            output_paths=output_paths,
+            checkpoint=(
+                self._checkpoint.model_dump(mode="json") if self._checkpoint is not None else None
+            ),
+            session_id=self._session_id,
+            subsystems_hunted=subsystems_hunted,
+            subsystem_spent_usd=subsystem_spent_usd,
+            pipeline_status=pipeline_status,
             status=run_status,
             budget_usd=self.budget_usd,
         )

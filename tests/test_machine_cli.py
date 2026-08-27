@@ -39,19 +39,22 @@ def _routing(value: dict | None = None) -> dict:
     return {"encoding": "base64url", "value": encoded}
 
 
-def _channel(operation: str, request: dict, routing: dict | None = None):
+def _channel(
+    operation: str,
+    request: dict,
+    routing: dict | None = None,
+    workspace: dict | None = None,
+):
     parent, child = socket.socketpair()
-    parent.sendall(
-        json.dumps(
-            {
-                "v": 1,
-                "type": f"{operation}.start",
-                "request": request,
-                "provider_routing": routing or _routing(),
-            }
-        ).encode()
-        + b"\n"
-    )
+    record = {
+        "v": 1,
+        "type": f"{operation}.start",
+        "request": request,
+        "provider_routing": routing or _routing(),
+    }
+    if workspace is not None:
+        record["workspace"] = workspace
+    parent.sendall(json.dumps(record).encode() + b"\n")
     return parent, MachineChannel(child.detach(), operation)
 
 
@@ -77,6 +80,25 @@ def test_channel_rejects_unknown_and_oversized_start_records():
     channel = MachineChannel(child.detach(), "operate")
     with pytest.raises(MachineProtocolError, match="unknown start"):
         channel.read_start()
+    channel.close()
+    parent.close()
+
+
+def test_channel_accepts_host_selected_workspace_paths():
+    workspace = {
+        "local_path": "/workspaces/run/source",
+        "output_dir": "/workspaces/run/sourcehunt",
+        "checkpoint_path": "/workspaces/run/sourcehunt/pipeline/checkpoint.json",
+    }
+    parent, channel = _channel(
+        "sourcehunt",
+        {"repo_url": "https://example.test/repo"},
+        workspace=workspace,
+    )
+
+    channel.read_start()
+
+    assert channel.workspace == workspace
     channel.close()
     parent.close()
 
@@ -122,6 +144,27 @@ def test_sourcehunt_request_rejects_paths_credentials_and_provider_fields():
     with pytest.raises(ValueError, match="unknown request field.*model"):
         sourcehunt._machine_request(
             {"repo_url": "https://example.test/repo", "model": "guest-model"}
+        )
+    with pytest.raises(ValueError, match="unknown request field.*stage"):
+        sourcehunt._machine_request(
+            {
+                "repo_url": "https://example.test/repo",
+                "stage": "hunt",
+            }
+        )
+
+
+def test_sourcehunt_machine_request_accepts_checkpoint_object():
+    checkpoint = {"schema_version": 1, "commit_sha": None, "options": {}, "result": {}}
+
+    parsed = sourcehunt._machine_request(
+        {"repo_url": "https://example.test/repo", "checkpoint": checkpoint}
+    )
+
+    assert parsed["checkpoint"] == checkpoint
+    with pytest.raises(ValueError, match="checkpoint must be a JSON object"):
+        sourcehunt._machine_request(
+            {"repo_url": "https://example.test/repo", "checkpoint": "serialized-json"}
         )
 
 
@@ -189,6 +232,14 @@ class _SourceResult:
     output_paths: dict = field(default_factory=lambda: {"report": "/private/report"})
     session_id: str = "source-test"
     pipeline_status: _Pipeline = field(default_factory=_Pipeline)
+    checkpoint: dict = field(
+        default_factory=lambda: {
+            "schema_version": 1,
+            "commit_sha": None,
+            "options": {},
+            "result": {},
+        }
+    )
 
 
 def test_sourcehunt_public_result_removes_host_paths():
@@ -196,6 +247,7 @@ def test_sourcehunt_public_result_removes_host_paths():
     assert result["findings"] == [{"file": "app.py"}]
     assert "repo_path" not in result
     assert "output_paths" not in result
+    assert result["checkpoint"]["schema_version"] == 1
     assert "/private" not in repr(result)
 
 

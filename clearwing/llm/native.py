@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -28,15 +29,126 @@ from genai_pyo3 import (
     Tool,
     Usage,
 )
+from openinference.instrumentation import get_input_attributes, get_output_attributes
 from pydantic import BaseModel, ConfigDict, RootModel
 
+from clearwing.observability.otel import get_oi_tracer
+
 from .budget import (
+    BudgetExceeded,
     BudgetReservation,
     SpendLedger,
     current_spend_metadata,
 )
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
+
+
+def _trace_llm_output(response: ChatResponse) -> dict[str, Any]:
+    """Serialize a native response and add Phoenix/OpenInference usage fields."""
+    serialized = response.to_dict() if hasattr(response, "to_dict") else repr(response)
+    attributes = dict(get_output_attributes(serialized))
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        input_tokens = usage.prompt_tokens or 0
+        output_tokens = usage.completion_tokens or 0
+        details = usage.prompt_tokens_details
+        cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+        attributes.update(
+            {
+                "gen_ai.usage.input_tokens": input_tokens,
+                "gen_ai.usage.output_tokens": output_tokens,
+                "llm.token_count.prompt": input_tokens,
+                "llm.token_count.completion": output_tokens,
+                "llm.token_count.total": input_tokens + output_tokens,
+                "llm.token_count.cached": cached_tokens,
+            }
+        )
+    provider_model_name = getattr(response, "provider_model_name", None)
+    if provider_model_name:
+        attributes["gen_ai.response.model"] = provider_model_name
+    return attributes
+
+
+def _trace_genai_input(
+    model: str, request: ChatRequest, options: ChatOptions
+) -> dict[str, Any]:
+    """Serialize the effective genai-pyo3 request without client credentials."""
+    return dict(
+        get_input_attributes(
+            {
+                "model": model,
+                "system": request.system,
+                "messages": [message.to_dict() for message in request.messages()],
+                "tools": [
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "schema": json.loads(tool.schema_json),
+                    }
+                    for tool in (request.tools or [])
+                ],
+                "options": {
+                    "temperature": options.temperature,
+                    "top_p": options.top_p,
+                    "max_tokens": options.max_tokens,
+                    "reasoning_effort": options.reasoning_effort,
+                    "response_json_mode": options.response_json_mode,
+                    "response_json_spec": str(options.response_json_spec)
+                    if options.response_json_spec is not None
+                    else None,
+                    "capture_reasoning_content": options.capture_reasoning_content,
+                },
+            }
+        )
+    )
+
+
+class _TracedGenAIClient:
+    """Trace the exact request objects handed to the native genai-pyo3 client."""
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    @tracer.llm(
+        name="genai_pyo3.achat",
+        process_input=_trace_genai_input,
+        process_output=_trace_llm_output,
+    )
+    async def achat(
+        self, model: str, request: ChatRequest, options: ChatOptions
+    ) -> ChatResponse:
+        return await self._client.achat(model, request, options)
+
+    @tracer.llm(
+        name="genai_pyo3.achat_via_stream",
+        process_input=_trace_genai_input,
+        process_output=_trace_llm_output,
+    )
+    async def achat_via_stream(
+        self, model: str, request: ChatRequest, options: ChatOptions
+    ) -> ChatResponse:
+        return await self._client.achat_via_stream(model, request, options)
+
+    @tracer.llm(name="genai_pyo3.astream_chat", process_input=_trace_genai_input)
+    async def astream_chat(self, model: str, request: ChatRequest, options: ChatOptions):
+        return await self._client.astream_chat(model, request, options)
+
+# Set by every ChatResponse builder to the provider's finish/stop reason for
+# the most recent completion in this async Task. Read via last_finish_reason()
+# — hunter uses it to explain why a response arrived empty (length vs stop vs
+# content_filter). ContextVar so concurrent hunter tasks don't overwrite each
+# other's value; genai_pyo3's ChatResponse is frozen so we can't attach it there.
+_LAST_FINISH_REASON: ContextVar[str | None] = ContextVar("last_finish_reason", default=None)
+
+
+def last_finish_reason() -> str | None:
+    """Provider finish/stop reason for the last completion in this Task."""
+    return _LAST_FINISH_REASON.get()
 
 # Per-file hunter runs can legitimately take up to ~a day against a slow local
 # model (large tier-A budgets, big files), so the socket-level read timeout
@@ -152,6 +264,14 @@ _REASONING_EFFORT_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
 # name. Intentionally empty today; populate as such models ship.
 _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 
+# Models that default to "low" reasoning_effort. deepseek-v4-flash has no
+# "medium" tier (only low/high/xhigh/max), so the usual "medium" default is
+# invalid; low also avoids reasoning tokens starving the output-token cap.
+# Case-insensitive substring match on the model name.
+_REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
+    "deepseek-v4-flash",
+)
+
 # Models that must NOT be sent ChatOptions(capture_reasoning_content=True):
 # genai-pyo3 / the backend errors when reasoning capture is requested for them.
 # Everything else supports it, so we capture reasoning by default and only skip
@@ -160,6 +280,36 @@ _REASONING_EFFORT_OVERRIDE_ALLOW: frozenset[str] = frozenset()
 _REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = (
     "gpt-5.3-codex-spark",
 )
+
+# Truncation-retry policy. Under a dollar budget the applied output cap is
+# known locally; a response whose completion_tokens reached that cap AND
+# carries no tool call was almost certainly cut off mid-generation
+# (provider finish_reason == "length"). genai-pyo3's ChatResponse does not
+# surface finish_reason, so we detect via the token count and retry ONCE with
+# a larger cap so reasoning models aren't robbed of the turn that would have
+# emitted their tool call. Bounded to a single escalation to avoid loops; the
+# affordability clamp in reserve_call still bounds total spend, and a
+# genuinely-exhausted budget raises BudgetExceeded which we swallow so the
+# truncated response is returned rather than looping.
+_TRUNCATION_RETRY_ESCALATION = 4
+_TRUNCATION_RETRY_CEILING = 65536
+
+
+def _looks_truncated(response: ChatResponse, applied_max_tokens: int | None) -> bool:
+    """True when *response* appears cut off at the output-token cap.
+
+    genai-pyo3's ChatResponse carries no finish_reason, so we use the reliable
+    proxy: a capped call whose completion_tokens reached the applied cap was
+    truncated. Returns False when no cap was applied (``applied_max_tokens is
+    None``) or usage is unavailable.
+    """
+    if applied_max_tokens is None:
+        return False
+    usage = getattr(response, "usage", None)
+    completion = getattr(usage, "completion_tokens", None) if usage is not None else None
+    if completion is None:
+        return False
+    return completion >= applied_max_tokens
 
 
 def _model_supports_reasoning_capture(model_name: str) -> bool:
@@ -296,6 +446,9 @@ class AsyncLLMClient:
                     pattern,
                 )
                 return None
+        for pattern in _REASONING_EFFORT_LOW_DEFAULT_PATTERNS:
+            if pattern in lower:
+                return "low"
         return "medium"
 
     def __init__(
@@ -613,6 +766,7 @@ class AsyncLLMClient:
             )
         )
 
+    @tracer.chain(name="llm.chat")
     async def achat(
         self,
         *,
@@ -625,6 +779,7 @@ class AsyncLLMClient:
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
+        _truncation_retry: int = 0,
     ) -> ChatResponse:
         request_tools = None
         if tools:
@@ -773,8 +928,53 @@ class AsyncLLMClient:
             ok=True,
             cached_tokens=cached_tokens,
         )
+
+        applied_cap = None if self._omit_max_tokens else max_tokens
+        # Only retry the truncation fingerprint: a capped turn that produced
+        # NEITHER a tool call NOR visible text (reasoning tokens consumed the
+        # whole cap before any output). A response carrying text is a real
+        # answer — e.g. a ranker emitting JSON at a tight cap — and must never
+        # be retried, or we'd regenerate valid output and risk over-spending.
+        has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
+        if (
+            _truncation_retry < 1
+            and not has_output
+            and _looks_truncated(response, applied_cap)
+        ):
+            escalated = min(
+                applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING
+            )
+            if escalated > applied_cap:
+                logger.warning(
+                    "LLM response for model=%s truncated at output cap "
+                    "(completion_tokens=%s >= max_tokens=%s) with no tool call "
+                    "or text; retrying once with max_tokens=%s.",
+                    self.model_name,
+                    completion_tokens,
+                    applied_cap,
+                    escalated,
+                )
+                try:
+                    return await self.achat(
+                        messages=messages,
+                        system=system,
+                        tools=tools,
+                        temperature=temperature,
+                        max_tokens=escalated,
+                        response_schema=response_schema,
+                        response_schema_name=response_schema_name,
+                        response_schema_description=response_schema_description,
+                        _truncation_retry=_truncation_retry + 1,
+                    )
+                except BudgetExceeded:
+                    logger.warning(
+                        "Truncation retry for model=%s could not be afforded "
+                        "(budget exhausted); returning the truncated response.",
+                        self.model_name,
+                    )
         return response
 
+    @tracer.chain(name="llm.chat")
     async def achat_stream(
         self,
         *,
@@ -785,6 +985,7 @@ class AsyncLLMClient:
         max_tokens: int | None = None,
         top_p: float | None = None,
         on_text_delta: Callable[[str], None] | None = None,
+        _truncation_retry: int = 0,
     ) -> ChatResponse:
         """Like ``achat`` but streams text deltas via *on_text_delta*.
 
@@ -944,15 +1145,56 @@ class AsyncLLMClient:
         completion_tokens = usage.completion_tokens
         cached_tokens = details.cached_tokens if details is not None else None
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        n_tool_calls = len(response.tool_calls or [])
         _record_call(
             self.model_name,
             elapsed_ms,
             prompt_tokens,
             completion_tokens,
-            len(response.tool_calls or []),
+            n_tool_calls,
             ok=True,
             cached_tokens=cached_tokens,
         )
+
+        applied_cap = None if self._omit_max_tokens else max_tokens
+        # Same fingerprint as achat: retry only a capped turn with no tool call
+        # AND no visible text; a text-bearing answer is never a truncation.
+        has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
+        if (
+            _truncation_retry < 1
+            and not has_output
+            and _looks_truncated(response, applied_cap)
+        ):
+            escalated = min(
+                applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING
+            )
+            if escalated > applied_cap:
+                logger.warning(
+                    "LLM stream for model=%s truncated at output cap "
+                    "(completion_tokens=%s >= max_tokens=%s) with no tool call "
+                    "or text; retrying once with max_tokens=%s.",
+                    self.model_name,
+                    completion_tokens,
+                    applied_cap,
+                    escalated,
+                )
+                try:
+                    return await self.achat_stream(
+                        messages=messages,
+                        system=system,
+                        tools=tools,
+                        temperature=temperature,
+                        max_tokens=escalated,
+                        on_text_delta=on_text_delta,
+                        _truncation_retry=_truncation_retry + 1,
+                    )
+                except BudgetExceeded:
+                    logger.warning(
+                        "Truncation retry (streaming) for model=%s could not be "
+                        "afforded (budget exhausted); returning the truncated "
+                        "response.",
+                        self.model_name,
+                    )
         return response
 
     def chat(self, **kwargs: Any) -> ChatResponse:
@@ -1020,14 +1262,19 @@ class AsyncLLMClient:
         return temperature, max_tokens
 
     def _build_client(self, client_cls):
+        def traced(client):
+            return _TracedGenAIClient(client)
+
         # anthropic_oauth bypasses the normal auth resolver entirely —
         # with_request_override sends only our explicit headers (Bearer
         # token + beta flags), avoiding the ANTHROPIC_API_KEY env lookup.
         if self.provider_name == "anthropic_oauth":
-            return client_cls.with_request_override(
-                "anthropic",
-                self._anthropic_oauth_url,
-                self._default_headers or {},
+            return traced(
+                client_cls.with_request_override(
+                    "anthropic",
+                    self._anthropic_oauth_url,
+                    self._default_headers or {},
+                )
             )
 
         # openai_codex (ChatGPT OAuth) is the openai_resp adapter pointed at
@@ -1045,7 +1292,9 @@ class AsyncLLMClient:
             headers = dict(self._default_headers or {})
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            return client_cls.with_request_override("openai_resp", responses_url, headers)
+            return traced(
+                client_cls.with_request_override("openai_resp", responses_url, headers)
+            )
 
         rust_provider = self.provider_name
         default_headers = self._default_headers
@@ -1053,31 +1302,37 @@ class AsyncLLMClient:
         if base_url:
             base_url = base_url if base_url.endswith("/") else f"{base_url}/"
             if self.api_key:
-                return client_cls.with_api_key_and_base_url(
+                return traced(
+                    client_cls.with_api_key_and_base_url(
+                        rust_provider,
+                        self.api_key,
+                        base_url,
+                        default_headers=default_headers,
+                        connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                        read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                        timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
+                    )
+                )
+            return traced(
+                client_cls.with_base_url(
                     rust_provider,
-                    self.api_key,
                     base_url,
                     default_headers=default_headers,
                     connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
                     read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
                     timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
                 )
-            return client_cls.with_base_url(
-                rust_provider,
-                base_url,
-                default_headers=default_headers,
-                connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
             )
         if self.api_key:
-            return client_cls.with_api_key(
-                rust_provider,
-                self.api_key,
-                default_headers=default_headers,
-                connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
+            return traced(
+                client_cls.with_api_key(
+                    rust_provider,
+                    self.api_key,
+                    default_headers=default_headers,
+                    connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                    timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
+                )
             )
         raise RuntimeError(
             f"Cannot build LLM client for model={self.model_name} "
@@ -1326,6 +1581,9 @@ class AsyncLLMClient:
         provider_model = self.model_name
         is_responses_api = False
         final_response: dict[str, Any] | None = None
+        # Chat/Completions SSE emits finish_reason on the terminating chunk only;
+        # capture the last non-null value so we can surface it after the loop.
+        stream_finish_reason: str | None = None
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1384,6 +1642,8 @@ class AsyncLLMClient:
                 if reasoning:
                     reasoning_parts.append(reasoning)
                 self._merge_openai_tool_call_deltas(tool_call_parts, delta.get("tool_calls"))
+                if choice.get("finish_reason"):
+                    stream_finish_reason = choice["finish_reason"]
 
         if is_responses_api:
             if final_response:
@@ -1396,6 +1656,8 @@ class AsyncLLMClient:
                 }
                 for part in (v for _, v in sorted(resp_tool_parts.items()))
             ]
+            # Responses SSE without a final response.done event: no reason to report.
+            _LAST_FINISH_REASON.set(None)
             return self._chat_response_from_parts(
                 text="".join(content_parts),
                 reasoning_content=None,
@@ -1404,6 +1666,7 @@ class AsyncLLMClient:
                 provider_model=provider_model,
             )
 
+        _LAST_FINISH_REASON.set(stream_finish_reason)
         return self._chat_response_from_parts(
             text="".join(content_parts),
             reasoning_content="".join(reasoning_parts) or None,
@@ -1416,6 +1679,7 @@ class AsyncLLMClient:
         if "output" in payload or payload.get("object") == "response":
             return self._chat_response_from_responses_payload(payload)
         choice = (payload.get("choices") or [{}])[0]
+        _LAST_FINISH_REASON.set(choice.get("finish_reason"))
         message = choice.get("message") or {}
         text = self._extract_openai_message_text(message.get("content"))
         reasoning_content = message.get("reasoning_content") or message.get("reasoning")
@@ -1430,6 +1694,11 @@ class AsyncLLMClient:
 
     def _chat_response_from_responses_payload(self, payload: dict[str, Any]) -> ChatResponse:
         """Parse an OpenAI Responses API (non-streaming) payload into ChatResponse."""
+        # Responses API: `status` is "completed"/"incomplete"/"failed"/"cancelled";
+        # on "incomplete" the reason (length/content_filter/etc.) lives under
+        # `incomplete_details.reason`. Prefer the specific reason when present.
+        incomplete_reason = (payload.get("incomplete_details") or {}).get("reason")
+        _LAST_FINISH_REASON.set(incomplete_reason or payload.get("status"))
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []

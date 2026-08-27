@@ -19,6 +19,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
+
+from clearwing.core.events import EventBus
 
 from .builders import (
     BuildRecipe,
@@ -248,6 +251,7 @@ class HunterSandbox:
         )
         if check.returncode == 0:
             logger.debug("Reusing sourcehunt sandbox image %s", tag)
+            EventBus().emit_message(f"sandbox cached  tag={tag[:16]}", "info")
             return tag
 
         with tempfile.TemporaryDirectory(prefix="clearwing-sandbox-build-") as build_dir:
@@ -256,28 +260,40 @@ class HunterSandbox:
                 f.write(dockerfile)
 
             platform_flag = self._target_platform()
+            san_str = ",".join(sanitizers) if sanitizers else "none"
             logger.info(
                 "Building sourcehunt sandbox image %s (sanitizers=%s, platform=%s)",
                 tag,
-                ",".join(sanitizers),
+                san_str,
                 platform_flag,
             )
+            EventBus().emit_message(
+                f"sandbox building  base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
+                f"  sanitizers={san_str}  tag={tag[:16]}",
+                "info",
+            )
+            _t = time.monotonic()
             try:
-                proc = subprocess.run(
-                    [
-                        "docker", "build",
-                        "--progress=plain",
-                        "--platform", platform_flag,
-                        "-t", tag,
-                        build_dir,
-                    ],
-                    capture_output=True, text=True, timeout=300,
+                proc = subprocess.Popen(
+                    ["docker", "build", "--progress=plain", "--platform", platform_flag, "-t", tag, build_dir],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
                     env=docker_env,
                 )
+                output_lines: list[str] = []
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        output_lines.append(line)
+                        EventBus().emit_message(f"docker | {line}", "debug")
+                proc.wait(timeout=300)
                 if proc.returncode != 0:
-                    raise RuntimeError(proc.stderr[-2000:] or proc.stdout[-2000:])
+                    raise RuntimeError("\n".join(output_lines[-40:]))
             except subprocess.TimeoutExpired as e:
-                raise RuntimeError(f"Sandbox image build timed out after 300s") from e
+                proc.kill()
+                raise RuntimeError("Sandbox image build timed out after 300s") from e
             except RuntimeError:
                 raise
             except Exception as e:
@@ -285,6 +301,7 @@ class HunterSandbox:
                 logger.debug("Sandbox image build failed", exc_info=True)
                 raise RuntimeError(f"Failed to build sandbox image: {e}") from e
 
+        EventBus().emit_message(f"sandbox ready  tag={tag[:16]}", "info")
         return tag
 
     def spawn(
@@ -380,7 +397,9 @@ class HunterSandbox:
         )
 
         sb = SandboxContainer(cfg)
+        _t = time.monotonic()
         sb.start()
+        logger.debug("Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t)
 
         if writable_workspace:
             sb.copy_tree_into(self.repo_path, "/workspace")

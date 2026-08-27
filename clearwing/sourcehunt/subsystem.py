@@ -24,6 +24,50 @@ from .instrumentation import stable_run_id
 
 logger = logging.getLogger(__name__)
 
+# Default caps for auto-detected subsystems. These bound how much a single
+# auto-detected subsystem (and how many subsystems) get hunted, to keep spend
+# predictable. They are DEFAULTS, not hard limits — callers may raise them or
+# pass None to disable the cap. NOTE: under ``--no-rank`` every file has the
+# same priority, so a cap here degenerates to keeping os.walk order and can drop
+# the ground-truth file out of scope (observed in CVE-2026-5747). That is why
+# every drop below is logged at WARNING rather than performed silently.
+DEFAULT_MAX_FILES_PER_SUBSYSTEM = 50
+DEFAULT_MAX_SUBSYSTEMS = 10
+
+
+def _warn_files_dropped(
+    context: str,
+    *,
+    kept: int,
+    dropped: list[FileTarget],
+    explicit: bool = False,
+) -> None:
+    """Emit a WARNING naming files dropped from a subsystem's scope.
+
+    Silent truncation reads downstream as "covered everything", so every drop
+    is surfaced with a count and a sample of the dropped paths. *explicit* marks
+    a drop from an operator-named scope, which is worded more loudly because it
+    overrides a deliberate choice.
+    """
+    total = kept + len(dropped)
+    sample = ", ".join(f.get("path", "") for f in dropped[:10])
+    more = "" if len(dropped) <= 10 else f" (+{len(dropped) - 10} more)"
+    if explicit:
+        logger.warning(
+            "Explicit scope %s matched %d file(s) but max_files=%d caps it — "
+            "DROPPING %d file(s) from a deliberately-named scope: %s%s. Pass "
+            "max_files=None (or raise it) to hunt the full scope.",
+            context, total, kept, len(dropped), sample, more,
+        )
+    else:
+        logger.warning(
+            "%s: kept top %d file(s) by priority, DROPPED %d out of scope: %s%s. "
+            "Under --no-rank all priorities are equal, so this keeps os.walk "
+            "order and can drop the ground-truth file. Raise the cap "
+            "(or set it to None) to widen scope.",
+            context, kept, len(dropped), sample, more,
+        )
+
 
 def _file_rank(file_target: FileTarget) -> int:
     p = file_target.get("priority", 0.0)
@@ -52,8 +96,8 @@ def identify_subsystems_auto(
     entry_points_by_file: dict | None = None,
     min_high_rank_files: int = 3,
     min_file_rank: int = 4,
-    max_files_per_subsystem: int = 50,
-    max_subsystems: int = 10,
+    max_files_per_subsystem: int | None = DEFAULT_MAX_FILES_PER_SUBSYSTEM,
+    max_subsystems: int | None = DEFAULT_MAX_SUBSYSTEMS,
 ) -> list[SubsystemTarget]:
     """Identify subsystems by grouping ranked files by directory prefix.
 
@@ -75,7 +119,18 @@ def identify_subsystems_auto(
             continue
 
         sorted_files = sorted(files, key=lambda f: f.get("priority", 0.0), reverse=True)
-        capped_files = sorted_files[:max_files_per_subsystem]
+        if (
+            max_files_per_subsystem is not None
+            and len(sorted_files) > max_files_per_subsystem
+        ):
+            _warn_files_dropped(
+                f"auto subsystem {prefix!r}",
+                kept=max_files_per_subsystem,
+                dropped=sorted_files[max_files_per_subsystem:],
+            )
+            capped_files = sorted_files[:max_files_per_subsystem]
+        else:
+            capped_files = sorted_files
         priority = max(f.get("priority", 0.0) for f in capped_files)
 
         eps: list = []
@@ -96,7 +151,19 @@ def identify_subsystems_auto(
         )
 
     subsystems.sort(key=lambda s: s.priority, reverse=True)
-    return subsystems[:max_subsystems]
+    if max_subsystems is not None and len(subsystems) > max_subsystems:
+        dropped = subsystems[max_subsystems:]
+        logger.warning(
+            "Auto-detection kept the top %d of %d subsystems by priority; "
+            "DROPPED %d: %s. Raise max_subsystems (or set it to None) to widen "
+            "scope.",
+            max_subsystems,
+            len(subsystems),
+            len(dropped),
+            ", ".join(s.root_path for s in dropped[:10]),
+        )
+        subsystems = subsystems[:max_subsystems]
+    return subsystems
 
 
 def subsystem_from_path(
@@ -104,11 +171,15 @@ def subsystem_from_path(
     file_targets: list[FileTarget],
     callgraph: Any = None,
     entry_points_by_file: dict | None = None,
-    max_files: int = 50,
+    max_files: int | None = None,
 ) -> SubsystemTarget:
     """Build a SubsystemTarget from a directory path or glob pattern.
 
     Raises ValueError if no files match.
+
+    An explicit path is a deliberate operator scope, so *max_files* defaults to
+    ``None`` (no cap) — the full matched set is hunted. If a cap is supplied and
+    exceeded, files are dropped with a loud WARNING rather than silently.
     """
     normalized = path.rstrip("/")
     is_glob = "*" in normalized or "?" in normalized
@@ -127,7 +198,16 @@ def subsystem_from_path(
         raise ValueError(f"No files match subsystem path: {path}")
 
     matched.sort(key=lambda f: f.get("priority", 0.0), reverse=True)
-    capped = matched[:max_files]
+    if max_files is not None and len(matched) > max_files:
+        _warn_files_dropped(
+            f"{path!r}",
+            kept=max_files,
+            dropped=matched[max_files:],
+            explicit=True,
+        )
+        capped = matched[:max_files]
+    else:
+        capped = matched
     priority = max(f.get("priority", 0.0) for f in capped)
 
     eps: list = []
@@ -172,6 +252,9 @@ class SubsystemHuntConfig:
     project_name: str = "target"
     trajectory_root: str | Path | None = None
     instrumentation: Any = None
+    # Max files enumerated in each subsystem hunt prompt. None = list every file
+    # (correct for an explicit scope so the ground-truth file is never hidden).
+    max_files_in_prompt: int | None = None
 
 
 class SubsystemHuntRunner:
@@ -181,6 +264,7 @@ class SubsystemHuntRunner:
         self.config = config
         self._spent: float = 0.0
         self._subsystems_completed: int = 0
+        self._budget_exhausted = False
 
     @property
     def total_spent(self) -> float:
@@ -189,6 +273,11 @@ class SubsystemHuntRunner:
     @property
     def subsystems_completed(self) -> int:
         return self._subsystems_completed
+
+    @property
+    def budget_exhausted(self) -> bool:
+        """Whether any subsystem stopped before completion at its budget limit."""
+        return self._budget_exhausted
 
     async def arun(self) -> list[Finding]:
         """Run all subsystem hunts. Returns merged findings."""
@@ -201,6 +290,7 @@ class SubsystemHuntRunner:
         async def _guarded_run(subsystem: SubsystemTarget) -> list[Finding]:
             async with sem:
                 if self.config.total_budget_usd > 0 and self._spent >= self.config.total_budget_usd:
+                    self._budget_exhausted = True
                     logger.info(
                         "Subsystem %s skipped: total budget exhausted",
                         subsystem.name,
@@ -225,8 +315,10 @@ class SubsystemHuntRunner:
                     )
                 self._spent += cost
                 self._subsystems_completed += 1
+                if stop == "budget_exhausted":
+                    self._budget_exhausted = True
                 logger.info(
-                    "Subsystem %s completed: %d findings, $%.4f, stop=%s",
+                    "Subsystem %s finished: %d findings, $%.4f, stop=%s",
                     subsystem.name,
                     len(findings),
                     cost,
@@ -247,6 +339,7 @@ class SubsystemHuntRunner:
                 findings = await coro
                 all_findings.extend(findings)
             except BudgetExceeded:
+                self._budget_exhausted = True
                 logger.info("Subsystem hunt stopped because the run budget is exhausted")
                 for task in tasks:
                     if not task.done():
@@ -273,11 +366,12 @@ class SubsystemHuntRunner:
             try:
                 sandbox = await asyncio.to_thread(self.config.sandbox_factory)
             except Exception as e:
-                logger.warning(
+                logger.error(
                     "sandbox_factory failed for subsystem %s: %s",
                     subsystem.name,
                     e,
                 )
+                raise SystemExit(1) from e
 
         session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
         files = [str(item.get("path") or "") for item in subsystem.files]
@@ -311,6 +405,7 @@ class SubsystemHuntRunner:
                 findings_pool=self.config.findings_pool,
                 campaign_hint=self.config.campaign_hint,
                 callgraph=self.config.callgraph,
+                max_files_in_prompt=self.config.max_files_in_prompt,
             )
             ctx.work_item_id = work_item_id
             ctx.instrumentation = instrumentation

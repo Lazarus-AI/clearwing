@@ -352,11 +352,6 @@ class TestObservabilityIntegration:
         assert obs.metrics is not None
         assert obs._connected is False
 
-    def test_init_debug(self):
-        obs = ObservabilityIntegration(debug=True)
-        # Should have ConsoleExporter + InMemoryExporter
-        assert len(obs.tracer._exporters) == 2
-
     def test_connect_disconnect(self):
         obs = ObservabilityIntegration()
         obs.connect()
@@ -431,68 +426,51 @@ class TestObservabilityIntegration:
         obs._on_error({"error": "something broke"})
         assert obs.metrics.get_counter("errors_total") == 1.0
 
-    def test_spans_property(self):
-        obs = ObservabilityIntegration()
-        assert obs.spans == []
-
-    def test_phoenix_disabled_by_default(self):
-        """PhoenixExporter not attached when env vars absent."""
-        obs = ObservabilityIntegration()
-        # Only InMemoryExporter present (no Phoenix without PHOENIX_ENDPOINT)
-        assert len(obs.tracer._exporters) == 1
-
-    def test_cost_update_emits_llm_span(self):
-        """cost_update event creates an llm_call span for Arize."""
-        obs = ObservabilityIntegration()
-        obs._on_cost_update({
-            "model": "claude-opus-4-6",
-            "provider": "anthropic",
-            "input_tokens": 2000,
-            "output_tokens": 400,
-            "cached_tokens": 500,
-            "total_cost_usd": 0.12,
-            "elapsed_ms": 1500,
-        })
-        obs.tracer.flush()
-        llm_spans = obs._in_memory.get_spans("llm_call")
-        assert len(llm_spans) == 1
-        s = llm_spans[0]
-        assert s.attributes["llm.model"] == "claude-opus-4-6"
-        assert s.attributes["llm.token_count.input"] == 2000
-        assert s.attributes["llm.cost_usd"] == 0.12
-
-
-# ---------------------------------------------------------------------------
-# PhoenixExporter tests
-# ---------------------------------------------------------------------------
-
-
-class TestPhoenixExporter:
-    def test_construct(self):
-        from clearwing.observability.phoenix import PhoenixExporter
-
-        exporter = PhoenixExporter(endpoint="http://localhost:6006", project_name="test")
-        exporter.shutdown()
-
-    def test_from_env_returns_none_without_endpoint(self, monkeypatch):
-        from clearwing.observability.phoenix import phoenix_exporter_from_env
-
+    def test_bootstrap_from_env_noop_without_endpoint(self, monkeypatch):
         monkeypatch.delenv("PHOENIX_ENDPOINT", raising=False)
         monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
-        assert phoenix_exporter_from_env() is None
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+        # Clear any singleton left over from a prior test.
+        if ObservabilityIntegration._singleton is not None:
+            ObservabilityIntegration._singleton.disconnect()
+        assert ObservabilityIntegration.bootstrap_from_env() is None
+        assert ObservabilityIntegration.bootstrap_from_env() is None
+        assert ObservabilityIntegration._singleton is None
 
-    def test_from_env_returns_none_without_project(self, monkeypatch):
-        from clearwing.observability.phoenix import phoenix_exporter_from_env
+    def test_bootstrap_from_env_connects_when_endpoint_set(self, monkeypatch):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+        monkeypatch.setattr("clearwing.observability.otel._otlp_exporter", InMemorySpanExporter)
         monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
-        monkeypatch.delenv("PHOENIX_PROJECT", raising=False)
-        assert phoenix_exporter_from_env() is None
+        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing-test")
+        if ObservabilityIntegration._singleton is not None:
+            ObservabilityIntegration._singleton.disconnect()
+        first = ObservabilityIntegration.bootstrap_from_env()
+        try:
+            assert first is not None
+            assert first._connected is True
+            second = ObservabilityIntegration.bootstrap_from_env()
+            assert second is first
+        finally:
+            if first is not None:
+                first.disconnect()
 
-    def test_from_env_returns_exporter_when_both_set(self, monkeypatch):
-        from clearwing.observability.phoenix import phoenix_exporter_from_env
+    def test_bootstrap_from_env_disconnect_cleans_up(self, monkeypatch):
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+        monkeypatch.setattr("clearwing.observability.otel._otlp_exporter", InMemorySpanExporter)
         monkeypatch.setenv("PHOENIX_ENDPOINT", "http://phoenix:6006")
-        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing")
-        exporter = phoenix_exporter_from_env()
-        assert exporter is not None
-        exporter.shutdown()
+        monkeypatch.setenv("PHOENIX_PROJECT", "clearwing-test")
+        if ObservabilityIntegration._singleton is not None:
+            ObservabilityIntegration._singleton.disconnect()
+        first = ObservabilityIntegration.bootstrap_from_env()
+        assert first is not None
+        first.disconnect()
+        assert ObservabilityIntegration._singleton is None
+        second = ObservabilityIntegration.bootstrap_from_env()
+        try:
+            assert second is not None
+            assert second is not first
+        finally:
+            if second is not None:
+                second.disconnect()

@@ -22,6 +22,7 @@ from clearwing.llm.messages import (
     _coerce_chat_messages,
 )
 from clearwing.llm.native import NativeToolSpec, response_text
+from clearwing.observability.otel import get_oi_tracer
 from clearwing.observability.telemetry import CostTracker
 from clearwing.providers.binding import AgentLimits
 from clearwing.safety.audit import AuditLogger
@@ -31,6 +32,7 @@ from .protocols import KnowledgeGraphPopulator, LLMInvokable, StateUpdater, Syst
 from .tooling import AgentTool, InterruptRequest, tool_execution_context
 
 logger = logging.getLogger(__name__)
+tracer = get_oi_tracer(__name__)
 
 
 FLAG_PATTERNS = [
@@ -257,6 +259,7 @@ class NativeAgentGraph:
             if paused:
                 break
 
+    @tracer.chain(name="agent.assistant_step")
     async def _aassistant_step(self, state: dict[str, Any]) -> dict[str, Any]:
         messages = list(state.get("messages", []))
         if self.context_summarizer:
@@ -284,20 +287,22 @@ class NativeAgentGraph:
         system, chat_messages = _coerce_chat_messages(messages)
         system = "\n\n".join(part for part in (sys_prompt, system) if part) or sys_prompt
 
+        provider_name = getattr(self.llm, "provider_name", None)
         response = await self.llm.achat_stream(
             messages=chat_messages,
             system=system,
             tools=self.native_tools or None,
             on_text_delta=self.on_text_delta,
         )
-
+        usage = response.usage
+        input_tokens = (usage.prompt_tokens or 0) if usage else 0
+        output_tokens = (usage.completion_tokens or 0) if usage else 0
         assistant_text = response_text(response)
         # tool_calls are raw genai ToolCall objects (.call_id/.fn_name/
         # .fn_arguments). Store them on the AIMessage so the next turn's
         # ChatMessage assistant round-trips them, and so the tool loop can
         # pair each result by call_id.
         tool_calls = list(response.tool_calls)
-        usage = response.usage
         ai_message = AIMessage(
             content=assistant_text,
             tool_calls=tool_calls,
@@ -312,10 +317,13 @@ class NativeAgentGraph:
         )
         state.setdefault("messages", []).append(ai_message)
 
-        input_tokens = (usage.prompt_tokens or 0) if usage else 0
-        output_tokens = (usage.completion_tokens or 0) if usage else 0
         if self.cost_tracker and (input_tokens or output_tokens):
-            self.cost_tracker.record_llm_call(input_tokens, output_tokens, self.model_name)
+            self.cost_tracker.record_llm_call(
+                input_tokens,
+                output_tokens,
+                self.model_name,
+                provider=provider_name,
+            )
             state["total_cost_usd"] = self.cost_tracker.total_cost_usd
             state["total_tokens"] = self.cost_tracker.input_tokens + self.cost_tracker.output_tokens
             if self.audit_logger:

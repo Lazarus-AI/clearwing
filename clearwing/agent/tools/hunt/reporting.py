@@ -13,6 +13,8 @@ verifier, exploiter, patcher, and reporter stages downstream.
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 
 from pydantic import Field
@@ -24,6 +26,8 @@ from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.state import Finding
 
 from .sandbox import HunterContext
+
+logger = logging.getLogger(__name__)
 
 
 class RecordTraceStepInput(ToolInputModel):
@@ -140,6 +144,15 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "step_number": n,
             },
         )
+        logger.info(
+            "[%s] trace#%d %s:%s%s%s",
+            ctx.file_path,
+            n,
+            file,
+            line,
+            f" ({function})" if function else "",
+            f" — {note[:120]}" if note else "",
+        )
         # Echo the full accumulated trace back into the conversation so the
         # growing dataflow path stays part of the message sequence the model
         # reasons over before calling record_finding.
@@ -203,6 +216,8 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             trace: Optional compatibility trace or summary. Streamed trace
                 steps take precedence when present.
         """
+        if isinstance(trace, str):
+            trace = json.loads(trace)
         explicit_steps = trace.get("steps", []) if trace else []
         try:
             authoritative_steps = (

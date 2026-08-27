@@ -13,8 +13,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
@@ -29,17 +31,64 @@ from .taint import TaintAnalyzer, TaintPath
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PreprocessResult:
+class PreprocessResult(BaseModel):
     """Output of the preprocessor — fed into the Ranker."""
+
+    model_config = ConfigDict(extra="forbid")
 
     repo_path: str
     file_targets: list[FileTarget]
     static_findings: list[StaticFinding]
-    semgrep_findings: list[dict] = field(default_factory=list)  # v0.2
+    semgrep_findings: list[dict] = Field(default_factory=list)  # v0.2
     callgraph: CallGraph | None = None  # v0.2
-    fuzz_corpora: list[dict] = field(default_factory=list)  # v0.2
-    taint_paths: list[TaintPath] = field(default_factory=list)  # v0.4
+    fuzz_corpora: list[dict] = Field(default_factory=list)  # v0.2
+    taint_paths: list[TaintPath] = Field(default_factory=list)  # v0.4
+
+    def to_checkpoint(self) -> dict[str, Any]:
+        """Serialize without paths tied to the current worker."""
+
+        payload = self.model_dump(mode="json")
+        payload.pop("repo_path")
+        for target in payload["file_targets"]:
+            target.pop("absolute_path", None)
+        return payload
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        payload: dict[str, Any],
+        repo_path: str | Path,
+    ) -> PreprocessResult:
+        """Restore worker-local paths for a newly materialized checkout."""
+
+        root = Path(repo_path).resolve()
+        saved_targets = payload.get("file_targets")
+        if not isinstance(saved_targets, list):
+            raise ValueError("checkpoint file targets must be a list")
+        targets: list[FileTarget] = []
+        for target in saved_targets:
+            if not isinstance(target, dict):
+                raise ValueError("checkpoint file target must be an object")
+            relative = Path(str(target.get("path") or ""))
+            if not relative.parts or relative.is_absolute():
+                raise ValueError("checkpoint file target must be repository-relative")
+            absolute = (root / relative).resolve()
+            if not absolute.is_relative_to(root):
+                raise ValueError("checkpoint file target escapes repository")
+            if not absolute.is_file():
+                raise ValueError(f"checkpoint file target is missing: {relative.as_posix()}")
+            rebound = dict(target)
+            rebound["path"] = relative.as_posix()
+            rebound["absolute_path"] = str(absolute)
+            targets.append(rebound)
+
+        return cls.model_validate(
+            {
+                **payload,
+                "repo_path": str(root),
+                "file_targets": targets,
+            }
+        )
 
     @property
     def file_count(self) -> int:
@@ -244,6 +293,7 @@ class Preprocessor:
         run_taint: bool = False,  # v0.4: tree-sitter taint analysis
         max_imports_by_files: int = 1000,  # cap the imports_by walk
         respect_gitignore: bool = False,
+        subsystem_paths: list[str] | None = None,
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -256,12 +306,18 @@ class Preprocessor:
         self.run_taint = run_taint
         self.max_imports_by_files = max_imports_by_files
         self.respect_gitignore = respect_gitignore
+        self.subsystem_paths = subsystem_paths or []
         self._analyzer: SourceAnalyzer | None = None
         self._cloner: SourceAnalyzer | None = None
 
-    def run(self) -> PreprocessResult:
+    def resolve_repository(self) -> str:
+        """Materialize the requested repository without analyzing it."""
+
+        return self._clone_or_use_local()
+
+    def run(self, *, repo_path: str | None = None) -> PreprocessResult:
         """Execute the full preprocess pipeline. See class docstring."""
-        repo_path = self._clone_or_use_local()
+        repo_path = repo_path or self.resolve_repository()
 
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")
@@ -296,24 +352,56 @@ class Preprocessor:
         build_callgraph = self.build_callgraph
         propagate_reachability = self.propagate_reachability
         run_taint = self.run_taint
+        callgraph_seed_files: list[str] | None = None
         if large_repo:
             if build_callgraph or propagate_reachability:
-                logger.info(
-                    "Large repo detected (%d source files); skipping callgraph/reachability",
-                    len(source_files),
-                )
+                if self.subsystem_paths:
+                    seed = self._expand_subsystem_files(repo_path, self.subsystem_paths)
+                    if seed:
+                        logger.info(
+                            "Large repo (%d files); seeding callgraph from %d subsystem files",
+                            len(source_files),
+                            len(seed),
+                        )
+                        callgraph_seed_files = seed
+                    else:
+                        logger.info(
+                            "Large repo detected (%d source files); skipping callgraph/reachability",
+                            len(source_files),
+                        )
+                        build_callgraph = False
+                        propagate_reachability = False
+                else:
+                    logger.info(
+                        "Large repo detected (%d source files); skipping callgraph/reachability",
+                        len(source_files),
+                    )
+                    build_callgraph = False
+                    propagate_reachability = False
             if run_taint:
-                logger.info(
-                    "Large repo detected (%d source files); skipping taint analysis",
-                    len(source_files),
-                )
-            build_callgraph = False
-            propagate_reachability = False
-            run_taint = False
+                if self.subsystem_paths and callgraph_seed_files:
+                    logger.info(
+                        "Large repo (%d files); seeding taint analysis from %d subsystem files",
+                        len(source_files),
+                        len(callgraph_seed_files),
+                    )
+                else:
+                    logger.info(
+                        "Large repo detected (%d source files); skipping taint analysis",
+                        len(source_files),
+                    )
+                    run_taint = False
 
         # Enumerate source files and build FileTarget entries
         file_targets: list[FileTarget] = []
-        for abs_path in source_files:
+        _total = len(source_files)
+        _update_every = max(1, _total // 10)
+        for _i, abs_path in enumerate(source_files):
+            if (_i + 1) % _update_every == 0 and (_i + 1) < _total:
+                logger.info(
+                    "Preprocessor: enumerating  %d/%d files  found=%d",
+                    _i + 1, _total, len(file_targets),
+                )
             ext = Path(abs_path).suffix.lower()
             language = _SOURCE_EXTS_TO_LANG.get(ext)
             if not language:
@@ -373,7 +461,7 @@ class Preprocessor:
             try:
                 builder = CallGraphBuilder()
                 if builder.available:
-                    callgraph = builder.build(repo_path)
+                    callgraph = builder.build(repo_path, files=callgraph_seed_files)
                     self._populate_callgraph_signals(file_targets, callgraph)
                 else:
                     logger.info("tree-sitter grammars not available; callgraph skipped")
@@ -391,10 +479,18 @@ class Preprocessor:
                 sidecar = SemgrepSidecar(respect_gitignore=self.respect_gitignore)
                 if sidecar.available:
                     semgrep_findings_objs = sidecar.run_scan(repo_path)
+                else:
+                    semgrep_findings_objs = []
+                if semgrep_findings_objs:
                     semgrep_findings = [_semgrep_finding_to_dict(f) for f in semgrep_findings_objs]
                     self._apply_semgrep_hints(file_targets, semgrep_findings)
+                    logger.info(
+                        "Semgrep sidecar: %d findings across %d files",
+                        len(semgrep_findings),
+                        len({f.get("file") for f in semgrep_findings}),
+                    )
                 else:
-                    logger.info("Semgrep binary not found; sidecar skipped")
+                    logger.info("Semgrep sidecar: 0 findings (or binary unavailable)")
             except Exception:
                 logger.warning("Semgrep sidecar failed", exc_info=True)
 
@@ -403,11 +499,15 @@ class Preprocessor:
 
         # v0.4: tree-sitter taint analysis
         taint_paths: list[TaintPath] = []
+        if not run_taint:
+            logger.info("Taint analysis skipped (run_taint=False)")
         if run_taint:
             try:
                 analyzer = TaintAnalyzer()
                 if analyzer.available:
-                    taint_result = analyzer.analyze_repo(repo_path)
+                    taint_result = analyzer.analyze_repo(
+                        repo_path, files=callgraph_seed_files
+                    )
                     taint_paths = taint_result.paths
                     self._apply_taint_signals(file_targets, taint_paths)
                 else:
@@ -469,6 +569,22 @@ class Preprocessor:
                 ft["semgrep_hint"] = counts[path]
 
     # --- v0.2 callgraph + reachability helpers -----------------------------
+
+    def _expand_subsystem_files(self, repo_path: str, subsystem_paths: list[str]) -> list[str]:
+        """Return absolute paths to source files under the given subsystem paths."""
+        from clearwing.sourcehunt.callgraph import _LANG_EXT_MAP
+        result: list[str] = []
+        for sp in subsystem_paths:
+            abs_sp = sp if os.path.isabs(sp) else os.path.join(repo_path, sp)
+            if os.path.isfile(abs_sp):
+                if Path(abs_sp).suffix.lower() in _LANG_EXT_MAP:
+                    result.append(abs_sp)
+            elif os.path.isdir(abs_sp):
+                for dirpath, _, filenames in os.walk(abs_sp):
+                    for fname in filenames:
+                        if Path(fname).suffix.lower() in _LANG_EXT_MAP:
+                            result.append(os.path.join(dirpath, fname))
+        return result
 
     @staticmethod
     def _populate_callgraph_signals(

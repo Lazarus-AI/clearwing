@@ -40,6 +40,21 @@ def add_parser(subparsers):
         help="Source-code vulnerability hunting (source-hunt pipeline)",
     )
     parser.add_argument("repo", nargs="?", help="Git URL or local path to a repository")
+    parser.add_argument(
+        "--checkpoint",
+        metavar="JSON",
+        help="Restore a legacy sourcehunt run from a checkpoint JSON blob",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        metavar="PATH",
+        help="Where to save the checkpoint file (default: <output-dir>/<session>/checkpoint.json)",
+    )
+    parser.add_argument(
+        "--stop-after",
+        choices=["preprocess", "rank", "hunt", "verify", "exploit"],
+        help="Stop after the named stage completes (checkpoint is saved for resumption)",
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -259,6 +274,16 @@ def add_parser(subparsers):
         dest="subsystem_paths",
         help="Manually specify a subsystem directory to hunt (repeatable). "
         "Implies --subsystem-hunt. Example: --subsystem net/ipv4/",
+    )
+    parser.add_argument(
+        "--subsystem-max-files",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="subsystem_max_files",
+        help="Max files hunted per subsystem. Default: 50 for auto-detected "
+        "subsystems, uncapped for an explicit --subsystem PATH. Raise it (or "
+        "pass 0 to disable) so ground-truth files aren't dropped out of scope.",
     )
     parser.add_argument(
         "--no-per-file-hunt",
@@ -1132,6 +1157,7 @@ def handle(cli, args):
 
     runner = SourceHuntRunner(
         repo_url=args.repo,
+        checkpoint=args.checkpoint,
         branch=args.branch,
         local_path=args.local_path,
         depth=args.depth,
@@ -1175,6 +1201,8 @@ def handle(cli, args):
         enable_findings_pool=not args.no_findings_pool,
         enable_subsystem_hunt=args.subsystem_hunt or bool(args.subsystem_paths),
         subsystem_paths=args.subsystem_paths or None,
+        # 0 disables the cap (uncapped); None falls back to the library default.
+        subsystem_max_files=args.subsystem_max_files or None,
         no_per_file_hunt=args.no_per_file_hunt,
         no_rank=args.no_rank,
         enable_behavior_monitor=not getattr(args, "no_behavior_monitor", False),
@@ -1198,6 +1226,8 @@ def handle(cli, args):
         retain_incomplete_certificates=args.retain_incomplete_certificates,
         emit_rejection_certificates=args.emit_rejection_certificates,
         falsify=args.falsify,
+        checkpoint_path=getattr(args, "checkpoint_path", None),
+        stop_after=getattr(args, "stop_after", None),
     )
 
     cli.console.print(
@@ -1288,18 +1318,21 @@ def _handle_machine(descriptor: int) -> int:
     channel = MachineChannel(descriptor, "sourcehunt")
     try:
         request, routing = channel.read_start()
-        print(f"sourcehunt machine-fd request: {request!r}", file=sys.stderr)
+        print(f"sourcehunt machine-fd request fields: {sorted(request)}", file=sys.stderr)
         parsed = _machine_request(request)
+        workspace = channel.workspace or {}
         install_runtime_routing(routing)
         provider_manager = ProviderManager.from_config(routing)
         result = asyncio.run(
             SourceHuntRunner(
                 repo_url=parsed["repo_url"],
+                local_path=workspace.get("local_path"),
                 branch=parsed["branch"],
                 depth=parsed["depth"],
                 budget_usd=parsed["budget_usd"],
                 max_parallel=parsed["max_parallel"],
-                output_dir=os.path.abspath("results/sourcehunt"),
+                output_dir=workspace.get("output_dir") or os.path.abspath("results/sourcehunt"),
+                checkpoint_path=workspace.get("checkpoint_path"),
                 no_verify=not parsed["verify"],
                 no_exploit=not parsed["exploit"],
                 flow=parsed["flow"],
@@ -1311,7 +1344,10 @@ def _handle_machine(descriptor: int) -> int:
                 subsystem_paths=parsed.get("subsystem_paths"),
                 subsystem_budget_usd=parsed.get("subsystem_budget_usd", 0.0),
                 subsystem_max_parallel=parsed.get("subsystem_max_parallel", 4),
+                subsystem_max_files=parsed.get("subsystem_max_files") or None,
                 output_formats=parsed.get("format"),
+                checkpoint=parsed.get("checkpoint"),
+                stop_after=parsed.get("stop_after"),
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1342,7 +1378,10 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_paths",
         "subsystem_budget_usd",
         "subsystem_max_parallel",
+        "subsystem_max_files",
         "no_per_file_hunt",
+        "checkpoint",
+        "stop_after",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -1375,9 +1414,22 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         parsed["subsystem_budget_usd"] = value["subsystem_budget_usd"]
     if "subsystem_max_parallel" in value:
         parsed["subsystem_max_parallel"] = value["subsystem_max_parallel"]
+    if "subsystem_max_files" in value:
+        parsed["subsystem_max_files"] = value["subsystem_max_files"]
     if "format" in value:
         fmt = value["format"]
         parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
+    if "checkpoint" in value:
+        checkpoint = value["checkpoint"]
+        if not isinstance(checkpoint, dict):
+            raise ValueError("checkpoint must be a JSON object")
+        parsed["checkpoint"] = checkpoint
+    if "stop_after" in value:
+        valid_stages = {"preprocess", "rank", "hunt", "verify"}
+        sa = value["stop_after"]
+        if sa not in valid_stages:
+            raise ValueError(f"stop_after must be one of {sorted(valid_stages)}, got {sa!r}")
+        parsed["stop_after"] = sa
     return parsed
 
 
@@ -1404,6 +1456,7 @@ def _public_result(result: Any) -> dict[str, Any]:
         "cost_usd": result.cost_usd,
         "tokens_used": result.tokens_used,
         "budget_usd": result.budget_usd,
+        "checkpoint": result.checkpoint,
         "pipeline": {
             name: {
                 "outcome": stage.outcome.value,

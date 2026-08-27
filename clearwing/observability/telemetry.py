@@ -57,6 +57,9 @@ class CostTracker:
         # Fireworks "Standard" serving path. cached_input applies to the subset
         # of input tokens served from the provider's prompt cache.
         "glm-5.2": {"input": 1.40, "cached_input": 0.14, "output": 4.40},
+        "UnCut": {"input": 1.40, "cached_input": 0.14, "output": 4.40},
+        "gpt-5.4": {"input": 2.50, "output": 15.0},
+        "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
     }
 
     _DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -112,13 +115,22 @@ class CostTracker:
         output_tokens: int,
         model: str,
         cached_tokens: int = 0,
-    ) -> None:
+        *,
+        elapsed_ms: float | None = None,
+        provider: str | None = None,
+    ) -> float:
         """Record token usage for a single LLM call and update the running cost.
 
         If *model* is not present in the pricing table the default Sonnet
         pricing is used.  ``cached_tokens`` bills at the model's cached rate.
         When an ``EventBus`` is available a ``COST_UPDATE`` event is emitted
         after updating counters.
+
+        ``elapsed_ms`` (wall-clock latency of the call) and ``provider`` are
+        optional; when supplied they ride along in the ``COST_UPDATE`` payload
+        for UI and metrics consumers. OTel spans are emitted directly at the
+        LLM boundary. Keyword-only to keep call sites explicit and future
+        additions non-breaking.
         """
         cost = self.estimate_cost(input_tokens, output_tokens, model, cached_tokens)
 
@@ -128,18 +140,22 @@ class CostTracker:
             self.total_cost_usd += cost
 
         try:
-            EventBus.emit(
+            EventBus().emit(
                 EventType.COST_UPDATE,
                 {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "cached_tokens": cached_tokens,
                     "cost": cost,
                     "total_cost_usd": self.total_cost_usd,
                     "model": model,
+                    "provider": provider or "unknown",
+                    "elapsed_ms": elapsed_ms or 0,
                 },
             )
         except Exception:
             pass  # telemetry should never break the caller
+        return cost
 
     def record_tool_call(self, tool_name: str, duration_ms: int) -> None:
         """Record a tool invocation and its wall-clock duration."""
