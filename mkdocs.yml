@@ -38,6 +38,7 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - LLM providers: providers.md
+  - Model roles: model-roles.md
   - FFmpeg case study: FFmpeg.md
   - Sourcehunt evaluation and rollout: eval_rollout.md
   - Remediation lifecycle: remediation.md

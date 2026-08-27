@@ -698,7 +698,7 @@ def handle(cli, args):
     cli_override = bool(
         args.model or getattr(args, "base_url", None) or getattr(args, "api_key", None)
     )
-    if providers_cfg.get("providers") and not cli_override:
+    if (providers_cfg.get("providers") or providers_cfg.get("model_roles")) and not cli_override:
         provider_manager = ProviderManager.from_config(providers_cfg)
         route_models = {
             "proof_local": args.proof_local_model,

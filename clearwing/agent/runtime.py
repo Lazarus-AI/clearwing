@@ -23,6 +23,7 @@ from clearwing.llm.messages import (
 )
 from clearwing.llm.native import NativeToolSpec, response_text
 from clearwing.observability.telemetry import CostTracker
+from clearwing.providers.binding import AgentLimits
 from clearwing.safety.audit import AuditLogger
 from clearwing.safety.guardrails import InputGuardrail, OutputGuardrail
 
@@ -122,8 +123,10 @@ class NativeAgentGraph:
         enable_output_guardrail: bool,
         enable_event_bus: bool,
         enable_context_summarizer: bool,
+        agent_limits: AgentLimits | None = None,
     ) -> None:
         self.llm = llm
+        self.agent_limits = agent_limits
         self.native_tools = native_tools
         self.tools = {tool.name: tool for tool in tools}
         self.system_prompt_fn = system_prompt_fn
@@ -226,13 +229,26 @@ class NativeAgentGraph:
 
     async def _arun_loop(self, thread_id: str):
         state = self._get_or_create_state(thread_id)
+        limits = self.agent_limits
+        max_steps = limits.max_steps if limits else None
+        max_tool_calls = limits.max_tool_calls if limits else None
+        steps = 0
+        tool_calls_total = 0
         while True:
+            if max_steps is not None and steps >= max_steps:
+                logger.info("agent loop stopped: reached max_steps=%d", max_steps)
+                break
             assistant_event = await self._aassistant_step(state)
+            steps += 1
             yield assistant_event
             last = state["messages"][-1]
             tool_calls = getattr(last, "tool_calls", []) or []
             if not tool_calls:
                 break
+            if max_tool_calls is not None and tool_calls_total >= max_tool_calls:
+                logger.info("agent loop stopped: reached max_tool_calls=%d", max_tool_calls)
+                break
+            tool_calls_total += len(tool_calls)
             tool_events, paused = await self._arun_tool_calls(
                 state, tool_calls, resume_decision=Ellipsis
             )
@@ -243,11 +259,21 @@ class NativeAgentGraph:
 
     async def _aassistant_step(self, state: dict[str, Any]) -> dict[str, Any]:
         messages = list(state.get("messages", []))
-        if self.context_summarizer and self.context_summarizer.should_summarize(messages):
-            try:
-                messages = await self.context_summarizer.summarize(messages, self.llm)
-            except Exception:
-                logger.debug("Context summarization failed", exc_info=True)
+        if self.context_summarizer:
+            # The role binding's context_budget_tokens (carried on the client)
+            # drives when older turns are summarized; None keeps the
+            # summarizer's built-in threshold.
+            budget = getattr(self.llm, "context_budget_tokens", None)
+            should = (
+                self.context_summarizer.should_summarize(messages, max_tokens=budget)
+                if budget
+                else self.context_summarizer.should_summarize(messages)
+            )
+            if should:
+                try:
+                    messages = await self.context_summarizer.summarize(messages, self.llm)
+                except Exception:
+                    logger.debug("Context summarization failed", exc_info=True)
 
         sys_prompt = self.system_prompt_fn(state)
         # Coerce the runtime's internal message model (AIMessage/ToolMessage/

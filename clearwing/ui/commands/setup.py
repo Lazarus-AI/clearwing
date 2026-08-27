@@ -138,6 +138,10 @@ def handle(cli, args) -> None:
     # Persist
     _write_config(cli, preset, base_url, api_key_literal, model)
 
+    # Optional: per-role model selection (model roles)
+    if not args.yes:
+        _maybe_configure_model_roles(cli, console, preset)
+
     # Test invoke (unless --no-test)
     if not args.no_test:
         _run_test_invoke(console, preset, base_url, api_key_literal, model)
@@ -463,6 +467,79 @@ def _write_config(
     cli.config.set("provider", value=provider_section)
 
     cli.console.print(f"\n[green]Wrote {path}[/green]")
+
+
+def _maybe_configure_model_roles(cli, console: Console, primary: ProviderPreset) -> None:
+    """Offer to write a ``model_roles:`` block using the configured provider.
+
+    Single-endpoint config already works for every task; model roles are the
+    opt-in step that gives each role (utility / researcher / frontier /
+    reviewer …) its own model + reasoning budget. The provider just set up
+    becomes the primary; the user may add a second provider so the reviewer
+    role gets an independent model family.
+    """
+    from clearwing.providers import KNOWN_PROVIDERS, ROLES, preset_by_key, recommend_roles
+
+    console.print(
+        "\n[bold]Model roles[/bold] [dim](optional, advanced)[/dim]\n"
+        "[dim]Give each role its own model + reasoning budget instead of one "
+        "model for every task. See docs/model-roles.md.[/dim]"
+    )
+    if not Confirm.ask("Configure per-role model selection now?", default=False):
+        console.print("[dim]Skipped — one endpoint serves every task. "
+                      "Run `clearwing models` anytime to see the roles.[/dim]")
+        return
+
+    provider_keys: list[str] = [primary.key]
+    if Confirm.ask(
+        "Add a second provider for independent review (recommended)?", default=False
+    ):
+        auditor = _prompt_provider_choice(console, KNOWN_PROVIDERS)
+        if auditor is not None and auditor.key != primary.key:
+            provider_keys.append(auditor.key)
+
+    presets = [preset_by_key(k) for k in provider_keys]
+    presets = [p for p in presets if p is not None]
+    assignments = recommend_roles(presets)
+
+    console.print("\n[bold]Resolved roles[/bold]")
+    for name in ROLES:
+        a = assignments[name]
+        out = a.inference.max_output_tokens
+        console.print(
+            f"  [bold]{name:12}[/bold] {a.provider}/{a.model}  "
+            f"[dim]reasoning={a.reasoning}, output={out}[/dim]"
+        )
+
+    if not Confirm.ask("\nWrite this model_roles block to config.yaml?", default=True):
+        console.print("[yellow]Model roles not written.[/yellow]")
+        return
+
+    _write_model_roles(cli, provider_keys)
+    console.print(
+        "[green]Wrote model_roles.[/green] "
+        "Tune it with `clearwing models` and a `roles:` override block."
+    )
+
+
+def _write_model_roles(cli, provider_keys: list[str]) -> None:
+    """Merge a ``model_roles:`` block into config.yaml, preserving the rest."""
+    import yaml
+
+    path = cli.config.DEFAULT_CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if path.exists():
+        try:
+            loaded = yaml.safe_load(path.read_text()) or {}
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    block = {"providers": provider_keys}
+    existing["model_roles"] = block
+    path.write_text(yaml.safe_dump(existing, default_flow_style=False, sort_keys=True))
+    cli.config.set("model_roles", value=block)
 
 
 def _run_test_invoke(
