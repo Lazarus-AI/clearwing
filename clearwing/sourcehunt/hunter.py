@@ -1722,7 +1722,6 @@ class NativeHunter:
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
                     visible_read_ranges.clear()
-                    overlapping_refreshes.clear()
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 provider_name = getattr(self.llm, "provider_name", None)
@@ -1921,7 +1920,6 @@ class NativeHunter:
                             tool_arguments,
                         )
                     )
-                    reread_blocked = False
                     reread_refresh = False
                     reread_range: tuple[int, int] | None = None
                     reread_path = ""
@@ -1933,13 +1931,7 @@ class NativeHunter:
                             visible_read_ranges.get(reread_path, []),
                         )
                         if covered >= 0.8:
-                            overlapping_refreshes[reread_path] = (
-                                overlapping_refreshes.get(reread_path, 0) + 1
-                            )
                             reread_refresh = True
-                            reread_blocked = overlapping_refreshes[reread_path] > 1
-                        else:
-                            overlapping_refreshes[reread_path] = 0
 
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
@@ -2013,23 +2005,6 @@ class NativeHunter:
                                 "tool_summary": tool_summary,
                                 "dynamic_verification_blocked": True,
                             },
-                        )
-                    elif reread_blocked and not skipped:
-                        tool_output = {
-                            "status": "read_already_recent",
-                            "error": (
-                                "At least 80% of this range is already present in the active "
-                                "conversation, and one context refresh was already allowed. "
-                                "This is now a reread spiral. Read a focused function/range or "
-                                "follow a caller, callee, reference, or active potential instead."
-                            ),
-                            "requested_range": reread_range,
-                            "visible_ranges": visible_read_ranges.get(reread_path, [])[-6:],
-                        }
-                        tool_summary = _tool_output_text(
-                            tool_call.fn_name,
-                            tool_arguments,
-                            tool_output,
                         )
                     elif skipped:
                         total_repeated_skips += 1

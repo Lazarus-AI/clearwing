@@ -504,6 +504,60 @@ async def test_read_file_pagination_is_not_falsely_throttled():
 
 
 @pytest.mark.asyncio
+async def test_overlapping_read_file_refreshes_return_content_instead_of_errors():
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=6, budget_usd=0.0)
+    hunter.tools[0].name = "read_file"
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": 0, "limit": 500},
+                )
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": 100, "limit": 100},
+                )
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": 100, "limit": 100},
+                )
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_logger = MagicMock()
+        mock_traj.for_hunter.return_value = mock_logger
+        await hunter.arun()
+
+    tool_results = [
+        call.args[1]["tool_output"]
+        for call in mock_logger.log.call_args_list
+        if call.args and call.args[0] == "tool_result"
+    ]
+    assert len(tool_results) == 3
+    assert tool_results[0] == "ok"
+    assert all(
+        output.startswith("[CONTEXT REFRESH:") and output.endswith("\nok")
+        for output in tool_results[1:]
+    )
+    assert not any(
+        isinstance(output, dict) and output.get("status") == "read_already_recent"
+        for output in tool_results
+    )
+
+
+@pytest.mark.asyncio
 async def test_read_file_exact_repeat_still_throttled():
     # The fix must not disable throttling entirely for read_file — a truly
     # identical (path, offset, limit) repeated verbatim is still a
