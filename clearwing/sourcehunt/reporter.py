@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from clearwing import __version__
+from clearwing.provenance import clearwing_build_provenance
 from clearwing.reporting.safety import (
     markdown_code_span,
     markdown_fenced_code,
@@ -31,47 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 _EVIDENCE_RANK = {level: idx for idx, level in enumerate(EVIDENCE_LEVELS)}
-_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
-
-
-def _clearwing_commit_sha() -> str:
-    """Return the Clearwing source revision, suffixed when the worktree is dirty."""
-
-    injected = os.environ.get("CLEARWING_COMMIT_SHA", "").strip()
-    if _COMMIT_RE.fullmatch(injected):
-        return injected.lower()
-
-    repository = Path(__file__).resolve().parents[2]
-    try:
-        head = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        dirty = subprocess.run(
-            ["git", "-C", str(repository), "status", "--porcelain"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    sha = head.stdout.strip().lower()
-    if head.returncode != 0 or not _COMMIT_RE.fullmatch(sha):
-        return "unknown"
-    if dirty.returncode == 0 and dirty.stdout.strip():
-        return f"{sha}-dirty"
-    return sha
-
-
 def _clearwing_provenance(start_time: str | None, end_time: str | None) -> dict[str, str]:
     now = datetime.now(timezone.utc).isoformat()
     return {
-        "version": __version__,
-        "commit_sha": _clearwing_commit_sha(),
+        **clearwing_build_provenance(),
         "start-time": start_time or now,
         "end-time": end_time or now,
     }
