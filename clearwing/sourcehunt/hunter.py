@@ -1588,13 +1588,11 @@ class NativeHunter:
         visible_read_ranges: dict[str, list[tuple[int, int]]] = {
             path: list(ranges) for path, ranges in self.ctx.read_ranges.items()
         }
-        overlapping_refreshes: dict[str, int] = {}
         flags_raised: int = 0
         empty_response_nudges: int = 0
         potential_reminder_active = False
         exploration_calls_since_checkpoint = 0
         active_potential_id: str | None = None
-
         synthesis_injected = False
         step = 0
         while True:
@@ -1722,7 +1720,6 @@ class NativeHunter:
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
                     visible_read_ranges.clear()
-                    overlapping_refreshes.clear()
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 provider_name = getattr(self.llm, "provider_name", None)
@@ -1921,26 +1918,6 @@ class NativeHunter:
                             tool_arguments,
                         )
                     )
-                    reread_blocked = False
-                    reread_refresh = False
-                    reread_range: tuple[int, int] | None = None
-                    reread_path = ""
-                    if tool_call.fn_name == "read_file":
-                        reread_path = str(tool_arguments.get("path") or "")
-                        reread_range = _requested_read_range(tool_arguments)
-                        covered = _range_coverage_fraction(
-                            reread_range,
-                            visible_read_ranges.get(reread_path, []),
-                        )
-                        if covered >= 0.8:
-                            overlapping_refreshes[reread_path] = (
-                                overlapping_refreshes.get(reread_path, 0) + 1
-                            )
-                            reread_refresh = True
-                            reread_blocked = overlapping_refreshes[reread_path] > 1
-                        else:
-                            overlapping_refreshes[reread_path] = 0
-
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
                     # same call with a growing/mutating tail (e.g. appending
@@ -2014,23 +1991,6 @@ class NativeHunter:
                                 "dynamic_verification_blocked": True,
                             },
                         )
-                    elif reread_blocked and not skipped:
-                        tool_output = {
-                            "status": "read_already_recent",
-                            "error": (
-                                "At least 80% of this range is already present in the active "
-                                "conversation, and one context refresh was already allowed. "
-                                "This is now a reread spiral. Read a focused function/range or "
-                                "follow a caller, callee, reference, or active potential instead."
-                            ),
-                            "requested_range": reread_range,
-                            "visible_ranges": visible_read_ranges.get(reread_path, [])[-6:],
-                        }
-                        tool_summary = _tool_output_text(
-                            tool_call.fn_name,
-                            tool_arguments,
-                            tool_output,
-                        )
                     elif skipped:
                         total_repeated_skips += 1
                         tool_output = {
@@ -2066,18 +2026,23 @@ class NativeHunter:
                             },
                         )
                         tool_output = await self._run_tool(tools_by_name, tool_call)
-                        if tool_call.fn_name == "read_file" and reread_range is not None:
-                            visible_read_ranges.setdefault(reread_path, []).append(reread_range)
-                            if reread_refresh and isinstance(tool_output, str):
-                                tool_output = (
-                                    "[CONTEXT REFRESH: this range substantially overlaps code "
-                                    "still present in the active conversation.]\n" + tool_output
+                        if tool_call.fn_name == "read_file" and isinstance(tool_output, str):
+                            reread_path = str(tool_arguments.get("path") or "")
+                            tool_summary, returned_range = _read_file_tool_response(
+                                tool_arguments,
+                                tool_output,
+                                visible_read_ranges.get(reread_path, []),
+                            )
+                            if returned_range is not None:
+                                visible_read_ranges.setdefault(reread_path, []).append(
+                                    returned_range
                                 )
-                        tool_summary = _tool_output_text(
-                            tool_call.fn_name,
-                            tool_arguments,
-                            tool_output,
-                        )
+                        else:
+                            tool_summary = _tool_output_text(
+                                tool_call.fn_name,
+                                tool_arguments,
+                                tool_output,
+                            )
                         trajectory.log(
                             "tool_result",
                             {
@@ -2520,6 +2485,85 @@ def _range_coverage_fraction(
     return sum(right - left + 1 for left, right in merged) / total
 
 
+def _uncovered_read_ranges(
+    requested: tuple[int, int], covered_ranges: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """Return requested line intervals not already represented in context."""
+    start, end = requested
+    intersections = sorted(
+        (max(start, covered_start), min(end, covered_end))
+        for covered_start, covered_end in covered_ranges
+        if max(start, covered_start) <= min(end, covered_end)
+    )
+    uncovered: list[tuple[int, int]] = []
+    cursor = start
+    for left, right in intersections:
+        if left > cursor:
+            uncovered.append((cursor, left - 1))
+        cursor = max(cursor, right + 1)
+        if cursor > end:
+            break
+    if cursor <= end:
+        uncovered.append((cursor, end))
+    return uncovered
+
+
+_READ_FILE_METADATA = re.compile(r"\n?\[CLEARWING_READ_METADATA total_lines=(\d+)\]\s*$")
+
+
+def _format_line_ranges(ranges: list[tuple[int, int]]) -> str:
+    if not ranges:
+        return "None"
+    return ", ".join(
+        f"{start}-{end}" if start != end else str(start) for start, end in ranges
+    )
+
+
+def _read_file_tool_response(
+    arguments: dict[str, Any],
+    raw_output: str,
+    visible_ranges: list[tuple[int, int]],
+) -> tuple[str, tuple[int, int] | None]:
+    """Render truthful read metadata from source lines actually sent to the model."""
+
+    requested = _requested_read_range(arguments)
+    metadata_match = _READ_FILE_METADATA.search(raw_output)
+    total_lines = int(metadata_match.group(1)) if metadata_match else None
+    content = _READ_FILE_METADATA.sub("", raw_output)
+    rendered_content = _clip_text(content, 3000)
+    numbered = [
+        int(match.group(1))
+        for line in rendered_content.splitlines()
+        if (match := re.match(r"\s*(\d+)\t", line))
+    ]
+    returned = (numbered[0], numbered[-1]) if numbered else None
+    coverage = (
+        _range_coverage_fraction(returned, visible_ranges) if returned is not None else 0.0
+    )
+    uncovered = (
+        _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
+    )
+    eof = total_lines is not None and requested[1] >= total_lines
+    truncated = (
+        bool(re.search(r"\[(?:file )?truncated at \d+ characters\]", content))
+        or len(content) > len(rendered_content)
+    )
+
+    header = "\n".join(
+        [
+            "[READ_FILE]",
+            f"Requested: {requested[0]}-{requested[1]}",
+            f"Returned: {_format_line_ranges([returned] if returned else [])}",
+            f"EOF: {eof}",
+            f"Truncated: {truncated}",
+            f"Overlap: {coverage:.0%}",
+            f"New lines: {_format_line_ranges(uncovered)}",
+            "[/READ_FILE]",
+        ]
+    )
+    return f"{header}\n{rendered_content}", returned
+
+
 def _summarize_match_list(tool_name: str, value: list[Any]) -> str:
     if not value:
         return f"{tool_name}: no matches."
@@ -2623,7 +2667,6 @@ _DYNAMIC_VERIFICATION_COMMAND = re.compile(
     r")",
     re.IGNORECASE,
 )
-
 
 def _tool_requires_active_potential(tool_name: str, arguments: dict[str, Any]) -> bool:
     """Return whether a tool call performs dynamic verification rather than exploration."""

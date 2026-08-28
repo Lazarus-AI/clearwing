@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from clearwing.sourcehunt.callgraph import CallGraph
 from clearwing.sourcehunt.preprocessor import (
     Preprocessor,
     PreprocessResult,
@@ -258,6 +260,40 @@ class TestPreprocessorErrorPaths:
     def test_invalid_repo_url_raises(self):
         with pytest.raises(ValueError, match="neither a git URL nor"):
             Preprocessor(repo_url="not-a-real-thing").run()
+
+
+def test_large_repo_decouples_repository_callgraph_from_subsystem_taint(monkeypatch):
+    monkeypatch.setattr(Preprocessor, "_LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD", 1)
+    callgraph_builder = MagicMock()
+    callgraph_builder.available = True
+    callgraph_builder.build.return_value = CallGraph()
+    taint_analyzer = MagicMock()
+    taint_analyzer.available = True
+    taint_analyzer.analyze_repo.return_value = MagicMock(paths=[])
+
+    with (
+        patch(
+            "clearwing.sourcehunt.preprocessor.CallGraphBuilder",
+            return_value=callgraph_builder,
+        ),
+        patch(
+            "clearwing.sourcehunt.preprocessor.TaintAnalyzer",
+            return_value=taint_analyzer,
+        ),
+    ):
+        Preprocessor(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            build_callgraph=True,
+            run_taint=True,
+            subsystem_paths=["src/codec_a.c"],
+        ).run()
+
+    callgraph_builder.build.assert_called_once_with(str(FIXTURE_C_PROPAGATION))
+    taint_analyzer.analyze_repo.assert_called_once_with(
+        str(FIXTURE_C_PROPAGATION),
+        files=[str(FIXTURE_C_PROPAGATION / "src/codec_a.c")],
+    )
 
 
 class TestIsGitUrl:

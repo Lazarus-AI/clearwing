@@ -13,7 +13,7 @@ from clearwing.agent.tools.hunt import build_reporting_tools
 from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.llm.native import NativeToolSpec
-from clearwing.sourcehunt.hunter import NativeHunter
+from clearwing.sourcehunt.hunter import NativeHunter, _read_file_tool_response
 
 
 @dataclass
@@ -70,6 +70,17 @@ def _make_hunter(agent_mode="constrained", max_steps=20, budget_usd=0.0):
         budget_usd=budget_usd,
     )
     return hunter, llm
+
+
+def test_read_metadata_does_not_treat_source_word_as_truncation():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py", "offset": 0, "limit": 1},
+        "     1\ttruncated = False\n[CLEARWING_READ_METADATA total_lines=2]",
+        [],
+    )
+
+    assert returned == (1, 1)
+    assert "Truncated: False" in summary
 
 
 @pytest.mark.asyncio
@@ -501,6 +512,86 @@ async def test_read_file_pagination_is_not_falsely_throttled():
         if len(c[0]) > 1 and isinstance(c[0][1], dict) and c[0][1].get("repeated_skip")
     ]
     assert len(skipped) == 0
+
+
+@pytest.mark.asyncio
+async def test_overlapping_read_file_refreshes_return_content_with_direction():
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=6, budget_usd=0.0)
+    hunter.tools[0].name = "read_file"
+    hunter.tools[0].schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["path"],
+    }
+
+    def read_handler(offset=0, limit=2000, **kwargs):
+        start = offset + 1
+        end = min(offset + limit, 52)
+        body = "\n".join(f"{line:6d}\tline {line}" for line in range(start, end + 1))
+        return f"{body}\n[CLEARWING_READ_METADATA total_lines=52]"
+
+    hunter.tools[0].handler = read_handler
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": 0, "limit": 50},
+                )
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": 40, "limit": 12},
+                )
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file",
+                    {"path": "views.py", "offset": 10, "limit": 10},
+                )
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_logger = MagicMock()
+        mock_traj.for_hunter.return_value = mock_logger
+        await hunter.arun()
+
+    tool_results = [
+        call.args[1]["tool_summary"]
+        for call in mock_logger.log.call_args_list
+        if call.args and call.args[0] == "tool_result"
+    ]
+    assert len(tool_results) == 3
+    assert "Requested: 1-50" in tool_results[0]
+    assert "Returned: 1-50" in tool_results[0]
+    assert "EOF: False" in tool_results[0]
+    assert "Overlap: 0%" in tool_results[0]
+    assert "Requested: 41-52" in tool_results[1]
+    assert "Returned: 41-52" in tool_results[1]
+    assert "EOF: True" in tool_results[1]
+    assert "Overlap: 83%" in tool_results[1]
+    assert "New lines: 51-52" in tool_results[1]
+    assert "Requested: 11-20" in tool_results[2]
+    assert "Returned: 11-20" in tool_results[2]
+    assert "EOF: False" in tool_results[2]
+    assert "Overlap: 100%" in tool_results[2]
+    assert "New lines: None" in tool_results[2]
+    assert not any(
+        isinstance(output, dict) and output.get("status") == "read_already_recent"
+        for output in tool_results
+    )
 
 
 @pytest.mark.asyncio

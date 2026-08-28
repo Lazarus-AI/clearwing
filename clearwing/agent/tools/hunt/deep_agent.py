@@ -153,13 +153,18 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         # with NR directly so the emitted line numbers match the file.
         cmd = (
             f"awk -v s={start} -v e={end} "
-            f"'NR>=s && NR<=e {{ printf \"%6d\\t%s\\n\", NR, $0 }}' "
+            "'NR>=s && NR<=e { printf \"%6d\\t%s\\n\", NR, $0 } "
+            "END { printf \"__CLEARWING_TOTAL_LINES__=%d\\n\", NR > \"/dev/stderr\" }' "
             f"{shlex.quote(path)}"
         )
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
             return _cap_output(f"error reading {path}: {result.stderr.strip()}", "file error")
-        return _cap_output(result.stdout, "file")
+        content = _cap_output(result.stdout, "file")
+        total_match = re.search(r"__CLEARWING_TOTAL_LINES__=(\d+)", result.stderr)
+        if total_match:
+            content += f"\n[CLEARWING_READ_METADATA total_lines={total_match.group(1)}]"
+        return content
 
     def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:
