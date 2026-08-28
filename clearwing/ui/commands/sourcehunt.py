@@ -309,6 +309,25 @@ def add_parser(subparsers):
         help="Skip the ranker; assign default priority scores to all files.",
     )
     parser.add_argument(
+        "--target-file",
+        "--target-files",
+        action="append",
+        default=[],
+        metavar="PATH",
+        dest="target_files",
+        help=(
+            "Hunt only this repository-relative file (repeatable). Bypasses the "
+            "ranker and seeds line-numbered source windows directly to hunters."
+        ),
+    )
+    parser.add_argument(
+        "--target-window-lines",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Lines per directly seeded target-file window (40-500; default: 480).",
+    )
+    parser.add_argument(
         "--seed-corpus",
         default=None,
         dest="seed_corpus",
@@ -1170,6 +1189,8 @@ def handle(cli, args):
         resume_session_id=getattr(args, "resume", None),
         branch=args.branch,
         local_path=args.local_path,
+        target_files=args.target_files or None,
+        target_window_lines=args.target_window_lines,
         depth=args.depth,
         budget_usd=args.budget,
         input_price_per_million=getattr(args, "input_price_per_million", None),
@@ -1286,6 +1307,9 @@ def handle(cli, args):
     if result.status == "budget_exhausted":
         cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
         cli.console.print("  Status: partial (budget exhausted)")
+    elif result.status == "incomplete":
+        cli.console.print("\n[bold yellow]Sourcehunt target plan incomplete[/bold yellow]")
+        cli.console.print("  Status: partial (one or more target windows did not complete)")
     else:
         cli.console.print("\n[bold]Sourcehunt complete[/bold]")
     cli.console.print(f"  Session: {result.session_id}")
@@ -1348,6 +1372,8 @@ def _handle_machine(descriptor: int) -> int:
                 flow=parsed["flow"],
                 agent_mode=parsed["agent_mode"],
                 no_rank=parsed["no_rank"],
+                target_files=parsed.get("target_files"),
+                target_window_lines=parsed.get("target_window_lines"),
                 no_per_file_hunt=parsed["no_per_file_hunt"],
                 enable_subsystem_hunt=parsed["subsystem_hunt"]
                 or bool(parsed.get("subsystem_paths")),
@@ -1383,6 +1409,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "flow",
         "agent_mode",
         "no_rank",
+        "target_files",
+        "target_window_lines",
         "format",
         "subsystem_hunt",
         "subsystem_paths",
@@ -1418,6 +1446,17 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "no_per_file_hunt": _boolean(value.get("no_per_file_hunt", False), "no_per_file_hunt"),
         "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),
     }
+    if "target_files" in value:
+        target_files = value["target_files"]
+        if not isinstance(target_files, list) or not 1 <= len(target_files) <= 100:
+            raise ValueError("target_files must be a list containing 1 to 100 paths")
+        parsed["target_files"] = [
+            _bounded_text(path, "target_files entry", 1024) for path in target_files
+        ]
+    if "target_window_lines" in value:
+        parsed["target_window_lines"] = _bounded_integer(
+            value["target_window_lines"], "target_window_lines", 40, 500
+        )
     if "subsystem_paths" in value:
         parsed["subsystem_paths"] = value["subsystem_paths"]
     if "subsystem_budget_usd" in value:

@@ -9,6 +9,7 @@ step budget is exhausted.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ from clearwing.sandbox.container import SandboxContainer
 
 from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
+from .target_windows import render_target_window_message, split_physical_source_lines
 
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
@@ -1189,6 +1191,41 @@ def _build_unconstrained_prompt(
     return prompt
 
 
+def _target_window_initial_message(file_target: FileTarget) -> str | None:
+    """Render an explicitly targeted source window with stable line numbers."""
+    start_line = file_target.get("target_start_line")
+    end_line = file_target.get("target_end_line")
+    total_lines = file_target.get("target_total_lines")
+    absolute_path = file_target.get("absolute_path")
+    if not all(isinstance(value, int) for value in (start_line, end_line, total_lines)):
+        return None
+    if not absolute_path or start_line < 1 or end_line < start_line or total_lines < end_line:
+        return None
+
+    try:
+        source_bytes = Path(absolute_path).read_bytes()
+    except OSError:
+        logger.warning("Unable to seed target window from %s", absolute_path, exc_info=True)
+        return None
+    expected_sha256 = file_target.get("target_sha256")
+    if expected_sha256 and hashlib.sha256(source_bytes).hexdigest() != expected_sha256:
+        raise ValueError(f"target file changed before hunting: {file_target.get('path', '')}")
+    all_lines = split_physical_source_lines(source_bytes)
+    source_lines = all_lines[start_line - 1 : end_line]
+    if len(source_lines) != end_line - start_line + 1:
+        raise ValueError(
+            f"target window no longer matches file extent: {file_target.get('path', '')}"
+        )
+
+    return render_target_window_message(
+        file_path=file_target.get("path", "unknown"),
+        language=file_target.get("language", ""),
+        source_lines=source_lines,
+        start_line=start_line,
+        total_lines=total_lines,
+    )
+
+
 SEED_TRANSCRIPT_BLOCK = """
 A previous investigation of this file found the following:
 {transcript}
@@ -1548,7 +1585,9 @@ class NativeHunter:
         # Ranges still present in the active conversation epoch. Unlike
         # lines_read, this is cleared after compaction so a focused reread can
         # legitimately boost code back into recent context.
-        visible_read_ranges: dict[str, list[tuple[int, int]]] = {}
+        visible_read_ranges: dict[str, list[tuple[int, int]]] = {
+            path: list(ranges) for path, ranges in self.ctx.read_ranges.items()
+        }
         overlapping_refreshes: dict[str, int] = {}
         flags_raised: int = 0
         empty_response_nudges: int = 0
@@ -2790,7 +2829,17 @@ def build_hunter_agent(
     if campaign_hint and prompt_mode != "unconstrained":
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
-    initial_user_message = f"Hunt for vulnerabilities in {ctx.file_path or 'unknown'}."
+    initial_user_message = _target_window_initial_message(file_target)
+    if initial_user_message is not None and ctx.file_path:
+        # The first user message contains source from this file, so constrained
+        # trace reporting should treat it as read just like read_source_file.
+        ctx.files_read.add(ctx.file_path)
+        start_line = file_target.get("target_start_line")
+        end_line = file_target.get("target_end_line")
+        if isinstance(start_line, int) and isinstance(end_line, int):
+            ctx.read_ranges.setdefault(ctx.file_path, []).append((start_line, end_line))
+    else:
+        initial_user_message = f"Hunt for vulnerabilities in {ctx.file_path or 'unknown'}."
 
     return NativeHunter(
         llm=llm,

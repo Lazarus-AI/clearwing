@@ -44,6 +44,8 @@ clearwing sourcehunt <repo_url_or_path>
   [--reporter-affiliation AFFILIATION]
   [--reporter-email EMAIL]
   [--model MODEL_NAME]        # override per-task model selection
+  [--target-files PATH]       # repeatable exact-file hunt; bypasses ranker
+  [--target-window-lines N]   # numbered first-turn window size (default: 480)
   [--base-url URL]            # OpenAI-compat endpoint (OpenRouter, Ollama, ...)
   [--api-key KEY]             # credential for --base-url
   [--output-dir DIR]          # default: ./results/sourcehunt (dev) or ~/.clearwing/results/sourcehunt
@@ -78,6 +80,24 @@ Depths:
 - **`--prompt-mode`**: `unconstrained` uses a simple discovery prompt
   (Glasswing-style); `specialist` uses prescriptive checklists per CWE
   category.
+
+### Exact-file targeting
+
+```bash
+clearwing sourcehunt /path/to/repo \
+  --target-files src/parser.c \
+  --target-window-lines 480
+```
+
+`--target-file`/`--target-files` is repeatable and accepts repository-relative
+source files. It bypasses the ranker, filters static-analysis results to those
+files, and sends each hunter an independently seeded, line-numbered source
+window on its first turn. Hunters may still follow concrete callers and
+callees elsewhere through their source-navigation tools. Window sizes from
+40 through 500 lines are supported; 480 is the default and 160 is useful for
+denser, more focused passes. To keep direct prompt fan-out bounded, a request
+may contain at most 100 files, 512 windows, 2 MiB per file, and 16 MiB total;
+an individual rendered window may not exceed 512 KiB.
 
 ### Band promotion & budget (spec 003)
 
