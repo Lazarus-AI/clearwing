@@ -44,6 +44,9 @@ from .state import FileTarget, Finding, SubsystemTarget
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
 
+_CALLGRAPH_NAVIGATION_TOOL_NAMES = frozenset(
+    {"lookup_callers", "lookup_callees", "list_functions", "read_function"}
+)
 
 
 def _trajectory_base_dir() -> Path:
@@ -359,11 +362,9 @@ DISCOVERY_PROMPT = """Please find a security vulnerability in this program.
 
 Your focus: {file_path} in {project_name}
 
-You have access to the full source tree and a sandboxed build/run environment
-with ASan, GDB, and standard development tools. Read the code, understand what
-it does, hypothesize vulnerabilities that might exist, and confirm or reject
-your hypotheses by running the actual project — adding debug logic, using
-debuggers, writing test inputs, whatever you need.
+You have access to the full source tree and static-analysis tools. Read the
+code, understand what it does, and develop source-backed vulnerability
+hypotheses. Dynamic reproduction belongs to the separate verification phase.
 
 If you find a vulnerability, call record_finding with a description, severity,
 CWE, and proof-of-concept. If you find nothing after thorough investigation,
@@ -399,11 +400,11 @@ Execution rules:
 - This is a single-file hunt. Start with the target file, not a broad directory listing.
 - Only use list_source_tree when you need to locate a concretely named related file or directory.
 - By step 3, form at least one concrete candidate hypothesis tied to a function, field, buffer, or array.
-- Prefer narrow grep_source/find_callers queries over broad regex sweeps across large directories.
+- Prefer narrow grep_source queries over broad regex sweeps across large directories.
 - If a grep result is dominated by static tables, scan constants, or generic arithmetic noise, refine the query immediately.
 - Keep read_source_file windows tight, usually 40-120 lines around the suspicious code.
 - If a tool result is summarized or truncated, narrow the next request instead of repeating the same broad call.
-- Once you have a plausible candidate, validate it with compile/run/fuzz tools when realistic, or explain exactly why static evidence is sufficient.
+- Once you have a plausible candidate, validate it with focused source evidence and preserve any remaining dynamic question for verification.
 - Do not spend the final step on marginal confirmation. If the mechanism is already coherent, use record_finding.
 - By the last 2 steps, either call record_finding or state explicitly why the evidence is still insufficient.
 """
@@ -417,16 +418,15 @@ Lines of code: {loc}
 Tags: {tags}
 {seeded_crash_block}{semgrep_hints_block}
 You have access to:
-- The cloned source tree (read-only) via read_source_file, list_source_tree, grep_source, find_callers
-- A sandboxed compile + run loop via compile_file, run_with_sanitizer, write_test_case
+- The cloned source tree (read-only) via read_source_file, list_source_tree, grep_source
 - record_finding to log a vulnerability when you find one
 
 Approach:
 1. Read the target file and understand its role in the project.
 2. Identify potential vulnerability patterns (memory safety, logic, injection, auth bypass).
-3. Read related files (callers, callees, headers it includes) for context using grep_source and find_callers.
+3. Read related files (callers, callees, headers it includes) for context using grep_source.
 4. Hypothesize specific vulnerabilities.
-5. If the file has a clear entry point, write a test input via write_test_case and try compile_file + run_with_sanitizer to confirm or reject each hypothesis.
+5. Trace the candidate from attacker-controlled input to the concrete sink and identify relevant guards or missing checks.
 6. If you find a real bug, call record_finding with:
    - severity (critical/high/medium/low/info)
    - cwe (CWE-89, CWE-787, etc.)
@@ -507,10 +507,9 @@ Approach:
    Start by grepping for memset(..., -1 ...), 0xFF/0xFFFF sentinels, and
    tables compared against IDs/counters such as slice_num, frame_num, or
    owner indexes.
-5. Use compile_file + run_with_sanitizer on the file with ASan/UBSan. If the
-   project has a fuzz entry point, run it with a crafted input.
-6. record_finding with evidence_level=crash_reproduced if you got an ASan
-   report, else static_corroboration if you can show a pattern.
+5. Establish the allocation, arithmetic, and write relationship from source.
+6. record_finding with evidence_level=static_corroboration when the mechanism
+   is supported end-to-end; leave dynamic reproduction to verification.
 
 Static-evidence threshold for sentinel/counter bugs:
 - If you can show a table is sentinel-filled, written with a monotonically
@@ -576,7 +575,7 @@ Approach:
 2. Trace the userspace-controlled inputs through the function to find where they're used as sizes, indices, or pointers.
 3. Look for asymmetric lock/unlock or refcount get/put across early-return paths.
 4. For each ioctl dispatch, verify the capability check runs BEFORE any userspace copy_from_user.
-5. If the file has a fuzz entry point, run compile_file + run_with_sanitizer.
+5. Establish the user-controlled path and concrete security impact from source.
 6. record_finding with CWE-416 (UAF), CWE-787 (OOB write), CWE-367 (TOCTOU),
    CWE-862 (missing authorization), or CWE-190 (integer overflow) as appropriate.
 
@@ -717,7 +716,7 @@ Do NOT try to find a traditional vulnerability. Instead, answer these specific q
 
 1. BUFFER SIZE ADEQUACY
    For each buffer size constant or macro, ask: is this big enough for every
-   downstream use? Use grep_source / find_callers to walk the call sites — are
+   downstream use? Use grep_source to walk the call sites — are
    any callers writing more bytes than this constant allows? Any cases where
    this constant is used as a memcpy length but the source data can be larger?
 
@@ -956,8 +955,11 @@ def _build_hunter_prompt(
     semgrep_hints_block = ""
     if semgrep_hints:
         hint_lines = []
-        for h in semgrep_hints[:5]:
-            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+        for h in semgrep_hints:
+            desc = f"  - line {h.get('line', '?')}: {h.get('description', '')}"
+            if h.get("rationale"):
+                desc += f" [{h['rationale']}]"
+            hint_lines.append(desc)
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — use as starting points):\n"
             + "\n".join(hint_lines)
@@ -989,7 +991,7 @@ def _build_propagation_prompt(file_target: FileTarget) -> str:
 # --- Deep agent mode ----------------------------------------------------------
 
 DEEP_AGENT_PROMPT = """You are a security researcher with full shell access inside a sandboxed container.
-The source tree at /workspace is a writable copy — modify source, add debug printfs, recompile, and use `git diff` to track your changes.
+Your shell starts in /workspace, a writable copy of the source tree. Use repository-relative paths; do not prepend `cd /workspace`. Modify source, add debug printfs, recompile, and use `git diff` to track your changes.
 ASan is enabled by default. UBSan is also available.
 
 Tools:
@@ -1068,8 +1070,11 @@ def _build_deep_agent_prompt(
     semgrep_hints_block = ""
     if semgrep_hints:
         hint_lines = []
-        for h in semgrep_hints[:5]:
-            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+        for h in semgrep_hints:
+            desc = f"  - line {h.get('line', '?')}: {h.get('description', '')}"
+            if h.get("rationale"):
+                desc += f" [{h['rationale']}]"
+            hint_lines.append(desc)
         semgrep_hints_block = (
             "\nStatic analysis hints (NOT ground truth — starting points only):\n"
             + "\n".join(hint_lines)
@@ -1131,8 +1136,11 @@ def _build_unconstrained_prompt(
         )
     if semgrep_hints:
         hint_lines = []
-        for h in semgrep_hints[:5]:
-            hint_lines.append(f"  - line {h.get('line', '?')}: {h.get('description', '')}")
+        for h in semgrep_hints:
+            desc = f"  - line {h.get('line', '?')}: {h.get('description', '')}"
+            if h.get("rationale"):
+                desc += f" [{h['rationale']}]"
+            hint_lines.append(desc)
         seed_parts.append(
             "\nStatic analysis hints (NOT ground truth — starting points only):\n"
             + "\n".join(hint_lines)
@@ -1211,10 +1219,60 @@ SUBSYSTEM_HUNT_PROMPT = """You are a security researcher investigating the \
 This subsystem spans {file_count} files under {root_path}:
 {file_listing}
 {cross_file_calls}
-You have full shell access. The source tree is at /workspace.
+You have full shell access, starting in /workspace. Use repository-relative paths; do not prepend `cd /workspace`.
 
 Your mission is to find exploitable vulnerabilities in this subsystem — \
 single-file bugs and cross-file bugs alike.
+
+Survey before committing: identify the major security boundaries and inspect
+representative entry points before spending most of the hunt on one lead.
+Preserve several plausible candidates when they exist; if only one survives the
+survey, say why. Do not let an easy local memory sink erase unresolved protocol,
+lifecycle, verification, authorization, or configuration questions.
+
+For each major security boundary, build an invariant map in the relevant
+potential: the attacker-controlled inputs, relationships that must hold between
+them, checks the code actually performs, and checks that appear missing. In
+particular ask only these high-value questions:
+- Verification/protocol: are type, algorithm/OID, length, encoding, key, and
+  parameter relationships all enforced, including across provider dispatch?
+- Lifecycle/state: can a value change after it was validated, activated, cached,
+  or made security-sensitive, and is it revalidated before later consumption?
+  A validation check disproves a candidate only if it dominates every subsequent
+  attacker-controlled mutation and every security-sensitive use, across all
+  reachable states. Map validation, mutation, and use by lifecycle stage before
+  treating an earlier check as proof of safety.
+- Branch/configuration: does every feature flag and error path preserve the same
+  confidentiality, integrity, authorization, and indistinguishable-failure property?
+- Authorization: is the decision scoped to the exact actor, resource, operation,
+  and current state rather than a cached or neighboring object?
+- Allocation/access extent: for every attacker-controlled size, count, offset,
+  or dimension that reaches a memory operation, map the exact expressions used
+  for validation, allocation, and access against the live bounds of every
+  object involved. State the required inequalities and prove them using the
+  values actually consumed at the sink. Treat differences between validated
+  and consumed values—including clamping, alignment, truncation, casts, and
+  unit conversion—as distinct leads.
+- Path confinement: whenever untrusted path text reaches filesystem operations,
+  enumerate how each relevant layer interprets separators, normalization,
+  drive/UNC roots, repeated separators, and parent components. Compare archive
+  or protocol naming syntax, application validation, filesystem API behavior,
+  and every supported target platform rather than only the analysis host. For
+  traversal candidates, build a compact interpretation matrix and treat
+  validation/execution semantic mismatches as distinct leads instead of stopping
+  after the first bypass.
+
+As soon as you name a possible bypass or security hypothesis, call
+`flag_potential` before doing more than one verification step. Flagging is a
+bookmark, not a claim that the issue is confirmed. Enrich it with
+`update_potential` and its invariant-map fields as source evidence accumulates.
+`record_finding` requires a complete map. Do not reread the whole
+target file to reconstruct candidates already preserved in the potential queue.
+
+Dynamic verification requires an active potential. Before building the project,
+installing dependencies, running the target or tests, enabling sanitizers, or
+fuzzing, first call `flag_potential` with the concrete source-level hypothesis.
+Build setup counts as verification, not exploration.
 
 Not a finding (skip these):
 - Missing NULL check on trusted-caller pointers (robustness, not security)
@@ -1289,8 +1347,7 @@ def _build_subsystem_prompt(
                 break
         if edges:
             cross_file_calls = (
-                "\nCross-file call edges within this subsystem:\n"
-                + "\n".join(edges) + "\n"
+                "\nCross-file call edges within this subsystem:\n" + "\n".join(edges) + "\n"
             )
 
     existing_findings_block = ""
@@ -1345,7 +1402,6 @@ def _build_subsystem_prompt(
     return prompt + DEEP_TRACE_INSTRUCTIONS
 
 
-
 def build_subsystem_hunter_agent(
     subsystem: SubsystemTarget,
     repo_path: str,
@@ -1374,9 +1430,27 @@ def build_subsystem_hunter_agent(
         findings_pool=findings_pool,
         callgraph=callgraph,
         subsystem=subsystem,
+        require_invariant_map=True,
     )
 
     tools = build_deep_agent_tools(ctx)
+    if callgraph is not None:
+        n_funcs = sum(len(v) for v in callgraph.functions.values())
+        n_edges = sum(len(v) for v in callgraph.calls_out.values())
+        cg_tool_names = [
+            t.name
+            for t in tools
+            if t.name in _CALLGRAPH_NAVIGATION_TOOL_NAMES
+        ]
+        logger.info(
+            "[%s] callgraph active: functions=%d edges=%d tools=%s",
+            subsystem.root_path,
+            n_funcs,
+            n_edges,
+            cg_tool_names,
+        )
+    else:
+        logger.info("[%s] callgraph NOT available — callgraph tools omitted", subsystem.root_path)
     prompt = _build_subsystem_prompt(
         subsystem,
         project_name,
@@ -1384,7 +1458,6 @@ def build_subsystem_hunter_agent(
         callgraph=callgraph,
         max_files_in_prompt=max_files_in_prompt,
     )
-
     if campaign_hint:
         prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
 
@@ -1394,7 +1467,8 @@ def build_subsystem_hunter_agent(
     )
     logger.info(
         "Subsystem hunt [%s]: %d files",
-        subsystem.name, len(subsystem.files),
+        subsystem.name,
+        len(subsystem.files),
     )
     return NativeHunter(
         llm=llm,
@@ -1420,6 +1494,7 @@ class HunterRunResult:
     # | "empty_response"
     stop_reason: str
     transcript_summary: str = ""
+    potentials: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1433,6 +1508,7 @@ class NativeHunter:
     budget_usd: float = 0.0  # 0 = unlimited (bounded by max_steps)
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
+    lead_checkpoint_calls: int = 4
     summarizer: ContextSummarizer | None = field(default=None)
 
     def _should_stop(self, step: int, cost_usd: float) -> str | None:
@@ -1468,12 +1544,39 @@ class NativeHunter:
         files_visited: set[str] = set()
         # {rel_path: set of (start_line, end_line) tuples from read_file calls}
         lines_read: dict[str, list[tuple[int, int]]] = {}
+        # Ranges still present in the active conversation epoch. Unlike
+        # lines_read, this is cleared after compaction so a focused reread can
+        # legitimately boost code back into recent context.
+        visible_read_ranges: dict[str, list[tuple[int, int]]] = {}
+        overlapping_refreshes: dict[str, int] = {}
         flags_raised: int = 0
         empty_response_nudges: int = 0
+        potential_reminder_active = False
+        exploration_calls_since_checkpoint = 0
+        active_potential_id: str | None = None
 
+        synthesis_injected = False
         step = 0
         while True:
             step += 1
+            # Forced fresh synthesis: when approaching the stop boundary,
+            # inject a user message demanding the model consolidate findings
+            # before we cut it off.
+            if not synthesis_injected:
+                near_budget = self.budget_usd > 0 and total_cost_usd >= self.budget_usd * 0.75
+                near_steps = step >= self.max_steps - 1
+                if near_budget or near_steps:
+                    synthesis_injected = True
+                    messages.append(
+                        ChatMessage(
+                            "user",
+                            "You are approaching the end of your budget. Synthesize your final "
+                            "findings now. For each lead you investigated, either record_finding "
+                            "if it is source-backed, or discard it only if the source affirmatively "
+                            "disproves it. Do not drop leads merely because you ran out of time "
+                            "to fully verify them — record them with the evidence you have.",
+                        )
+                    )
             stop_reason = self._should_stop(step, total_cost_usd)
             if stop_reason:
                 logger.warning(
@@ -1501,6 +1604,7 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason=stop_reason,
                     transcript_summary=last_assistant_text[-500:],
+                    potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                 )
 
             model_call_id = stable_run_id(
@@ -1514,22 +1618,61 @@ class NativeHunter:
             if step % 25 == 1:
                 records = len(self.ctx.findings)
                 visited_list = ", ".join(sorted(files_visited)) or "none"
-                budget_note = (
-                    f"  Cost so far: ${total_cost_usd:.2f}"
-                    + (f" of ${self.budget_usd:.2f}" if self.budget_usd else "")
+                budget_note = f"  Cost so far: ${total_cost_usd:.2f}" + (
+                    f" of ${self.budget_usd:.2f}" if self.budget_usd else ""
                 )
+                # Nudge toward new classes after findings are recorded
+                diversity_note = ""
+                if records > 0:
+                    recorded_cwes = {f.get("cwe", "") for f in self.ctx.findings if f.get("cwe")}
+                    diversity_note = (
+                        f"\n  CWEs found so far: {', '.join(sorted(recorded_cwes)) or 'none'}"
+                        f"\n  → Look for DIFFERENT vulnerability classes now (UAF, race, logic, auth bypass, etc.)"
+                    )
                 sitrep = (
                     f"[SITUATION REPORT — step {step}]\n"
                     f"  Findings recorded: {records}  Flags raised: {flags_raised}\n"
                     f"  Files visited: {visited_list}\n"
-                    f"{budget_note}"
+                    f"{budget_note}{diversity_note}"
                 )
+                # The queue contains only leads that have not been ruled out.
+                if self.ctx.potentials:
+                    sitrep += "\n  Unresolved leads (not validated findings):"
+                    for p in self.ctx.potentials:
+                        sitrep += (
+                            f"\n    [{p.get('priority', 'medium')} "
+                            f"score={p.get('priority_score', 0)}] "
+                            f"{p.get('file', '?')}:{p.get('line', '?')} — "
+                            f"{p.get('hypothesis', '')}"
+                        )
+                        invariant = p.get("security_invariant")
+                        if invariant:
+                            sitrep += f"\n      invariant: {invariant}"
+                        questions = p.get("open_questions") or []
+                        if questions:
+                            sitrep += "\n      unresolved: " + "; ".join(questions[:4])
+                        disproof = p.get("disproof_conditions") or []
+                        if disproof:
+                            sitrep += "\n      disproof: " + "; ".join(disproof[:3])
+                        missing_checks = p.get("missing_checks") or []
+                        if missing_checks:
+                            sitrep += "\n      missing checks: " + "; ".join(missing_checks[:4])
+                if self.ctx.potential_history:
+                    history_counts: dict[str, int] = {}
+                    for p in self.ctx.potential_history:
+                        status = str(p.get("status", "examined"))
+                        history_counts[status] = history_counts.get(status, 0) + 1
+                    sitrep += "\n  Durable investigation history: " + ", ".join(
+                        f"{status}={count}" for status, count in sorted(history_counts.items())
+                    )
                 # Coverage note: how many files in the subsystem haven't been opened yet
                 if self.ctx.subsystem is not None:
                     subsystem_files = {ft.get("path", "") for ft in self.ctx.subsystem.files}
                     unopened = subsystem_files - files_visited
                     if unopened:
-                        sitrep += f"\n  Unopened subsystem files: {len(unopened)}/{len(subsystem_files)}"
+                        sitrep += (
+                            f"\n  Unopened subsystem files: {len(unopened)}/{len(subsystem_files)}"
+                        )
                 messages.append(ChatMessage("user", sitrep))
                 trajectory.log("sitrep", {"step": step, "content": sitrep})
 
@@ -1538,21 +1681,33 @@ class NativeHunter:
                 if self.summarizer and self.summarizer.should_summarize(messages):
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
+                    visible_read_ranges.clear()
+                    overlapping_refreshes.clear()
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 provider_name = getattr(self.llm, "provider_name", None)
+                active_tools = self.tools
+                if not self.ctx.potentials:
+                    inactive_potential_tools = {
+                        "update_potential",
+                        "dismiss_potential",
+                        "defer_potential",
+                    }
+                    active_tools = [
+                        tool
+                        for tool in active_tools
+                        if tool.name not in inactive_potential_tools
+                    ]
                 response = await self.llm.achat(
                     messages=messages,
                     system=self.prompt,
-                    tools=self.tools,
+                    tools=active_tools,
                     max_tokens=24000,
                 )
                 input_tokens = response.usage.prompt_tokens or 0
                 output_tokens = response.usage.completion_tokens or 0
                 details = getattr(response.usage, "prompt_tokens_details", None)
-                cached_tokens = (
-                    (getattr(details, "cached_tokens", None) or 0) if details else 0
-                )
+                cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
                 call_cost = _estimate_cost_usd(
                     input_tokens,
                     output_tokens,
@@ -1623,6 +1778,15 @@ class NativeHunter:
                     last_assistant_text.split("\n", 1)[0][:200],
                 )
             if response.reasoning_content:
+                EventBus().emit(
+                    EventType.HUNTER_REASONING,
+                    {
+                        "hunter_target": self.ctx.file_path,
+                        "text": response.reasoning_content[-2000:],
+                        "content_length": len(response.reasoning_content),
+                        "step": step,
+                    },
+                )
                 logger.debug(
                     "[%s] step=%d thinking: %s",
                     self.ctx.file_path,
@@ -1642,10 +1806,90 @@ class NativeHunter:
                         tool_calls=tool_calls_in_response,
                     )
                 )
+                tool_names = {tool_call.fn_name for tool_call in tool_calls_in_response}
+                checkpoint_just_answered = potential_reminder_active
+                potential_reminder_active = False
+                if "flag_potential" in tool_names:
+                    exploration_calls_since_checkpoint = 0
+                candidate_language = "\n".join(
+                    part for part in (last_assistant_text, last_reasoning_content) if part
+                )
+                articulated_lead = bool(
+                    re.search(
+                        r"\b(?:bypass hypothesis|potential bypass|authorization bypass|"
+                        r"security issue|potential vulnerability|could allow unauthorized|"
+                        r"verify whether|without check(?:ing)?|attacker[- ]controlled|"
+                        r"missing validation|could overflow|may (?:reuse|cache)|"
+                        r"unlike the other path)\b",
+                        candidate_language,
+                        re.IGNORECASE,
+                    )
+                )
+                investigative_tool_names = {
+                    "execute",
+                    "read_file",
+                    "read_source_file",
+                    "read_function",
+                    "list_functions",
+                    "lookup_callers",
+                    "lookup_callees",
+                    "find_security_issues",
+                }
+                uses_investigative_tool = any(
+                    name in investigative_tool_names for name in tool_names
+                )
+                should_remind_about_potential = (
+                    not checkpoint_just_answered
+                    and "flag_potential" not in tool_names
+                    and articulated_lead
+                    and uses_investigative_tool
+                )
                 for tool_call in tool_calls_in_response:
                     tool_arguments = tool_call.fn_arguments
                     if not isinstance(tool_arguments, dict):
                         tool_arguments = {}
+                    if (
+                        active_potential_id is not None
+                        and tool_call.fn_name
+                        in {"update_potential", "dismiss_potential", "defer_potential"}
+                        and not tool_arguments.get("potential_id")
+                        and any(
+                            potential.get("id") == active_potential_id
+                            for potential in self.ctx.potentials
+                        )
+                    ):
+                        # The verification controller owns the active lead.
+                        # Do not rely on a smaller model to preserve an opaque
+                        # eight-character ID across a growing conversation.
+                        tool_arguments["potential_id"] = active_potential_id
+                    potentials_before = len(self.ctx.potentials)
+                    findings_before = len(self.ctx.findings)
+                    dynamic_verification_blocked = (
+                        active_potential_id is None
+                        and _tool_requires_active_potential(
+                            tool_call.fn_name,
+                            tool_arguments,
+                        )
+                    )
+                    reread_blocked = False
+                    reread_refresh = False
+                    reread_range: tuple[int, int] | None = None
+                    reread_path = ""
+                    if tool_call.fn_name == "read_file":
+                        reread_path = str(tool_arguments.get("path") or "")
+                        reread_range = _requested_read_range(tool_arguments)
+                        covered = _range_coverage_fraction(
+                            reread_range,
+                            visible_read_ranges.get(reread_path, []),
+                        )
+                        if covered >= 0.8:
+                            overlapping_refreshes[reread_path] = (
+                                overlapping_refreshes.get(reread_path, 0) + 1
+                            )
+                            reread_refresh = True
+                            reread_blocked = overlapping_refreshes[reread_path] > 1
+                        else:
+                            overlapping_refreshes[reread_path] = 0
 
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
@@ -1681,7 +1925,7 @@ class NativeHunter:
 
                     # Track file visits, line ranges, and flag counts for the
                     # end-of-run summary. Independent of the dedup key above.
-                    if tool_call.fn_name in ("read_file", "semgrep_scan"):
+                    if tool_call.fn_name in ("read_file", "find_security_issues"):
                         fpath = tool_arguments.get("path", "")
                         if fpath:
                             rel = str(fpath).removeprefix("/workspace/").removeprefix("/")
@@ -1689,16 +1933,55 @@ class NativeHunter:
                             if tool_call.fn_name == "read_file":
                                 offset = int(tool_arguments.get("offset", 0))
                                 limit = int(tool_arguments.get("limit", 2000))
-                                lines_read.setdefault(rel, []).append(
-                                    (offset + 1, offset + limit)
-                                )
+                                lines_read.setdefault(rel, []).append((offset + 1, offset + limit))
                     elif tool_call.fn_name == "flag_potential":
                         flags_raised += 1
 
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
 
-                    if skipped:
+                    if dynamic_verification_blocked:
+                        tool_output = {
+                            "error": (
+                                "dynamic verification requires an active potential. "
+                                "Flag the concrete source-level hypothesis with "
+                                "flag_potential before building, installing dependencies, "
+                                "running the target or tests, using sanitizers, or fuzzing."
+                            )
+                        }
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                                "dynamic_verification_blocked": True,
+                            },
+                        )
+                    elif reread_blocked and not skipped:
+                        tool_output = {
+                            "status": "read_already_recent",
+                            "error": (
+                                "At least 80% of this range is already present in the active "
+                                "conversation, and one context refresh was already allowed. "
+                                "This is now a reread spiral. Read a focused function/range or "
+                                "follow a caller, callee, reference, or active potential instead."
+                            ),
+                            "requested_range": reread_range,
+                            "visible_ranges": visible_read_ranges.get(reread_path, [])[-6:],
+                        }
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name,
+                            tool_arguments,
+                            tool_output,
+                        )
+                    elif skipped:
                         total_repeated_skips += 1
                         tool_output = {
                             "error": (
@@ -1733,6 +2016,13 @@ class NativeHunter:
                             },
                         )
                         tool_output = await self._run_tool(tools_by_name, tool_call)
+                        if tool_call.fn_name == "read_file" and reread_range is not None:
+                            visible_read_ranges.setdefault(reread_path, []).append(reread_range)
+                            if reread_refresh and isinstance(tool_output, str):
+                                tool_output = (
+                                    "[CONTEXT REFRESH: this range substantially overlaps code "
+                                    "still present in the active conversation.]\n" + tool_output
+                                )
                         tool_summary = _tool_output_text(
                             tool_call.fn_name,
                             tool_arguments,
@@ -1747,6 +2037,71 @@ class NativeHunter:
                                 "tool_summary": tool_summary,
                             },
                         )
+                        if (
+                            tool_call.fn_name == "flag_potential"
+                            and len(self.ctx.potentials) > potentials_before
+                        ):
+                            # Potential tools keep the queue in descending computed-priority
+                            # order. Verify the strongest lead, not merely the newest one.
+                            active_potential_id = self.ctx.potentials[0].get("id")
+                        elif (
+                            tool_call.fn_name == "record_finding"
+                            and len(self.ctx.findings) > findings_before
+                        ):
+                            if not any(
+                                potential.get("id") == active_potential_id
+                                for potential in self.ctx.potentials
+                            ):
+                                active_potential_id = (
+                                    self.ctx.potentials[0].get("id")
+                                    if self.ctx.potentials
+                                    else None
+                                )
+                        elif tool_call.fn_name == "dismiss_potential":
+                            dismissed_id = tool_arguments.get("potential_id")
+                            if dismissed_id == active_potential_id and not any(
+                                potential.get("id") == dismissed_id
+                                for potential in self.ctx.potentials
+                            ):
+                                active_potential_id = (
+                                    self.ctx.potentials[0].get("id")
+                                    if self.ctx.potentials
+                                    else None
+                                )
+                        elif (
+                            tool_call.fn_name == "defer_potential"
+                            and tool_arguments.get("potential_id") == active_potential_id
+                            and str(tool_output).startswith("Deferred potential")
+                        ):
+                            active_potential_id = (
+                                self.ctx.potentials[0].get("id")
+                                if self.ctx.potentials
+                                else None
+                            )
+                        elif (
+                            active_potential_id is None
+                            and tool_call.fn_name in investigative_tool_names
+                        ):
+                            exploration_calls_since_checkpoint += 1
+                    live_summary = _live_tool_result_summary(
+                        tool_call.fn_name,
+                        tool_arguments,
+                        tool_output,
+                    )
+                    EventBus().emit(
+                        EventType.TOOL_RESULT,
+                        {
+                            "tool": tool_call.fn_name,
+                            "tool_name": tool_call.fn_name,
+                            "hunter_target": self.ctx.file_path,
+                            "arguments": tool_arguments,
+                            "summary": live_summary,
+                            "is_error": _tool_result_is_error(tool_output),
+                            "content_length": len(tool_summary),
+                            "repeated_skip": skipped,
+                            "dynamic_verification_blocked": dynamic_verification_blocked,
+                        },
+                    )
                     messages.append(
                         ChatMessage(
                             "tool",
@@ -1788,7 +2143,37 @@ class NativeHunter:
                             tokens_used=total_input_tokens + total_output_tokens,
                             stop_reason="degenerate_loop",
                             transcript_summary=last_assistant_text[-500:],
+                            potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                         )
+                checkpoint_due_to_calls = (
+                    active_potential_id is None
+                    and exploration_calls_since_checkpoint >= self.lead_checkpoint_calls
+                )
+                if should_remind_about_potential or checkpoint_due_to_calls:
+                    potential_reminder_active = True
+                    exploration_calls_since_checkpoint = 0
+                    reminder = (
+                        "LEAD CHECKPOINT\n\n"
+                        "Review only the evidence gathered since the previous checkpoint.\n\n"
+                        "If you have a concrete suspicious line, Call flag_potential now before "
+                        "further exploration. State the violated security invariant, the "
+                        "attacker-controlled value or state that may reach it, and at least one "
+                        "condition that would disprove the hypothesis.\n\n"
+                        "If nothing is concrete enough, state NO_POTENTIAL and name the single "
+                        "semantic-navigation query most likely to expose or rule out a security "
+                        "boundary, then make that one query."
+                    )
+                    messages.append(ChatMessage("user", reminder))
+                    trajectory.log(
+                        "nudge",
+                        {
+                            "step": step,
+                            "kind": "lead_checkpoint",
+                            "trigger": "language"
+                            if should_remind_about_potential
+                            else "investigative_call_budget",
+                        },
+                    )
                 continue
 
             # Empty response: model sent no text and no tool calls.
@@ -1805,7 +2190,9 @@ class NativeHunter:
                     finish_reason = last_finish_reason()
                     logger.warning(
                         "[%s] step=%d: empty response (nudge %d/3) finish_reason=%s output_tokens=%d reasoning=%s",
-                        self.ctx.file_path, step, empty_response_nudges,
+                        self.ctx.file_path,
+                        step,
+                        empty_response_nudges,
                         finish_reason or "unknown",
                         last_output_tokens,
                         repr(last_reasoning_content[:200]) if last_reasoning_content else "none",
@@ -1859,6 +2246,7 @@ class NativeHunter:
                     tokens_used=total_input_tokens + total_output_tokens,
                     stop_reason="empty_response",
                     transcript_summary=last_assistant_text[-500:],
+                    potentials=[*self.ctx.potential_history, *self.ctx.potentials],
                 )
 
             if last_assistant_text:
@@ -1886,6 +2274,7 @@ class NativeHunter:
                 tokens_used=total_input_tokens + total_output_tokens,
                 stop_reason="completed",
                 transcript_summary=last_assistant_text[-500:],
+                potentials=[*self.ctx.potential_history, *self.ctx.potentials],
             )
 
     async def _run_tool(
@@ -1966,30 +2355,51 @@ class NativeHunter:
                     },
                 )
                 logger.info("[%s] $ %s", self.ctx.file_path, cmd[:200])
-            elif tool_call.fn_name in ("lookup_callers", "lookup_callees"):
-                func_name = arguments.get("func_name", "")
+            elif tool_call.fn_name in (
+                "lookup_callers",
+                "lookup_callees",
+                "list_functions",
+                "read_function",
+            ):
+                cg_arg = (
+                    arguments.get("func_name") or arguments.get("name") or arguments.get("path", "")
+                )
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
                         "tool_name": tool_call.fn_name,
-                        "func_name": func_name,
+                        "func_name": cg_arg,
                         "hunter_target": self.ctx.file_path,
                         "sandbox_id": sandbox_id,
                     },
                 )
-                logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, func_name)
+                logger.info("[%s] %s(%s)", self.ctx.file_path, tool_call.fn_name, cg_arg)
+                result = await tool.ainvoke(arguments)
+                # Log the callgraph result so --live output shows what came back
+                result_str = json.dumps(result, default=str)
+                if len(result_str) > 2000:
+                    result_str = result_str[:2000] + "..."
+                logger.info(
+                    "[%s] %s(%s) → %s",
+                    self.ctx.file_path,
+                    tool_call.fn_name,
+                    cg_arg,
+                    result_str,
+                )
+                return result
             else:
+                event_data = {
+                    "tool_name": tool_call.fn_name,
+                    "hunter_target": self.ctx.file_path,
+                    "sandbox_id": sandbox_id,
+                }
                 EventBus().emit(
                     EventType.TOOL_START,
-                    {
-                        "tool_name": tool_call.fn_name,
-                        "hunter_target": self.ctx.file_path,
-                        "sandbox_id": sandbox_id,
-                    },
+                    event_data,
                 )
             return await tool.ainvoke(arguments)
         except Exception as exc:
-            logger.warning(
+            logger.error(
                 "Hunter tool %s failed for %s: %s | fn_arguments=%r fn_arguments_json=%r",
                 tool_call.fn_name,
                 self.ctx.file_path,
@@ -2023,6 +2433,41 @@ def _clip_text(text: str, limit: int) -> str:
         return text
     clipped = text[:limit].rstrip()
     return f"{clipped}\n... truncated {len(text) - len(clipped)} chars ..."
+
+
+def _requested_read_range(arguments: dict[str, Any]) -> tuple[int, int]:
+    start_line = arguments.get("start_line")
+    if start_line is not None:
+        start = max(1, int(start_line))
+        end_line = arguments.get("end_line")
+        end = int(end_line) if end_line is not None else start + int(arguments.get("limit", 2000)) - 1
+        return start, max(start, end)
+    offset = max(0, int(arguments.get("offset", 0)))
+    limit = max(1, int(arguments.get("limit", 2000)))
+    return offset + 1, offset + limit
+
+
+def _range_coverage_fraction(
+    requested: tuple[int, int], covered_ranges: list[tuple[int, int]]
+) -> float:
+    start, end = requested
+    total = max(1, end - start + 1)
+    intersections: list[tuple[int, int]] = []
+    for covered_start, covered_end in covered_ranges:
+        left = max(start, covered_start)
+        right = min(end, covered_end)
+        if left <= right:
+            intersections.append((left, right))
+    if not intersections:
+        return 0.0
+    intersections.sort()
+    merged: list[tuple[int, int]] = []
+    for left, right in intersections:
+        if merged and left <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+        else:
+            merged.append((left, right))
+    return sum(right - left + 1 for left, right in merged) / total
 
 
 def _summarize_match_list(tool_name: str, value: list[Any]) -> str:
@@ -2081,7 +2526,7 @@ def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> 
             return _summarize_read_source(arguments, value)
         return _clip_text(value, 3000)
     if isinstance(value, list):
-        if tool_name in {"grep_source", "find_callers"}:
+        if tool_name == "grep_source":
             return _summarize_match_list(tool_name, value)
         if tool_name == "list_source_tree":
             return _summarize_tree_listing(arguments, value)
@@ -2093,6 +2538,100 @@ def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> 
         return _clip_text(json.dumps(value, indent=2, sort_keys=True), 3000)
     except Exception:
         return _clip_text(str(value), 3000)
+
+
+def _tool_result_is_error(value: Any) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get("isError") or value.get("error"))
+    if isinstance(value, str):
+        return value.lower().startswith(("no potential found", "error", "failed"))
+    return False
+
+
+_DYNAMIC_VERIFICATION_TOOLS = {
+    "compile_file",
+    "run_with_sanitizer",
+    "write_test_case",
+    "fuzz_harness",
+}
+
+_DYNAMIC_VERIFICATION_COMMAND = re.compile(
+    r"(?:"
+    r"\b(?:apt(?:-get)?|apk|dnf|yum)\s+(?:install|add|update)\b|"
+    r"\b(?:pip3?|uv)\s+(?:install|add)\b|"
+    r"\b(?:npm|pnpm|yarn|cargo)\s+(?:install|add)\b|"
+    r"\b(?:autoreconf|autogen|cmake|meson|ninja|make|ctest)\b|"
+    r"(?:^|&&\s*|\|\|\s*|[;|]\s*|\btimeout\s+\d+\s+)(?:\./|/workspace/)[\w.-]+|"
+    r"\b(?:cargo|go)\s+(?:build|test|run|fuzz)\b|"
+    r"\b(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)\b|"
+    r"(?:address|undefined|memory|thread)sanitizer|"
+    r"\b(?:asan|ubsan|msan|tsan)_options\b|"
+    r"-fsanitize(?:=|\b)|"
+    r"\b(?:afl(?:-fuzz|\+\+)?|honggfuzz|libfuzzer|cargo-fuzz|pytest)\b|"
+    r"\bsubprocess\.(?:run|popen|call)\b|"
+    r"\b(?:fuzz|fuzzer|fuzzing)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _tool_requires_active_potential(tool_name: str, arguments: dict[str, Any]) -> bool:
+    """Return whether a tool call performs dynamic verification rather than exploration."""
+    if tool_name in _DYNAMIC_VERIFICATION_TOOLS:
+        return True
+    if tool_name != "execute":
+        return False
+    return bool(_DYNAMIC_VERIFICATION_COMMAND.search(str(arguments.get("command", ""))))
+
+
+def _live_tool_result_summary(tool_name: str, arguments: dict[str, Any], value: Any) -> str:
+    """Produce one useful live-status line without echoing source or raw JSON."""
+    if tool_name in {"read_file", "read_source_file"} and isinstance(value, str):
+        path = str(arguments.get("path", "?"))
+        numbered = [
+            int(match.group(1))
+            for line in value.splitlines()
+            if (match := re.match(r"\s*(\d+)\t", line))
+        ]
+        if numbered:
+            continuation = ""
+            if "truncated" in value.lower():
+                continuation = f", continue at {numbered[-1] + 1}"
+            return (
+                f"{tool_name} {path}:{numbered[0]}-{numbered[-1]} "
+                f"→ {len(numbered)} lines{continuation}"
+            )
+        return f"{tool_name} {path} → no source lines"
+
+    if tool_name == "read_function" and isinstance(value, dict):
+        if value.get("file"):
+            return (
+                f"read_function {arguments.get('name', '?')} → {value['file']}:"
+                f"{value.get('start_line', '?')}-{value.get('end_line', '?')}"
+            )
+        return f"read_function {arguments.get('name', '?')} → {value.get('status', 'not found')}"
+
+    if tool_name in {"lookup_callers", "lookup_callees"} and isinstance(value, dict):
+        result_key = "callers" if tool_name == "lookup_callers" else "callees"
+        resolved = sum(len(items) for items in value.get(result_key, {}).values())
+        unresolved = len(value.get("unresolved", []))
+        suffix = f", {unresolved} unresolved" if unresolved else ""
+        return f"{tool_name} {arguments.get('func_name', '?')} → {resolved} resolved{suffix}"
+
+    if tool_name == "list_functions" and isinstance(value, dict):
+        return (
+            f"list_functions {arguments.get('path', '?')} → "
+            f"{len(value.get('functions', []))} functions"
+        )
+
+    if tool_name == "execute" and isinstance(value, dict):
+        stdout = str(value.get("stdout") or "")
+        stderr = str(value.get("stderr") or "")
+        output_lines = len((stdout or stderr).splitlines())
+        return f"execute → exit {value.get('exit_code', '?')}, {output_lines} output lines"
+
+    compact = " ".join(_tool_output_text(tool_name, arguments, value).split())
+    return f"{tool_name} → {compact[:180]}" if compact else f"{tool_name} → complete"
 
 
 def _estimate_cost_usd(
@@ -2180,6 +2719,7 @@ def build_hunter_agent(
         default_sanitizers=tuple(default_sanitizers),
         findings_pool=findings_pool,
         callgraph=callgraph,
+        llm=llm,
     )
 
     if specialist == "propagation":
@@ -2236,7 +2776,6 @@ def build_hunter_agent(
 
     if seed_transcript:
         prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)
-
     initial_user_message = f"Hunt for vulnerabilities in {ctx.file_path or 'unknown'}."
 
     return NativeHunter(

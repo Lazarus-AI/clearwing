@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from clearwing import __version__
 from clearwing.runners.cicd.sarif import SARIFGenerator
 
 from .state import EVIDENCE_LEVELS, Finding, PipelineStatus
@@ -19,6 +24,50 @@ logger = logging.getLogger(__name__)
 
 
 _EVIDENCE_RANK = {level: idx for idx, level in enumerate(EVIDENCE_LEVELS)}
+_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _clearwing_commit_sha() -> str:
+    """Return the Clearwing source revision, suffixed when the worktree is dirty."""
+
+    injected = os.environ.get("CLEARWING_COMMIT_SHA", "").strip()
+    if _COMMIT_RE.fullmatch(injected):
+        return injected.lower()
+
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        dirty = subprocess.run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    sha = head.stdout.strip().lower()
+    if head.returncode != 0 or not _COMMIT_RE.fullmatch(sha):
+        return "unknown"
+    if dirty.returncode == 0 and dirty.stdout.strip():
+        return f"{sha}-dirty"
+    return sha
+
+
+def _clearwing_provenance(start_time: str | None, end_time: str | None) -> dict[str, str]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "version": __version__,
+        "commit_sha": _clearwing_commit_sha(),
+        "start-time": start_time or now,
+        "end-time": end_time or now,
+    }
 
 
 def write_sourcehunt_report(
@@ -34,6 +83,10 @@ def write_sourcehunt_report(
     subsystem_stats: dict | None = None,
     pipeline_status: PipelineStatus | None = None,
     budget_summary: dict[str, Any] | None = None,
+    potentials: list[dict] | None = None,
+    trace_id: str | None = None,
+    run_started_at: str | None = None,
+    run_ended_at: str | None = None,
 ) -> dict[str, str]:
     """Write the requested formats. Returns {format: filesystem_path}."""
     formats = formats or ["sarif", "markdown", "json"]
@@ -79,10 +132,13 @@ def write_sourcehunt_report(
         json_data: dict[str, Any] = {
             "session_id": session_id,
             "repo_url": repo_url,
+            "clearwing": _clearwing_provenance(run_started_at, run_ended_at),
             "spent_per_tier": spent_per_tier,
             "findings": findings,
             "verified_findings": verified_findings,
         }
+        if trace_id:
+            json_data["trace_id"] = trace_id
         if band_stats:
             json_data["band_stats"] = band_stats
         if pool_stats:
@@ -100,6 +156,8 @@ def write_sourcehunt_report(
             }
         if budget_summary is not None:
             json_data["budget"] = budget_summary
+        if potentials:
+            json_data["potentials"] = potentials
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f, indent=2, default=_json_default)
         paths["json"] = str(json_path)

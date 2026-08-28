@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from clearwing.findings.types import Finding
 
@@ -131,6 +131,7 @@ class HuntResult(BaseModel):
     subsystem_status: Literal["completed", "skipped", "budget_exhausted", "degraded"] = (
         "completed"
     )
+    potentials: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HuntCheckpoint(BaseModel):

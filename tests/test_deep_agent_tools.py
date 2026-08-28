@@ -39,6 +39,7 @@ def test_build_deep_agent_tools_set(ctx):
     tools = build_deep_agent_tools(ctx)
     names = {t.name for t in tools}
     assert "think" not in names
+    assert "semgrep_scan" not in names
     assert {"execute", "read_file", "write_file", "record_finding"} <= names
 
 

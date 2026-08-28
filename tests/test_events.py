@@ -27,6 +27,7 @@ class TestEventType:
             "SOURCEHUNT_STAGE",
             "HUNT_PROGRESS",
             "HUNTER_STATUS",
+            "HUNTER_REASONING",
             "FINDING_RECORDED",
             "TRACE_STEP",
             "VALIDATION_RESULT",

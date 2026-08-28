@@ -11,8 +11,9 @@ same console.
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -36,6 +37,9 @@ _recent_status: deque[dict] = deque(maxlen=6)
 _recent_traces: deque[dict] = deque(maxlen=6)
 # Ring buffer of recent execute commands
 _recent_execs: deque[dict] = deque(maxlen=6)
+# Replace-in-place slots answering: what is it thinking, and what did it learn?
+_latest_reasoning: deque[dict] = deque(maxlen=1)
+_latest_result: deque[dict] = deque(maxlen=1)
 
 
 def _fmt_tokens(n: int | None) -> str:
@@ -49,6 +53,44 @@ def _fmt_tokens(n: int | None) -> str:
 
 def _fmt_ms(ms: int) -> str:
     return f"{ms / 1000:.1f}s" if ms >= 1000 else f"{ms}ms"
+
+
+def _fmt_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _estimated_remaining_seconds(
+    elapsed_seconds: float,
+    spent_usd: float,
+    budget_usd: float | None,
+) -> float | None:
+    """Project remaining wall time from the observed budget-consumption rate."""
+    if not budget_usd or spent_usd <= 0 or elapsed_seconds < 5:
+        return None
+    remaining_usd = max(0.0, budget_usd - spent_usd)
+    return elapsed_seconds * remaining_usd / spent_usd
+
+
+def _timestamped_event(data: dict) -> dict:
+    event = dict(data)
+    event.setdefault("ts", time.strftime("%H:%M:%S"))
+    return event
+
+
+def _reasoning_preview(text: str, limit: int = 240) -> str:
+    """Prefer the latest non-empty paragraph, where the next action usually lives."""
+    paragraphs = [" ".join(part.split()) for part in text.split("\n\n") if part.strip()]
+    preview = paragraphs[-1] if paragraphs else " ".join(text.split())
+    if len(preview) <= limit:
+        return preview
+    return "…" + preview[-(limit - 1) :]
 
 
 def _fmt_usd(cost: float) -> str:
@@ -72,6 +114,20 @@ def _cost_usd(counts: dict, model: str | None) -> float:
     )
 
 
+def _trace_context_header(
+    trace_context: Callable[[], tuple[str | None, str | None]] | None,
+) -> Text | None:
+    if trace_context is None:
+        return None
+    trace_id, span_id = trace_context()
+    return Text.assemble(
+        ("trace-id ", "dim"),
+        (trace_id or "pending", "bold cyan"),
+        ("  ·  span-id ", "dim"),
+        (span_id or "pending", "bold cyan"),
+    )
+
+
 def _append_trace_and_status(renderables: list[Any]) -> None:
     """Append structured hunter trace and narration rows to the panel."""
 
@@ -87,6 +143,7 @@ def _append_trace_and_status(renderables: list[Any]) -> None:
             renderables.append(
                 Text.assemble(
                     (f"[{hunter}] ", "dim cyan"),
+                    (f"{trace.get('ts', '')} ", "dim"),
                     (f"trace#{step_number} ", "bold magenta"),
                     (f"{file}:{line} ", ""),
                     (f"({function}) ", "dim"),
@@ -105,14 +162,44 @@ def _append_trace_and_status(renderables: list[Any]) -> None:
                 renderables.append(
                     Text.assemble(
                         (f"[{hunter}] ", "dim cyan"),
+                        (f"{status.get('ts', '')} ", "dim"),
                         (first_line, ""),
                     )
                 )
 
 
+def _append_latest_reasoning_and_result(renderables: list[Any]) -> None:
+    if not _latest_reasoning and not _latest_result:
+        return
+    renderables.append(Rule(style="dim"))
+    if _latest_reasoning:
+        item = _latest_reasoning[-1]
+        renderables.append(
+            Text.assemble(
+                (f"{item.get('ts', '')} ", "dim"),
+                ("reasoning  ", "bold magenta"),
+                (_reasoning_preview(str(item.get("text") or "")), "italic"),
+            )
+        )
+    if _latest_result:
+        item = _latest_result[-1]
+        failed = bool(item.get("is_error"))
+        label = "error      " if failed else "result     "
+        style = "bold red" if failed else "bold green"
+        renderables.append(
+            Text.assemble(
+                (f"{item.get('ts', '')} ", "dim"),
+                (label, style),
+                (str(item.get("summary") or "")[:240], ""),
+            )
+        )
+
+
 def _build_panel(
     budget_usd: float | None = None,
     spend_ledger: Any = None,
+    elapsed_seconds: float = 0.0,
+    trace_context: Callable[[], tuple[str | None, str | None]] | None = None,
 ) -> Panel:
     stats = native.recent_call_stats()
     totals = stats["totals"]
@@ -157,7 +244,19 @@ def _build_panel(
         header.append("  ·  ")
         header.append(f"{totals['failures']} failed", style="bold red")
 
-    renderables: list = [header]
+    header.append("  ·  elapsed ", style="dim")
+    header.append(_fmt_duration(elapsed_seconds))
+    estimated_remaining = _estimated_remaining_seconds(elapsed_seconds, spent, budget_usd)
+    if estimated_remaining is not None:
+        header.append("  ·  est. remaining ", style="dim")
+        header.append(f"~{_fmt_duration(estimated_remaining)}", style="bold blue")
+        header.append(" (budget pace)", style="dim blue")
+
+    renderables: list = []
+    trace_header = _trace_context_header(trace_context)
+    if trace_header is not None:
+        renderables.extend((trace_header, Rule(style="dim")))
+    renderables.append(header)
 
     if budget_usd is not None:
         progress = Progress(BarColumn(bar_width=40))
@@ -203,7 +302,11 @@ def _build_panel(
     if _recent_reads:
         renderables.append(Rule(style="dim"))
         reads_table = Table(
-            box=None, show_header=True, header_style="dim", pad_edge=False, padding=(0, 2),
+            box=None,
+            show_header=True,
+            header_style="dim",
+            pad_edge=False,
+            padding=(0, 2),
         )
         reads_table.add_column("hunter")
         reads_table.add_column("sandbox")
@@ -238,6 +341,7 @@ def _build_panel(
                 )
             )
 
+    _append_latest_reasoning_and_result(renderables)
     _append_trace_and_status(renderables)
 
     return Panel(
@@ -251,12 +355,24 @@ def _build_panel(
 class _ActivityRenderable:
     """Re-renders on every Live refresh so the panel reflects live totals."""
 
-    def __init__(self, budget_usd: float | None = None, spend_ledger: Any = None) -> None:
+    def __init__(
+        self,
+        budget_usd: float | None = None,
+        spend_ledger: Any = None,
+        trace_context: Callable[[], tuple[str | None, str | None]] | None = None,
+    ) -> None:
         self.budget_usd = budget_usd
         self.spend_ledger = spend_ledger
+        self.trace_context = trace_context
+        self.started_at = time.monotonic()
 
     def __rich__(self) -> Panel:
-        return _build_panel(self.budget_usd, self.spend_ledger)
+        return _build_panel(
+            self.budget_usd,
+            self.spend_ledger,
+            elapsed_seconds=time.monotonic() - self.started_at,
+            trace_context=self.trace_context,
+        )
 
 
 @contextmanager
@@ -266,6 +382,7 @@ def llm_activity_panel(
     live: bool = False,
     budget_usd: float | None = None,
     spend_ledger: Any = None,
+    trace_context: Callable[[], tuple[str | None, str | None]] | None = None,
 ) -> Iterator[None]:
     """Pin a live LLM-activity panel while the wrapped block runs.
 
@@ -293,19 +410,31 @@ def llm_activity_panel(
             tool = data.get("tool_name") or data.get("tool", "?")
             hunter = data.get("hunter_target") or data.get("args", {}).get("hunter_target", "")
             logging.getLogger("clearwing.sourcehunt.live").info(
-                "[%s] tool: %s", hunter or "agent", tool,
+                "[%s] tool: %s",
+                hunter or "agent",
+                tool,
             )
 
     def _on_status(data):
         if isinstance(data, dict) and data.get("text"):
-            _recent_status.append(data)
+            _recent_status.append(_timestamped_event(data))
 
     def _on_trace(data):
         if isinstance(data, dict):
-            _recent_traces.append(data)
+            _recent_traces.append(_timestamped_event(data))
+
+    def _on_reasoning(data):
+        if isinstance(data, dict) and data.get("text"):
+            _latest_reasoning.append(_timestamped_event(data))
+
+    def _on_result(data):
+        if isinstance(data, dict) and data.get("summary"):
+            _latest_result.append(_timestamped_event(data))
 
     bus.subscribe(EventType.TOOL_START, _on_read)
     bus.subscribe(EventType.HUNTER_STATUS, _on_status)
+    bus.subscribe(EventType.HUNTER_REASONING, _on_reasoning)
+    bus.subscribe(EventType.TOOL_RESULT, _on_result)
     bus.subscribe(EventType.TRACE_STEP, _on_trace)
 
     console = console or Console(stderr=True)
@@ -313,13 +442,11 @@ def llm_activity_panel(
     root = logging.getLogger()
     saved_handlers = root.handlers[:]
     saved_level = root.level
-    root.handlers = [
-        RichHandler(console=console, show_path=False, show_time=False, markup=False)
-    ]
+    root.handlers = [RichHandler(console=console, show_path=False, show_time=False, markup=False)]
     root.setLevel(logging.INFO)
 
     live_display = Live(
-        _ActivityRenderable(budget_usd, spend_ledger),
+        _ActivityRenderable(budget_usd, spend_ledger, trace_context),
         console=console,
         refresh_per_second=refresh_hz,
         transient=False,
@@ -330,10 +457,14 @@ def llm_activity_panel(
     finally:
         bus.unsubscribe(EventType.TOOL_START, _on_read)
         bus.unsubscribe(EventType.HUNTER_STATUS, _on_status)
+        bus.unsubscribe(EventType.HUNTER_REASONING, _on_reasoning)
+        bus.unsubscribe(EventType.TOOL_RESULT, _on_result)
         bus.unsubscribe(EventType.TRACE_STEP, _on_trace)
         _recent_reads.clear()
         _recent_status.clear()
         _recent_traces.clear()
         _recent_execs.clear()
+        _latest_reasoning.clear()
+        _latest_result.clear()
         root.handlers = saved_handlers
         root.setLevel(saved_level)
