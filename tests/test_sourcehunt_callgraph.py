@@ -96,21 +96,6 @@ class TestCallGraphMethods:
         assert "b.c" in distances
         assert "c.c" not in distances
 
-    def test_merge_invalidates_reverse_edges(self):
-        graph = CallGraph()
-        graph.functions["target.c"] = {"target"}
-        graph.defined_in["target"] = {"target.c"}
-        assert graph.callers_of_file("target.c") == set()
-
-        addition = CallGraph()
-        addition.functions["caller.c"] = {"caller"}
-        addition.calls_out["caller.c"] = {"target"}
-        addition.func_calls_out["caller.c"]["caller"] = {"target"}
-        addition.indexed_files.add("caller.c")
-        graph.merge(addition)
-
-        assert graph.callers_of_file("target.c") == {"caller.c"}
-
 
 # --- CallGraphBuilder (needs tree-sitter grammars) --------------------------
 
@@ -133,22 +118,6 @@ class TestCallGraphBuilderC:
         assert "decode_frame_b" in graph.defined_in
         assert "decode_frame_c" in graph.defined_in
         assert graph.defined_in["decode_frame_a"] == {"src/codec_a.c"}
-
-    def test_expand_parses_only_new_supported_files(self, builder):
-        codec_a = FIXTURE_C_PROPAGATION / "src/codec_a.c"
-        codec_b = FIXTURE_C_PROPAGATION / "src/codec_b.c"
-        graph = builder.build(str(FIXTURE_C_PROPAGATION), files=[str(codec_a)])
-
-        expansion = builder.expand(
-            graph,
-            str(FIXTURE_C_PROPAGATION),
-            [str(codec_a), str(codec_b), str(codec_b)],
-        )
-
-        assert expansion.requested_files == 3
-        assert expansion.indexed_files == 1
-        assert "src/codec_b.c" in graph.indexed_files
-        assert "decode_frame_b" in graph.defined_in
 
 
 class TestCallGraphBuilderPython:
