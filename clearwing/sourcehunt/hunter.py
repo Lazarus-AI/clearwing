@@ -40,7 +40,6 @@ from clearwing.observability.telemetry import CostTracker
 from clearwing.reporting.safety import redact_tree
 from clearwing.sandbox.container import SandboxContainer
 
-from .callgraph import CallGraphBuilder
 from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
 from .target_windows import render_target_window_message, split_physical_source_lines
@@ -1594,8 +1593,6 @@ class NativeHunter:
         potential_reminder_active = False
         exploration_calls_since_checkpoint = 0
         active_potential_id: str | None = None
-        lazy_callgraph_builder: CallGraphBuilder | None = None
-
         synthesis_injected = False
         step = 0
         while True:
@@ -2046,34 +2043,6 @@ class NativeHunter:
                                 tool_arguments,
                                 tool_output,
                             )
-                        if (
-                            tool_call.fn_name == "execute"
-                            and isinstance(tool_output, dict)
-                            and tool_output.get("exit_code") == 0
-                            and self.ctx.callgraph is not None
-                        ):
-                            matched_files = _grep_result_source_files(
-                                str(tool_arguments.get("command", "")),
-                                str(tool_output.get("stdout", "")),
-                                self.ctx.repo_path,
-                            )
-                            if matched_files:
-                                if lazy_callgraph_builder is None:
-                                    lazy_callgraph_builder = CallGraphBuilder()
-                                expansion = lazy_callgraph_builder.expand(
-                                    self.ctx.callgraph,
-                                    self.ctx.repo_path,
-                                    matched_files,
-                                )
-                                if expansion.indexed_files:
-                                    expansion_note = (
-                                        "[CALLGRAPH EXPANDED: "
-                                        f"files={expansion.indexed_files} "
-                                        f"functions={expansion.functions_added} "
-                                        f"edges={expansion.edges_added}]"
-                                    )
-                                    tool_summary = f"{tool_summary}\n{expansion_note}"
-                                    EventBus().emit_message(expansion_note, "info")
                         trajectory.log(
                             "tool_result",
                             {
@@ -2575,7 +2544,10 @@ def _read_file_tool_response(
         _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
     )
     eof = total_lines is not None and requested[1] >= total_lines
-    truncated = "truncated" in content.lower() or len(content) > len(rendered_content)
+    truncated = (
+        bool(re.search(r"\[(?:file )?truncated at \d+ characters\]", content))
+        or len(content) > len(rendered_content)
+    )
 
     header = "\n".join(
         [
@@ -2695,49 +2667,6 @@ _DYNAMIC_VERIFICATION_COMMAND = re.compile(
     r")",
     re.IGNORECASE,
 )
-
-_GREP_COMMAND = re.compile(r"(?:^|[;&|]\s*|\s)(?:rg|grep|git\s+grep)(?:\s|$)")
-_GREP_LOCATION = re.compile(r"^(.*?):\d+(?::|-)" )
-
-
-def _grep_result_source_files(
-    command: str,
-    stdout: str,
-    repo_path: str,
-    max_files: int = 50,
-) -> list[str]:
-    """Resolve repository files named by successful grep-family output."""
-
-    if not _GREP_COMMAND.search(command):
-        return []
-    root = Path(repo_path).resolve()
-    resolved: list[str] = []
-    seen: set[Path] = set()
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        match = _GREP_LOCATION.match(line)
-        candidate_text = match.group(1) if match else line
-        if candidate_text.startswith("/workspace/"):
-            candidate = root / candidate_text.removeprefix("/workspace/")
-        else:
-            candidate = Path(candidate_text)
-            if not candidate.is_absolute():
-                candidate = root / candidate
-        candidate = candidate.resolve()
-        if (
-            candidate in seen
-            or not candidate.is_relative_to(root)
-            or not candidate.is_file()
-        ):
-            continue
-        seen.add(candidate)
-        resolved.append(str(candidate))
-        if len(resolved) >= max_files:
-            break
-    return resolved
-
 
 def _tool_requires_active_potential(tool_name: str, arguments: dict[str, Any]) -> bool:
     """Return whether a tool call performs dynamic verification rather than exploration."""

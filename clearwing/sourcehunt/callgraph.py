@@ -76,21 +76,6 @@ _LANG_EXT_MAP = {
     ".rs": "rust",
 }
 
-_SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "vendor",
-    "dist",
-    "build",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    "target",
-}
-
 
 # --- Per-language query nodes ------------------------------------------------
 
@@ -132,16 +117,6 @@ class FunctionInfo:
     end_line: int  # 1-indexed, inclusive
 
 
-@dataclass(frozen=True)
-class CallGraphExpansion:
-    """Summary of files and graph facts added by a lazy expansion."""
-
-    requested_files: int
-    indexed_files: int
-    functions_added: int
-    edges_added: int
-
-
 @dataclass
 class CallGraph:
     """Callgraph output.
@@ -161,30 +136,7 @@ class CallGraph:
     func_calls_out: dict[str, dict[str, set[str]]] = field(
         default_factory=partial(defaultdict, partial(defaultdict, set))
     )
-    indexed_files: set[str] = field(default_factory=set)
     _file_callers: dict[str, set[str]] | None = field(default=None, repr=False)
-
-    def merge(self, addition: CallGraph) -> None:
-        """Merge a disjoint or partially overlapping graph into this graph."""
-
-        for file, names in addition.functions.items():
-            self.functions[file].update(names)
-        for file, names in addition.calls_out.items():
-            self.calls_out[file].update(names)
-        for name, files in addition.defined_in.items():
-            self.defined_in[name].update(files)
-        for file, infos in addition.function_info.items():
-            existing = {(info.name, info.start_line, info.end_line) for info in self.function_info[file]}
-            self.function_info[file].extend(
-                info
-                for info in infos
-                if (info.name, info.start_line, info.end_line) not in existing
-            )
-        for file, functions in addition.func_calls_out.items():
-            for function, callees in functions.items():
-                self.func_calls_out[file][function].update(callees)
-        self.indexed_files.update(addition.indexed_files)
-        self._file_callers = None
 
     def _build_file_callers(self) -> None:
         """Precompute reverse file adjacency: target_file → set of caller files."""
@@ -310,9 +262,6 @@ class CallGraphBuilder:
                 continue
             try:
                 self._ingest_file(abs_path, lang_name, graph, repo_path)
-                graph.indexed_files.add(
-                    Path(os.path.relpath(abs_path, repo_path)).as_posix()
-                )
                 parsed += 1
             except Exception:
                 logger.debug("Failed to parse %s", abs_path, exc_info=True)
@@ -333,46 +282,6 @@ class CallGraphBuilder:
         )
         return graph
 
-    def expand(
-        self,
-        graph: CallGraph,
-        repo_path: str,
-        files: list[str],
-    ) -> CallGraphExpansion:
-        """Parse safe, supported, previously unindexed files and merge them."""
-
-        root = Path(repo_path).resolve()
-        selected: list[str] = []
-        seen: set[str] = set()
-        for candidate in files:
-            path = Path(candidate).resolve()
-            if not path.is_relative_to(root) or not path.is_file():
-                continue
-            relative = path.relative_to(root).as_posix()
-            if (
-                relative in graph.indexed_files
-                or relative in seen
-                or any(part in _SKIP_DIRS for part in path.relative_to(root).parts)
-            ):
-                continue
-            language = _LANG_EXT_MAP.get(path.suffix.lower())
-            if language is None or language not in self._languages:
-                continue
-            seen.add(relative)
-            selected.append(str(path))
-
-        functions_before = sum(len(names) for names in graph.functions.values())
-        edges_before = sum(len(names) for names in graph.calls_out.values())
-        addition = self.build(str(root), files=selected) if selected else CallGraph()
-        graph.merge(addition)
-        return CallGraphExpansion(
-            requested_files=len(files),
-            indexed_files=len(addition.indexed_files),
-            functions_added=sum(len(names) for names in graph.functions.values())
-            - functions_before,
-            edges_added=sum(len(names) for names in graph.calls_out.values()) - edges_before,
-        )
-
     # --- internals ----------------------------------------------------------
 
     def _get_parser(self, lang_name: str) -> Any:
@@ -383,8 +292,22 @@ class CallGraphBuilder:
         return self._parsers[lang_name]
 
     def _walk_repo(self, repo_path: str) -> Iterator[str]:
+        skip_dirs = {
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            "venv",
+            "vendor",
+            "dist",
+            "build",
+            ".tox",
+            ".mypy_cache",
+            ".pytest_cache",
+            "target",
+        }
         for dirpath, dirnames, filenames in os.walk(repo_path):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
             for fname in filenames:
                 if os.path.splitext(fname)[1].lower() in _LANG_EXT_MAP:
                     yield os.path.join(dirpath, fname)
