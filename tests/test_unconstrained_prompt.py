@@ -142,7 +142,7 @@ class TestBuildHunterAgentPromptMode:
         assert "execute" in tool_names
         assert hunter.max_steps == 500
 
-    def test_unconstrained_constrained_uses_discovery_prompt_with_9_tools(self):
+    def test_unconstrained_constrained_uses_static_discovery_tools(self):
         llm = MagicMock()
         ft = _make_file_target(tags=["memory_unsafe"])
         hunter, ctx = build_hunter_agent(
@@ -159,7 +159,12 @@ class TestBuildHunterAgentPromptMode:
         assert ctx.specialist == "unconstrained"
         tool_names = {t.name for t in hunter.tools}
         assert "read_source_file" in tool_names
-        assert "compile_file" in tool_names
+        # Dynamic verification (compile/run/fuzz) is gated behind the
+        # investigation policy: a constrained hunter gets only static-analysis
+        # tools plus the potential lifecycle, and must flag_potential before
+        # earning dynamic tools in the separate verification phase.
+        assert "compile_file" not in tool_names
+        assert "flag_potential" in tool_names
         assert hunter.max_steps == 20
 
     def test_specialist_mode_uses_specialist_prompt(self):
