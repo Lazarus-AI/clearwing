@@ -170,7 +170,7 @@ class TestSourceHuntSandboxCpuWiring:
         manager.spawn.assert_called_once_with(
             writable_workspace=True,
             memory_mb=16384,
-            timeout_seconds=600,
+            timeout_seconds=30,
             runtime=None,
         )
 
