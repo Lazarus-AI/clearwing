@@ -17,8 +17,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from genai_pyo3 import ChatResponse
+from genai_pyo3 import ChatResponse, ToolCall
 
+from clearwing.sandbox.container import ExecResult
 from clearwing.sourcehunt.checkpoints import HuntResult
 from clearwing.sourcehunt.pool import assign_tier
 from clearwing.sourcehunt.preprocessor import Preprocessor
@@ -467,6 +468,27 @@ class TestAdversarialVerifierDefault:
         ALL calls for the one with the adversarial system prompt.
         """
         verifier_llm = _make_verifier_llm()
+        tool_response = MagicMock()
+        tool_response.first_text = ""
+        tool_response.tool_calls = [
+            ToolCall("verify-call", "execute", json.dumps({"command": "true"}))
+        ]
+        verdict_response = MagicMock()
+        verdict_response.first_text = json.dumps(
+            {
+                "is_real": True,
+                "severity": "high",
+                "evidence_level": "root_cause_explained",
+                "pro_argument": "source and execution support the report",
+                "counter_argument": "",
+                "tie_breaker": "focused execution",
+                "duplicate_cve": None,
+            }
+        )
+        verdict_response.tool_calls = []
+        verifier_llm.achat.side_effect = [tool_response, verdict_response]
+        sandbox = MagicMock()
+        sandbox.exec.return_value = ExecResult(0, "", "", 0.01)
         runner = SourceHuntRunner(
             repo_url=str(FIXTURE_PY_SQLI),
             local_path=str(FIXTURE_PY_SQLI),
@@ -486,20 +508,20 @@ class TestAdversarialVerifierDefault:
             enable_mechanism_memory=False,
             enable_patch_oracle=False,
             enable_variant_loop=False,
-            sandbox_factory=MagicMock(),
+            sandbox_factory=lambda **_kwargs: sandbox,
         )
         runner._hunt = AsyncMock(return_value=_mock_hunt_result())
         runner.run()
         # Find the call whose system prompt contains STEEL-MAN
         found_adversarial = False
-        for call in verifier_llm.aask_text.call_args_list:
+        for call in verifier_llm.achat.call_args_list:
             system_prompt = call.kwargs.get("system", "")
             if "STEEL-MAN" in system_prompt:
                 found_adversarial = True
                 break
         assert found_adversarial, (
             "Expected at least one verifier LLM call to use the adversarial "
-            f"(STEEL-MAN) system prompt; got {len(verifier_llm.aask_text.call_args_list)} calls"
+            f"(STEEL-MAN) system prompt; got {len(verifier_llm.achat.call_args_list)} calls"
         )
 
 

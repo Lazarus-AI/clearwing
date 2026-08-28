@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from itertools import islice
 from typing import Any, Literal, cast
 
@@ -20,10 +21,14 @@ from pydantic import BaseModel, Field
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
-from clearwing.llm import AsyncLLMClient, BudgetExceeded
+from clearwing.llm import AsyncLLMClient, BudgetExceeded, NativeToolSpec
 from clearwing.llm.native import response_text
 from clearwing.reporting.safety import redact_text, redact_tree
 
+from .dynamic_verification import (
+    clamp_dynamic_evidence_level,
+    run_tool_assisted_verification,
+)
 from .state import (
     EVIDENCE_LEVELS,
     Axes,
@@ -228,16 +233,18 @@ class _VerdictSchema(BaseModel):
             impactful=self.axes.impactful,
             general=self.axes.general,
         )
+        advance = all(result.passed for _, result in axes.items())
         return ValidatorVerdict(
             finding_id=finding_id,
             axes=axes,
-            advance=self.advance,
-            severity_validated=self.severity if self.advance else None,
+            advance=advance,
+            severity_validated=self.severity if advance else None,
             evidence_level=self.evidence_level,
             pro_argument=self.pro_argument,
             counter_argument=self.counter_argument,
             tie_breaker=self.tie_breaker,
             duplicate_cve=self.duplicate_cve,
+            outcome="confirmed" if advance else "refuted",
         )
 
 
@@ -279,6 +286,8 @@ class Validator:
         self,
         finding: Finding,
         file_content: str = "",
+        *,
+        verification_tools: Sequence[NativeToolSpec] | None = None,
     ) -> ValidatorVerdict:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
@@ -289,20 +298,51 @@ class Validator:
         # otherwise return empty text under free-form prompting. We validate to
         # the typed wire object and map it to the domain verdict directly (no
         # dict round-trip). Requires a model/gateway with constrained decoding.
+        verification = None
         try:
-            response = await self.llm.aask_text(
-                system=system_prompt,
-                user=user_msg,
-                response_schema=_VerdictSchema,
-                response_schema_name="ValidatorVerdict",
-            )
+            if verification_tools:
+                verification = await run_tool_assisted_verification(
+                    self.llm,
+                    system_prompt=system_prompt,
+                    user_message=user_msg,
+                    tools=verification_tools,
+                    response_schema=_VerdictSchema,
+                    response_schema_name="ValidatorVerdict",
+                    product_file=str(finding.get("file") or "") or None,
+                )
+                response = verification.response
+                if verification.completed_dynamic_calls == 0:
+                    raise RuntimeError(
+                        "dynamic verification incomplete: no build, run, or fuzz tool completed"
+                    )
+            else:
+                response = await self.llm.aask_text(
+                    system=system_prompt,
+                    user=user_msg,
+                    response_schema=_VerdictSchema,
+                    response_schema_name="ValidatorVerdict",
+                )
             schema = _VerdictSchema.model_validate_json(response_text(response))
             verdict = schema.to_verdict(finding.get("id", "unknown"))
+            if verification_tools:
+                verdict.dynamic_evidence = list(verification.evidence)
+                clamped = clamp_dynamic_evidence_level(
+                    verdict.evidence_level,
+                    qualifying_crash_calls=verification.qualifying_crash_calls,
+                )
+                if clamped != verdict.evidence_level:
+                    verdict.evidence_level = clamped
+                    verdict.tie_breaker = (
+                        "Host evidence gate limited the model-selected evidence level. "
+                        + verdict.tie_breaker
+                    ).strip()
         except BudgetExceeded:
             raise
         except Exception as e:
             logger.warning("Validator LLM call failed", exc_info=True)
             verdict = self._error_verdict(finding, f"validator error: {e}")
+            if verification is not None:
+                verdict.dynamic_evidence = list(verification.evidence)
 
         EventBus().emit_validation_result(ValidationResultPayload(
             finding_id=verdict.finding_id,
@@ -422,6 +462,7 @@ class Validator:
             counter_argument="",
             tie_breaker=reason,
             duplicate_cve=None,
+            outcome="operational_error",
         )
 
     async def arun_patch_oracle(
@@ -481,6 +522,8 @@ def apply_validator_verdict(
     }
 
     _bump_evidence(finding, verdict.evidence_level)
+    if verdict.dynamic_evidence:
+        finding["verification_evidence"] = verdict.dynamic_evidence
 
     if verdict.patch_oracle_attempted:
         finding["patch_oracle_passed"] = verdict.patch_oracle_passed
