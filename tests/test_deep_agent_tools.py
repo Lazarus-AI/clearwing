@@ -98,6 +98,19 @@ def test_read_file_with_defaults(tools, mock_sandbox):
     assert "line1" in result
 
 
+def test_read_file_appends_total_line_metadata(tools, mock_sandbox):
+    mock_sandbox.exec.return_value = ExecResult(
+        exit_code=0,
+        stdout="     1\tline1\n",
+        stderr="__CLEARWING_TOTAL_LINES__=1\n",
+        duration_seconds=0.05,
+    )
+
+    result = tools["read_file"].handler(path="/workspace/foo.c")
+
+    assert result.endswith("[CLEARWING_READ_METADATA total_lines=1]")
+
+
 def test_read_file_with_offset_limit(tools, mock_sandbox):
     mock_sandbox.exec.return_value = ExecResult(
         exit_code=0, stdout="content", stderr="", duration_seconds=0.05
