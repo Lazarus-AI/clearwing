@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -265,6 +266,9 @@ async def test_concrete_executor_pins_checkout_and_wires_exact_hint_packet(
     class FakeRunner:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+            local_path = Path(kwargs["local_path"])
+            captured["local_path_existed"] = local_path.is_dir()
+            captured["local_path_had_git"] = (local_path / ".git").exists()
 
         async def arun(self):
             return None
@@ -290,6 +294,9 @@ async def test_concrete_executor_pins_checkout_and_wires_exact_hint_packet(
     assert captured["campaign_hint"] == spec.campaign_hint()
     assert captured["flow"] == "proof"
     assert captured["model_override"] == spec.model
+    assert Path(captured["local_path"]).name.startswith("source-snapshot-")
+    assert captured["local_path_existed"] is True
+    assert captured["local_path_had_git"] is False
 
     (checkout / "app.py").write_text("print('changed')\n", encoding="utf-8")
     with pytest.raises(ValueError, match="tracked modifications"):

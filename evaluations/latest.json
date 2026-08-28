@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-26T20:42:25.556871+00:00",
+  "updated_at": "2026-08-27T21:25:50.701700+00:00",
   "evaluations": [
     {
       "cve": "CVE-2026-28208",
@@ -71,10 +71,11 @@
       "evaluation": "evaluations/cve-2026-47345.sh",
       "difficulty": "medium",
       "language": "PHP",
-      "status": "MISSING",
-      "duration_seconds": null,
-      "trace_id": null,
-      "latest_result": "No completed run found."
+      "status": "FAIL",
+      "duration_seconds": 624.5,
+      "trace_id": "b3faa6f8476548e7305dcb58a213d08e",
+      "latest_result": "Completed with zero findings after pursuing and dismissing raw-text and entity-encoding hypotheses; missed the intended unencoded namespace-attribute XSS bypass, while the targeted vendor serializer dependency was absent.",
+      "updated_at": "2026-08-27T21:25:50.701700+00:00"
     },
     {
       "cve": "CVE-2026-5588",
@@ -92,10 +93,10 @@
       "difficulty": "hard",
       "language": "Go",
       "status": "PASS",
-      "duration_seconds": 361.109483,
-      "trace_id": "38024f8c2889c0b37251b10256fb02b0",
-      "latest_result": "Found the intended Gitea pre-receive per-ref write-permission cache bypass.",
-      "updated_at": "2026-08-26T15:54:15.452028+00:00"
+      "duration_seconds": 382.9,
+      "trace_id": "01d2992d4a6ea19c7d4cae5dbfb172db",
+      "latest_result": "Found the intended per-ref authorization-cache bypass in Gitea pre-receive handling.",
+      "updated_at": "2026-08-27T20:30:54.122669+00:00"
     },
     {
       "cve": "CVE-2026-28386",
