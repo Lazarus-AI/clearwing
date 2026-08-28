@@ -172,6 +172,32 @@ class TestAttemptSandboxPath:
         assert "rejected" in attempt.notes
         assert "crash reproduces" in attempt.notes
 
+    def test_candidate_diff_is_passed_to_poc_replay(self):
+        candidate = "--- a/a.c\n+++ b/a.c\n@@ -1 +1 @@\n-bad\n+good\n"
+        llm = _mock_llm(
+            {
+                "diff": candidate,
+                "commit_message": "fix",
+                "explanation": "ok",
+                "confidence": "high",
+            }
+        )
+        observed = []
+
+        def replay(sb, finding, diff):
+            observed.append(diff)
+            return False
+
+        attempt = _run(
+            AutoPatcher(llm).aattempt(
+                _make_finding(),
+                sandbox=MagicMock(),
+                rerun_poc=replay,
+            )
+        )
+        assert attempt.validated is True
+        assert observed == [candidate]
+
     def test_validation_error(self):
         llm = _mock_llm(
             {
