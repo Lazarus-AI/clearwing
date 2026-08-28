@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
+
+_DEFAULT_DENIED_TOOLS = "create_custom_tool,connect_mcp_server,kali_cleanup"
+
+
+def _denied_tools() -> set[str]:
+    raw = os.environ.get("CLEARWING_MCP_DENIED_TOOLS", _DEFAULT_DENIED_TOOLS)
+    return {t.strip() for t in raw.split(",") if t.strip()}
 
 
 class MCPServer:
@@ -40,11 +48,20 @@ class MCPServer:
         return name, description, schema
 
     def _register_tools(self) -> None:
-        """Register all Clearwing tools as MCP-compatible tool definitions."""
+        """Register all Clearwing tools as MCP-compatible tool definitions.
+
+        Tools whose names appear in ``CLEARWING_MCP_DENIED_TOOLS`` (default:
+        ``create_custom_tool,connect_mcp_server,kali_cleanup``) are skipped so
+        the MCP surface cannot be used to spawn processes, register runtime
+        code, or tear down the isolation container.
+        """
         from clearwing.agent.tools import get_all_tools
 
+        denied = _denied_tools()
         for tool in get_all_tools():
             name, description, schema = self._tool_to_mcp(tool)
+            if name in denied:
+                continue
             self._tools[name] = {
                 "description": description,
                 "input_schema": schema,
