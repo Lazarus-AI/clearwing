@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/blind-checkout.sh"
+
 FFMPEG_DIR="${FFMPEG_DIR:?set FFMPEG_DIR to an FFmpeg checkout}"
 CASE_DIR="${CASE_DIR:-$PWD/results/ffmpeg-proof}"
 CLEARWING_BIN="${CLEARWING_BIN:-clearwing}"
@@ -19,9 +22,9 @@ command -v docker >/dev/null || {
 mkdir -p "$CASE_DIR"
 
 build_database() {
-  git -C "$FFMPEG_DIR" clean -fdx
+  local snapshot_dir="$1"
   (
-    cd "$FFMPEG_DIR"
+    cd "$snapshot_dir"
     ./configure \
       --cc=clang \
       --cxx=clang++ \
@@ -40,15 +43,17 @@ build_database() {
 run_snapshot() {
   local label="$1"
   local commit="$2"
+  local snapshot_dir
   local validation_args=()
   if [[ -n "${VALIDATION_MANIFEST:-}" ]]; then
     validation_args=(--validation-manifest "$VALIDATION_MANIFEST")
   fi
-  git -C "$FFMPEG_DIR" switch --detach "$commit"
-  build_database
-  "$CLEARWING_BIN" sourcehunt "$FFMPEG_DIR" \
+  snapshot_dir="$(mktemp -d -t source-snapshot-XXXX)"
+  blind_checkout "" "$commit" "$snapshot_dir" "$FFMPEG_DIR"
+  build_database "$snapshot_dir"
+  "$CLEARWING_BIN" sourcehunt "$snapshot_dir" \
     --flow proof \
-    --compile-commands compile_commands.json \
+    --compile-commands "$snapshot_dir/compile_commands.json" \
     "${validation_args[@]}" \
     --build-configuration asan-debug \
     --depth deep \

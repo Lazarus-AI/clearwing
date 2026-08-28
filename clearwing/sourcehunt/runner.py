@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from opentelemetry import trace as otel_trace
+
 from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm.budget import BudgetExceeded, SpendLedger
@@ -109,6 +111,7 @@ class SourceHuntResult:
     session_id: str = ""
     subsystems_hunted: int = 0
     subsystem_spent_usd: float = 0.0
+    potentials: list[dict] = field(default_factory=list)
     elaborated_findings: list[Finding] = field(default_factory=list)
     pipeline_status: PipelineStatus = field(default_factory=PipelineStatus)
     status: str = "completed"
@@ -828,6 +831,10 @@ class SourceHuntRunner:
             live=self._live,
             budget_usd=self.budget_usd or None,
             spend_ledger=self._spend_ledger,
+            trace_context=lambda: (
+                getattr(self, "_otel_trace_id", None),
+                getattr(self, "_otel_span_id", None),
+            ),
         ):
             return asyncio.run(self.arun())
 
@@ -1060,6 +1067,13 @@ class SourceHuntRunner:
     async def arun(self) -> SourceHuntResult:
         self._run_started_at = datetime.now(timezone.utc).isoformat()
         self._run_started_monotonic = time.monotonic()
+        span_context = otel_trace.get_current_span().get_span_context()
+        self._otel_trace_id = (
+            f"{span_context.trace_id:032x}" if span_context.is_valid else None
+        )
+        self._otel_span_id = (
+            f"{span_context.span_id:016x}" if span_context.is_valid else None
+        )
         if self._flow == "proof":
             try:
                 return await self._arun_proof_flow()
@@ -1304,6 +1318,7 @@ class SourceHuntRunner:
                 callgraph=preprocess_result.callgraph,
             )
             all_findings = hunt_result.findings
+            all_potentials = hunt_result.potentials
             files_hunted = hunt_result.files_hunted
             spent_per_tier = hunt_result.spent_per_tier
             band_stats = hunt_result.band_stats
@@ -1330,10 +1345,6 @@ class SourceHuntRunner:
                         )
                 except Exception:
                     logger.debug("Behavior monitor failed", exc_info=True)
-
-            # Promote static findings into the all_findings list so depth=quick
-            # output is still useful when no hunter llm is available
-            all_findings = self._merge_static_findings(all_findings, preprocess_result)
 
             # 3.5. Persist findings to historical DB (spec 005)
             # Skip when running under campaign — campaign handles bulk ingestion.
@@ -1377,6 +1388,7 @@ class SourceHuntRunner:
                     subsystem_spent_usd=subsystem_spent,
                     subsystem_status=hunt_result.subsystem_status,
                     pipeline_status=pipeline_status,
+                    potentials=all_potentials,
                 )
 
             # 4. Verify (unless --no-verify)
@@ -1571,6 +1583,7 @@ class SourceHuntRunner:
                     subsystem_spent_usd=subsystem_spent,
                     subsystem_status=hunt_result.subsystem_status,
                     pipeline_status=pipeline_status,
+                    potentials=all_potentials,
                 )
 
             # 5. Exploit-triage (unless --no-exploit) — gated on evidence_level
@@ -1786,6 +1799,7 @@ class SourceHuntRunner:
                 subsystem_spent_usd=subsystem_spent,
                 subsystem_status=hunt_result.subsystem_status,
                 pipeline_status=pipeline_status,
+                potentials=all_potentials,
             )
         finally:
             if self._spend_ledger is not None:
@@ -2701,6 +2715,7 @@ class SourceHuntRunner:
         try:
             subsystem_findings = await subsystem_runner.arun()
             result.findings.extend(subsystem_findings)
+            result.potentials.extend(subsystem_runner.all_potentials)
             result.subsystems_hunted = len(subsystem_targets)
             result.subsystem_spent_usd = subsystem_runner.total_spent
             result.subsystem_status = (
@@ -2928,17 +2943,15 @@ class SourceHuntRunner:
             image_tag = manager.build_image()
         except Exception as exc:
             logger.error(
-                "HunterSandbox unavailable (%s); falling back to host mode. "
-                "Start Docker to enable sanitizer-backed containers.",
+                "HunterSandbox startup failed: %s",
                 exc,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
             EventBus().emit_message(
-                f"WARNING: sandbox unavailable ({exc}); running without container isolation. "
-                "Findings may lack sanitizer corroboration. Start Docker for full coverage.",
-                "warning",
+                f"ERROR: sandbox startup failed ({exc}); aborting sourcehunt.",
+                "error",
             )
-            return
+            raise RuntimeError(f"HunterSandbox startup failed: {exc}") from exc
 
         self._sandbox_manager = manager
         cpu_limit = manager.default_cpu_limit
@@ -2965,7 +2978,7 @@ class SourceHuntRunner:
             self.sandbox_factory = lambda **kw: manager.spawn(
                 writable_workspace=True,
                 memory_mb=kw.pop("memory_mb", 16384),
-                timeout_seconds=kw.pop("timeout_seconds", 600),
+                timeout_seconds=kw.pop("timeout_seconds", 30),
                 runtime=kw.pop("runtime", gvisor_rt),
                 **kw,
             )
@@ -3100,6 +3113,7 @@ class SourceHuntRunner:
         subsystem_spent_usd: float,
         subsystem_status: str,
         pipeline_status: PipelineStatus,
+        potentials: list[dict[str, Any]],
     ) -> SourceHuntResult:
         """Write final outputs and preserve the pipeline state accumulated so far."""
         finding_files = [str(finding.file or "") for finding in findings]
@@ -3160,6 +3174,7 @@ class SourceHuntRunner:
             subsystem_stats=subsystem_stats,
             pipeline_status=pipeline_status,
             budget_summary=budget_summary,
+            potentials=potentials,
         )
         report_status = "degraded" if self._last_reporting_error else "completed"
         self._emit_stage(
@@ -3208,6 +3223,7 @@ class SourceHuntRunner:
             session_id=self._session_id,
             subsystems_hunted=subsystems_hunted,
             subsystem_spent_usd=subsystem_spent_usd,
+            potentials=potentials,
             pipeline_status=pipeline_status,
             status=run_status,
             budget_usd=self.budget_usd,
@@ -3381,6 +3397,7 @@ class SourceHuntRunner:
         subsystem_stats: dict | None = None,
         pipeline_status: PipelineStatus | None = None,
         budget_summary: dict[str, Any] | None = None,
+        potentials: list[dict] | None = None,
     ) -> dict[str, str]:
         """Write SARIF / markdown / JSON outputs to the output directory.
 
@@ -3441,6 +3458,10 @@ class SourceHuntRunner:
                 pipeline_status=pipeline_status,
                 budget_summary=budget_summary,
                 run_metadata=run_metadata,
+                potentials=potentials,
+                trace_id=getattr(self, "_otel_trace_id", None),
+                run_started_at=getattr(self, "_run_started_at", None),
+                run_ended_at=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as exc:
             logger.warning("Reporter failed", exc_info=True)

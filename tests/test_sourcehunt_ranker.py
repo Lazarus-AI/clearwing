@@ -14,6 +14,7 @@ Critical assertions:
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -656,6 +657,60 @@ class TestFuzzableRankBoost:
         # 4*0.5 + 1*0.2 + 3*0.3 + 0.5 = 2.0 + 0.2 + 0.9 + 0.5 = 3.6 → A
         assert files[0]["priority"] == pytest.approx(3.6)
         assert assign_tier(files[0]) == "A"
+
+
+class TestCircuitBreaker:
+    def test_circuit_breaker_stops_after_consecutive_failures(self):
+        """When N consecutive chunks return empty, the pipeline doesn't crash
+        and all files get heuristic fallback scores."""
+        call_count = 0
+
+        async def slow_fail(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Yield control so the event loop can process breaker logic
+            await asyncio.sleep(0)
+            raise ValueError(
+                "LLM returned empty response; expected JSON matching RankedFileScoreResponse"
+            )
+
+        llm = AsyncMock()
+        llm.aask_json.side_effect = slow_fail
+        config = RankerConfig(
+            chunk_size=2,
+            circuit_breaker_threshold=2,
+            chunk_max_retries=0,  # no retries — fail fast for test
+            max_inflight_chunks=1,  # serialize so breaker can trip between chunks
+        )
+        files = [_make_file(f"f{i}.c") for i in range(10)]
+        Ranker(llm, config).rank(files)
+        # Circuit breaker should trip — not all 5 chunks should have been attempted
+        # (with max_inflight=1 and sleep(0), breaker can cancel pending tasks)
+        assert call_count <= 3  # at most breaker_threshold + 1 in-flight
+        # All files still get heuristic fallback scores
+        for f in files:
+            assert f["surface"] >= 1
+            assert f["priority"] > 0
+
+    def test_no_circuit_breaker_when_chunks_succeed(self):
+        """Successful chunks don't trigger the breaker."""
+        scores = [
+            {
+                "path": f"f{i}.c",
+                "surface": 3,
+                "influence": 2,
+                "surface_rationale": "ok",
+                "influence_rationale": "ok",
+            }
+            for i in range(6)
+        ]
+        llm = AsyncMock()
+        llm.aask_json.return_value = ({"results": scores}, ChatResponse())
+        config = RankerConfig(chunk_size=2, circuit_breaker_threshold=2)
+        files = [_make_file(f"f{i}.c") for i in range(6)]
+        Ranker(llm, config).rank(files)
+        # All 3 chunks processed
+        assert llm.aask_json.call_count == 3
 
 
 class TestRankerSystemPrompt:

@@ -57,6 +57,7 @@ class EventType(enum.Enum):
     EVAL_PROGRESS = "eval_progress"
     FINDING_RECORDED = "finding_recorded"
     HUNTER_STATUS = "hunter_status"
+    HUNTER_REASONING = "hunter_reasoning"
     TRACE_STEP = "trace_step"
 
 

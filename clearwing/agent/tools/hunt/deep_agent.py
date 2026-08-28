@@ -28,7 +28,6 @@ from pydantic import Field
 from clearwing.llm import NativeToolSpec, ToolInputModel
 from clearwing.reporting.safety import redact_text
 
-from .discovery import build_semgrep_tool
 from .pool_query import build_pool_query_tools
 from .potentials import build_potential_tools
 from .reporting import build_reporting_tools
@@ -106,7 +105,7 @@ def _matches(name: str, tokens: list[str]) -> bool:
 
 
 
-def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
+def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: C901
     """Build the deep agent tool set: execute, read_file, write_file,
     plus the shared reporting + findings-pool tools.
     """
@@ -257,8 +256,6 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
 
     reporting_tools = build_reporting_tools(ctx)
 
-    semgrep_tool = build_semgrep_tool(ctx)
-
     callgraph_tools = (
         [
             NativeToolSpec(
@@ -330,7 +327,6 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
             schema=WriteFileInput.model_json_schema(),
             handler=write_file,
         ),
-        semgrep_tool,
         *reporting_tools,
         *build_potential_tools(ctx),
         *(build_pool_query_tools(ctx) if ctx.findings_pool is not None else []),
