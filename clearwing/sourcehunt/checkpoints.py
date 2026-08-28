@@ -132,6 +132,7 @@ class HuntResult(BaseModel):
         "completed"
     )
     potentials: list[dict[str, Any]] = Field(default_factory=list)
+    target_plan_completed: bool = True
 
 
 class HuntCheckpoint(BaseModel):

@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from opentelemetry import trace as otel_trace
@@ -72,7 +72,12 @@ from .patcher import AutoPatcher, apply_patch_attempt
 from .paths import resolve_repo_file
 from .poc_runner import build_rerun_poc_callback
 from .pool import HunterPool, HuntPoolConfig, TierBudget
-from .preprocessor import Preprocessor, PreprocessResult
+from .preprocessor import (
+    _SOURCE_EXTS_TO_LANG,
+    Preprocessor,
+    PreprocessResult,
+    _tag_file,
+)
 from .ranker import Ranker, RankerConfig
 from .state import (
     EvidenceLevel,
@@ -83,6 +88,7 @@ from .state import (
     evidence_at_or_above,
     filter_by_evidence,
 )
+from .target_windows import render_target_window_message, split_physical_source_lines
 from .variant_loop import (
     VariantLoop,
     VariantPatternGenerator,
@@ -91,6 +97,13 @@ from .verifier import Verifier, apply_verifier_result
 
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
+
+MAX_TARGET_FILES = 100
+MAX_TARGET_PATH_LENGTH = 1024
+MAX_TARGET_FILE_BYTES = 2 * 1024 * 1024
+MAX_TARGET_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_TARGET_WINDOWS = 512
+MAX_TARGET_WINDOW_BYTES = 512 * 1024
 
 
 @dataclass
@@ -217,6 +230,8 @@ class SourceHuntRunner:
         repo_url: str = "",
         branch: str = "main",
         local_path: str | None = None,
+        target_files: list[str] | tuple[str, ...] | None = None,
+        target_window_lines: int | None = None,
         depth: str = "standard",  # quick | standard | deep
         budget_usd: float = 0.0,
         input_price_per_million: float | None = None,
@@ -316,6 +331,12 @@ class SourceHuntRunner:
             repo_url = repo_url or t.repo_url
             branch = branch if branch != "main" else t.branch
             local_path = local_path if local_path is not None else t.local_path
+            target_files = target_files if target_files is not None else t.target_files
+            target_window_lines = (
+                target_window_lines
+                if target_window_lines is not None
+                else t.target_window_lines
+            )
             depth = depth if depth != "standard" else t.depth
             # Budget params
             budget_usd = budget_usd if budget_usd != 0.0 else b.budget_usd
@@ -475,6 +496,20 @@ class SourceHuntRunner:
             )
         if sandbox_cpus is not None and (not math.isfinite(sandbox_cpus) or sandbox_cpus < 0):
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
+        normalized_target_files = self._normalize_target_files(target_files or ())
+        target_window_lines = 480 if target_window_lines is None else target_window_lines
+        if type(target_window_lines) is not int or not 40 <= target_window_lines <= 500:
+            raise ValueError("target_window_lines must be between 40 and 500")
+        if normalized_target_files and flow != "legacy":
+            raise ValueError("target_files is currently supported only by the legacy flow")
+        if normalized_target_files and depth == "quick":
+            raise ValueError("target_files requires standard or deep depth so hunters run")
+        if normalized_target_files and no_per_file_hunt:
+            raise ValueError("target_files cannot be combined with no_per_file_hunt")
+        if normalized_target_files and shard_entry_points:
+            raise ValueError("target_files cannot be combined with entry-point sharding")
+        if normalized_target_files and (enable_subsystem_hunt or subsystem_paths):
+            raise ValueError("target_files cannot be combined with subsystem hunting")
         if flow not in {"legacy", "proof"}:
             raise ValueError("flow must be 'legacy' or 'proof'")
         if checkpoint is not None and flow != "legacy":
@@ -496,6 +531,10 @@ class SourceHuntRunner:
         self.repo_url = repo_url
         self.branch = branch
         self.local_path = local_path
+        self._target_files = normalized_target_files
+        self._target_window_lines = target_window_lines
+        self._target_metadata: dict[str, dict[str, Any]] = {}
+        self._target_plan_incomplete = False
         self.depth = depth
         self.budget_usd = budget_usd
         self.input_price_per_million = input_price_per_million
@@ -586,7 +625,7 @@ class SourceHuntRunner:
         self._enable_subsystem_hunt = enable_subsystem_hunt or bool(subsystem_paths)
         self._subsystem_paths = subsystem_paths
         self._no_per_file_hunt = no_per_file_hunt
-        self._no_rank = no_rank
+        self._no_rank = no_rank or bool(self._target_files)
         self._stop_after = stop_after
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
@@ -633,6 +672,201 @@ class SourceHuntRunner:
         self._run_started_monotonic: float | None = None
         self._resolved_model_roles: dict[str, dict[str, str]] = {}
         self._verification_incomplete = False
+
+    @staticmethod
+    def _normalize_target_files(paths: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        """Validate and normalize explicit repository-relative target files."""
+        if len(paths) > MAX_TARGET_FILES:
+            raise ValueError(f"target_files accepts at most {MAX_TARGET_FILES} paths")
+        normalized: list[str] = []
+        for raw_path in paths:
+            if not isinstance(raw_path, str):
+                raise ValueError("target_files entries must be strings")
+            candidate = raw_path.strip().replace("\\", "/")
+            if len(candidate) > MAX_TARGET_PATH_LENGTH:
+                raise ValueError(
+                    f"target_files entries must be at most {MAX_TARGET_PATH_LENGTH} characters"
+                )
+            path = PurePosixPath(candidate)
+            windows_drive = len(candidate) >= 2 and candidate[0].isalpha() and candidate[1] == ":"
+            if (
+                not candidate
+                or "\x00" in candidate
+                or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+                or "\u2028" in candidate
+                or "\u2029" in candidate
+                or path.is_absolute()
+                or windows_drive
+                or ".." in path.parts
+                or path.as_posix() == "."
+            ):
+                raise ValueError(
+                    f"target_files entries must be repository-relative files: {raw_path!r}"
+                )
+            relative = path.as_posix()
+            if relative not in normalized:
+                normalized.append(relative)
+        return tuple(normalized)
+
+    def _inspect_target_files(self, repo_path: str) -> dict[str, dict[str, Any]]:
+        """Validate, fingerprint, and size an explicit target plan."""
+        if not self._target_files:
+            return {}
+
+        root = Path(repo_path).resolve()
+        metadata: dict[str, dict[str, Any]] = {}
+        total_bytes = 0
+        total_windows = 0
+        for relative in self._target_files:
+            unresolved = root / relative
+            cursor = root
+            for part in PurePosixPath(relative).parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    raise ValueError(
+                        f"invalid target file {relative}: symbolic links are not supported"
+                    )
+            try:
+                absolute = unresolved.resolve(strict=True)
+                absolute.relative_to(root)
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"invalid target file {relative}: {exc}") from exc
+            if not absolute.is_file():
+                raise ValueError(f"target file is not a regular file: {relative}")
+
+            language = _SOURCE_EXTS_TO_LANG.get(absolute.suffix.lower())
+            if language is None:
+                raise ValueError(f"unsupported source target: {relative}")
+            try:
+                source_bytes = absolute.read_bytes()
+            except OSError as exc:
+                raise ValueError(f"unable to read target file {relative}: {exc}") from exc
+            if not source_bytes:
+                raise ValueError(f"target file is empty: {relative}")
+            if len(source_bytes) > MAX_TARGET_FILE_BYTES:
+                raise ValueError(
+                    f"target file exceeds {MAX_TARGET_FILE_BYTES} bytes: {relative}"
+                )
+
+            lines = split_physical_source_lines(source_bytes)
+            line_count = len(lines)
+            file_windows = 0
+            for start in range(0, line_count, self._target_window_lines):
+                window_lines = lines[start : start + self._target_window_lines]
+                rendered = render_target_window_message(
+                    file_path=relative,
+                    language=language,
+                    source_lines=window_lines,
+                    start_line=start + 1,
+                    total_lines=line_count,
+                )
+                window_size = len(rendered.encode("utf-8"))
+                if window_size > MAX_TARGET_WINDOW_BYTES:
+                    first_line = start + 1
+                    last_line = min(line_count, start + self._target_window_lines)
+                    raise ValueError(
+                        f"target window {relative}:{first_line}-{last_line} exceeds "
+                        f"{MAX_TARGET_WINDOW_BYTES} prompt bytes"
+                    )
+                file_windows += 1
+
+            total_bytes += len(source_bytes)
+            total_windows += file_windows
+            metadata[relative] = {
+                "absolute_path": str(absolute),
+                "language": language,
+                "line_count": line_count,
+                "size_bytes": len(source_bytes),
+                "sha256": hashlib.sha256(source_bytes).hexdigest(),
+            }
+
+        if total_bytes > MAX_TARGET_TOTAL_BYTES:
+            raise ValueError(f"target files exceed {MAX_TARGET_TOTAL_BYTES} total bytes")
+        if total_windows > MAX_TARGET_WINDOWS:
+            raise ValueError(f"target plan exceeds {MAX_TARGET_WINDOWS} windows")
+        return metadata
+
+    def _filter_target_files(self, result: PreprocessResult) -> PreprocessResult:
+        """Restrict preprocessing output to explicit files before ranking."""
+        if not self._target_files:
+            return result
+
+        current_metadata = self._inspect_target_files(result.repo_path)
+        if self._target_metadata and current_metadata != self._target_metadata:
+            raise ValueError("target files changed while preprocessing; rerun the hunt")
+        self._target_metadata = current_metadata
+        targets_by_path = {target.get("path", ""): target for target in result.file_targets}
+
+        selected: list[FileTarget] = []
+        for path in self._target_files:
+            item = current_metadata[path]
+            target = dict(
+                targets_by_path.get(path)
+                or {
+                    "path": path,
+                    "absolute_path": item["absolute_path"],
+                    "language": item["language"],
+                    "tags": _tag_file(path, ""),
+                    "surface": 0,
+                    "influence": 0,
+                    "reachability": 3,
+                    "priority": 0.0,
+                    "tier": "C",
+                }
+            )
+            target["absolute_path"] = item["absolute_path"]
+            target["language"] = item["language"]
+            target["loc"] = item["line_count"]
+            target["target_size_bytes"] = item["size_bytes"]
+            target["target_sha256"] = item["sha256"]
+            selected.append(target)
+
+        selected_paths = set(self._target_files)
+        repo_root = Path(result.repo_path).resolve()
+
+        def _static_path(finding: Any) -> str:
+            path = Path(str(getattr(finding, "file_path", "") or ""))
+            if path.is_absolute():
+                try:
+                    path = path.resolve().relative_to(repo_root)
+                except ValueError:
+                    return ""
+            return path.as_posix()
+
+        result.file_targets = selected
+        result.static_findings = [
+            finding for finding in result.static_findings if _static_path(finding) in selected_paths
+        ]
+        result.semgrep_findings = [
+            finding
+            for finding in result.semgrep_findings
+            if str(finding.get("file") or "") in selected_paths
+        ]
+        result.taint_paths = [
+            path for path in result.taint_paths if str(path.file or "") in selected_paths
+        ]
+        return result
+
+    def _expand_target_windows(self, files: list[FileTarget]) -> list[FileTarget]:
+        """Create independently seeded windows for explicit target files."""
+        if not self._target_files:
+            return files
+
+        windows: list[FileTarget] = []
+        for file_target in files:
+            total_lines = int(file_target.get("loc", 0) or 0)
+            if total_lines == 0:
+                windows.append(file_target)
+                continue
+            for start_line in range(1, total_lines + 1, self._target_window_lines):
+                window = dict(file_target)
+                window["target_start_line"] = start_line
+                window["target_end_line"] = min(
+                    total_lines, start_line + self._target_window_lines - 1
+                )
+                window["target_total_lines"] = total_lines
+                windows.append(window)
+        return windows
 
     def _dump_checkpoint(self) -> None:
         if self._checkpoint is None:
@@ -1111,7 +1345,7 @@ class SourceHuntRunner:
             self._preflight_budget_clients()
             # 1. Preprocess
             self._emit_stage("preprocess", "started")
-            preprocess_result = self._preprocess()
+            preprocess_result = self._filter_target_files(self._preprocess())
             repo_path = preprocess_result.repo_path
             files = preprocess_result.file_targets
             files_ranked = len(files)
@@ -1149,20 +1383,28 @@ class SourceHuntRunner:
 
             # 2. Rank
             if self._no_rank:
-                logger.info("Ranker skipped (--no-rank); assigning default priority scores")
+                skip_reason = "--target-files" if self._target_files else "--no-rank"
+                logger.info("Ranker skipped (%s); assigning default priority scores", skip_reason)
                 self._emit_stage(
                     "rank",
                     "started",
                     detail=f"{len(files)} files",
                     files=stage_files,
                 )
-                pipeline_status.record_degraded(
-                    "ranker", "All files assigned default priority scores (--no-rank)"
-                )
+                if self._target_files:
+                    pipeline_status.record(
+                        "ranker",
+                        StageOutcome.SKIPPED,
+                        fallback_description="Explicit target files bypass ranking",
+                    )
+                else:
+                    pipeline_status.record_degraded(
+                        "ranker", f"All files assigned default priority scores ({skip_reason})"
+                    )
                 self._emit_stage(
                     "rank",
-                    "degraded",
-                    detail="Skipped (--no-rank)",
+                    "skipped" if self._target_files else "degraded",
+                    detail=f"Skipped ({skip_reason})",
                     files=stage_files,
                 )
                 self._apply_rank_fallbacks(files)
@@ -1323,7 +1565,7 @@ class SourceHuntRunner:
 
             # 3. Tiered hunt
             hunt_result = await self._hunt(
-                files=files,
+                files=self._expand_target_windows(files),
                 repo_path=repo_path,
                 pipeline_status=pipeline_status,
                 stage_files=stage_files,
@@ -1341,6 +1583,37 @@ class SourceHuntRunner:
             band_stats = hunt_result.band_stats
             subsystems_hunted = hunt_result.subsystems_hunted
             subsystem_spent = hunt_result.subsystem_spent_usd
+
+            if self._target_files and not hunt_result.target_plan_completed:
+                self._target_plan_incomplete = True
+                if historical_db is not None:
+                    historical_db.close()
+                for stage in ("verify", "exploit"):
+                    self._emit_stage(
+                        stage,
+                        "skipped",
+                        findings_so_far=len(all_findings),
+                        detail="Explicit target window plan was incomplete",
+                        files=stage_files,
+                        finding_ids=[finding.id for finding in all_findings],
+                    )
+                return self._finalize_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    findings=all_findings,
+                    verified=[],
+                    exploited=[],
+                    files_ranked=files_ranked,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    findings_pool=findings_pool,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                    subsystem_status=hunt_result.subsystem_status,
+                    pipeline_status=pipeline_status,
+                    potentials=all_potentials,
+                )
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
             if self._enable_behavior_monitor and all_findings:
@@ -2606,6 +2879,22 @@ class SourceHuntRunner:
             "subsystem_budget_usd": self._subsystem_budget_usd,
             "subsystem_max_parallel": self._subsystem_max_parallel,
         }
+        if self._target_files:
+            options.update(
+                {
+                    "target_files": list(self._target_files),
+                    "target_window_lines": self._target_window_lines,
+                    "target_fingerprints": [
+                        {
+                            "path": file_target.get("path", ""),
+                            "size_bytes": file_target.get("target_size_bytes"),
+                            "sha256": file_target.get("target_sha256"),
+                        }
+                        for file_target in files
+                        if file_target.get("target_start_line") in {None, 1}
+                    ],
+                }
+            )
         self._hunt_restored = False
         hunt_symbols = sorted(
             {
@@ -2662,6 +2951,7 @@ class SourceHuntRunner:
             files_hunted=0,
             spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
         )
+        target_plan_completed = not self._target_files
         hunter_llm = self._get_native_client("hunter", self.hunter_llm, budget_stage="hunt")
         if self._no_per_file_hunt:
             logger.info("Per-file hunt skipped (--no-per-file-hunt)")
@@ -2718,12 +3008,16 @@ class SourceHuntRunner:
                     findings_pool=findings_pool,
                     trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                     instrumentation=self._instrumentation,
+                    explicit_target_windows=bool(self._target_files),
                     callgraph=callgraph,
                 )
             )
             try:
                 result.findings = await pool.arun()
+                target_plan_completed = pool.all_targets_completed
                 if pool.budget_exhausted or self._budget_exhausted():
+                    if pool.budget_exhausted:
+                        target_plan_completed = False
                     pipeline_status.record(
                         "hunter_pool",
                         StageOutcome.SKIPPED,
@@ -2739,6 +3033,19 @@ class SourceHuntRunner:
                         symbols=self._finding_symbols(result.findings),
                         finding_ids=[finding.id for finding in result.findings],
                     )
+                elif self._target_files and not target_plan_completed:
+                    pipeline_status.record_degraded(
+                        "hunter_pool", "Explicit target plan did not complete every window"
+                    )
+                    self._emit_stage(
+                        "hunt",
+                        "degraded",
+                        findings_so_far=len(result.findings),
+                        cost_usd=pool.total_spent,
+                        detail="Explicit target plan was incomplete",
+                        files=stage_files,
+                        finding_ids=[finding.id for finding in result.findings],
+                    )
                 else:
                     pipeline_status.record_succeeded("hunter_pool")
                     self._emit_stage(
@@ -2752,6 +3059,7 @@ class SourceHuntRunner:
                         finding_ids=[finding.id for finding in result.findings],
                     )
             except BudgetExceeded:
+                target_plan_completed = False
                 logger.info("HunterPool stopped because the run budget is exhausted")
                 pipeline_status.record(
                     "hunter_pool",
@@ -2767,6 +3075,7 @@ class SourceHuntRunner:
                     finding_ids=[finding.id for finding in result.findings],
                 )
             except Exception as exc:
+                target_plan_completed = False
                 logger.warning("HunterPool run failed", exc_info=True)
                 pipeline_status.record_degraded(
                     "hunter_pool", "Hunter phase produced no findings due to error"
@@ -2822,6 +3131,17 @@ class SourceHuntRunner:
 
         if self._checkpoint is None:
             raise RuntimeError("hunting requires a preprocessing checkpoint")
+        if self._target_files and not target_plan_completed:
+            # Target coverage is all-or-nothing at the stage-checkpoint level.
+            # A later resume must rerun the explicit window plan rather than
+            # treating partial coverage as complete.
+            self._checkpoint.hunt = None
+            self._checkpoint.verification = None
+            self._checkpoint.exploitation = None
+            result.target_plan_completed = False
+            self._dump_checkpoint()
+            return result
+        result.target_plan_completed = target_plan_completed
         self._checkpoint.hunt = HuntCheckpoint.from_result(result, options=options)
         self._dump_checkpoint()
         return result
@@ -3020,8 +3340,25 @@ class SourceHuntRunner:
             subsystem_paths=self._subsystem_paths,
         )
         repo_path: str | None = None
-        if self._checkpoint is not None and self._checkpoint.preprocess is not None:
+        if self._target_files:
             repo_path = self._preprocessor.resolve_repository()
+            self._target_metadata = self._inspect_target_files(repo_path)
+            options.update(
+                {
+                    "target_files": list(self._target_files),
+                    "target_window_lines": self._target_window_lines,
+                    "target_fingerprints": [
+                        {
+                            "path": path,
+                            "size_bytes": self._target_metadata[path]["size_bytes"],
+                            "sha256": self._target_metadata[path]["sha256"],
+                        }
+                        for path in self._target_files
+                    ],
+                }
+            )
+        if self._checkpoint is not None and self._checkpoint.preprocess is not None:
+            repo_path = repo_path or self._preprocessor.resolve_repository()
             restored = self._checkpoint.preprocess.restore(repo_path=repo_path, options=options)
             if restored is not None:
                 self._preprocess_restored = True
@@ -3380,7 +3717,7 @@ class SourceHuntRunner:
 
         run_status = (
             "incomplete"
-            if self._verification_incomplete
+            if self._target_plan_incomplete or self._verification_incomplete
             else (
                 "budget_exhausted"
                 if self._budget_exhausted() or subsystem_status == "budget_exhausted"

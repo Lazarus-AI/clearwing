@@ -39,6 +39,8 @@ from .instrumentation import stable_run_id
 from .state import FileTarget, Finding
 
 logger = logging.getLogger(__name__)
+
+TARGET_WINDOW_CACHE_VERSION = 1
 _DEFAULT_HUNTER_FACTORY = None
 
 
@@ -95,6 +97,9 @@ class WorkItem:
                 "run_id": run_id,
                 "file": self.file_target.get("path", ""),
                 "tier": tier,
+                "target_start_line": self.file_target.get("target_start_line"),
+                "target_end_line": self.file_target.get("target_end_line"),
+                "target_sha256": self.file_target.get("target_sha256"),
                 "band": self.band,
                 "attempt": self.attempt,
                 "entry_point": entry_point_id,
@@ -103,6 +108,16 @@ class WorkItem:
                 "context_id": self.context_id,
             },
         )
+
+
+def _target_label(file_target: FileTarget) -> str:
+    """Return a stable label that distinguishes windows of the same file."""
+    path = file_target.get("path", "")
+    start_line = file_target.get("target_start_line")
+    end_line = file_target.get("target_end_line")
+    if isinstance(start_line, int) and isinstance(end_line, int):
+        return f"{path}:{start_line}-{end_line}"
+    return path
 
 
 def _file_rank(file_target: FileTarget) -> int:
@@ -230,6 +245,7 @@ class HuntPoolConfig:
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
     work_cache: Any = None  # HuntWorkCache | None — work-item-granular hunt resume
+    explicit_target_windows: bool = False
     callgraph: Any = None
 
 
@@ -291,7 +307,7 @@ class HunterPool:
     def __init__(self, config: HuntPoolConfig):
         self.config = config
         for ft in self.config.files:
-            ft["tier"] = assign_tier(ft)
+            ft["tier"] = "A" if config.explicit_target_windows else assign_tier(ft)
         self._results: dict[str, TargetResult] = {}
         self._spent_per_tier: dict[str, float] = {"A": 0.0, "B": 0.0, "C": 0.0}
         self._spent_per_band: dict[str, float] = {"fast": 0.0, "standard": 0.0, "deep": 0.0}
@@ -303,8 +319,50 @@ class HunterPool:
     def run(self) -> list[Finding]:
         return asyncio.run(self.arun())
 
+    def _target_semgrep_hints(self, file_target: FileTarget) -> list[dict] | None:
+        """Return only the static prompt hints relevant to a target window."""
+        hints = self.config.semgrep_hints_by_file.get(file_target.get("path", ""))
+        start_line = file_target.get("target_start_line")
+        end_line = file_target.get("target_end_line")
+        if not hints or not isinstance(start_line, int) or not isinstance(end_line, int):
+            return hints
+        return [
+            hint
+            for hint in hints
+            if not isinstance(hint.get("line"), int)
+            or int(hint["line"]) <= 0
+            or start_line <= int(hint["line"]) <= end_line
+        ]
+
     def _expand_to_work_items(self, files: list[FileTarget], band: str) -> list[WorkItem]:
         """Expand files into WorkItems respecting redundancy and entry-point sharding."""
+        if self.config.explicit_target_windows:
+            items: list[WorkItem] = []
+            for file_target in files:
+                file_path = file_target.get("path", "")
+                context = {
+                    "cache_version": TARGET_WINDOW_CACHE_VERSION,
+                    "seeded_crash": self.config.seeded_crashes_by_file.get(file_path),
+                    "static_hints": self._target_semgrep_hints(file_target),
+                    "agent_mode": self.config.agent_mode,
+                    "prompt_mode": self.config.prompt_mode,
+                    "campaign_hint": self.config.campaign_hint,
+                    "exploit_mode": self.config.exploit_mode,
+                    "target_total_lines": file_target.get("target_total_lines"),
+                    "target_size_bytes": file_target.get("target_size_bytes"),
+                }
+                items.append(
+                    WorkItem(
+                        file_target=file_target,
+                        band=band,
+                        seed_context=_format_seed_context(
+                            self.config.seed_corpus_by_file.get(file_path, [])
+                        ),
+                        context_id=stable_run_id("context", context),
+                    )
+                )
+            return items
+
         items: list[WorkItem] = []
         for ft in files:
             rank = _file_rank(ft)
@@ -377,7 +435,10 @@ class HunterPool:
 
         total_budget = self.config.budget_usd
         tb = self.config.tier_budget
-        if total_budget <= 0:
+        if self.config.explicit_target_windows:
+            budget_a = total_budget if total_budget > 0 else float("inf")
+            budget_b = budget_c = 0.0
+        elif total_budget <= 0:
             budget_a = budget_b = budget_c = float("inf")
         else:
             budget_a = total_budget * tb.tier_a_fraction
@@ -410,7 +471,9 @@ class HunterPool:
             all_findings = self.config.findings_pool.all_findings()
         else:
             for tr in target_results:
-                if tr.status == "completed":
+                if tr.status == "completed" or (
+                    self.config.explicit_target_windows and tr.findings
+                ):
                     for f in cast(list[Finding], tr.findings):
                         all_findings.append(f)
         if self.config.on_finding:
@@ -458,9 +521,31 @@ class HunterPool:
 
     @property
     def completed_target_count(self) -> int:
-        return len(
-            {result.target for result in self._results.values() if result.status == "completed"}
-        )
+        completed = {
+            result.target
+            for result in self._results.values()
+            if result.status == "completed"
+            and (
+                not self.config.explicit_target_windows
+                or result.stop_reason == "completed"
+            )
+        }
+        labels_by_file: dict[str, set[str]] = {}
+        for file_target in self.config.files:
+            labels_by_file.setdefault(file_target.get("path", ""), set()).add(
+                _target_label(file_target)
+            )
+        return sum(labels.issubset(completed) for labels in labels_by_file.values())
+
+    @property
+    def all_targets_completed(self) -> bool:
+        expected = {_target_label(file_target) for file_target in self.config.files}
+        completed = {
+            result.target
+            for result in self._results.values()
+            if result.status == "completed" and result.stop_reason == "completed"
+        }
+        return expected.issubset(completed)
 
     async def _run_tier_phase(
         self,
@@ -497,9 +582,13 @@ class HunterPool:
             work_item_id = wi.stable_identifier(self.config.session_id_prefix, tier)
             cached = self.config.work_cache.load(work_item_id) if self.config.work_cache else None
             if cached is not None and (
-                cached.target != wi.file_target.get("path", "")
+                cached.target != _target_label(wi.file_target)
                 or cached.tier != tier
                 or cached.band != wi.band
+                or (
+                    self.config.explicit_target_windows
+                    and cached.stop_reason != "completed"
+                )
             ):
                 logger.warning("Ignoring mismatched cached hunter work %s", work_item_id)
                 cached = None
@@ -544,7 +633,7 @@ class HunterPool:
                 )
                 for task, (wi, _work_item_id, _from_cache) in list(in_flight.items()):
                     task.cancel()
-                    key = wi.file_target.get("path", "")
+                    key = _target_label(wi.file_target)
                     async with self._state_lock:
                         self._results[key] = TargetResult(
                             target=key,
@@ -558,7 +647,7 @@ class HunterPool:
 
             for task in done:
                 wi, work_item_id, from_cache = in_flight.pop(task)
-                key = wi.file_target.get("path", "")
+                key = _target_label(wi.file_target)
                 try:
                     result = await task
                 except asyncio.CancelledError:
@@ -631,7 +720,9 @@ class HunterPool:
                     )
                 )
 
-                if result.status == "completed" and result.findings:
+                if result.findings and (
+                    result.status == "completed" or self.config.explicit_target_windows
+                ):
                     for f in cast(list[Finding], result.findings):
                         trace = f.get("vulnerability_trace")
                         trace_chain = ""
@@ -654,7 +745,7 @@ class HunterPool:
                             except Exception:
                                 logger.debug("findings_pool.add failed", exc_info=True)
 
-                if result.status == "completed":
+                if result.status == "completed" and not self.config.explicit_target_windows:
                     next_band = promotion_decision(
                         cast(list[Finding], result.findings),
                         result.stop_reason,
@@ -706,6 +797,8 @@ class HunterPool:
                 {
                     "run_id": self.config.session_id_prefix,
                     "file": file_target.get("path", ""),
+                    "target_start_line": file_target.get("target_start_line"),
+                    "target_end_line": file_target.get("target_end_line"),
                     "band": band,
                     "entry_point": (
                         getattr(entry_point, "function_name", "") if entry_point is not None else ""
@@ -729,7 +822,7 @@ class HunterPool:
         with spend_metadata(
             tier=tier,
             band=band,
-            target=file_target.get("path", ""),
+            target=_target_label(file_target),
             entry_point=(entry_point.function_name if entry_point else None),
             work_item_id=work_item_id,
         ):
@@ -765,9 +858,12 @@ class HunterPool:
                 finding_ids=[finding.id for finding in findings],
                 metadata={"tier": tier, "band": band, "cost_usd": cost, "tokens": tokens},
             )
+        status = "completed"
+        if self.config.explicit_target_windows and stop_reason != "completed":
+            status = "budget_exhausted" if stop_reason == "budget_exhausted" else "error"
         return TargetResult(
-            target=file_target.get("path", ""),
-            status="completed",
+            target=_target_label(file_target),
+            status=status,
             findings=cast(list[dict], findings),
             cost_usd=cost,
             tokens_used=tokens,
@@ -855,6 +951,8 @@ class HunterPool:
                 {
                     "run_id": self.config.session_id_prefix,
                     "file": file_target.get("path", ""),
+                    "target_start_line": file_target.get("target_start_line"),
+                    "target_end_line": file_target.get("target_end_line"),
                     "entry_point": (
                         getattr(entry_point, "function_name", "") if entry_point is not None else ""
                     ),
@@ -878,7 +976,7 @@ class HunterPool:
 
         file_path = file_target.get("path", "")
         seeded_crash = self.config.seeded_crashes_by_file.get(file_path)
-        semgrep_hints = self.config.semgrep_hints_by_file.get(file_path)
+        semgrep_hints = self._target_semgrep_hints(file_target)
 
         result = _DEFAULT_HUNTER_FACTORY(
             file_target=file_target,

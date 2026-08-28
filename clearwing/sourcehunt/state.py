@@ -107,6 +107,14 @@ class FileTarget(TypedDict, total=False):
     defines_constants: bool
     has_fuzz_entry_point: bool  # v0.2: detected by tagger
     fuzz_harness_path: str | None  # v0.2: filled by Harness Generator
+    # Explicit --target-files hunts may split a large file into independently
+    # seeded, line-numbered windows. These fields scope the hunter's first
+    # message without restricting its read-only navigation tools.
+    target_start_line: int
+    target_end_line: int
+    target_total_lines: int
+    target_size_bytes: int
+    target_sha256: str
 
 
 # Phase 3 unified the legacy sourcehunt finding TypedDict with the
