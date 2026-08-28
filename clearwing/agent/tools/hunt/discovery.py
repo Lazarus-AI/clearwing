@@ -209,7 +209,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             rel = _normalize_path(ctx.repo_path, path)
         except ValueError as e:
             return f"Error: {e}"
-        ctx.files_read.add(rel)
         host_path = os.path.join(ctx.repo_path, rel)
         try:
             with open(host_path, encoding="utf-8", errors="replace") as f:
@@ -228,6 +227,9 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             )
         else:
             footer = ""
+        if sliced:
+            ctx.files_read.add(rel)
+            ctx.read_ranges.setdefault(rel, []).append((first + 1, first + len(sliced)))
         return _safe_source_output("".join(sliced) + footer, "source file")
 
     def list_source_tree(dir_path: str = ".", max_depth: int = 2) -> list[str]:
