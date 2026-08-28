@@ -511,10 +511,23 @@ class TestHunterTrajectoryLogging:
         class _StubLLM:
             model_name = "stub-model"
 
-            async def achat(self, *, messages, system, tools, **kwargs):
+            async def achat(
+                self,
+                *,
+                messages,
+                system,
+                tools,
+                cache_prefix=False,
+                prompt_cache_key=None,
+                **kwargs,
+            ):
                 assert system == "system prompt"
                 # messages includes the initial user message + sitrep at step 1
                 assert len(messages) >= 1
+                # Hunter opts into prompt caching (transport hint; no effect on
+                # the model input or findings).
+                assert cache_prefix is True
+                assert prompt_cache_key == "traj-test:"
                 return ChatResponse(
                     content=[{"text": "No findings."}],
                     usage=Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18),

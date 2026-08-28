@@ -382,6 +382,46 @@ def _run_coro_sync(coro):
     raise RuntimeError("Synchronous wrapper called from a running event loop")
 
 
+def _mark_cache_prefix(
+    messages: list[ChatMessage], cache_prefix: bool
+) -> list[ChatMessage]:
+    """Return the request's message list, optionally with a caching breakpoint.
+
+    When *cache_prefix* is False this is the previous behaviour verbatim —
+    ``list(messages)`` — so every existing caller keeps sending byte-identical
+    requests.
+
+    When True, a single ``cache_control="ephemeral"`` marker is placed on the
+    *last* message and cleared from every earlier one. Providers that support
+    prompt caching (Anthropic maps this to a content-part ``cache_control``;
+    OpenAI to request-level caching) then cache the whole prefix up to and
+    including it — i.e. ``system`` + ``tools`` + every prior turn. On the next
+    turn the marker rides the new last message, so the just-grown history is a
+    cache *read* rather than a fresh write. This is a transport/billing hint
+    only: it does not alter the tokens the model conditions on, so outputs are
+    unchanged by construction.
+
+    The ``cache_control`` field is mutated *in place*. It is the one field that
+    is purely a transport hint — never part of the tokenized prompt — so
+    toggling it is invisible to the model. We deliberately do NOT reconstruct
+    the message: a rebuilt ``ChatMessage`` cannot round-trip ``reasoning_content``
+    (no constructor arg) or ``raw_content_json``, and dropping the reasoning
+    value that pairs with an assistant turn's ``thought_signature`` makes
+    Anthropic reject the request ("thinking blocks require one reasoning value
+    per thought signature"). Because the hunter reuses one growing ``messages``
+    list across turns, we also clear any stale marker left on earlier messages
+    so there is never more than one breakpoint (Anthropic caps at 4).
+    """
+    if not cache_prefix or not messages:
+        return list(messages)
+    last_index = len(messages) - 1
+    for i, msg in enumerate(messages):
+        want = "ephemeral" if i == last_index else None
+        if msg.cache_control != want:
+            msg.cache_control = want
+    return list(messages)
+
+
 def response_text(response: ChatResponse) -> str:
     """Coalesce a :class:`ChatResponse`'s text segments into a single string.
 
@@ -822,6 +862,8 @@ class AsyncLLMClient:
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
         _truncation_retry: int = 0,
+        cache_prefix: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> ChatResponse:
         request_tools = None
         if tools:
@@ -836,7 +878,7 @@ class AsyncLLMClient:
 
         system_prompt = system or self.default_system
         request = ChatRequest(
-            messages=list(messages),
+            messages=_mark_cache_prefix(messages, cache_prefix),
             system=system_prompt,
             tools=request_tools,
         )
@@ -878,6 +920,7 @@ class AsyncLLMClient:
                 capture_reasoning_content=self.capture_reasoning_content,
                 normalize_reasoning_content=self.capture_reasoning_content,
                 reasoning_effort=self.reasoning_effort,
+                prompt_cache_key=prompt_cache_key,
                 response_json_spec=(
                     _json_spec_from_model(
                         response_schema,
@@ -1021,6 +1064,8 @@ class AsyncLLMClient:
         top_p: float | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         _truncation_retry: int = 0,
+        cache_prefix: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> ChatResponse:
         """Like ``achat`` but streams text deltas via *on_text_delta*.
 
@@ -1035,6 +1080,8 @@ class AsyncLLMClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p,
+                cache_prefix=cache_prefix,
+                prompt_cache_key=prompt_cache_key,
             )
 
         request_tools = None
@@ -1044,7 +1091,7 @@ class AsyncLLMClient:
             ]
         system_prompt = system or self.default_system
         request = ChatRequest(
-            messages=list(messages),
+            messages=_mark_cache_prefix(messages, cache_prefix),
             system=system_prompt,
             tools=request_tools,
         )
@@ -1080,6 +1127,7 @@ class AsyncLLMClient:
                 capture_reasoning_content=self.capture_reasoning_content,
                 normalize_reasoning_content=self.capture_reasoning_content,
                 reasoning_effort=self.reasoning_effort,
+                prompt_cache_key=prompt_cache_key,
             )
             async with self._semaphore:
                 client = self._build_client(Client)
@@ -1164,6 +1212,8 @@ class AsyncLLMClient:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    cache_prefix=cache_prefix,
+                    prompt_cache_key=prompt_cache_key,
                 )
             raise
 
@@ -1233,6 +1283,8 @@ class AsyncLLMClient:
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
+        cache_prefix: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> ChatResponse:
         return await self.achat(
             messages=[ChatMessage("user", user)],
@@ -1242,6 +1294,8 @@ class AsyncLLMClient:
             response_schema=response_schema,
             response_schema_name=response_schema_name,
             response_schema_description=response_schema_description,
+            cache_prefix=cache_prefix,
+            prompt_cache_key=prompt_cache_key,
         )
 
     async def aask_json(
@@ -1255,6 +1309,8 @@ class AsyncLLMClient:
         schema_model: type[BaseModel] | None = None,
         schema_name: str | None = None,
         schema_description: str | None = None,
+        cache_prefix: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> tuple[Any, ChatResponse]:
         response = await self.aask_text(
             system=system,
@@ -1264,6 +1320,8 @@ class AsyncLLMClient:
             response_schema=schema_model,
             response_schema_name=schema_name,
             response_schema_description=schema_description,
+            cache_prefix=cache_prefix,
+            prompt_cache_key=prompt_cache_key,
         )
         text = response_text(response)
         if schema_model is not None:
@@ -1942,6 +2000,7 @@ class AsyncLLMClient:
             capture_reasoning_content=options.capture_reasoning_content,
             normalize_reasoning_content=options.normalize_reasoning_content,
             reasoning_effort=None,
+            prompt_cache_key=options.prompt_cache_key,
             response_json_spec=options.response_json_spec,
         )
 
@@ -1959,6 +2018,7 @@ class AsyncLLMClient:
             capture_reasoning_content=options.capture_reasoning_content,
             normalize_reasoning_content=options.normalize_reasoning_content,
             reasoning_effort=options.reasoning_effort,
+            prompt_cache_key=options.prompt_cache_key,
             response_json_spec=options.response_json_spec,
         )
 
