@@ -1922,16 +1922,22 @@ class NativeHunter:
                     )
                     reread_refresh = False
                     reread_range: tuple[int, int] | None = None
+                    reread_coverage = 0.0
+                    reread_uncovered: list[tuple[int, int]] = []
                     reread_path = ""
                     if tool_call.fn_name == "read_file":
                         reread_path = str(tool_arguments.get("path") or "")
                         reread_range = _requested_read_range(tool_arguments)
-                        covered = _range_coverage_fraction(
+                        reread_coverage = _range_coverage_fraction(
                             reread_range,
                             visible_read_ranges.get(reread_path, []),
                         )
-                        if covered >= 0.8:
+                        if reread_coverage >= 0.8:
                             reread_refresh = True
+                            reread_uncovered = _uncovered_read_ranges(
+                                reread_range,
+                                visible_read_ranges.get(reread_path, []),
+                            )
 
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
@@ -2044,9 +2050,27 @@ class NativeHunter:
                         if tool_call.fn_name == "read_file" and reread_range is not None:
                             visible_read_ranges.setdefault(reread_path, []).append(reread_range)
                             if reread_refresh and isinstance(tool_output, str):
+                                if reread_uncovered:
+                                    new_lines = ", ".join(
+                                        f"{start}-{end}" if start != end else str(start)
+                                        for start, end in reread_uncovered
+                                    )
+                                    direction = (
+                                        f"Only lines {new_lines} are new. Focus on those lines; "
+                                        "do not re-analyze the overlapping portion."
+                                    )
+                                else:
+                                    direction = (
+                                        "This request exposes no new lines. Use the returned "
+                                        "content now, then follow a caller, callee, reference, "
+                                        "or active potential instead of rereading this range."
+                                    )
                                 tool_output = (
-                                    "[CONTEXT REFRESH: this range substantially overlaps code "
-                                    "still present in the active conversation.]\n" + tool_output
+                                    "[READ OVERLAP ADVISORY: "
+                                    f"{reread_coverage:.0%} of requested lines are already "
+                                    "visible in the active conversation. "
+                                    f"{direction} Content is returned successfully below.]\n"
+                                    + tool_output
                                 )
                         tool_summary = _tool_output_text(
                             tool_call.fn_name,
@@ -2493,6 +2517,29 @@ def _range_coverage_fraction(
         else:
             merged.append((left, right))
     return sum(right - left + 1 for left, right in merged) / total
+
+
+def _uncovered_read_ranges(
+    requested: tuple[int, int], covered_ranges: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """Return requested line intervals not already represented in context."""
+    start, end = requested
+    intersections = sorted(
+        (max(start, covered_start), min(end, covered_end))
+        for covered_start, covered_end in covered_ranges
+        if max(start, covered_start) <= min(end, covered_end)
+    )
+    uncovered: list[tuple[int, int]] = []
+    cursor = start
+    for left, right in intersections:
+        if left > cursor:
+            uncovered.append((cursor, left - 1))
+        cursor = max(cursor, right + 1)
+        if cursor > end:
+            break
+    if cursor <= end:
+        uncovered.append((cursor, end))
+    return uncovered
 
 
 def _summarize_match_list(tool_name: str, value: list[Any]) -> str:

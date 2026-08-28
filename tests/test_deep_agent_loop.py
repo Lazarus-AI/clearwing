@@ -504,7 +504,7 @@ async def test_read_file_pagination_is_not_falsely_throttled():
 
 
 @pytest.mark.asyncio
-async def test_overlapping_read_file_refreshes_return_content_instead_of_errors():
+async def test_overlapping_read_file_refreshes_return_content_with_direction():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=6, budget_usd=0.0)
     hunter.tools[0].name = "read_file"
     llm.achat.side_effect = [
@@ -520,7 +520,7 @@ async def test_overlapping_read_file_refreshes_return_content_instead_of_errors(
             tool_calls_list=[
                 _make_tool_call(
                     "read_file",
-                    {"path": "views.py", "offset": 100, "limit": 100},
+                    {"path": "views.py", "offset": 400, "limit": 120},
                 )
             ]
         ),
@@ -547,10 +547,12 @@ async def test_overlapping_read_file_refreshes_return_content_instead_of_errors(
     ]
     assert len(tool_results) == 3
     assert tool_results[0] == "ok"
-    assert all(
-        output.startswith("[CONTEXT REFRESH:") and output.endswith("\nok")
-        for output in tool_results[1:]
-    )
+    assert tool_results[1].startswith("[READ OVERLAP ADVISORY: 83%")
+    assert "Only lines 501-520 are new" in tool_results[1]
+    assert tool_results[1].endswith("\nok")
+    assert tool_results[2].startswith("[READ OVERLAP ADVISORY: 100%")
+    assert "This request exposes no new lines" in tool_results[2]
+    assert tool_results[2].endswith("\nok")
     assert not any(
         isinstance(output, dict) and output.get("status") == "read_already_recent"
         for output in tool_results
