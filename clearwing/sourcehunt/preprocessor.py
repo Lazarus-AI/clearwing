@@ -352,38 +352,24 @@ class Preprocessor:
         build_callgraph = self.build_callgraph
         propagate_reachability = self.propagate_reachability
         run_taint = self.run_taint
-        callgraph_seed_files: list[str] | None = None
+        taint_seed_files: list[str] | None = None
         if large_repo:
             if build_callgraph or propagate_reachability:
-                if self.subsystem_paths:
-                    seed = self._expand_subsystem_files(repo_path, self.subsystem_paths)
-                    if seed:
-                        logger.info(
-                            "Large repo (%d files); seeding callgraph from %d subsystem files",
-                            len(source_files),
-                            len(seed),
-                        )
-                        callgraph_seed_files = seed
-                    else:
-                        logger.info(
-                            "Large repo detected (%d source files); skipping callgraph/reachability",
-                            len(source_files),
-                        )
-                        build_callgraph = False
-                        propagate_reachability = False
-                else:
-                    logger.info(
-                        "Large repo detected (%d source files); skipping callgraph/reachability",
-                        len(source_files),
-                    )
-                    build_callgraph = False
-                    propagate_reachability = False
+                logger.info(
+                    "Large repo (%d files); building repository-wide callgraph "
+                    "across parser-supported non-vendor files",
+                    len(source_files),
+                )
             if run_taint:
-                if self.subsystem_paths and callgraph_seed_files:
+                if self.subsystem_paths:
+                    taint_seed_files = self._expand_subsystem_files(
+                        repo_path, self.subsystem_paths
+                    )
+                if taint_seed_files:
                     logger.info(
                         "Large repo (%d files); seeding taint analysis from %d subsystem files",
                         len(source_files),
-                        len(callgraph_seed_files),
+                        len(taint_seed_files),
                     )
                 else:
                     logger.info(
@@ -461,7 +447,7 @@ class Preprocessor:
             try:
                 builder = CallGraphBuilder()
                 if builder.available:
-                    callgraph = builder.build(repo_path, files=callgraph_seed_files)
+                    callgraph = builder.build(repo_path)
                     self._populate_callgraph_signals(file_targets, callgraph)
                 else:
                     logger.info("tree-sitter grammars not available; callgraph skipped")
@@ -506,7 +492,7 @@ class Preprocessor:
                 analyzer = TaintAnalyzer()
                 if analyzer.available:
                     taint_result = analyzer.analyze_repo(
-                        repo_path, files=callgraph_seed_files
+                        repo_path, files=taint_seed_files
                     )
                     taint_paths = taint_result.paths
                     self._apply_taint_signals(file_targets, taint_paths)
