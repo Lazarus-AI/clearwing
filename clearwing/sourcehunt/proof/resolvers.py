@@ -1200,10 +1200,16 @@ def apply_resolution(
 ) -> Obligation:
     """Persist a resolver result and update the authoritative obligation."""
 
+    # Defensive: two resolutions may legitimately carry evidence/claims that
+    # reduce to the same append-only logical_id (identical rule over identical
+    # facts). Re-adding one raises in ProofGraph, which would otherwise abort
+    # the whole run instead of the single action. Reuse the existing record.
     for evidence in resolution.evidence:
-        graph.add_evidence(evidence)
+        if evidence.logical_id not in graph.evidence:
+            graph.add_evidence(evidence)
     for claim in resolution.claims:
-        graph.add_claim(claim)
+        if claim.logical_id not in graph.claims:
+            graph.add_claim(claim)
     for derivation in resolution.derivations:
         store.append(derivation)
     supporting = (

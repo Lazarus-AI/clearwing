@@ -205,6 +205,17 @@ class Evidence(VersionedRecord):
             "artifact_digest": self.artifact_digest,
             "observations": self.observations,
             "provenance": self.provenance.model_dump(mode="json"),
+            # Evidence supporting/contradicting different claims (or
+            # obligations) is not the same logical evidence, even when the
+            # underlying observations coincide. Without these fields, a
+            # mechanical resolver firing the same deterministic rule over the
+            # same facts for two distinct obligations produces byte-identical
+            # identity payloads and thus a colliding logical_id — which the
+            # append-only ProofGraph rejects. This is reachable whenever many
+            # candidates converge on the same handful of facts (e.g. a single
+            # minified JS bundle).
+            "supports": list(self.supports),
+            "contradicts": list(self.contradicts),
         }
 
 
