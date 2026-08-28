@@ -1920,25 +1920,6 @@ class NativeHunter:
                             tool_arguments,
                         )
                     )
-                    reread_refresh = False
-                    reread_range: tuple[int, int] | None = None
-                    reread_coverage = 0.0
-                    reread_uncovered: list[tuple[int, int]] = []
-                    reread_path = ""
-                    if tool_call.fn_name == "read_file":
-                        reread_path = str(tool_arguments.get("path") or "")
-                        reread_range = _requested_read_range(tool_arguments)
-                        reread_coverage = _range_coverage_fraction(
-                            reread_range,
-                            visible_read_ranges.get(reread_path, []),
-                        )
-                        if reread_coverage >= 0.8:
-                            reread_refresh = True
-                            reread_uncovered = _uncovered_read_ranges(
-                                reread_range,
-                                visible_read_ranges.get(reread_path, []),
-                            )
-
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
                     # same call with a growing/mutating tail (e.g. appending
@@ -2047,36 +2028,23 @@ class NativeHunter:
                             },
                         )
                         tool_output = await self._run_tool(tools_by_name, tool_call)
-                        if tool_call.fn_name == "read_file" and reread_range is not None:
-                            visible_read_ranges.setdefault(reread_path, []).append(reread_range)
-                            if reread_refresh and isinstance(tool_output, str):
-                                if reread_uncovered:
-                                    new_lines = ", ".join(
-                                        f"{start}-{end}" if start != end else str(start)
-                                        for start, end in reread_uncovered
-                                    )
-                                    direction = (
-                                        f"Only lines {new_lines} are new. Focus on those lines; "
-                                        "do not re-analyze the overlapping portion."
-                                    )
-                                else:
-                                    direction = (
-                                        "This request exposes no new lines. Use the returned "
-                                        "content now, then follow a caller, callee, reference, "
-                                        "or active potential instead of rereading this range."
-                                    )
-                                tool_output = (
-                                    "[READ OVERLAP ADVISORY: "
-                                    f"{reread_coverage:.0%} of requested lines are already "
-                                    "visible in the active conversation. "
-                                    f"{direction} Content is returned successfully below.]\n"
-                                    + tool_output
+                        if tool_call.fn_name == "read_file" and isinstance(tool_output, str):
+                            reread_path = str(tool_arguments.get("path") or "")
+                            tool_summary, returned_range = _read_file_tool_response(
+                                tool_arguments,
+                                tool_output,
+                                visible_read_ranges.get(reread_path, []),
+                            )
+                            if returned_range is not None:
+                                visible_read_ranges.setdefault(reread_path, []).append(
+                                    returned_range
                                 )
-                        tool_summary = _tool_output_text(
-                            tool_call.fn_name,
-                            tool_arguments,
-                            tool_output,
-                        )
+                        else:
+                            tool_summary = _tool_output_text(
+                                tool_call.fn_name,
+                                tool_arguments,
+                                tool_output,
+                            )
                         trajectory.log(
                             "tool_result",
                             {
@@ -2540,6 +2508,59 @@ def _uncovered_read_ranges(
     if cursor <= end:
         uncovered.append((cursor, end))
     return uncovered
+
+
+_READ_FILE_METADATA = re.compile(r"\n?\[CLEARWING_READ_METADATA total_lines=(\d+)\]\s*$")
+
+
+def _format_line_ranges(ranges: list[tuple[int, int]]) -> str:
+    if not ranges:
+        return "None"
+    return ", ".join(
+        f"{start}-{end}" if start != end else str(start) for start, end in ranges
+    )
+
+
+def _read_file_tool_response(
+    arguments: dict[str, Any],
+    raw_output: str,
+    visible_ranges: list[tuple[int, int]],
+) -> tuple[str, tuple[int, int] | None]:
+    """Render truthful read metadata from source lines actually sent to the model."""
+
+    requested = _requested_read_range(arguments)
+    metadata_match = _READ_FILE_METADATA.search(raw_output)
+    total_lines = int(metadata_match.group(1)) if metadata_match else None
+    content = _READ_FILE_METADATA.sub("", raw_output)
+    rendered_content = _clip_text(content, 3000)
+    numbered = [
+        int(match.group(1))
+        for line in rendered_content.splitlines()
+        if (match := re.match(r"\s*(\d+)\t", line))
+    ]
+    returned = (numbered[0], numbered[-1]) if numbered else None
+    coverage = (
+        _range_coverage_fraction(returned, visible_ranges) if returned is not None else 0.0
+    )
+    uncovered = (
+        _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
+    )
+    eof = total_lines is not None and requested[1] >= total_lines
+    truncated = "truncated" in content.lower() or len(content) > len(rendered_content)
+
+    header = "\n".join(
+        [
+            "[READ_FILE]",
+            f"Requested: {requested[0]}-{requested[1]}",
+            f"Returned: {_format_line_ranges([returned] if returned else [])}",
+            f"EOF: {eof}",
+            f"Truncated: {truncated}",
+            f"Overlap: {coverage:.0%}",
+            f"New lines: {_format_line_ranges(uncovered)}",
+            "[/READ_FILE]",
+        ]
+    )
+    return f"{header}\n{rendered_content}", returned
 
 
 def _summarize_match_list(tool_name: str, value: list[Any]) -> str:

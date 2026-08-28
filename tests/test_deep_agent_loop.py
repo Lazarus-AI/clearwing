@@ -507,12 +507,29 @@ async def test_read_file_pagination_is_not_falsely_throttled():
 async def test_overlapping_read_file_refreshes_return_content_with_direction():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=6, budget_usd=0.0)
     hunter.tools[0].name = "read_file"
+    hunter.tools[0].schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["path"],
+    }
+
+    def read_handler(offset=0, limit=2000, **kwargs):
+        start = offset + 1
+        end = min(offset + limit, 52)
+        body = "\n".join(f"{line:6d}\tline {line}" for line in range(start, end + 1))
+        return f"{body}\n[CLEARWING_READ_METADATA total_lines=52]"
+
+    hunter.tools[0].handler = read_handler
     llm.achat.side_effect = [
         FakeResponse(
             tool_calls_list=[
                 _make_tool_call(
                     "read_file",
-                    {"path": "views.py", "offset": 0, "limit": 500},
+                    {"path": "views.py", "offset": 0, "limit": 50},
                 )
             ]
         ),
@@ -520,7 +537,7 @@ async def test_overlapping_read_file_refreshes_return_content_with_direction():
             tool_calls_list=[
                 _make_tool_call(
                     "read_file",
-                    {"path": "views.py", "offset": 400, "limit": 120},
+                    {"path": "views.py", "offset": 40, "limit": 12},
                 )
             ]
         ),
@@ -528,7 +545,7 @@ async def test_overlapping_read_file_refreshes_return_content_with_direction():
             tool_calls_list=[
                 _make_tool_call(
                     "read_file",
-                    {"path": "views.py", "offset": 100, "limit": 100},
+                    {"path": "views.py", "offset": 10, "limit": 10},
                 )
             ]
         ),
@@ -541,18 +558,25 @@ async def test_overlapping_read_file_refreshes_return_content_with_direction():
         await hunter.arun()
 
     tool_results = [
-        call.args[1]["tool_output"]
+        call.args[1]["tool_summary"]
         for call in mock_logger.log.call_args_list
         if call.args and call.args[0] == "tool_result"
     ]
     assert len(tool_results) == 3
-    assert tool_results[0] == "ok"
-    assert tool_results[1].startswith("[READ OVERLAP ADVISORY: 83%")
-    assert "Only lines 501-520 are new" in tool_results[1]
-    assert tool_results[1].endswith("\nok")
-    assert tool_results[2].startswith("[READ OVERLAP ADVISORY: 100%")
-    assert "This request exposes no new lines" in tool_results[2]
-    assert tool_results[2].endswith("\nok")
+    assert "Requested: 1-50" in tool_results[0]
+    assert "Returned: 1-50" in tool_results[0]
+    assert "EOF: False" in tool_results[0]
+    assert "Overlap: 0%" in tool_results[0]
+    assert "Requested: 41-52" in tool_results[1]
+    assert "Returned: 41-52" in tool_results[1]
+    assert "EOF: True" in tool_results[1]
+    assert "Overlap: 83%" in tool_results[1]
+    assert "New lines: 51-52" in tool_results[1]
+    assert "Requested: 11-20" in tool_results[2]
+    assert "Returned: 11-20" in tool_results[2]
+    assert "EOF: False" in tool_results[2]
+    assert "Overlap: 100%" in tool_results[2]
+    assert "New lines: None" in tool_results[2]
     assert not any(
         isinstance(output, dict) and output.get("status") == "read_already_recent"
         for output in tool_results
