@@ -370,6 +370,8 @@ class TestHunterSandboxWritableWorkspace:
             if isinstance(c[0][0], str) and "git init" in c[0][0]
         ]
         assert len(git_calls) == 1
+        assert "rm -rf /workspace/.git" in git_calls[0][0][0]
+        assert "find . -name .git -type f -delete" in git_calls[0][0][0]
 
     def test_deep_agent_mode_adds_packages(self):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox

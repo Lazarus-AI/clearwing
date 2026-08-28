@@ -10,6 +10,8 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import math
@@ -19,7 +21,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -630,6 +632,7 @@ class SourceHuntRunner:
         self._run_started_at: str | None = None
         self._run_started_monotonic: float | None = None
         self._resolved_model_roles: dict[str, dict[str, str]] = {}
+        self._verification_incomplete = False
 
     def _dump_checkpoint(self) -> None:
         if self._checkpoint is None:
@@ -1413,6 +1416,34 @@ class SourceHuntRunner:
             rejected = verification_result.rejected
             if rejected:
                 self._write_rejected_findings(rejected)
+            if verification_result.status != "completed" and not self.no_verify:
+                self._verification_incomplete = True
+                self._emit_stage(
+                    "exploit",
+                    "skipped",
+                    findings_so_far=len(verified),
+                    detail="Verification did not conclusively process every finding",
+                    files=[str(finding.file or "") for finding in verified],
+                    symbols=self._finding_symbols(verified),
+                    finding_ids=[finding.id for finding in verified],
+                )
+                return self._finalize_result(
+                    start_time=start_time,
+                    repo_path=repo_path,
+                    findings=all_findings,
+                    verified=verified,
+                    exploited=[],
+                    files_ranked=files_ranked,
+                    files_hunted=files_hunted,
+                    spent_per_tier=spent_per_tier,
+                    band_stats=band_stats,
+                    findings_pool=findings_pool,
+                    subsystems_hunted=subsystems_hunted,
+                    subsystem_spent_usd=subsystem_spent,
+                    subsystem_status=hunt_result.subsystem_status,
+                    pipeline_status=pipeline_status,
+                    potentials=all_potentials,
+                )
 
             # 4.5. v0.3: Extract mechanisms from verified findings and persist them
             #      to the cross-run store. Cheap LLM pass; failures are non-fatal.
@@ -1948,6 +1979,7 @@ class SourceHuntRunner:
             "no_exploit": self.no_exploit,
             "exploit_budget_band": self._exploit_budget_band,
             "agent_mode": self._effective_agent_mode,
+            "verified_findings_sha256": self._finding_set_digest(verified),
         }
         self._exploitation_restored = False
         self._emit_stage(
@@ -2023,6 +2055,100 @@ class SourceHuntRunner:
         )
         return result
 
+    def _spawn_verification_sandbox(self) -> Any:
+        """Spawn a writable sandbox for one independent verification pass."""
+        factory = (
+            self._sandbox_manager.spawn
+            if self._sandbox_manager is not None
+            else self.sandbox_factory
+        )
+        if factory is None:
+            return None
+
+        requested_options = {
+            "writable_workspace": True,
+            "timeout_seconds": 600,
+        }
+        if self._sandbox_manager is not None:
+            requested_options.update(
+                session_id=self._session_id + "-v",
+                runtime=self._gvisor_runtime,
+            )
+
+        try:
+            try:
+                parameters = inspect.signature(factory).parameters.values()
+            except (TypeError, ValueError):
+                options = requested_options
+            else:
+                accepts_keywords = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+                )
+                supported_names = {parameter.name for parameter in parameters}
+                options = {
+                    key: value
+                    for key, value in requested_options.items()
+                    if accepts_keywords or key in supported_names
+                }
+            return factory(**options)
+        except Exception:
+            logger.warning("Verification sandbox spawn failed", exc_info=True)
+            return None
+
+    def _verification_resources(self, repo_path: str) -> tuple[Any, Any, list]:
+        """Create the runner-owned context and tools for one verifier."""
+        sandbox = self._spawn_verification_sandbox()
+        if sandbox is None:
+            self._verification_sandbox_failed = True
+            return None, None, []
+        try:
+            from clearwing.agent.tools.hunt import (
+                HunterContext,
+                build_verification_tools,
+            )
+
+            sandbox_config = getattr(sandbox, "config", None)
+            network_mode = getattr(sandbox_config, "network_mode", None)
+            if (
+                sandbox_config is not None
+                and isinstance(network_mode, str)
+                and network_mode != "none"
+            ):
+                raise RuntimeError("verification sandbox must disable networking")
+            if (
+                hasattr(sandbox, "workspace_baseline_commit")
+                and not sandbox.workspace_baseline_commit
+            ):
+                raise RuntimeError("verification sandbox has no immutable workspace baseline")
+
+            ctx = HunterContext(
+                repo_path=repo_path,
+                sandbox=sandbox,
+                sandbox_manager=self._sandbox_manager,
+                session_id=self._session_id + "-v",
+                specialist="verifier",
+            )
+            return sandbox, ctx, build_verification_tools(ctx)
+        except Exception:
+            logger.warning("Verification tool setup failed", exc_info=True)
+            self._verification_sandbox_failed = True
+            self._stop_verification_sandbox(sandbox)
+            return None, None, []
+
+    @staticmethod
+    def _stop_verification_sandbox(sandbox: Any, ctx: Any = None) -> None:
+        if ctx is not None:
+            try:
+                ctx.cleanup_variants()
+            except Exception:
+                logger.debug("Verification variant cleanup failed", exc_info=True)
+        if sandbox is None:
+            return
+        try:
+            sandbox.stop()
+        except Exception:
+            logger.debug("Verification sandbox cleanup failed", exc_info=True)
+
     async def _verify(
         self,
         findings: list[Finding],
@@ -2032,14 +2158,29 @@ class SourceHuntRunner:
     ) -> VerificationResult:
         """Run or restore the completed verification stage."""
 
+        verifier_llm = (
+            None
+            if self.no_verify
+            else self._get_native_client(
+                "verifier", self.verifier_llm, budget_stage="verify"
+            )
+        )
         options = {
             "no_verify": self.no_verify,
             "validator_mode": self.validator_mode,
             "adversarial_verifier": self.adversarial_verifier,
             "adversarial_threshold": self.adversarial_threshold,
             "enable_patch_oracle": self.enable_patch_oracle,
+            "verification_protocol": "sandbox-tools-v2",
+            "evidence_policy": "host-observed-v2",
+            "sandbox_runtime": self._gvisor_runtime or "default",
+            "verifier_provider": getattr(verifier_llm, "provider_name", None),
+            "verifier_model": getattr(verifier_llm, "model_name", None),
+            "findings_sha256": self._finding_set_digest(findings),
         }
         self._verification_restored = False
+        self._verification_sandbox_failed = False
+        self._verification_incomplete = False
         self._emit_stage(
             "verify",
             "started",
@@ -2054,9 +2195,14 @@ class SourceHuntRunner:
             if restored is None:
                 raise ValueError("verification checkpoint is invalid or incompatible with this run")
             self._verification_restored = True
-            pipeline_status.record_succeeded("verifier")
             result = restored
-            result.status = "completed"
+            if result.status == "completed":
+                pipeline_status.record_succeeded("verifier")
+            else:
+                self._verification_incomplete = True
+                pipeline_status.record_degraded(
+                    "verifier", "Restored verification was not complete"
+                )
             detail = f"Restored {len(result.verified)} verified findings from checkpoint"
         else:
             result = VerificationResult(verified=[], rejected=[])
@@ -2070,34 +2216,53 @@ class SourceHuntRunner:
                 )
             elif self._budget_exhausted():
                 result.status = "budget_exhausted"
+                self._verification_incomplete = True
                 pipeline_status.record(
                     "verifier",
                     StageOutcome.SKIPPED,
                     fallback_description="Budget exhausted; findings remain unverified",
                 )
             else:
-                verifier_llm = self._get_native_client(
-                    "verifier", self.verifier_llm, budget_stage="verify"
-                )
                 if verifier_llm is None:
-                    result.status = "degraded"
-                    for finding in findings:
-                        finding["verified"] = True
-                    result.verified = findings
-                    pipeline_status.record_degraded(
-                        "verifier", "Findings auto-verified without independent review"
-                    )
+                    if findings:
+                        result.status = "incomplete"
+                        self._verification_incomplete = True
+                        for finding in findings:
+                            finding["verified"] = False
+                            finding["verifier_tie_breaker"] = (
+                                "Independent verifier model unavailable; "
+                                "finding left unverified"
+                            )
+                        pipeline_status.record_degraded(
+                            "verifier", "Independent verifier model unavailable"
+                        )
+                    else:
+                        pipeline_status.record_succeeded("verifier")
                 elif self.validator_mode == "v2":
                     result.verified, result.rejected = await self._verify_v2(
                         verifier_llm, findings, repo_path
                     )
                 else:
                     result.verified = await self._verify_v1(verifier_llm, findings, repo_path)
+                if self._verification_sandbox_failed or self._verification_incomplete:
+                    result.status = "incomplete"
+                    self._verification_incomplete = True
+                    pipeline_status.record_degraded(
+                        "verifier",
+                        "Dynamic verification did not conclusively process every finding",
+                    )
+                elif result.status == "completed":
+                    pipeline_status.record_succeeded("verifier")
             if self._checkpoint is None:
                 raise RuntimeError("verification requires a preprocessing checkpoint")
-            self._checkpoint.verification = VerificationCheckpoint.from_result(
-                result, options=options
-            )
+            if result.status != "completed":
+                # Partial, transient, or operational failures are not durable.
+                self._checkpoint.verification = None
+                self._checkpoint.exploitation = None
+            else:
+                self._checkpoint.verification = VerificationCheckpoint.from_result(
+                    result, options=options
+                )
             self._dump_checkpoint()
             detail = (
                 "Verification skipped (--no-verify)"
@@ -2129,11 +2294,31 @@ class SourceHuntRunner:
             adversarial_threshold=self.adversarial_threshold,
         )
         for finding in all_findings:
+            verification_sandbox, verification_ctx, verification_tools = (
+                self._verification_resources(repo_path)
+            )
             try:
+                if not verification_tools:
+                    finding["verified"] = False
+                    finding["verifier_tie_breaker"] = (
+                        "Dynamic verification unavailable; finding left unverified"
+                    )
+                    continue
                 result = await v.averify(
                     finding,
                     file_content=self._load_file_content(repo_path, finding),
+                    verification_tools=verification_tools,
                 )
+                outcome = result.outcome or (
+                    "confirmed" if result.is_real else "refuted"
+                )
+                if outcome in {"operational_error", "inconclusive"}:
+                    self._verification_incomplete = True
+                    finding["verified"] = False
+                    finding["verifier_tie_breaker"] = result.tie_breaker
+                    if result.dynamic_evidence:
+                        finding["verification_evidence"] = result.dynamic_evidence
+                    continue
                 if self.enable_patch_oracle and result.is_real:
                     result = await self._run_patch_oracle_v1(v, finding, repo_path, result)
                 apply_verifier_result(
@@ -2145,13 +2330,17 @@ class SourceHuntRunner:
                     verified.append(finding)
             except BudgetExceeded:
                 logger.info("Verification stopped at the run budget")
+                self._verification_incomplete = True
                 break
             except Exception:
+                self._verification_incomplete = True
                 logger.warning(
                     "Verifier failed for %s",
                     finding.get("id"),
                     exc_info=True,
                 )
+            finally:
+                self._stop_verification_sandbox(verification_sandbox, verification_ctx)
         return verified
 
     async def _verify_v2(
@@ -2170,12 +2359,32 @@ class SourceHuntRunner:
             gate_threshold=self.adversarial_threshold,
         )
         for finding in all_findings:
+            verification_sandbox, verification_ctx, verification_tools = (
+                self._verification_resources(repo_path)
+            )
             try:
+                if not verification_tools:
+                    finding["verified"] = False
+                    finding["verifier_tie_breaker"] = (
+                        "Dynamic verification unavailable; finding left unverified"
+                    )
+                    continue
                 discoverer_sev = finding.get("severity")
                 verdict = await val.avalidate(
                     finding,
                     file_content=self._load_file_content(repo_path, finding),
+                    verification_tools=verification_tools,
                 )
+                outcome = verdict.outcome or (
+                    "confirmed" if verdict.advance else "refuted"
+                )
+                if outcome in {"operational_error", "inconclusive"}:
+                    self._verification_incomplete = True
+                    finding["verified"] = False
+                    finding["verifier_tie_breaker"] = verdict.tie_breaker
+                    if verdict.dynamic_evidence:
+                        finding["verification_evidence"] = verdict.dynamic_evidence
+                    continue
                 if self.enable_patch_oracle and verdict.advance:
                     verdict = await self._run_patch_oracle_v2(
                         val,
@@ -2196,13 +2405,17 @@ class SourceHuntRunner:
                 self._record_calibration(finding, verdict, discoverer_sev)
             except BudgetExceeded:
                 logger.info("Validation stopped at the run budget")
+                self._verification_incomplete = True
                 break
             except Exception:
+                self._verification_incomplete = True
                 logger.warning(
                     "Validator failed for %s",
                     finding.get("id"),
                     exc_info=True,
                 )
+            finally:
+                self._stop_verification_sandbox(verification_sandbox, verification_ctx)
         return verified, rejected
 
     async def _run_patch_oracle_v1(self, v, finding, repo_path, result):
@@ -3166,9 +3379,13 @@ class SourceHuntRunner:
             subsystem_spent_usd = ledger_subsystem_spend
 
         run_status = (
-            "budget_exhausted"
-            if self._budget_exhausted() or subsystem_status == "budget_exhausted"
-            else "completed"
+            "incomplete"
+            if self._verification_incomplete
+            else (
+                "budget_exhausted"
+                if self._budget_exhausted() or subsystem_status == "budget_exhausted"
+                else "completed"
+            )
         )
         if run_status == "budget_exhausted":
             pipeline_status.record(
@@ -3223,13 +3440,9 @@ class SourceHuntRunner:
 
         return SourceHuntResult(
             exit_code=(
-                0
-                if self._stop_after
-                else (
-                    3
-                    if run_status == "budget_exhausted"
-                    else self._exit_code(findings if self.no_verify else verified)
-                )
+                3
+                if run_status in {"budget_exhausted", "incomplete"}
+                else (0 if self._stop_after else self._exit_code(findings if self.no_verify else verified))
             ),
             repo_url=self.repo_url,
             repo_path=repo_path,
@@ -3298,6 +3511,21 @@ class SourceHuntRunner:
                 )
             )
         return out
+
+    @staticmethod
+    def _finding_set_digest(findings: list[Finding]) -> str:
+        """Bind downstream checkpoints to their exact ordered finding input."""
+        portable = [
+            dict(finding) if isinstance(finding, dict) else asdict(finding)
+            for finding in findings
+        ]
+        encoded = json.dumps(
+            portable,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _finding_symbols(findings: list[Finding]) -> list[str]:
