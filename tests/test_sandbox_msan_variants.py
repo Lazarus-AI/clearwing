@@ -19,7 +19,7 @@ import pytest
 from clearwing.agent.tools.hunt import (
     HunterContext,
     _parse_variant_arg,
-    build_hunter_tools,
+    build_analysis_tools,
 )
 from clearwing.sandbox.builders import (
     INCOMPATIBLE_SANITIZER_PAIRS,
@@ -462,7 +462,7 @@ class TestCompileFileVariantDispatch:
             sandbox=primary,
             sandbox_manager=manager,
         )
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         compile_tool = next(t for t in tools if t.name == "compile_file")
         result = compile_tool.invoke(
             {
@@ -483,7 +483,7 @@ class TestCompileFileVariantDispatch:
             repo_path="/tmp/repo",
             sandbox=primary,
         )
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         compile_tool = next(t for t in tools if t.name == "compile_file")
         compile_tool.invoke({"file_path": "src/foo.c"})
         primary.exec.assert_called_once()
@@ -503,7 +503,7 @@ class TestRunWithSanitizerVariantDispatch:
             sandbox=primary,
             sandbox_manager=manager,
         )
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         run_tool = next(t for t in tools if t.name == "run_with_sanitizer")
         result = run_tool.invoke(
             {
@@ -527,7 +527,7 @@ class TestRunWithSanitizerVariantDispatch:
             sandbox_manager=manager,
             default_sanitizers=("asan", "ubsan"),
         )
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         run_tool = next(t for t in tools if t.name == "run_with_sanitizer")
         run_tool.invoke(
             {
