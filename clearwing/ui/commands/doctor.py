@@ -278,7 +278,6 @@ def _invoke_test_native(endpoint) -> DoctorCheck:
         resp = asyncio.run(
             client.achat(
                 messages=[ChatMessage("user", "Reply with exactly the word PONG.")],
-                max_tokens=16,
             )
         )
     except Exception as exc:

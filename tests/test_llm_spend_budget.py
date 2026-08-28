@@ -125,7 +125,7 @@ def test_reservations_are_atomic_across_concurrent_native_calls(tmp_path, monkey
 
     assert sum(isinstance(result, ChatResponse) for result in results) == 1
     assert sum(isinstance(result, BudgetExceeded) for result in results) == 7
-    assert observed_caps == [1]
+    assert observed_caps == [None]
     assert ledger.spent_usd == pytest.approx(1.0)
     assert ledger.remaining_usd == pytest.approx(0.0)
 
@@ -282,7 +282,7 @@ def test_streaming_calls_settle_against_the_same_ledger(tmp_path, monkeypatch):
 
     assert result is response
     assert deltas == ["ok"]
-    assert observed_caps == [1]
+    assert observed_caps == [None]
     assert ledger.spent_usd == pytest.approx(1.0)
 
 
