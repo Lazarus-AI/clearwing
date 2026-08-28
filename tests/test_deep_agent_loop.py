@@ -13,7 +13,7 @@ from clearwing.agent.tools.hunt import build_reporting_tools
 from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.llm.native import NativeToolSpec
-from clearwing.sourcehunt.hunter import NativeHunter
+from clearwing.sourcehunt.hunter import NativeHunter, _grep_result_source_files
 
 
 @dataclass
@@ -70,6 +70,20 @@ def _make_hunter(agent_mode="constrained", max_steps=20, budget_usd=0.0):
         budget_usd=budget_usd,
     )
     return hunter, llm
+
+
+def test_grep_results_resolve_safe_repository_files(tmp_path):
+    source = tmp_path / "src" / "views.py"
+    source.parent.mkdir()
+    source.write_text("def handler(): pass\n")
+
+    resolved = _grep_result_source_files(
+        'rg -n "handler" src',
+        "src/views.py:1:def handler(): pass\n../outside.py:1:nope\n",
+        str(tmp_path),
+    )
+
+    assert resolved == [str(source)]
 
 
 @pytest.mark.asyncio
