@@ -485,6 +485,19 @@ class TestBuildHunterAgent:
         )
         assert ctx.specialist == "propagation"
 
+    def test_specialist_prompt_preserves_campaign_hint(self):
+        hunter, _ctx = build_hunter_agent(
+            file_target=_make_file_target("foo.c", tier="B"),
+            repo_path=str(FIXTURE_C_PROPAGATION),
+            sandbox=None,
+            llm=MagicMock(),
+            session_id="s1",
+            prompt_mode="specialist",
+            campaign_hint="audit target arithmetic",
+        )
+
+        assert "We are particularly interested in audit target arithmetic." in hunter.prompt
+
     def test_v02_seam_seeded_crash_param_accepted(self):
         llm = MagicMock()
         ft = _make_file_target("foo.c")
