@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 from clearwing.agent.tools.hunt import (
     HunterContext,
     _default_libfuzzer_template,
-    build_hunter_tools,
+    build_analysis_tools,
 )
 from clearwing.sandbox.container import ExecResult
 
@@ -104,7 +104,7 @@ class TestLibFuzzerTemplate:
 class TestFuzzHarnessNoSandbox:
     def test_returns_error_without_sandbox(self):
         ctx = HunterContext(repo_path="/tmp")
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke(
             {
@@ -118,7 +118,7 @@ class TestFuzzHarnessNoSandbox:
 class TestFuzzHarnessMissingInput:
     def test_no_target_and_no_source_is_error(self):
         ctx = HunterContext(repo_path="/tmp", sandbox=_FakeSandbox([]))
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke({"target_function": "", "harness_source": ""})
         assert result["status"] == "error"
@@ -137,7 +137,7 @@ class TestFuzzHarnessTemplateMode:
             ]
         )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke(
             {
@@ -166,7 +166,7 @@ class TestFuzzHarnessTemplateMode:
             ]
         )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke(
             {
@@ -186,7 +186,7 @@ class TestFuzzHarnessTemplateMode:
             ]
         )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke({"target_function": "decode"})
         assert result["status"] == "compile_failed"
@@ -215,7 +215,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) {
             ]
         )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke(
             {
@@ -243,7 +243,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *D, size_t S) { return 0; }
             ]
         )
         ctx = HunterContext(repo_path="/tmp", sandbox=fake)
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         fuzz.invoke(
             {
@@ -275,7 +275,7 @@ class TestFuzzHarnessVariantDispatch:
             sandbox=primary,
             sandbox_manager=manager,
         )
-        tools = build_hunter_tools(ctx)
+        tools = build_analysis_tools(ctx)
         fuzz = next(t for t in tools if t.name == "fuzz_harness")
         result = fuzz.invoke(
             {
