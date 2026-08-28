@@ -65,6 +65,23 @@ def test_llm_spans_use_per_call_cost(spans):
     assert [span.attributes["llm.cost_usd"] for span in spans.get_finished_spans()] == [3.0, 3.0]
 
 
+def test_provenance_processor_attaches_build_metadata_to_every_span(spans, monkeypatch):
+    commit_sha = "a" * 40
+    monkeypatch.setenv("CLEARWING_COMMIT_SHA", commit_sha)
+    provider = TracerProvider()
+    provider.add_span_processor(otel._ClearwingProvenanceSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(spans))
+    tracer = provider.get_tracer("test")
+
+    with tracer.start_as_current_span("parent"):
+        with tracer.start_as_current_span("child"):
+            pass
+
+    for span in spans.get_finished_spans():
+        assert span.attributes["clearwing.version"]
+        assert span.attributes["clearwing.commit_sha"] == commit_sha
+
+
 def test_openinference_decorator_records_exceptions(spans):
     tracer = otel.get_oi_tracer("test")
 

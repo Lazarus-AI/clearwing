@@ -13,12 +13,38 @@ from openinference.semconv.trace import OpenInferenceSpanKindValues
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanProcessor
+
+from clearwing.provenance import clearwing_build_provenance
 
 logger = logging.getLogger(__name__)
 
 _provider_lock = threading.Lock()
 _provider: TracerProvider | None = None
+
+
+class _ClearwingProvenanceSpanProcessor(SpanProcessor):
+    """Attach build identity directly to every span exported by Clearwing."""
+
+    def __init__(self) -> None:
+        provenance = clearwing_build_provenance()
+        self._attributes = {
+            "clearwing.version": provenance["version"],
+            "clearwing.commit_sha": provenance["commit_sha"],
+        }
+
+    def on_start(self, span, parent_context=None) -> None:  # type: ignore[no-untyped-def]
+        for key, value in self._attributes.items():
+            span.set_attribute(key, value)
+
+    def on_end(self, span) -> None:  # type: ignore[no-untyped-def]
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
 
 def _env_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
@@ -61,6 +87,7 @@ def configure_telemetry(
 
         current = trace.get_tracer_provider()
         if isinstance(current, TracerProvider):
+            current.add_span_processor(_ClearwingProvenanceSpanProcessor())
             _provider = current
             logger.info("Using the process's existing OpenTelemetry SDK provider")
             return current
@@ -72,6 +99,7 @@ def configure_telemetry(
             resource_attributes["openinference.project.name"] = project
 
         provider = TracerProvider(resource=Resource.create(resource_attributes))
+        provider.add_span_processor(_ClearwingProvenanceSpanProcessor())
         selected_exporters = list(exporters) if exporters is not None else [_otlp_exporter()]
         for exporter in selected_exporters:
             provider.add_span_processor(BatchSpanProcessor(exporter))
