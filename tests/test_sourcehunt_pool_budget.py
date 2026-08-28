@@ -7,7 +7,7 @@ so we can exercise the budget math without any LLM or sandbox calls.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -124,6 +124,23 @@ class TestTierAssignmentOnInit:
         assert files[1]["tier"] == "B"
         assert files[2]["tier"] == "C"
         assert files[3]["tier"] == "B"  # critical regression — must be B not C
+
+
+def test_default_hunter_factory_receives_callgraph():
+    callgraph = object()
+    config = HuntPoolConfig(
+        files=[_ft("target.c", 5, 5)],
+        repo_path="/tmp/repo",
+        llm=MagicMock(),
+        callgraph=callgraph,
+    )
+    pool = HunterPool(config)
+    factory = MagicMock(return_value=(MagicMock(), MagicMock()))
+
+    with patch("clearwing.sourcehunt.pool._DEFAULT_HUNTER_FACTORY", factory):
+        pool._build_hunter_for_file(config.files[0], sandbox=None)
+
+    assert factory.call_args.kwargs["callgraph"] is callgraph
 
 
 # --- Within-tier priority ordering -----------------------------------------

@@ -230,6 +230,7 @@ class HuntPoolConfig:
     trajectory_root: str | Path | None = None
     instrumentation: Any = None  # SourceHuntInstrumentation | None
     work_cache: Any = None  # HuntWorkCache | None — work-item-granular hunt resume
+    callgraph: Any = None
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -897,6 +898,7 @@ class HunterPool:
             entry_point=entry_point,
             seed_context=seed_context,
             findings_pool=self.config.findings_pool,
+            callgraph=self.config.callgraph,
         )
         self._configure_hunter_context(result, work_item_id)
         return result
