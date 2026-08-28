@@ -36,6 +36,7 @@ from clearwing.llm import (
 from clearwing.llm.budget import spend_metadata
 from clearwing.observability.otel import get_oi_tracer
 from clearwing.observability.telemetry import CostTracker
+from clearwing.reporting.safety import redact_tree
 from clearwing.sandbox.container import SandboxContainer
 
 from .instrumentation import stable_run_id
@@ -331,7 +332,7 @@ class HunterTrajectoryLogger:
             **payload,
         }
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+            handle.write(json.dumps(redact_tree(record), sort_keys=True, default=str) + "\n")
         if self.instrumentation is not None and (model_call_id or tool_action_id):
             try:
                 self.instrumentation.record(

@@ -21,12 +21,23 @@ from pathlib import Path
 from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
+from clearwing.reporting.safety import redact_text
 from clearwing.sourcehunt.semgrep_sidecar import SemgrepSidecar, finding_to_dict
 
 from .potentials import build_potential_tools
 from .sandbox import HunterContext
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_OUTPUT_CAP = 100_000
+
+
+def _safe_source_output(text: str, label: str = "source output") -> str:
+    """Redact repository secrets before source text crosses into an LLM prompt."""
+    safe = redact_text(text)
+    if len(safe) <= _SOURCE_OUTPUT_CAP:
+        return safe
+    return safe[:_SOURCE_OUTPUT_CAP] + f"\n\n[{label} truncated at {_SOURCE_OUTPUT_CAP} characters]"
 
 
 class ReadSourceFileInput(ToolInputModel):
@@ -117,7 +128,7 @@ def _parse_rg_output(stdout: str, default_file: str = "") -> list[dict]:
             {
                 "file": path.replace("/workspace/", "", 1).replace("\\", "/"),
                 "line_number": ln,
-                "matched_text": text.rstrip(),
+                "matched_text": _safe_source_output(text.rstrip(), "grep match"),
             }
         )
         if len(matches) >= 100:
@@ -166,7 +177,7 @@ def _grep_python_fallback(
                             {
                                 "file": rel_file,
                                 "line_number": i,
-                                "matched_text": line.rstrip(),
+                                "matched_text": _safe_source_output(line.rstrip(), "grep match"),
                             }
                         )
                         if len(matches) >= 100:
@@ -217,7 +228,7 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             )
         else:
             footer = ""
-        return "".join(sliced) + footer
+        return _safe_source_output("".join(sliced) + footer, "source file")
 
     def list_source_tree(dir_path: str = ".", max_depth: int = 2) -> list[str]:
         """List files and directories relative to the repo root.

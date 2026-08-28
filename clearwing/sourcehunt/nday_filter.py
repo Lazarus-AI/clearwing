@@ -7,13 +7,14 @@ based on the patch diff. Batches up to 10 CVEs per LLM call to keep costs
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+from clearwing.llm import extract_json_array
 
 logger = logging.getLogger(__name__)
 
@@ -169,11 +170,8 @@ class NdayFilter:
                 c.exploitability = "POSSIBLY_EXPLOITABLE"
 
     def _parse_response(self, text: str) -> list[dict]:
-        text = text.strip()
-        json_match = re.search(r"\[.*\]", text, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
-        return []
+        try:
+            parsed = extract_json_array(text)
+        except ValueError:
+            return []
+        return [item for item in parsed if isinstance(item, dict)]

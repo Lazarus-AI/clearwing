@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from clearwing import __version__
+from clearwing.reporting.safety import (
+    markdown_code_span,
+    markdown_fenced_code,
+    markdown_inline,
+    redact_text,
+    redact_tree,
+)
 from clearwing.runners.cicd.sarif import SARIFGenerator
 
 from .state import EVIDENCE_LEVELS, Finding, PipelineStatus
@@ -83,6 +90,7 @@ def write_sourcehunt_report(
     subsystem_stats: dict | None = None,
     pipeline_status: PipelineStatus | None = None,
     budget_summary: dict[str, Any] | None = None,
+    run_metadata: dict[str, Any] | None = None,
     potentials: list[dict] | None = None,
     trace_id: str | None = None,
     run_started_at: str | None = None,
@@ -92,6 +100,19 @@ def write_sourcehunt_report(
     formats = formats or ["sarif", "markdown", "json"]
     if "all" in formats:
         formats = ["sarif", "markdown", "json"]
+
+    # Findings and repository labels can contain source/model-controlled text.
+    # Redact once at the output boundary and render only from detached copies so
+    # the in-memory evidence remains intact for later pipeline stages.
+    repo_url = redact_text(repo_url)
+    findings = redact_tree(findings)
+    verified_findings = redact_tree(verified_findings)
+    spent_per_tier = redact_tree(spent_per_tier)
+    band_stats = redact_tree(band_stats)
+    pool_stats = redact_tree(pool_stats)
+    subsystem_stats = redact_tree(subsystem_stats)
+    budget_summary = redact_tree(budget_summary)
+    run_metadata = redact_tree(run_metadata)
 
     session_dir = Path(output_dir) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -106,7 +127,7 @@ def write_sourcehunt_report(
             tool_name="clearwing-sourcehunt",
         )
         with open(sarif_path, "w", encoding="utf-8") as f:
-            json.dump(sarif, f, indent=2)
+            json.dump(redact_tree(sarif), f, indent=2)
         paths["sarif"] = str(sarif_path)
 
     if "markdown" in formats:
@@ -159,7 +180,7 @@ def write_sourcehunt_report(
         if potentials:
             json_data["potentials"] = potentials
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(json_data, f, indent=2, default=_json_default)
+            json.dump(redact_tree(json_data), f, indent=2, default=_json_default)
         paths["json"] = str(json_path)
 
     if budget_summary and budget_summary.get("ledger_path"):
@@ -169,7 +190,8 @@ def write_sourcehunt_report(
     # checkpointed a minimal running manifest; this atomically replaces it
     # with the complete report index while preserving authoritative spend.
     manifest_path = session_dir / "manifest.json"
-    manifest_data: dict[str, Any] = dict(budget_summary or {})
+    manifest_data: dict[str, Any] = dict(run_metadata or {})
+    manifest_data.update(budget_summary or {})
     manifest_data.update(
         {
             "session_id": session_id,
@@ -187,7 +209,7 @@ def write_sourcehunt_report(
     )
     manifest_tmp = manifest_path.with_suffix(".json.tmp")
     with open(manifest_tmp, "w", encoding="utf-8") as f:
-        json.dump(manifest_data, f, indent=2)
+        json.dump(redact_tree(manifest_data), f, indent=2)
         f.flush()
     manifest_tmp.replace(manifest_path)
     paths["manifest"] = str(manifest_path)
@@ -260,9 +282,9 @@ def _render_markdown(
     budget_summary: dict[str, Any] | None = None,
 ) -> str:
     lines = []
-    lines.append(f"# Sourcehunt Report — {session_id}")
+    lines.append(f"# Sourcehunt Report — {markdown_inline(session_id)}")
     lines.append("")
-    lines.append(f"- **Repo:** {repo_url}")
+    lines.append(f"- **Repo:** {markdown_inline(repo_url)}")
     lines.append(f"- **Findings:** {len(findings)} ({len(verified_findings)} verified)")
     lines.append(
         f"- **Spend by tier:** "
@@ -324,7 +346,7 @@ def _render_markdown(
     if pipeline_status and pipeline_status.stages:
         lines.append("## Pipeline Health")
         for status_line in pipeline_status.summary_lines():
-            lines.append(status_line)
+            lines.append(markdown_inline(redact_text(status_line)))
         lines.append("")
 
     # Severity histogram
@@ -350,74 +372,91 @@ def _render_markdown(
     )
     for i, f in enumerate(sorted_findings, 1):
         sev = (f.get("severity_verified") or f.get("severity") or "info").upper()
+        location = f"{f.get('file', '?')}:{f.get('line_number', '?')}"
         lines.append(
-            f"### {i}. [{sev}] {f.get('finding_type', 'unknown')} "
-            f"at `{f.get('file', '?')}:{f.get('line_number', '?')}`"
+            f"### {i}. [{markdown_inline(sev)}] "
+            f"{markdown_inline(f.get('finding_type', 'unknown'))} "
+            f"at {markdown_code_span(location)}"
         )
         lines.append("")
-        lines.append(f"- **CWE:** {f.get('cwe', 'N/A')}")
-        lines.append(f"- **Evidence:** {f.get('evidence_level', 'suspicion')}")
-        lines.append(f"- **Discovered by:** {f.get('discovered_by', 'unknown')}")
+        lines.append(f"- **CWE:** {markdown_inline(f.get('cwe', 'N/A'))}")
+        lines.append(
+            f"- **Evidence:** {markdown_inline(f.get('evidence_level', 'suspicion'))}"
+        )
+        lines.append(
+            f"- **Discovered by:** {markdown_inline(f.get('discovered_by', 'unknown'))}"
+        )
         if f.get("verified") is True:
             lines.append("- **Verified:** yes")
         if f.get("crypto_protocol"):
-            lines.append(f"- **Crypto protocol:** {f['crypto_protocol']}")
+            lines.append(f"- **Crypto protocol:** {markdown_inline(f['crypto_protocol'])}")
         if f.get("algorithm"):
-            lines.append(f"- **Algorithm:** {f['algorithm']}")
+            lines.append(f"- **Algorithm:** {markdown_inline(f['algorithm'])}")
         if f.get("crypto_attack_class"):
-            lines.append(f"- **Attack class:** {f['crypto_attack_class']}")
+            lines.append(f"- **Attack class:** {markdown_inline(f['crypto_attack_class'])}")
         if f.get("key_material_exposed"):
-            lines.append(f"- **Key material at risk:** {f['key_material_exposed']}")
+            lines.append(
+                f"- **Key material at risk:** {markdown_inline(f['key_material_exposed'])}"
+            )
         lines.append("")
-        lines.append(f.get("description", ""))
+        lines.append(markdown_inline(f.get("description", "")))
         if f.get("code_snippet"):
             lines.append("")
-            lines.append("```")
-            lines.append(f["code_snippet"])
-            lines.append("```")
+            lines.append(markdown_fenced_code(f["code_snippet"]))
         if f.get("crash_evidence"):
             lines.append("")
             lines.append("**Crash evidence:**")
-            lines.append("```")
-            lines.append(f["crash_evidence"][:2000])
-            lines.append("```")
+            lines.append(markdown_fenced_code(f["crash_evidence"][:2000]))
         if f.get("validator_axes"):
             lines.append("")
             lines.append("- **Validation axes:**")
             for axis_name, axis_data in f["validator_axes"].items():
                 status = "PASS" if axis_data["passed"] else "FAIL"
-                lines.append(f"  - {axis_name}: {status} ({axis_data['confidence']})")
+                lines.append(
+                    f"  - {markdown_inline(axis_name)}: {status} "
+                    f"({markdown_inline(axis_data['confidence'])})"
+                )
         if f.get("severity_disagreement"):
-            lines.append(f"- **Severity disagreement:** {f['severity_disagreement']}")
+            lines.append(
+                f"- **Severity disagreement:** {markdown_inline(f['severity_disagreement'])}"
+            )
         if f.get("verifier_counter_argument"):
             lines.append("")
-            lines.append(f"_Verifier counter-argument:_ {f['verifier_counter_argument']}")
+            lines.append(
+                f"_Verifier counter-argument:_ "
+                f"{markdown_inline(f['verifier_counter_argument'])}"
+            )
         if f.get("exploit_partial"):
             lines.append("")
             lines.append(
-                f"- **Exploit partial:** primitive={f.get('exploit_primitive_type', '?')}"
+                f"- **Exploit partial:** "
+                f"primitive={markdown_inline(f.get('exploit_primitive_type', '?'))}"
             )
         if f.get("exploit_mitigations_bypassed"):
             lines.append(
-                f"- **Mitigations bypassed:** {', '.join(f['exploit_mitigations_bypassed'])}"
+                f"- **Mitigations bypassed:** "
+                f"{markdown_inline(', '.join(f['exploit_mitigations_bypassed']))}"
             )
         if f.get("exploit_mitigations_blocking"):
             lines.append(
-                f"- **Mitigations blocking:** {', '.join(f['exploit_mitigations_blocking'])}"
+                f"- **Mitigations blocking:** "
+                f"{markdown_inline(', '.join(f['exploit_mitigations_blocking']))}"
             )
         if f.get("exploit_chained_findings"):
             lines.append(
-                f"- **Chained findings:** {', '.join(f['exploit_chained_findings'])}"
+                f"- **Chained findings:** "
+                f"{markdown_inline(', '.join(f['exploit_chained_findings']))}"
             )
         if f.get("exploit_cost_usd"):
             lines.append(f"- **Exploit cost:** ${f['exploit_cost_usd']:.2f}")
         if f.get("discovered_by") == "elaboration_agent":
             lines.append(
-                f"- **Elaborated from:** {f.get('related_finding_id', '?')}"
+                f"- **Elaborated from:** "
+                f"{markdown_inline(f.get('related_finding_id', '?'))}"
             )
         if f.get("elaboration_upgrade_path"):
             lines.append(
-                f"- **Upgrade path:** {f['elaboration_upgrade_path']}"
+                f"- **Upgrade path:** {markdown_inline(f['elaboration_upgrade_path'])}"
             )
         if f.get("stability_classification"):
             cls = f["stability_classification"]
@@ -436,9 +475,13 @@ def _render_markdown(
         lines.append("Findings where discoverer and validator severity differ by 2+ levels:")
         lines.append("")
         for f in disagreements:
+            finding_id = markdown_code_span(f.get("id", "?"))
+            location = markdown_code_span(
+                f"{f.get('file', '?')}:{f.get('line_number', '?')}"
+            )
             lines.append(
-                f"- `{f.get('id', '?')}` at `{f.get('file', '?')}:{f.get('line_number', '?')}`: "
-                f"{f['severity_disagreement']}"
+                f"- {finding_id} at {location}: "
+                f"{markdown_inline(f['severity_disagreement'])}"
             )
         lines.append("")
 
@@ -448,11 +491,13 @@ def _render_markdown(
         lines.append("## Rejected Findings")
         lines.append("")
         for f in rejected:
-            fid = f.get("id", "?")
-            axes = ", ".join(f["rejected_axes"])
+            fid = markdown_code_span(f.get("id", "?"))
+            axes = markdown_inline(", ".join(f["rejected_axes"]))
+            location = markdown_code_span(
+                f"{f.get('file', '?')}:{f.get('line_number', '?')}"
+            )
             lines.append(
-                f"- `{fid}` at `{f.get('file', '?')}:{f.get('line_number', '?')}` "
-                f"— failed: {axes}"
+                f"- {fid} at {location} — failed: {axes}"
             )
         lines.append("")
 

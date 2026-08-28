@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from clearwing.observability.telemetry import CostTracker
+from clearwing.reporting.safety import redact_text
 
 if TYPE_CHECKING:
     from clearwing.providers.env import LLMEndpoint
@@ -162,7 +163,7 @@ class SpendLedger:
 
         self.limit_usd = float(limit_usd)
         self.session_id = session_id
-        self.repo_url = repo_url
+        self.repo_url = redact_text(repo_url)
         self.default_max_output_tokens = int(default_max_output_tokens)
         self._pricing_override = (
             ModelPricing(

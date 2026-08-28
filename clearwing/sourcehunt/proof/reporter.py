@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from clearwing.reporting.safety import markdown_inline, redact_text, redact_tree
+
 from .models import Assumption, Candidate, Certificate, CertificateKind, Fact
 from .store import ProofStore
 
@@ -32,18 +34,18 @@ class ProofReporter:
         ]
         findings_path = self.store.root / "findings.json"
         findings_path.write_text(
-            json.dumps(finding_payloads, indent=2, sort_keys=True) + "\n",
+            json.dumps(redact_tree(finding_payloads), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         report_path = self.store.root / "report.md"
         report_path.write_text(
-            self._markdown(certificates, candidate_by_id),
+            redact_text(self._markdown(certificates, candidate_by_id)),
             encoding="utf-8",
         )
         sarif_path = self.store.root / "findings.sarif"
         sarif_path.write_text(
             json.dumps(
-                self._sarif(finding_payloads),
+                redact_tree(self._sarif(finding_payloads)),
                 indent=2,
                 sort_keys=True,
             )
@@ -110,13 +112,13 @@ class ProofReporter:
             candidate = candidates.get(certificate.candidate_id)
             lines.extend(
                 [
-                    f"## {candidate.title if candidate else certificate.candidate_id}",
+                    f"## {markdown_inline(candidate.title if candidate else certificate.candidate_id)}",
                     "",
-                    f"- Certificate: §{certificate.id}§",
-                    f"- Decision: §{certificate.decision}§",
-                    f"- Validity: §{certificate.validity}§",
-                    f"- Reason: {certificate.reason}",
-                    f"- Proof plans: {', '.join(certificate.proof_plan_ids) or 'none'}",
+                    f"- Certificate: §{markdown_inline(certificate.id)}§",
+                    f"- Decision: §{markdown_inline(certificate.decision)}§",
+                    f"- Validity: §{markdown_inline(certificate.validity)}§",
+                    f"- Reason: {markdown_inline(certificate.reason)}",
+                    f"- Proof plans: {markdown_inline(', '.join(certificate.proof_plan_ids) or 'none')}",
                     "",
                 ]
             )
@@ -128,9 +130,13 @@ class ProofReporter:
             if assumptions:
                 lines.extend(["### Assumptions", ""])
                 for assumption in assumptions:
-                    evidence = ", ".join(f"§{item}§" for item in assumption.evidence_ids) or "none"
+                    evidence = (
+                        ", ".join(f"§{markdown_inline(item)}§" for item in assumption.evidence_ids)
+                        or "none"
+                    )
                     lines.append(
-                        f"- [{assumption.status.value}] {assumption.statement} "
+                        f"- [{markdown_inline(assumption.status.value)}] "
+                        f"{markdown_inline(assumption.statement)} "
                         f"Evidence: {evidence}."
                     )
                 lines.append("")
@@ -139,8 +145,8 @@ class ProofReporter:
                     [
                         "### Stale certificate",
                         "",
-                        f"- Reason: {certificate.stale_reason or 'dependency changed'}",
-                        f"- Invalidated by: {', '.join(certificate.invalidated_by) or 'unknown'}",
+                        f"- Reason: {markdown_inline(certificate.stale_reason or 'dependency changed')}",
+                        f"- Invalidated by: {markdown_inline(', '.join(certificate.invalidated_by) or 'unknown')}",
                         "",
                     ]
                 )
@@ -148,8 +154,12 @@ class ProofReporter:
                 lines.extend(["### Audited claims", ""])
                 for claim in certificate.report_claims:
                     statement = claim.get("statement") or claim.get("predicate")
-                    evidence_ids = ", ".join(f"§{item}§" for item in claim.get("evidence_ids", []))
-                    lines.append(f"- {statement} Evidence: {evidence_ids}.")
+                    evidence_ids = ", ".join(
+                        f"§{markdown_inline(item)}§" for item in claim.get("evidence_ids", [])
+                    )
+                    lines.append(
+                        f"- {markdown_inline(str(statement or ''))} Evidence: {evidence_ids}."
+                    )
                 lines.append("")
             if certificate.unresolved_obligation_ids:
                 lines.extend(
@@ -157,7 +167,7 @@ class ProofReporter:
                         "### Unresolved",
                         "",
                         *[
-                            f"- §{obligation_id}§"
+                            f"- §{markdown_inline(obligation_id)}§"
                             for obligation_id in certificate.unresolved_obligation_ids
                         ],
                         "",
@@ -169,7 +179,7 @@ class ProofReporter:
                         "### Blocked",
                         "",
                         *[
-                            f"- §{obligation_id}§"
+                            f"- §{markdown_inline(obligation_id)}§"
                             for obligation_id in certificate.blocked_obligation_ids
                         ],
                         "",

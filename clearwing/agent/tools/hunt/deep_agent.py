@@ -26,6 +26,7 @@ import shlex
 from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
+from clearwing.reporting.safety import redact_text
 
 from .pool_query import build_pool_query_tools
 from .potentials import build_potential_tools
@@ -83,9 +84,10 @@ class ReadFunctionInput(ToolInputModel):
 
 
 def _cap_output(text: str, label: str = "output") -> str:
-    if len(text) <= _OUTPUT_CAP:
-        return text
-    return text[:_OUTPUT_CAP] + f"\n\n[{label} truncated at {_OUTPUT_CAP} bytes]"
+    safe = redact_text(text)
+    if len(safe) <= _OUTPUT_CAP:
+        return safe
+    return safe[:_OUTPUT_CAP] + f"\n\n[{label} truncated at {_OUTPUT_CAP} characters]"
 
 
 # Split on non-alphanumeric AND camelCase boundaries so filter="FooBar"
@@ -156,8 +158,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         )
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
-            return f"error reading {path}: {result.stderr.strip()}"
-        return result.stdout
+            return _cap_output(f"error reading {path}: {result.stderr.strip()}", "file error")
+        return _cap_output(result.stdout, "file")
 
     def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:

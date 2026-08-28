@@ -21,12 +21,14 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from clearwing.sandbox.container import SandboxContainer
 
+from .paths import safe_repo_relative_path
 from .state import Finding
 
 logger = logging.getLogger(__name__)
@@ -100,9 +102,9 @@ class PocRunner:
             "notes": "",
         }
 
-        file_rel = finding.get("file", "")
-        if not file_rel:
-            report["notes"] = "no file path in finding"
+        file_rel = safe_repo_relative_path(finding.get("file", ""))
+        if file_rel is None:
+            report["notes"] = "no file path in finding (unsafe or missing)"
             return report
 
         # 1. If there's no diff, just replay the PoC against the unmodified
@@ -162,7 +164,12 @@ class PocRunner:
         scratch_dir = f"/scratch/patched/{os.path.dirname(file_rel)}"
         src = f"{self.repo_root}/{file_rel}"
         dst = f"/scratch/patched/{file_rel}"
-        mkdir_cmd = ["sh", "-c", f"mkdir -p '{scratch_dir}' && cp '{src}' '{dst}'"]
+        mkdir_cmd = [
+            "sh",
+            "-c",
+            f"mkdir -p {shlex.quote(scratch_dir)} && "
+            f"cp -- {shlex.quote(src)} {shlex.quote(dst)}",
+        ]
         result = self.sandbox.exec(mkdir_cmd, timeout=self.config.apply_timeout_seconds)
         if result.exit_code != 0:
             return False, f"could not copy source to scratch: {result.stderr}"
@@ -206,13 +213,16 @@ class PocRunner:
         # Build with ASan/UBSan, -g for stack traces, -O0 for accurate line
         # numbers. Include -I /workspace to pick up headers.
         compile_cmd = [
-            "sh",
-            "-c",
-            (
-                f"cc -fsanitize={san_flags} {self.config.extra_cflags} "
-                f"-I {self.repo_root} -I {self.repo_root}/include "
-                f"-o {binary_path} {source_path} 2>&1"
-            ),
+            "cc",
+            f"-fsanitize={san_flags}",
+            *shlex.split(self.config.extra_cflags),
+            "-I",
+            self.repo_root,
+            "-I",
+            f"{self.repo_root}/include",
+            "-o",
+            binary_path,
+            source_path,
         ]
         result = self.sandbox.exec(
             compile_cmd,
@@ -238,14 +248,18 @@ class PocRunner:
 
         if stdin_block:
             # Pipe the PoC via shell heredoc — quoted to survive shell escaping
-            escaped = stdin_block.replace("'", "'\\''")
             cmd = [
                 "sh",
                 "-c",
-                f"printf '%s' '{escaped}' | {binary_path} 2>&1; echo __EXITCODE__$?",
+                f"printf %s {shlex.quote(stdin_block)} | "
+                f"{shlex.quote(binary_path)} 2>&1; echo __EXITCODE__$?",
             ]
         else:
-            cmd = ["sh", "-c", f"{binary_path} 2>&1; echo __EXITCODE__$?"]
+            cmd = [
+                "sh",
+                "-c",
+                f"{shlex.quote(binary_path)} 2>&1; echo __EXITCODE__$?",
+            ]
 
         result = self.sandbox.exec(cmd, timeout=self.config.run_timeout_seconds)
         # Extract the tail exit code from the wrapped output
