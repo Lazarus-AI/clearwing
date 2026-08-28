@@ -55,6 +55,15 @@ def add_parser(subparsers):
         choices=["preprocess", "rank", "hunt", "verify", "exploit"],
         help="Stop after the named stage completes (checkpoint is saved for resumption)",
     )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help=(
+            "Resume a prior legacy run in place by its session id (e.g. sh-535ed81b). "
+            "Reuses that session's checkpoint, spend ledger, and completed hunter work; "
+            "the repo and hunt options must match the original run"
+        ),
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -1158,6 +1167,7 @@ def handle(cli, args):
     runner = SourceHuntRunner(
         repo_url=args.repo,
         checkpoint=args.checkpoint,
+        resume_session_id=getattr(args, "resume", None),
         branch=args.branch,
         local_path=args.local_path,
         depth=args.depth,

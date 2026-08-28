@@ -215,6 +215,28 @@ use a lowered 70% threshold with 100 runs.
   [--no-patch-oracle]           # skip patch-oracle truth test
 ```
 
+### Checkpointing & resume
+
+Every legacy run checkpoints its pipeline stages under
+`<output-dir>/<session>/`. Resume is a single system built on those
+checkpoints:
+
+```bash
+  [--checkpoint JSON]           # restore from a portable checkpoint blob
+  [--checkpoint-path PATH]      # where the checkpoint is saved
+  [--stop-after STAGE]          # stop after preprocess|rank|verify|exploit|hunt
+  [--resume SESSION_ID]         # resume a prior run in place (e.g. sh-535ed81b)
+```
+
+A completed stage restores whole. The **hunt** stage additionally memoizes
+each completed work item (file/band/attempt/context) under
+`<session>/hunt-work/`, so a run interrupted part way through resumes at
+work-item granularity — finished files are reused and only unfinished work
+re-runs. `--resume` continues the same session directory, including its spend
+ledger, so the dollar budget stays a lifetime cap across the resume. The repo
+and hunt options must match the original run; the model, endpoint, and
+credentials may change.
+
 ### `sourcehunt --nday` — N-day exploit pipeline
 
 ```bash
