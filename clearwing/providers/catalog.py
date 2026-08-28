@@ -58,6 +58,15 @@ class ProviderPreset:
     #: setup wizard ("Common models: ..." hint).
     alt_models: tuple[str, ...] = field(default_factory=tuple)
 
+    #: This backend's capability ladder: which of its models fills each
+    #: role tier (``small`` | ``mid`` | ``large``). The role
+    #: resolver (:func:`clearwing.providers.roles.recommend_roles`) reads
+    #: this to turn an abstract role — frontier, utility, reviewer — into a
+    #: concrete model *for this provider*. This is the entire recommendation
+    #: dataset: fill in the rungs and every role auto-populates. Tiers left
+    #: out fall back to :attr:`default_model` via :meth:`model_for_tier`.
+    tier_models: dict[str, str] = field(default_factory=dict)
+
     #: Required genai-pyo3 adapter name. Every preset in the catalog
     #: declares exactly one of: `anthropic`, `openai`, `openai_resp`,
     #: `openai_codex`, `ollama`, `gemini`. The wizard persists this as
@@ -69,6 +78,15 @@ class ProviderPreset:
     #: Optional named auth flow. OAuth providers use this to skip API-key
     #: prompts and write an auth marker into config.yaml.
     auth_flow: str | None = None
+
+    def model_for_tier(self, tier: str) -> str:
+        """Model this provider offers for a capability tier.
+
+        Falls back to :attr:`default_model` when the tier is not spelled
+        out in :attr:`tier_models`, so the resolver always gets a usable
+        identifier even for a sparsely-described backend.
+        """
+        return self.tier_models.get(tier, self.default_model)
 
 
 # --- The catalog ----------------------------------------------------------
@@ -88,6 +106,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         api_key_env_var=None,
         is_openai_compat=False,
         alt_models=("claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"),
+        tier_models={
+            "small": "claude-haiku-4-5-20251001",
+            "mid": "claude-sonnet-4-6",
+            "large": "claude-opus-4-7",
+        },
         provider_adapter="anthropic",
         auth_flow="anthropic_oauth",
     ),
@@ -114,6 +137,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         api_key_env_var="ANTHROPIC_API_KEY",
         is_openai_compat=False,
         alt_models=("claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"),
+        tier_models={
+            "small": "claude-haiku-4-5-20251001",
+            "mid": "claude-sonnet-4-6",
+            "large": "claude-opus-4-7",
+        },
         provider_adapter="anthropic",
     ),
     ProviderPreset(
@@ -134,6 +162,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "qwen/qwen-2.5-coder-32b-instruct",
             "google/gemini-2.0-flash",
         ),
+        tier_models={
+            "small": "anthropic/claude-haiku-4-5",
+            "mid": "anthropic/claude-sonnet-4",
+            "large": "anthropic/claude-opus-4.7",
+        },
         provider_adapter="openai",
     ),
     ProviderPreset(
@@ -147,6 +180,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         api_key_env_var=None,
         is_local=True,
         alt_models=("qwen2.5:72b", "llama3.3:70b", "mistral-small3:24b"),
+        tier_models={
+            "small": "qwen2.5-coder:7b",
+            "mid": "qwen2.5-coder:32b",
+            "large": "qwen2.5:72b",
+        },
         provider_adapter="ollama",
     ),
     ProviderPreset(
@@ -172,6 +210,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="gpt-4o",
         api_key_env_var="OPENAI_API_KEY",
         alt_models=("gpt-4o-mini",),
+        tier_models={
+            "small": "gpt-4o-mini",
+            "mid": "gpt-4o",
+            "large": "gpt-4o",
+        },
         provider_adapter="openai",
     ),
     ProviderPreset(
@@ -185,6 +228,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="gpt-5.4",
         api_key_env_var="OPENAI_API_KEY",
         alt_models=("gpt-5.4-mini", "gpt-5.3-codex", "o3", "o3-mini", "gpt-4o"),
+        tier_models={
+            "small": "gpt-5.4-mini",
+            "mid": "gpt-5.4",
+            "large": "o3",
+        },
         provider_adapter="openai_resp",
     ),
     ProviderPreset(
@@ -200,6 +248,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "deepseek-ai/DeepSeek-V3",
             "mistralai/Mixtral-8x22B-Instruct-v0.1",
         ),
+        tier_models={
+            "small": "Qwen/Qwen2.5-Coder-32B-Instruct",
+            "mid": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+            "large": "deepseek-ai/DeepSeek-V3",
+        },
         provider_adapter="openai",
     ),
     ProviderPreset(
@@ -211,6 +264,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="llama-3.3-70b-versatile",
         api_key_env_var="GROQ_API_KEY",
         alt_models=("qwen-2.5-coder-32b", "mixtral-8x7b-32768"),
+        tier_models={
+            "small": "qwen-2.5-coder-32b",
+            "mid": "llama-3.3-70b-versatile",
+            "large": "llama-3.3-70b-versatile",
+        },
         provider_adapter="openai",
     ),
     ProviderPreset(
@@ -231,7 +289,14 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_base_url="https://api.deepseek.com/v1",
         default_model="deepseek-chat",
         api_key_env_var="DEEPSEEK_API_KEY",
-        alt_models=("deepseek-coder",),
+        alt_models=("deepseek-coder", "deepseek-reasoner"),
+        # DeepSeek exposes one chat model and one reasoning model today.
+        # As the V4 Flash / Pro family lands, drop its ids into mid / large.
+        tier_models={
+            "small": "deepseek-chat",
+            "mid": "deepseek-chat",
+            "large": "deepseek-reasoner",
+        },
         provider_adapter="openai",
     ),
     ProviderPreset(
@@ -250,6 +315,11 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
             "MiniMax-M2.5-highspeed",
             "MiniMax-M2.1",
         ),
+        tier_models={
+            "small": "MiniMax-M2.5-highspeed",
+            "mid": "MiniMax-M2.5",
+            "large": "MiniMax-M2.7",
+        },
         provider_adapter="anthropic",
     ),
     ProviderPreset(

@@ -331,6 +331,49 @@ def _model_supports_reasoning_capture(model_name: str) -> bool:
     return not any(pattern in lower for pattern in _REASONING_CAPTURE_UNSUPPORTED_PATTERNS)
 
 
+def _model_supports_reasoning_effort(model_name: str) -> bool:
+    """False when *model_name*'s family rejects the ``reasoning_effort`` param.
+
+    Same denylist :meth:`AsyncLLMClient._auto_resolve_reasoning_effort`
+    uses, exposed so callers deciding an *explicit* effort (e.g. the role
+    resolver forcing ``high``) can avoid sending the parameter to a model
+    that would answer with HTTP 400.
+    """
+    lower = model_name.lower()
+    if lower in _REASONING_EFFORT_OVERRIDE_ALLOW:
+        return True
+    return not any(pattern in lower for pattern in _REASONING_EFFORT_UNSUPPORTED_PATTERNS)
+
+
+def effective_reasoning_effort(model_name: str, requested: str | None) -> str | None:
+    """Resolve a *requested* reasoning effort against a model's capability.
+
+    The role layer asks for an effort by name (``none``, ``high``,
+    ``max`` …). This honors that request unless the model family rejects
+    the ``reasoning_effort`` parameter — in which case it downgrades to
+    ``None`` (omit the field) rather than letting the provider 400.
+
+    ``None`` or ``"auto"`` passes straight through, preserving
+    :class:`AsyncLLMClient`'s per-model auto-resolution for callers that
+    don't want to force a value.
+    """
+    if requested is None or requested == "auto":
+        return requested
+    if requested in ("none", "off"):
+        # An explicit "no reasoning" request is always safe to honor as
+        # omitting the parameter; "off" is the role-layer spelling.
+        return "none" if _model_supports_reasoning_effort(model_name) else None
+    if not _model_supports_reasoning_effort(model_name):
+        logger.info(
+            "reasoning_effort downgraded to None: model %r rejects the parameter "
+            "(requested %r)",
+            model_name,
+            requested,
+        )
+        return None
+    return requested
+
+
 def _run_coro_sync(coro):
     try:
         asyncio.get_running_loop()
@@ -469,6 +512,11 @@ class AsyncLLMClient:
         rate_limit_initial_backoff_seconds: float = 1.0,
         rate_limit_max_backoff_seconds: float = 60.0,
         reasoning_effort: str | None | Literal["auto"] = "auto",
+        default_temperature: float | None = None,
+        default_max_tokens: int | None = None,
+        default_top_p: float | None = None,
+        default_timeout_seconds: int | None = None,
+        context_budget_tokens: int | None = None,
     ) -> None:
         self.model_name = model_name
         self.provider_name = provider_name
@@ -549,6 +597,24 @@ class AsyncLLMClient:
             self._anthropic_oauth_url = "https://api.anthropic.com/v1/messages"
 
         self.default_system = default_system
+        # Role-binding inference defaults: applied by achat/achat_stream when a
+        # call site passes temperature/max_tokens=None. A call that specifies
+        # either value wins; these only fill the gap, so no existing call site
+        # changes behavior.
+        self.default_temperature = default_temperature
+        self.default_max_tokens = default_max_tokens
+        # Nucleus-sampling default (ChatOptions.top_p) and a per-attempt wall
+        # clock. Both fill in only when a call passes None, mirroring the
+        # temperature/max_tokens defaults. `timeout_seconds` is enforced by the
+        # client (asyncio.wait_for), not a provider parameter.
+        self.default_top_p = default_top_p
+        self.timeout_seconds = default_timeout_seconds
+        # How much conversation context this role should carry before the
+        # agent loop summarizes older turns (see ContextSummarizer). Distinct
+        # from the model's hard context window and from max output. None keeps
+        # the summarizer's built-in threshold. Not a per-call API param — read
+        # by the runtime, not sent in ChatOptions.
+        self.context_budget_tokens = context_budget_tokens
         # `reasoning_effort` controls how much reasoning the provider runs
         # (for models that support it). Accepted values: "none" | "minimal"
         # | "low" | "medium" | "high" | "xhigh" | "max" | "budget:<n>" | None.
@@ -751,6 +817,7 @@ class AsyncLLMClient:
         tools: list[NativeToolSpec] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
@@ -773,7 +840,15 @@ class AsyncLLMClient:
             system=system_prompt,
             tools=request_tools,
         )
+        if temperature is None:
+            temperature = self.default_temperature
+        if max_tokens is None:
+            max_tokens = self.default_max_tokens
+        if top_p is None:
+            top_p = self.default_top_p
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
+        if self.provider_name == "openai_codex":
+            top_p = None  # Codex gateway rejects sampling params
         reservation = self._reserve_spend_call(
             messages=messages,
             system=system_prompt,
@@ -789,6 +864,7 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
+                top_p=top_p,
                 max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
@@ -942,6 +1018,7 @@ class AsyncLLMClient:
         tools: list[NativeToolSpec] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        top_p: float | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         _truncation_retry: int = 0,
     ) -> ChatResponse:
@@ -957,6 +1034,7 @@ class AsyncLLMClient:
                 tools=tools,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                top_p=top_p,
             )
 
         request_tools = None
@@ -970,7 +1048,15 @@ class AsyncLLMClient:
             system=system_prompt,
             tools=request_tools,
         )
+        if temperature is None:
+            temperature = self.default_temperature
+        if max_tokens is None:
+            max_tokens = self.default_max_tokens
+        if top_p is None:
+            top_p = self.default_top_p
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
+        if self.provider_name == "openai_codex":
+            top_p = None  # Codex gateway rejects sampling params
         reservation = self._reserve_spend_call(
             messages=messages,
             system=system_prompt,
@@ -986,6 +1072,7 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
+                top_p=top_p,
                 max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
@@ -1275,6 +1362,22 @@ class AsyncLLMClient:
         )
 
     async def _achat_with_provider_policy(
+        self,
+        client: Client,
+        request: ChatRequest,
+        options: ChatOptions,
+    ) -> ChatResponse:
+        # Role-level per-attempt wall clock (asyncio.wait_for), tighter than the
+        # transport read/total timeouts baked into the Client. Unset -> no extra
+        # cap. Applied per attempt so a retry gets a fresh budget.
+        if self.timeout_seconds:
+            return await asyncio.wait_for(
+                self._achat_provider_dispatch(client, request, options),
+                timeout=self.timeout_seconds,
+            )
+        return await self._achat_provider_dispatch(client, request, options)
+
+    async def _achat_provider_dispatch(
         self,
         client: Client,
         request: ChatRequest,
@@ -1831,6 +1934,7 @@ class AsyncLLMClient:
         """
         return ChatOptions(
             temperature=options.temperature,
+            top_p=options.top_p,
             max_tokens=options.max_tokens,
             capture_content=options.capture_content,
             capture_usage=options.capture_usage,
@@ -1847,6 +1951,7 @@ class AsyncLLMClient:
 
         return ChatOptions(
             temperature=options.temperature,
+            top_p=options.top_p,
             max_tokens=None,
             capture_content=options.capture_content,
             capture_usage=options.capture_usage,

@@ -194,6 +194,13 @@ class Config:
             task_models:
               hunter: anthropic/claude-opus-4
               verifier: qwen2.5-coder:32b
+
+        Or the role-based shape (see docs/model-roles.md), which
+        ``ProviderManager.from_config`` expands into per-task routes:
+            model_roles:
+              providers: [deepseek, anthropic]
+              overrides:
+                frontier: {model: claude-opus-4-7, reasoning: max}
         """
         out: dict[str, Any] = {}
         if "provider" in self.config:
@@ -204,6 +211,8 @@ class Config:
             out["routes"] = self.config["routes"]
         if "task_models" in self.config:
             out["task_models"] = self.config["task_models"]
+        if "model_roles" in self.config:
+            out["model_roles"] = self.config["model_roles"]
         return out
 
     def load(self, config_file: str) -> None:

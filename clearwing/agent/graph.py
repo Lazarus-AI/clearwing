@@ -61,6 +61,7 @@ def build_react_graph(
     enable_output_guardrail: bool = True,
     enable_event_bus: bool = True,
     enable_context_summarizer: bool = True,
+    agent_limits=None,
 ):
     del state_schema
     if state_updater_fn is None:
@@ -97,6 +98,7 @@ def build_react_graph(
         enable_output_guardrail=enable_output_guardrail,
         enable_event_bus=enable_event_bus,
         enable_context_summarizer=enable_context_summarizer,
+        agent_limits=agent_limits,
     )
 
 
@@ -136,6 +138,7 @@ def create_agent(
 
     # No `bind_tools` step: the native client takes the tool list per-call.
     # `build_react_graph` builds the NativeToolSpec list from `all_tools`.
+    agent_limits = None
     if provider_manager is None:
         llm = _create_llm(model_name, base_url=base_url, api_key=api_key)
     else:
@@ -145,6 +148,7 @@ def create_agent(
             api_key=api_key,
             provider_manager=provider_manager,
         )
+        agent_limits = provider_manager.get_agent_limits("default")
 
     return build_react_graph(
         llm_with_tools=llm,
@@ -153,4 +157,5 @@ def create_agent(
         state_schema=AgentState,
         model_name=model_name,
         session_id=session_id,
+        agent_limits=agent_limits,
     )
