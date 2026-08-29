@@ -168,6 +168,117 @@ def test_sourcehunt_machine_request_accepts_checkpoint_object():
         )
 
 
+def test_sourcehunt_machine_request_semgrep_is_strict_and_default_off():
+    assert sourcehunt._machine_request({"repo_url": "https://example.test/repo"})["semgrep"] is False
+    assert (
+        sourcehunt._machine_request(
+            {"repo_url": "https://example.test/repo", "semgrep": True}
+        )["semgrep"]
+        is True
+    )
+    with pytest.raises(ValueError, match="semgrep must be a boolean"):
+        sourcehunt._machine_request(
+            {"repo_url": "https://example.test/repo", "semgrep": "true"}
+        )
+
+
+def test_sourcehunt_machine_handler_propagates_semgrep(monkeypatch):
+    captured = {}
+
+    class FakeChannel:
+        workspace = {
+            "local_path": "/workspace/source",
+            "output_dir": "/workspace/results",
+            "checkpoint_path": "/workspace/results/checkpoint.json",
+        }
+
+        def __init__(self, descriptor, operation):
+            assert descriptor == 7
+            assert operation == "sourcehunt"
+
+        def read_start(self):
+            return (
+                {"repo_url": "https://example.test/repo", "semgrep": True},
+                {"provider": {"model": "test-model"}},
+            )
+
+        def emit(self, *_args):
+            pass
+
+        def result(self, value):
+            captured["result"] = value
+
+        def error(self, error):
+            raise AssertionError(f"unexpected machine error: {error}")
+
+        def close(self):
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured["runner"] = kwargs
+
+        async def arun(self):
+            return _SourceResult()
+
+    monkeypatch.setattr("clearwing.ui.machine.MachineChannel", FakeChannel)
+    monkeypatch.setattr("clearwing.providers.install_runtime_routing", lambda routing: None)
+    monkeypatch.setattr(
+        "clearwing.providers.ProviderManager.from_config",
+        lambda routing: SimpleNamespace(),
+    )
+    monkeypatch.setattr("clearwing.sourcehunt.runner.SourceHuntRunner", FakeRunner)
+
+    assert sourcehunt._handle_machine(7) == 0
+    assert captured["runner"]["enable_semgrep"] is True
+
+
+def test_sourcehunt_machine_handler_honors_visible_cli_semgrep(monkeypatch):
+    captured = {}
+
+    class FakeChannel:
+        workspace = {}
+
+        def __init__(self, _descriptor, _operation):
+            pass
+
+        def read_start(self):
+            return (
+                {"repo_url": "https://example.test/repo"},
+                {"provider": {"model": "test-model"}},
+            )
+
+        def emit(self, *_args):
+            pass
+
+        def result(self, _value):
+            pass
+
+        def error(self, error):
+            raise AssertionError(f"unexpected machine error: {error}")
+
+        def close(self):
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def arun(self):
+            return _SourceResult()
+
+    monkeypatch.setattr("clearwing.ui.machine.MachineChannel", FakeChannel)
+    monkeypatch.setattr("clearwing.providers.install_runtime_routing", lambda routing: None)
+    monkeypatch.setattr(
+        "clearwing.providers.ProviderManager.from_config",
+        lambda routing: SimpleNamespace(),
+    )
+    monkeypatch.setattr("clearwing.sourcehunt.runner.SourceHuntRunner", FakeRunner)
+
+    assert sourcehunt._handle_machine(7, enable_semgrep=True) == 0
+    assert captured["enable_semgrep"] is True
+
+
 def test_operate_machine_uses_host_routing_and_emits_typed_records():
     parent, channel = _channel("operate", {"target": "host", "goals": ["scan"]})
     request, routing = channel.read_start()

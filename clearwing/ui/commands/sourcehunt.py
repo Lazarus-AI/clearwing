@@ -320,6 +320,12 @@ def add_parser(subparsers):
         help="Exclude files and directories matched by the target repo's root .gitignore",
     )
     parser.add_argument(
+        "--semgrep",
+        action="store_true",
+        default=False,
+        help="Run the Semgrep hint scan during preprocessing (default: disabled)",
+    )
+    parser.add_argument(
         "--budget",
         type=float,
         default=0.0,
@@ -694,7 +700,7 @@ def add_parser(subparsers):
 def handle(cli, args):
     """Run the sourcehunt pipeline."""
     if args.machine_fd is not None:
-        raise SystemExit(_handle_machine(args.machine_fd))
+        raise SystemExit(_handle_machine(args.machine_fd, enable_semgrep=args.semgrep))
     if not args.repo:
         args._command_parser.error("the following arguments are required: repo")
 
@@ -1088,6 +1094,7 @@ def handle(cli, args):
                 depth=args.depth,
                 budget_usd=args.budget,
                 sandbox_cpus=args.sandbox_cpus,
+                enable_semgrep=args.semgrep,
                 output_dir=args.output_dir,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
@@ -1133,6 +1140,7 @@ def handle(cli, args):
                 depth=args.depth,
                 budget_usd=args.budget,
                 sandbox_cpus=args.sandbox_cpus,
+                enable_semgrep=args.semgrep,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
             )
@@ -1209,6 +1217,7 @@ def handle(cli, args):
         enable_artifact_store=getattr(args, "encrypt_artifacts", False),
         gvisor_runtime="runsc" if getattr(args, "gvisor", False) else None,
         respect_gitignore=args.respect_gitignore,
+        enable_semgrep=args.semgrep,
         live=args.live,
         sandbox_cpus=args.sandbox_cpus,
         flow=args.flow,
@@ -1310,7 +1319,7 @@ def handle(cli, args):
     sys.exit(result.exit_code)
 
 
-def _handle_machine(descriptor: int) -> int:
+def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
     from ...providers import ProviderManager, install_runtime_routing
     from ...sourcehunt.runner import SourceHuntRunner
     from ..machine import MachineChannel
@@ -1348,6 +1357,7 @@ def _handle_machine(descriptor: int) -> int:
                 output_formats=parsed.get("format"),
                 checkpoint=parsed.get("checkpoint"),
                 stop_after=parsed.get("stop_after"),
+                enable_semgrep=enable_semgrep or parsed["semgrep"],
                 provider_manager=provider_manager,
                 on_progress=lambda progress: channel.emit("progress", progress),
             ).arun()
@@ -1380,6 +1390,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_max_parallel",
         "subsystem_max_files",
         "no_per_file_hunt",
+        "semgrep",
         "checkpoint",
         "stop_after",
     }
@@ -1407,6 +1418,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "no_rank": _boolean(value.get("no_rank", False), "no_rank"),
         "no_per_file_hunt": _boolean(value.get("no_per_file_hunt", False), "no_per_file_hunt"),
         "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),
+        "semgrep": _boolean(value.get("semgrep", False), "semgrep"),
     }
     if "subsystem_paths" in value:
         parsed["subsystem_paths"] = value["subsystem_paths"]
