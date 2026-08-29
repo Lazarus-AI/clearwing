@@ -59,6 +59,15 @@ class DisclosureUpdatePayload:
 
 
 @dataclass(slots=True, frozen=True)
+class AssetDiscoveredPayload:
+    scope: str
+    asset_type: str
+    value: str
+    source: str
+    parent: str | None
+
+
+@dataclass(slots=True, frozen=True)
 class BenchmarkProgressPayload:
     mode: str
     targets_completed: int

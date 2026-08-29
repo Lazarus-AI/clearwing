@@ -1,6 +1,7 @@
 """CLI subcommand modules."""
 
 from . import (
+    asm,
     bench,
     campaign,
     ci,
@@ -29,6 +30,7 @@ ALL_COMMANDS = [
     setup,
     doctor,
     scan,
+    asm,
     report,
     history,
     config,

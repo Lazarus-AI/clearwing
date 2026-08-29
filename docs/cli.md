@@ -26,6 +26,26 @@ clearwing scan <target>
 Writes to `~/.clearwing/clearwing.db` automatically. Retrieve later
 with `clearwing report` or `clearwing history`.
 
+## `asm` — attack-surface management
+
+Discover an external surface (subdomains, hosts, URLs, technologies), track what
+changes over time, and feed new hosts into the scanners. Passive-first and
+host-safe; never exploits automatically. See [Attack Surface Management](asm.md).
+
+```bash
+clearwing asm scan <scope|domain>     # discover the surface + report
+  [--mode recon|stealth|web-assessment|external-sweep]
+  [--no-scan] [--screenshot] [--notify] [-o DIR]
+clearwing asm monitor <scope> [--once] [--interval S] [--no-scan]  # continuous
+clearwing asm sweep <scope> [--max-parallel N]   # scan every known host
+clearwing asm report <scope> [-o DIR]            # re-render the report
+clearwing asm list [scope]                        # list scopes, or assets in one
+```
+
+A bare domain becomes an ad-hoc scope; named scopes are defined under `asm.scopes`
+in `~/.clearwing/config.yaml`. New assets/findings notify a configured Slack or
+generic webhook, and findings are prioritized with CISA KEV + EPSS.
+
 ## `sourcehunt` — source-code vulnerability hunting
 
 ```bash

@@ -43,6 +43,11 @@ Clearwing is a dual-mode offensive-security tool:
 - **Campaign orchestration** — runs sourcehunt across dozens or
   hundreds of repositories from a single YAML config with shared
   budget, checkpoint/resume, and aggregate reporting.
+- **Attack-surface management** — passive external discovery (subdomains,
+  cert transparency, Wayback, DNS/liveness), a scope-keyed asset inventory with
+  delta detection, continuous monitoring with Slack/webhook alerts on new
+  assets, KEV/EPSS-prioritized findings, and mass sweeps that feed the scanners.
+  See [`docs/asm.md`](docs/asm.md).
 - **Responsible disclosure** — human-in-the-loop validation
   workflow with MITRE/HackerOne template generation, SHA-3
   cryptographic commitments for provable priority, timeline

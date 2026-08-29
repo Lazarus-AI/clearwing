@@ -29,6 +29,7 @@ class TestEventType:
             "HUNTER_STATUS",
             "HUNTER_REASONING",
             "FINDING_RECORDED",
+            "ASSET_DISCOVERED",
             "TRACE_STEP",
             "VALIDATION_RESULT",
             "DISCLOSURE_UPDATE",

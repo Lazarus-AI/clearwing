@@ -45,6 +45,7 @@ nav:
   - VVAH pattern review: vvah-integration.md
   - Architecture: architecture.md
   - CLI reference: cli.md
+  - Attack Surface Management: asm.md
   - API reference: api.md
   - Web API (WebSocket): web-api.md
 
