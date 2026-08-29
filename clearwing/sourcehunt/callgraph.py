@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from clearwing.core.events import EventBus
+from clearwing.sourcehunt.paths import resolve_repo_file
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +311,12 @@ class CallGraphBuilder:
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
             for fname in filenames:
                 if os.path.splitext(fname)[1].lower() in _LANG_EXT_MAP:
-                    yield os.path.join(dirpath, fname)
+                    candidate = os.path.join(dirpath, fname)
+                    safe_path = resolve_repo_file(
+                        repo_path, os.path.relpath(candidate, repo_path)
+                    )
+                    if safe_path is not None:
+                        yield candidate
 
     def _ingest_file(
         self,

@@ -603,6 +603,47 @@ class TestHunterToolsHostFallback:
         out = read.invoke({"path": "../../../etc/passwd"})
         assert "Error" in out
 
+    def test_read_source_file_checked_in_symlink_escape_blocked(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text("secret outside the run lease\n")
+        (repo / "leak.c").symlink_to(outside)
+
+        ctx = HunterContext(repo_path=str(repo))
+        read = next(t for t in build_hunter_tools(ctx) if t.name == "read_source_file")
+
+        out = read.invoke({"path": "leak.c"})
+        assert "Error" in out
+        assert "secret outside" not in out
+
+    def test_read_source_file_git_metadata_blocked_and_hidden(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+        ctx = HunterContext(repo_path=str(repo))
+        tools = build_hunter_tools(ctx)
+        read = next(t for t in tools if t.name == "read_source_file")
+        listing = next(t for t in tools if t.name == "list_source_tree")
+
+        assert "Error" in read.invoke({"path": ".git/HEAD"})
+        assert not any(
+            entry.startswith(".git") for entry in listing.invoke({"dir_path": "."})
+        )
+
+    def test_grep_source_does_not_follow_symlink_outside_repository(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text("UNIQUE_SECRET_TOKEN\n")
+        (repo / "leak.c").symlink_to(outside)
+
+        ctx = HunterContext(repo_path=str(repo))
+        grep = next(t for t in build_hunter_tools(ctx) if t.name == "grep_source")
+
+        assert grep.invoke({"pattern": "UNIQUE_SECRET_TOKEN", "path": "."}) == []
+
     def test_list_source_tree(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
         tools = build_hunter_tools(ctx)

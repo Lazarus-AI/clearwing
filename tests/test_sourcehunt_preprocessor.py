@@ -19,6 +19,22 @@ from clearwing.sourcehunt.preprocessor import (
     _tag_file,
 )
 
+
+def test_preprocessor_does_not_read_checked_in_symlink_outside_repository(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "safe.py").write_text("print('safe')\n")
+    outside = tmp_path / "outside.py"
+    outside.write_text("eval(user_controlled)\n")
+    (repo / "leak.py").symlink_to(outside)
+
+    result = Preprocessor(repo_url=str(repo), local_path=str(repo)).run()
+
+    paths = {target["path"] for target in result.file_targets}
+    assert "safe.py" in paths
+    assert "leak.py" not in paths
+    assert all("outside.py" not in finding.file_path for finding in result.static_findings)
+
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
 

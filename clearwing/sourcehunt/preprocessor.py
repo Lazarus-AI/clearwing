@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
 from clearwing.analysis.source_analyzer import _GitignoreMatcher
+from clearwing.sourcehunt.paths import resolve_repo_directory, resolve_repo_file
 
 from .callgraph import CallGraph, CallGraphBuilder
 from .semgrep_sidecar import SemgrepSidecar
@@ -252,9 +253,14 @@ def _count_imports_by(
             if gitignore and gitignore.matches_file(other):
                 continue
             try:
-                if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
+                safe_other = resolve_repo_file(
+                    repo_path, os.path.relpath(other, repo_path)
+                )
+                if safe_other is None:
                     continue
-                with open(other, encoding="utf-8", errors="ignore") as f:
+                if safe_other.stat().st_size > SourceAnalyzer.MAX_FILE_SIZE:
+                    continue
+                with safe_other.open(encoding="utf-8", errors="ignore") as f:
                     head = f.read(64 * 1024)  # only scan the first 64 KB
                 if pattern.search(head):
                     count += 1
@@ -575,15 +581,25 @@ class Preprocessor:
         from clearwing.sourcehunt.callgraph import _LANG_EXT_MAP
         result: list[str] = []
         for sp in subsystem_paths:
-            abs_sp = sp if os.path.isabs(sp) else os.path.join(repo_path, sp)
-            if os.path.isfile(abs_sp):
+            requested = os.path.relpath(sp, repo_path) if os.path.isabs(sp) else sp
+            abs_sp = resolve_repo_file(repo_path, requested)
+            if abs_sp is not None:
                 if Path(abs_sp).suffix.lower() in _LANG_EXT_MAP:
-                    result.append(abs_sp)
-            elif os.path.isdir(abs_sp):
-                for dirpath, _, filenames in os.walk(abs_sp):
+                    result.append(str(abs_sp))
+                continue
+            directory = resolve_repo_directory(repo_path, requested)
+            if directory is not None:
+                for dirpath, dirnames, filenames in os.walk(directory):
+                    dirnames[:] = [directory for directory in dirnames if directory != ".git"]
                     for fname in filenames:
-                        if Path(fname).suffix.lower() in _LANG_EXT_MAP:
-                            result.append(os.path.join(dirpath, fname))
+                        if Path(fname).suffix.lower() not in _LANG_EXT_MAP:
+                            continue
+                        candidate = os.path.join(dirpath, fname)
+                        safe_candidate = resolve_repo_file(
+                            repo_path, os.path.relpath(candidate, repo_path)
+                        )
+                        if safe_candidate is not None:
+                            result.append(str(safe_candidate))
         return result
 
     @staticmethod
