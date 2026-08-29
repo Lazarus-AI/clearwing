@@ -76,6 +76,11 @@ class KnowledgeGraph:
         "key_material",
         "certificate",
         "kdf_config",
+        # v0.5: attack-surface entities
+        "domain",
+        "subdomain",
+        "url",
+        "technology",
     )
     RELATIONSHIP_TYPES = (
         "HAS_PORT",
@@ -97,6 +102,11 @@ class KnowledgeGraph:
         "AUTHENTICATES_WITH",
         "PRESENTS_CERT",
         "VULNERABLE_TO",
+        # v0.5: attack-surface relationships
+        "HAS_SUBDOMAIN",
+        "RESOLVES_TO",
+        "HAS_URL",
+        "RUNS_TECH",
     )
 
     def __init__(
@@ -361,6 +371,33 @@ class KnowledgeGraph:
     def add_vulnerability(self, service_id: str, cve: str, cvss: float = 0.0, **kwargs) -> Entity:
         entity = self.add_entity("cve", cve, cvss=cvss, **kwargs)
         self.add_relationship(service_id, cve, "AFFECTED_BY")
+        return entity
+
+    # -- attack-surface (v0.5) -----------------------------------------
+
+    def add_domain(self, domain: str, **kwargs) -> Entity:
+        return self.add_entity("domain", domain, **kwargs)
+
+    def add_subdomain(self, domain: str, subdomain: str, **kwargs) -> Entity:
+        entity = self.add_entity("subdomain", subdomain, **kwargs)
+        self.add_relationship(domain, subdomain, "HAS_SUBDOMAIN")
+        return entity
+
+    def add_host_resolution(self, name: str, ip: str, **kwargs) -> Entity:
+        """Record that a name resolves to an IP (added as a `target`)."""
+        entity = self.add_entity("target", ip, **kwargs)
+        self.add_relationship(name, ip, "RESOLVES_TO")
+        return entity
+
+    def add_url(self, host: str, url: str, **kwargs) -> Entity:
+        entity = self.add_entity("url", url, **kwargs)
+        self.add_relationship(host, url, "HAS_URL")
+        return entity
+
+    def add_technology(self, host: str, technology: str, **kwargs) -> Entity:
+        tech_id = f"tech:{technology}"
+        entity = self.add_entity("technology", tech_id, name=technology, **kwargs)
+        self.add_relationship(host, tech_id, "RUNS_TECH")
         return entity
 
     def add_exploit_result(

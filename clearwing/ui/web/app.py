@@ -335,6 +335,31 @@ def create_app():
         finally:
             db.close()
 
+    @app.get("/api/asm/scopes")
+    async def asm_scopes():
+        """List ASM scopes with an asset count each."""
+        from clearwing.asm.assets import AssetStore
+
+        store = AssetStore()
+        try:
+            return [
+                {"scope": name, "assets": sum(store.stats(name).values()), "types": store.stats(name)}
+                for name in store.scopes()
+            ]
+        finally:
+            store.close()
+
+    @app.get("/api/asm/scopes/{scope}/assets")
+    async def asm_assets(scope: str, asset_type: str | None = None):
+        """List the assets in a scope (optionally filtered by type)."""
+        from clearwing.asm.assets import AssetStore
+
+        store = AssetStore()
+        try:
+            return [a.to_dict() for a in store.known_assets(scope, asset_type)]
+        finally:
+            store.close()
+
     @app.get("/api/operate/{session_id}", dependencies=[Depends(require_api_key)])
     async def get_operator_status(session_id: str):
         """Get the status of an operator session."""
@@ -408,6 +433,7 @@ def create_app():
                 EventType.DISCLOSURE_UPDATE: "disclosure_update",
                 EventType.BENCHMARK_PROGRESS: "benchmark_progress",
                 EventType.EVAL_PROGRESS: "eval_progress",
+                EventType.ASSET_DISCOVERED: "asset_discovered",
             }
             for et, name in event_map.items():
                 h = on_event(name)
