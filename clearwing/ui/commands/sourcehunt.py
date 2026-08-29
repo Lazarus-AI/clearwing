@@ -1434,37 +1434,55 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_result(result: Any) -> dict[str, Any]:
+    max_findings_per_bucket = 16
+
+    def text(value: Any, maximum_bytes: int) -> str | None:
+        if not isinstance(value, str) or not value:
+            return None
+        return value.encode("utf-8")[:maximum_bytes].decode("utf-8", errors="ignore")
+
     def finding(value: Any) -> dict[str, Any]:
         item = asdict(value) if not isinstance(value, dict) else dict(value)
-        item.pop("extra", None)
         file = item.get("file")
         if isinstance(file, str) and os.path.isabs(file):
-            item["file"] = os.path.basename(file)
-        return item
+            file = os.path.basename(file)
+        public = {
+            "id": text(item.get("id"), 512),
+            "title": text(item.get("title"), 1024),
+            "finding_type": text(item.get("finding_type"), 512),
+            "severity": text(item.get("severity"), 64),
+            "severity_verified": text(item.get("severity_verified"), 64),
+            "file": text(file, 2048),
+            "line_number": item.get("line_number")
+            if isinstance(item.get("line_number"), int)
+            else None,
+            "end_line": item.get("end_line") if isinstance(item.get("end_line"), int) else None,
+            "cwe": text(item.get("cwe"), 128),
+            "description": text(item.get("description"), 4096),
+            "evidence_level": text(item.get("evidence_level"), 128),
+            "confidence": text(item.get("confidence"), 64),
+            "code_snippet": text(item.get("code_snippet"), 8192),
+            "recommendation": text(item.get("recommendation"), 4096),
+            "verified": item.get("verified") if isinstance(item.get("verified"), bool) else None,
+        }
+        return {key: value for key, value in public.items() if value is not None and value != ""}
+
+    def findings_bucket(values: list[Any]) -> list[dict[str, Any]]:
+        return [finding(item) for item in values[:max_findings_per_bucket]]
+
+    findings = list(result.findings)
+    verified_findings = list(result.verified_findings)
 
     return {
-        "status": result.status,
-        "exit_code": result.exit_code,
-        "repo_url": result.repo_url,
-        "session_id": result.session_id,
-        "findings": [finding(item) for item in result.findings],
-        "verified_findings": [finding(item) for item in result.verified_findings],
-        "exploited_findings": [finding(item) for item in result.exploited_findings],
+        "status": text(result.status, 64),
+        "findings": findings_bucket(findings),
+        "verified_findings": findings_bucket(verified_findings),
+        "finding_count": len(findings),
         "files_ranked": result.files_ranked,
         "files_hunted": result.files_hunted,
         "duration_seconds": result.duration_seconds,
         "cost_usd": result.cost_usd,
         "tokens_used": result.tokens_used,
-        "budget_usd": result.budget_usd,
-        "checkpoint": result.checkpoint,
-        "pipeline": {
-            name: {
-                "outcome": stage.outcome.value,
-                "error": stage.error,
-                "fallback_description": stage.fallback_description,
-            }
-            for name, stage in result.pipeline_status.stages.items()
-        },
     }
 
 
