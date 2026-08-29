@@ -166,7 +166,7 @@ def _render_html(cg, max_nodes: int = 500) -> str:
 <html>
 <head>
 <title>Callgraph Visualization</title>
-<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 <style>
   body {{ margin: 0; background: #1e1e1e; color: #eee; font-family: monospace; }}
   #graph {{ width: 100vw; height: 100vh; }}
