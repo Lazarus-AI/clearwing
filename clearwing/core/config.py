@@ -135,6 +135,31 @@ class Config:
             "include_mitigations": True,
         },
         "database": {"path": "clearwing.db", "auto_backup": True},
+        "asm": {
+            # Attack-Surface Management. Named scopes are defined here and
+            # referenced by name (e.g. `clearwing asm scan acme`):
+            #   scopes:
+            #     acme:
+            #       domains: [acme.com, acme.io]
+            #       exclusions: [legacy.acme.com]
+            "scopes": {},
+            # Passive discovery is always available. These enrich it when set;
+            # keys conventionally come from env vars (see below).
+            "shodan_api_key_env": "SHODAN_API_KEY",
+            "censys_api_id_env": "CENSYS_API_ID",
+            "censys_api_secret_env": "CENSYS_API_SECRET",
+            "github_api_key_env": "GITHUB_API_KEY",
+            # Continuous monitor.
+            "poll_interval_seconds": 86400,  # daily
+            "scan_new_assets": True,  # run port/service/vuln scans on new hosts
+            # Outbound notifications (only active when a URL is set). The env
+            # var is checked first, then this literal.
+            "slack_webhook_env": "CLEARWING_SLACK_WEBHOOK",
+            "slack_webhook_url": "",
+            "webhook_url": "",
+            # Threat-intel prioritization (CISA KEV + EPSS, both public feeds).
+            "threat_intel": True,
+        },
     }
 
     #: Default path searched when no explicit config_file is passed.

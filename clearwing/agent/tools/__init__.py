@@ -23,6 +23,15 @@ def _get_browser_tools() -> list[Any]:
         return []
 
 
+def _get_discovery_tools() -> list[Any]:
+    try:
+        from .recon.discovery_tools import get_discovery_tools
+
+        return get_discovery_tools()
+    except ImportError:
+        return []
+
+
 def _get_proxy_tools() -> list[Any]:
     try:
         from .recon.proxy_tools import get_proxy_tools
@@ -242,6 +251,7 @@ def get_all_tools() -> list[Any]:
     ]
 
     tools.extend(_get_browser_tools())
+    tools.extend(_get_discovery_tools())
     tools.extend(_get_proxy_tools())
     tools.extend(_get_webcrypto_tools())
     tools.extend(_get_auth_recorder_tools())

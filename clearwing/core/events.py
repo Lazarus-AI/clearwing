@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from clearwing.core.event_payloads import (
+        AssetDiscoveredPayload,
         BenchmarkProgressPayload,
         CampaignProgressPayload,
         DisclosureUpdatePayload,
@@ -56,6 +57,7 @@ class EventType(enum.Enum):
     BENCHMARK_PROGRESS = "benchmark_progress"
     EVAL_PROGRESS = "eval_progress"
     FINDING_RECORDED = "finding_recorded"
+    ASSET_DISCOVERED = "asset_discovered"
     HUNTER_STATUS = "hunter_status"
     HUNTER_REASONING = "hunter_reasoning"
     TRACE_STEP = "trace_step"
@@ -169,3 +171,6 @@ class EventBus:
 
     def emit_eval_progress(self, payload: EvalProgressPayload) -> None:
         self.emit(EventType.EVAL_PROGRESS, payload)
+
+    def emit_asset_discovered(self, payload: AssetDiscoveredPayload) -> None:
+        self.emit(EventType.ASSET_DISCOVERED, payload)
