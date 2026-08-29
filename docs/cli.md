@@ -447,6 +447,7 @@ extras (`pip install -e '.[web]'`).
 ```bash
 clearwing setup                              # menu-driven
 clearwing setup --provider openrouter        # skip the menu
+clearwing setup --provider orcarouter        # OrcaRouter preset
 clearwing setup --provider ollama --no-test  # skip the live test
 clearwing setup -y                           # skip confirmations
 clearwing init                               # alias — same wizard
@@ -454,8 +455,8 @@ clearwing init                               # alias — same wizard
 
 Walks through LLM backend selection, credential entry, optional
 connection testing, and persistence to `~/.clearwing/config.yaml`.
-The menu currently lists Anthropic, OpenRouter, Ollama, LM Studio,
-OpenAI, Together, Groq, Fireworks, DeepSeek, and a "custom
+The menu currently lists Anthropic, OpenRouter, OrcaRouter, Ollama,
+LM Studio, OpenAI, Together, Groq, Fireworks, DeepSeek, and a "custom
 OpenAI-compatible endpoint" catch-all. Safe to re-run — existing
 config is shown and can be overwritten.
 
