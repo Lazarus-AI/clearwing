@@ -26,7 +26,7 @@ from clearwing.observability.telemetry import CostTracker
 from clearwing.reporting.safety import redact_text
 
 if TYPE_CHECKING:
-    from clearwing.providers.env import LLMEndpoint
+    from clearwing.providers.env import EndpointPricing, LLMEndpoint
 
 
 class BudgetExceeded(RuntimeError):
@@ -58,9 +58,27 @@ def _endpoint_pricing(endpoint: LLMEndpoint | None) -> ModelPricing | None:
     pricing-table behavior. Returns ``None`` when the endpoint is absent or
     carries no pricing, so runs without endpoint pricing are unaffected.
     """
-    pricing = getattr(endpoint, "pricing", None)
+    return _pricing_value(getattr(endpoint, "pricing", None))
+
+
+def _pricing_value(pricing: EndpointPricing | None) -> ModelPricing | None:
+    """Convert one explicit endpoint/client pricing value for ledger use."""
     if pricing is None:
         return None
+    values = {
+        "input": float(pricing.input_per_mtok),
+        "output": float(pricing.output_per_mtok),
+        "cached": (
+            float(pricing.cached_per_mtok)
+            if pricing.cached_per_mtok is not None
+            else float(pricing.input_per_mtok)
+        ),
+    }
+    for name, value in values.items():
+        if not math.isfinite(value) or value < 0:
+            raise BudgetConfigurationError(
+                f"endpoint {name} token price must be a finite value >= 0"
+            )
     cached = (
         pricing.cached_per_mtok if pricing.cached_per_mtok is not None else pricing.input_per_mtok
     )
@@ -239,6 +257,7 @@ class SpendLedger:
         model: str,
         provider: str,
         supports_output_limit: bool,
+        endpoint_pricing: EndpointPricing | None = None,
     ) -> ModelPricing:
         """Fail before spending when strict pricing/capping is unavailable."""
 
@@ -246,6 +265,7 @@ class SpendLedger:
             model,
             provider=provider,
             strict=self.enforcing,
+            endpoint_pricing=endpoint_pricing,
         )
         if self.enforcing and pricing.output_per_million > 0 and not supports_output_limit:
             raise BudgetConfigurationError(
@@ -264,6 +284,7 @@ class SpendLedger:
         requested_max_output_tokens: int | None,
         supports_output_limit: bool,
         metadata: dict[str, Any] | None = None,
+        endpoint_pricing: EndpointPricing | None = None,
     ) -> BudgetReservation:
         """Atomically reserve the worst-case price and return the output cap."""
 
@@ -271,6 +292,7 @@ class SpendLedger:
             model=model,
             provider=provider,
             supports_output_limit=supports_output_limit,
+            endpoint_pricing=endpoint_pricing,
         )
         input_token_upper_bound = max(0, int(input_token_upper_bound))
         metadata = dict(metadata or {})
@@ -612,12 +634,16 @@ class SpendLedger:
         *,
         provider: str,
         strict: bool,
+        endpoint_pricing: EndpointPricing | None = None,
     ) -> ModelPricing:
         # Highest precedence: the active endpoint's own price. When an
         # LLMEndpoint carries a `pricing` block it is the authoritative,
         # already-resolved per-model price and outranks both the operator
         # override and the built-in pricing table. Absent it (the default for
         # every endpoint) this is None and the existing sources apply unchanged.
+        call_pricing = _pricing_value(endpoint_pricing)
+        if call_pricing is not None:
+            return call_pricing
         if self._endpoint_pricing is not None:
             return self._endpoint_pricing
 

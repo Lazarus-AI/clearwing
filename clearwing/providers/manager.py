@@ -19,7 +19,7 @@ from .binding import (
     validate_inference,
 )
 from .catalog import preset_by_key
-from .env import LLMEndpoint, resolve_llm_endpoint
+from .env import EndpointPricing, LLMEndpoint, resolve_llm_endpoint
 from .roles import ROLES, TASK_ROLES, RoleAssignment, Tier, recommend_roles, role_for_task
 from .runtime import runtime_routing
 
@@ -41,6 +41,9 @@ class ProviderConfig:
     # "openai", "openai_resp", "openai_codex", "anthropic", "gemini",
     # "ollama". Left empty for the default behavior (heuristic).
     adapter: str = ""
+    # Optional authoritative price supplied by the route owner. This follows
+    # the provider config to the native client so aliases can use distinct rates.
+    pricing: EndpointPricing | None = None
 
 
 @dataclass
@@ -338,6 +341,7 @@ class ProviderManager:
                     api_key=api_key,
                     base_url=base_url,
                     adapter=pcfg.get("adapter", ""),
+                    pricing=_pricing_from_config(pcfg.get("pricing")),
                 )
             )
 
@@ -386,6 +390,7 @@ class ProviderManager:
                     api_key=pcfg.get("api_key", ""),
                     base_url=pcfg.get("base_url", ""),
                     adapter=pcfg.get("adapter", ""),
+                    pricing=_pricing_from_config(pcfg.get("pricing")),
                 )
             )
             routes.append(
@@ -832,6 +837,7 @@ class ProviderManager:
             api_key=endpoint.api_key or "",
             provider_name=provider_name,
             max_concurrency=_native_concurrency_for_task(task, provider_name),
+            pricing=endpoint.pricing,
         )
 
     def _endpoint_for_task(self, task: str) -> LLMEndpoint:
@@ -893,6 +899,7 @@ class ProviderManager:
                 api_key=config.api_key if config else "",
                 provider_name="anthropic",
                 max_concurrency=_native_concurrency_for_task(task, "anthropic"),
+                pricing=config.pricing if config else None,
                 **common,
             )
 
@@ -904,6 +911,7 @@ class ProviderManager:
                 api_key=config.api_key if config else "",
                 provider_name=provider_name,
                 max_concurrency=_native_concurrency_for_task(task, provider_name),
+                pricing=config.pricing if config else None,
                 **common,
             )
 
@@ -913,6 +921,7 @@ class ProviderManager:
                 api_key=config.api_key if config else "",
                 provider_name="gemini",
                 max_concurrency=_native_concurrency_for_task(task, "gemini"),
+                pricing=config.pricing if config else None,
                 **common,
             )
 
@@ -928,6 +937,7 @@ class ProviderManager:
                 api_key=config.api_key if config else "",
                 provider_name="ollama",
                 max_concurrency=_native_concurrency_for_task(task, "ollama"),
+                pricing=config.pricing if config else None,
                 **common,
             )
 
@@ -939,6 +949,7 @@ class ProviderManager:
                 api_key=config.api_key,
                 provider_name=provider_name,
                 max_concurrency=_native_concurrency_for_task(task, provider_name),
+                pricing=config.pricing,
                 **common,
             )
         raise ValueError(f"Unknown provider: {provider}")
@@ -1003,6 +1014,29 @@ def _expand_env(value: Any) -> str:
     if s.startswith("${") and s.endswith("}"):
         return os.environ.get(s[2:-1], "")
     return s
+
+
+def _pricing_from_config(value: Any) -> EndpointPricing | None:
+    """Parse an optional provider pricing block without treating zero as absent."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("provider pricing must be an object")
+    missing = [name for name in ("input_per_mtok", "output_per_mtok") if name not in value]
+    if missing:
+        raise ValueError(f"provider pricing is missing: {', '.join(missing)}")
+    return EndpointPricing(
+        input_per_mtok=float(value["input_per_mtok"]),
+        output_per_mtok=float(value["output_per_mtok"]),
+        cached_per_mtok=(
+            float(value["cached_per_mtok"]) if value.get("cached_per_mtok") is not None else None
+        ),
+        cache_creation_per_mtok=(
+            float(value["cache_creation_per_mtok"])
+            if value.get("cache_creation_per_mtok") is not None
+            else None
+        ),
+    )
 
 
 def _adapter_for_endpoint(endpoint: LLMEndpoint) -> str:

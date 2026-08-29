@@ -14,7 +14,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
 
 import aiohttp
@@ -41,6 +41,9 @@ from .budget import (
     SpendLedger,
     current_spend_metadata,
 )
+
+if TYPE_CHECKING:
+    from clearwing.providers.env import EndpointPricing
 
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
@@ -557,11 +560,13 @@ class AsyncLLMClient:
         default_top_p: float | None = None,
         default_timeout_seconds: int | None = None,
         context_budget_tokens: int | None = None,
+        pricing: EndpointPricing | None = None,
     ) -> None:
         self.model_name = model_name
         self.provider_name = provider_name
         self.api_key = api_key
         self.base_url = base_url
+        self.pricing = pricing
         self._default_headers: dict[str, str] | None = None
 
         # `openai_codex` is clearwing's label for the OAuth-authenticated
@@ -701,6 +706,7 @@ class AsyncLLMClient:
             model=self.model_name,
             provider=self.provider_name,
             supports_output_limit=self.provider_name != "openai_codex",
+            endpoint_pricing=self.pricing,
         )
         bound = copy.copy(self)
         bound._spend_ledger = ledger
@@ -735,6 +741,7 @@ class AsyncLLMClient:
             requested_max_output_tokens=max_tokens,
             supports_output_limit=self.provider_name != "openai_codex",
             metadata=current_spend_metadata(),
+            endpoint_pricing=self.pricing,
         )
 
     @staticmethod
