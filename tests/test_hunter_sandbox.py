@@ -142,6 +142,7 @@ class TestHunterSandboxBuildImage:
         args = mock_popen.call_args[0][0]
         assert "docker" in args[0]
         assert tag in args
+        assert not any(arg.startswith("--progress") for arg in args)
 
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
     def test_build_image_reuses_cached(self, mock_run, temp_repo: Path):
