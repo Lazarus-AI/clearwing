@@ -2787,6 +2787,9 @@ def build_hunter_agent(
 
     if seed_transcript:
         prompt += "\n\n" + SEED_TRANSCRIPT_BLOCK.format(transcript=seed_transcript)
+    if campaign_hint and prompt_mode != "unconstrained":
+        prompt += "\n" + CAMPAIGN_HINT_TEMPLATE.format(objective=campaign_hint)
+
     initial_user_message = f"Hunt for vulnerabilities in {ctx.file_path or 'unknown'}."
 
     return NativeHunter(
