@@ -2505,6 +2505,7 @@ class SourceHuntRunner:
                     findings_pool=findings_pool,
                     trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                     instrumentation=self._instrumentation,
+                    callgraph=callgraph,
                 )
             )
             try:
