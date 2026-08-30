@@ -799,7 +799,7 @@ class HunterPool:
                 sandbox = await asyncio.to_thread(self.config.sandbox_factory)
             except Exception as e:
                 logger.error("sandbox_factory failed for %s: %s", file_target.get("path"), e)
-                raise SystemExit(1) from e
+                raise RuntimeError(f"sandbox startup failed: {e}") from e
 
         try:
             hunter, ctx = self._build_hunter_for_file(

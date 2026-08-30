@@ -6,6 +6,7 @@ so we can exercise the budget math without any LLM or sandbox calls.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
@@ -141,6 +142,21 @@ def test_default_hunter_factory_receives_callgraph():
         pool._build_hunter_for_file(config.files[0], sandbox=None)
 
     assert factory.call_args.kwargs["callgraph"] is callgraph
+
+
+def test_sandbox_startup_failure_does_not_exit_process():
+    def fail_sandbox():
+        raise RuntimeError("daemon unavailable")
+
+    config = HuntPoolConfig(
+        files=[_ft("target.c", 5, 5)],
+        repo_path="/tmp/repo",
+        sandbox_factory=fail_sandbox,
+    )
+    pool = HunterPool(config)
+
+    with pytest.raises(RuntimeError, match="sandbox startup failed: daemon unavailable"):
+        asyncio.run(pool._run_one_hunter(config.files[0], cost_limit=1.0))
 
 
 # --- Within-tier priority ordering -----------------------------------------
