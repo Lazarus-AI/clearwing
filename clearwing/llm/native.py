@@ -14,7 +14,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
 
 import aiohttp
@@ -36,11 +36,13 @@ from pydantic import BaseModel, ConfigDict, RootModel
 from clearwing.observability.otel import get_oi_tracer
 
 from .budget import (
-    BudgetExceeded,
     BudgetReservation,
     SpendLedger,
     current_spend_metadata,
 )
+
+if TYPE_CHECKING:
+    from clearwing.providers.env import EndpointPricing
 
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
@@ -91,7 +93,6 @@ def _trace_genai_input(model: str, request: ChatRequest, options: ChatOptions) -
                 "options": {
                     "temperature": options.temperature,
                     "top_p": options.top_p,
-                    "max_tokens": options.max_tokens,
                     "reasoning_effort": options.reasoning_effort,
                     "response_json_mode": options.response_json_mode,
                     "response_json_spec": str(options.response_json_spec)
@@ -293,37 +294,6 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
 # for names matching this list. Case-insensitive substring match on the model
 # name. Add new offenders here as they surface.
 _REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = ("gpt-5.3-codex-spark",)
-
-# Truncation-retry policy. Under a dollar budget the applied output cap is
-# known locally; a response whose completion_tokens reached that cap AND
-# carries no tool call was almost certainly cut off mid-generation
-# (provider finish_reason == "length"). genai-pyo3's ChatResponse does not
-# surface finish_reason, so we detect via the token count and retry ONCE with
-# a larger cap so reasoning models aren't robbed of the turn that would have
-# emitted their tool call. Bounded to a single escalation to avoid loops; the
-# affordability clamp in reserve_call still bounds total spend, and a
-# genuinely-exhausted budget raises BudgetExceeded which we swallow so the
-# truncated response is returned rather than looping.
-_TRUNCATION_RETRY_ESCALATION = 4
-_TRUNCATION_RETRY_CEILING = 65536
-
-
-def _looks_truncated(response: ChatResponse, applied_max_tokens: int | None) -> bool:
-    """True when *response* appears cut off at the output-token cap.
-
-    genai-pyo3's ChatResponse carries no finish_reason, so we use the reliable
-    proxy: a capped call whose completion_tokens reached the applied cap was
-    truncated. Returns False when no cap was applied (``applied_max_tokens is
-    None``) or usage is unavailable.
-    """
-    if applied_max_tokens is None:
-        return False
-    usage = getattr(response, "usage", None)
-    completion = getattr(usage, "completion_tokens", None) if usage is not None else None
-    if completion is None:
-        return False
-    return completion >= applied_max_tokens
-
 
 def _model_supports_reasoning_capture(model_name: str) -> bool:
     """False when *model_name* rejects reasoning-content capture (blacklist)."""
@@ -557,11 +527,13 @@ class AsyncLLMClient:
         default_top_p: float | None = None,
         default_timeout_seconds: int | None = None,
         context_budget_tokens: int | None = None,
+        pricing: EndpointPricing | None = None,
     ) -> None:
         self.model_name = model_name
         self.provider_name = provider_name
         self.api_key = api_key
         self.base_url = base_url
+        self.pricing = pricing
         self._default_headers: dict[str, str] | None = None
 
         # `openai_codex` is clearwing's label for the OAuth-authenticated
@@ -637,16 +609,13 @@ class AsyncLLMClient:
             self._anthropic_oauth_url = "https://api.anthropic.com/v1/messages"
 
         self.default_system = default_system
-        # Role-binding inference defaults: applied by achat/achat_stream when a
-        # call site passes temperature/max_tokens=None. A call that specifies
-        # either value wins; these only fill the gap, so no existing call site
-        # changes behavior.
+        # Role-binding inference defaults are resolved before each call.
         self.default_temperature = default_temperature
         self.default_max_tokens = default_max_tokens
         # Nucleus-sampling default (ChatOptions.top_p) and a per-attempt wall
         # clock. Both fill in only when a call passes None, mirroring the
-        # temperature/max_tokens defaults. `timeout_seconds` is enforced by the
-        # client (asyncio.wait_for), not a provider parameter.
+        # temperature default. `timeout_seconds` is enforced by the client
+        # (asyncio.wait_for), not a provider parameter.
         self.default_top_p = default_top_p
         self.timeout_seconds = default_timeout_seconds
         # How much conversation context this role should carry before the
@@ -672,12 +641,6 @@ class AsyncLLMClient:
         # every model except the blacklisted ones (see
         # _REASONING_CAPTURE_UNSUPPORTED_PATTERNS), which error if it's set.
         self.capture_reasoning_content = _model_supports_reasoning_capture(model_name)
-        # Some Responses-compatible gateways reject the standard
-        # `max_output_tokens` field.  Learn that once from an explicit HTTP
-        # 400 and omit the optional provider-side cap for the rest of this
-        # client session; the spend ledger still reserves against the caller's
-        # requested maximum before ChatOptions is built.
-        self._omit_max_tokens = False
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.timeout_max_retries = max(0, timeout_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
@@ -701,6 +664,7 @@ class AsyncLLMClient:
             model=self.model_name,
             provider=self.provider_name,
             supports_output_limit=self.provider_name != "openai_codex",
+            endpoint_pricing=self.pricing,
         )
         bound = copy.copy(self)
         bound._spend_ledger = ledger
@@ -735,6 +699,7 @@ class AsyncLLMClient:
             requested_max_output_tokens=max_tokens,
             supports_output_limit=self.provider_name != "openai_codex",
             metadata=current_spend_metadata(),
+            endpoint_pricing=self.pricing,
         )
 
     @staticmethod
@@ -861,7 +826,6 @@ class AsyncLLMClient:
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
-        _truncation_retry: int = 0,
         cache_prefix: bool = False,
         prompt_cache_key: str | None = None,
     ) -> ChatResponse:
@@ -897,17 +861,14 @@ class AsyncLLMClient:
             tools=tools,
             max_tokens=max_tokens,
         )
-        if reservation is not None and self._spend_ledger is not None:
-            if self._spend_ledger.enforcing:
-                max_tokens = reservation.max_output_tokens
-
         started = time.monotonic()
         dispatched = False
         try:
             options = ChatOptions(
                 temperature=temperature,
                 top_p=top_p,
-                max_tokens=None if self._omit_max_tokens else max_tokens,
+                # Output-token fields are deliberately never sent. Provider
+                # gateways disagree on their spelling and semantics.
                 capture_content=True,
                 capture_usage=True,
                 capture_tool_calls=True,
@@ -951,20 +912,6 @@ class AsyncLLMClient:
                         )
                         self.reasoning_effort = None
                         options = self._rebuild_options_without_reasoning(options)
-                        response = await self._with_retries(
-                            lambda: self._achat_with_provider_policy(client, request, options)
-                        )
-                    elif (
-                        options.max_tokens is not None
-                        and self._is_unsupported_max_output_tokens_error(exc)
-                    ):
-                        logger.warning(
-                            "Provider rejected max_output_tokens for model %r; retrying "
-                            "without it and disabling it for this session.",
-                            self.model_name,
-                        )
-                        self._omit_max_tokens = True
-                        options = self._rebuild_options_without_max_tokens(options)
                         response = await self._with_retries(
                             lambda: self._achat_with_provider_policy(client, request, options)
                         )
@@ -1014,43 +961,6 @@ class AsyncLLMClient:
             cached_tokens=cached_tokens,
         )
 
-        applied_cap = None if self._omit_max_tokens else max_tokens
-        # Only retry the truncation fingerprint: a capped turn that produced
-        # NEITHER a tool call NOR visible text (reasoning tokens consumed the
-        # whole cap before any output). A response carrying text is a real
-        # answer — e.g. a ranker emitting JSON at a tight cap — and must never
-        # be retried, or we'd regenerate valid output and risk over-spending.
-        has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
-        if _truncation_retry < 1 and not has_output and _looks_truncated(response, applied_cap):
-            escalated = min(applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING)
-            if escalated > applied_cap:
-                logger.warning(
-                    "LLM response for model=%s truncated at output cap "
-                    "(completion_tokens=%s >= max_tokens=%s) with no tool call "
-                    "or text; retrying once with max_tokens=%s.",
-                    self.model_name,
-                    completion_tokens,
-                    applied_cap,
-                    escalated,
-                )
-                try:
-                    return await self.achat(
-                        messages=messages,
-                        system=system,
-                        tools=tools,
-                        temperature=temperature,
-                        max_tokens=escalated,
-                        response_schema=response_schema,
-                        response_schema_name=response_schema_name,
-                        response_schema_description=response_schema_description,
-                        _truncation_retry=_truncation_retry + 1,
-                    )
-                except BudgetExceeded:
-                    logger.warning(
-                        "Truncation retry for model=%s could not be afforded "
-                        "(budget exhausted); returning the truncated response.",
-                        self.model_name,
-                    )
         return response
 
     async def achat_stream(
@@ -1063,7 +973,6 @@ class AsyncLLMClient:
         max_tokens: int | None = None,
         top_p: float | None = None,
         on_text_delta: Callable[[str], None] | None = None,
-        _truncation_retry: int = 0,
         cache_prefix: bool = False,
         prompt_cache_key: str | None = None,
     ) -> ChatResponse:
@@ -1110,17 +1019,12 @@ class AsyncLLMClient:
             tools=tools,
             max_tokens=max_tokens,
         )
-        if reservation is not None and self._spend_ledger is not None:
-            if self._spend_ledger.enforcing:
-                max_tokens = reservation.max_output_tokens
-
         started = time.monotonic()
         dispatched = False
         try:
             options = ChatOptions(
                 temperature=temperature,
                 top_p=top_p,
-                max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
                 capture_tool_calls=True,
@@ -1158,18 +1062,6 @@ class AsyncLLMClient:
                         )
                         self.reasoning_effort = None
                         options = self._rebuild_options_without_reasoning(options)
-                        response = await _consume(options)
-                    elif (
-                        options.max_tokens is not None
-                        and self._is_unsupported_max_output_tokens_error(exc)
-                    ):
-                        logger.warning(
-                            "Provider rejected max_output_tokens (streaming) for model "
-                            "%r; retrying without it and disabling it for this session.",
-                            self.model_name,
-                        )
-                        self._omit_max_tokens = True
-                        options = self._rebuild_options_without_max_tokens(options)
                         response = await _consume(options)
                     elif self._should_try_openai_http_fallback(exc) and (
                         not (self._spend_ledger is not None and self._spend_ledger.enforcing)
@@ -1235,39 +1127,6 @@ class AsyncLLMClient:
             cached_tokens=cached_tokens,
         )
 
-        applied_cap = None if self._omit_max_tokens else max_tokens
-        # Same fingerprint as achat: retry only a capped turn with no tool call
-        # AND no visible text; a text-bearing answer is never a truncation.
-        has_output = bool(n_tool_calls) or bool(getattr(response, "first_text", None))
-        if _truncation_retry < 1 and not has_output and _looks_truncated(response, applied_cap):
-            escalated = min(applied_cap * _TRUNCATION_RETRY_ESCALATION, _TRUNCATION_RETRY_CEILING)
-            if escalated > applied_cap:
-                logger.warning(
-                    "LLM stream for model=%s truncated at output cap "
-                    "(completion_tokens=%s >= max_tokens=%s) with no tool call "
-                    "or text; retrying once with max_tokens=%s.",
-                    self.model_name,
-                    completion_tokens,
-                    applied_cap,
-                    escalated,
-                )
-                try:
-                    return await self.achat_stream(
-                        messages=messages,
-                        system=system,
-                        tools=tools,
-                        temperature=temperature,
-                        max_tokens=escalated,
-                        on_text_delta=on_text_delta,
-                        _truncation_retry=_truncation_retry + 1,
-                    )
-                except BudgetExceeded:
-                    logger.warning(
-                        "Truncation retry (streaming) for model=%s could not be "
-                        "afforded (budget exhausted); returning the truncated "
-                        "response.",
-                        self.model_name,
-                    )
         return response
 
     def chat(self, **kwargs: Any) -> ChatResponse:
@@ -1336,10 +1195,11 @@ class AsyncLLMClient:
     def _codex_safe_params(
         self, temperature: float | None, max_tokens: int | None
     ) -> tuple[float | None, int | None]:
-        # The ChatGPT Codex (openai_codex) backend rejects `temperature` and
-        # `max_output_tokens`, so omit both for that provider.
+        # The ChatGPT Codex (openai_codex) backend rejects `temperature`.
+        # Output-token fields are omitted for every provider when ChatOptions
+        # is built; max_tokens remains an internal accounting hint here.
         if self.provider_name == "openai_codex":
-            return None, None
+            return None, max_tokens
         return temperature, max_tokens
 
     def _build_client(self, client_cls):
@@ -1592,8 +1452,9 @@ class AsyncLLMClient:
             body["temperature"] = options.temperature
         if options.top_p is not None:
             body["top_p"] = options.top_p
-        if options.max_tokens is not None:
-            body["max_tokens"] = options.max_tokens
+        # Output-token caps are intentionally absent even if this low-level
+        # fallback is handed an options object containing one. Keeping the
+        # omission here makes it a transport invariant.
         if options.stop_sequences:
             body["stop"] = list(options.stop_sequences)
         if options.seed is not None:
@@ -1993,31 +1854,12 @@ class AsyncLLMClient:
         return ChatOptions(
             temperature=options.temperature,
             top_p=options.top_p,
-            max_tokens=options.max_tokens,
             capture_content=options.capture_content,
             capture_usage=options.capture_usage,
             capture_tool_calls=options.capture_tool_calls,
             capture_reasoning_content=options.capture_reasoning_content,
             normalize_reasoning_content=options.normalize_reasoning_content,
             reasoning_effort=None,
-            prompt_cache_key=options.prompt_cache_key,
-            response_json_spec=options.response_json_spec,
-        )
-
-    @staticmethod
-    def _rebuild_options_without_max_tokens(options: ChatOptions) -> ChatOptions:
-        """Return a copy of *options* with ``max_tokens=None``."""
-
-        return ChatOptions(
-            temperature=options.temperature,
-            top_p=options.top_p,
-            max_tokens=None,
-            capture_content=options.capture_content,
-            capture_usage=options.capture_usage,
-            capture_tool_calls=options.capture_tool_calls,
-            capture_reasoning_content=options.capture_reasoning_content,
-            normalize_reasoning_content=options.normalize_reasoning_content,
-            reasoning_effort=options.reasoning_effort,
             prompt_cache_key=options.prompt_cache_key,
             response_json_spec=options.response_json_spec,
         )
@@ -2033,15 +1875,6 @@ class AsyncLLMClient:
         """
         text = str(exc).lower()
         if "reasoning_effort" not in text:
-            return False
-        return "400" in text or "unsupported" in text
-
-    @staticmethod
-    def _is_unsupported_max_output_tokens_error(exc: BaseException) -> bool:
-        """True for an explicit rejection of Responses' output-token cap."""
-
-        text = str(exc).lower()
-        if "max_output_tokens" not in text:
             return False
         return "400" in text or "unsupported" in text
 

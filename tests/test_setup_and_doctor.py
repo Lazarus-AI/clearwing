@@ -77,6 +77,15 @@ class TestProviderCatalog:
         assert preset_by_key("openai_oauth").key == "openai-oauth"
         assert preset_by_key("unknown-provider") is None
 
+    def test_orcarouter_preset(self):
+        preset = preset_by_key("orcarouter")
+        assert preset is not None
+        assert preset.display_name == "OrcaRouter"
+        assert preset.default_base_url == "https://api.orcarouter.ai/v1"
+        assert preset.api_key_env_var == "ORCAROUTER_API_KEY"
+        assert preset.provider_adapter == "openai"
+        assert preset.is_openai_compat
+
     def test_openai_oauth_preset_is_not_openai_compat(self):
         preset = preset_by_key("openai-oauth")
         assert preset is not None

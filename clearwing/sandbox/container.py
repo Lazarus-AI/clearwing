@@ -80,6 +80,7 @@ class SandboxContainer:
         self._container = None
         self.scratch_host_dir: str | None = None
         self.variant: list[str] | None = None
+        self.workspace_baseline_commit: str | None = None
 
     # --- Lifecycle ----------------------------------------------------------
 

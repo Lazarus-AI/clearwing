@@ -25,9 +25,11 @@ _RECENT_SESSIONS: dict[str, dict] = {}
 def hunt_source_code(
     repo_url_or_path: str,
     branch: str = "main",
-    depth: str = "quick",
+    depth: str | None = None,
     budget_usd: float = 0.0,
     output_dir: str | None = None,
+    target_files: list[str] | None = None,
+    target_window_lines: int = 480,
 ) -> str:
     """Run the Clearwing source-code vulnerability hunting pipeline against a repo.
 
@@ -41,8 +43,12 @@ def hunt_source_code(
         depth: 'quick' (preprocessor + static analysis only, no LLM hunters),
                'standard' (LLM hunters on rank A/B + verifier),
                'deep' (everything + Tier C propagation audit + exploit triage).
+               Defaults to 'standard' with target_files, otherwise 'quick'.
         budget_usd: Max dollars to spend. Defaults to unlimited; 0 means unlimited.
         output_dir: Where to write the SARIF / markdown / JSON outputs.
+        target_files: Optional repository-relative files to hunt directly,
+                      bypassing the ranker.
+        target_window_lines: Lines per line-numbered target window (default 480).
 
     Returns:
         A human-readable summary with the top findings. Full reports are
@@ -61,17 +67,18 @@ def hunt_source_code(
     endpoint = resolve_llm_endpoint()
     provider_manager = ProviderManager.for_endpoint(endpoint)
 
-    runner = SourceHuntRunner(
-        repo_url=repo_url_or_path,
-        branch=branch,
-        local_path=local_path,
-        depth=depth,
-        budget_usd=budget_usd,
-        output_dir=output_dir,
-        provider_manager=provider_manager,
-    )
-
     try:
+        runner = SourceHuntRunner(
+            repo_url=repo_url_or_path,
+            branch=branch,
+            local_path=local_path,
+            depth=depth or ("standard" if target_files else "quick"),
+            budget_usd=budget_usd,
+            output_dir=output_dir,
+            target_files=target_files,
+            target_window_lines=target_window_lines,
+            provider_manager=provider_manager,
+        )
         result = runner.run()
     except Exception as e:
         logger.warning("hunt_source_code failed", exc_info=True)

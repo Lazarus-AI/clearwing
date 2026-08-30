@@ -20,6 +20,8 @@ class TargetConfig:
     branch: str = "main"
     local_path: str | None = None
     depth: str = "standard"  # quick | standard | deep
+    target_files: tuple[str, ...] = ()
+    target_window_lines: int = 480
 
 
 @dataclass(frozen=True)

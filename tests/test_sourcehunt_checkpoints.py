@@ -742,11 +742,24 @@ def test_stop_after_verify_returns_accumulated_verification_result(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_runner_checkpoints_and_restores_verification(tmp_path: Path, monkeypatch):
     finding = Finding(id="finding-1", file="sample.c", severity="high")
+    verifier_client = type(
+        "VerifierClient",
+        (),
+        {"provider_name": "test-provider", "model_name": "test-model"},
+    )()
     first = SourceHuntRunner(
-        repo_url=str(tmp_path), output_dir=str(tmp_path), enable_mechanism_memory=False
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path),
+        validator_mode="v1",
+        enable_mechanism_memory=False,
     )
     first._checkpoint = SourceHuntCheckpoint()
-    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: verifier_client)
+
+    async def verify_once(*args, **kwargs):
+        return [finding]
+
+    monkeypatch.setattr(first, "_verify_v1", verify_once)
     result = await first._verify(
         [finding], repo_path=str(tmp_path), pipeline_status=PipelineStatus()
     )
@@ -757,13 +770,15 @@ async def test_runner_checkpoints_and_restores_verification(tmp_path: Path, monk
         repo_url=str(tmp_path),
         output_dir=str(tmp_path),
         checkpoint=first._checkpoint.model_dump(mode="json"),
+        validator_mode="v1",
         enable_mechanism_memory=False,
     )
-    monkeypatch.setattr(
-        resumed,
-        "_get_native_client",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("verifier called")),
-    )
+    monkeypatch.setattr(resumed, "_get_native_client", lambda *args, **kwargs: verifier_client)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("verifier called")
+
+    monkeypatch.setattr(resumed, "_verify_v1", fail_if_called)
     restored = await resumed._verify(
         [finding], repo_path=str(tmp_path), pipeline_status=PipelineStatus()
     )

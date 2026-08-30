@@ -26,7 +26,7 @@ from clearwing.observability.telemetry import CostTracker
 from clearwing.reporting.safety import redact_text
 
 if TYPE_CHECKING:
-    from clearwing.providers.env import LLMEndpoint
+    from clearwing.providers.env import EndpointPricing, LLMEndpoint
 
 
 class BudgetExceeded(RuntimeError):
@@ -58,9 +58,27 @@ def _endpoint_pricing(endpoint: LLMEndpoint | None) -> ModelPricing | None:
     pricing-table behavior. Returns ``None`` when the endpoint is absent or
     carries no pricing, so runs without endpoint pricing are unaffected.
     """
-    pricing = getattr(endpoint, "pricing", None)
+    return _pricing_value(getattr(endpoint, "pricing", None))
+
+
+def _pricing_value(pricing: EndpointPricing | None) -> ModelPricing | None:
+    """Convert one explicit endpoint/client pricing value for ledger use."""
     if pricing is None:
         return None
+    values = {
+        "input": float(pricing.input_per_mtok),
+        "output": float(pricing.output_per_mtok),
+        "cached": (
+            float(pricing.cached_per_mtok)
+            if pricing.cached_per_mtok is not None
+            else float(pricing.input_per_mtok)
+        ),
+    }
+    for name, value in values.items():
+        if not math.isfinite(value) or value < 0:
+            raise BudgetConfigurationError(
+                f"endpoint {name} token price must be a finite value >= 0"
+            )
     cached = (
         pricing.cached_per_mtok if pricing.cached_per_mtok is not None else pricing.input_per_mtok
     )
@@ -137,6 +155,7 @@ class SpendLedger:
         default_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         manifest_filename: str = "manifest.json",
         endpoint: LLMEndpoint | None = None,
+        resume: bool = False,
     ) -> None:
         if not math.isfinite(limit_usd) or limit_usd < 0:
             raise BudgetConfigurationError("LLM budget must be a finite value >= 0")
@@ -195,15 +214,132 @@ class SpendLedger:
         self.ledger_path = session_dir / "spend-ledger.jsonl"
         self.manifest_path = session_dir / manifest_filename
         with self._lock:
+            if resume:
+                self._restore_history_locked()
             self._persist_event_locked(
                 {
-                    "event": "run_started",
+                    "event": "run_resumed" if resume else "run_started",
                     "session_id": self.session_id,
                     "budget_usd": self.limit_usd,
+                    "carried_forward_usd": self._spent_usd,
                     "timestamp": self._timestamp(),
                 }
             )
             self._persist_snapshot_locked()
+
+    def _restore_history_locked(self) -> None:
+        """Restore settled calls and conservatively close interrupted reservations.
+
+        Replays the existing spend ledger so a resumed session keeps its dollar
+        cap as a lifetime budget rather than starting fresh. A call that was
+        reserved but never settled (the process died mid-flight) is charged its
+        reservation — the safe assumption is that it did spend.
+        """
+        if not self.ledger_path.is_file():
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is missing"
+            )
+        try:
+            lines = self.ledger_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is unreadable"
+            ) from exc
+
+        reservations: dict[str, dict[str, Any]] = {}
+        settlements: dict[str, dict[str, Any]] = {}
+        has_run_header = False
+        for index, line in enumerate(lines):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if index == len(lines) - 1:
+                    break  # tolerate a torn final line from a crash mid-write
+                raise BudgetConfigurationError(
+                    f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+                ) from exc
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") in {"run_started", "run_resumed"}:
+                has_run_header = has_run_header or event.get("session_id") == self.session_id
+            call_id = str(event.get("call_id") or "")
+            if not call_id:
+                continue
+            if event.get("event") == "call_reserved":
+                reservations.setdefault(call_id, event)
+            elif event.get("event") == "call_settled":
+                settlements.setdefault(call_id, event)
+
+        if not has_run_header:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            )
+
+        for call_id in reservations.keys() | settlements.keys():
+            if call_id in settlements:
+                self._restore_settlement_locked(settlements[call_id])
+            else:
+                self._recover_reservation_locked(call_id, reservations[call_id])
+        if self.enforcing and self._spent_usd >= self.limit_usd - self._EPSILON:
+            self._exhausted = True
+            self._status = "budget_exhausted"
+
+    def _restore_settlement_locked(self, event: dict[str, Any]) -> None:
+        try:
+            cost = float(event["cost_usd"])
+            input_tokens = int(event.get("input_tokens", 0))
+            output_tokens = int(event.get("output_tokens", 0))
+            cached_tokens = int(event.get("cached_input_tokens", 0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            ) from exc
+        if not math.isfinite(cost) or min(cost, input_tokens, output_tokens, cached_tokens) < 0:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            )
+        if not isinstance(event.get("metadata"), dict):
+            event = {**event, "metadata": {}}
+        self._records.append(event)
+        self._spent_usd += cost
+        self._input_tokens += input_tokens
+        self._output_tokens += output_tokens
+        self._cached_input_tokens += cached_tokens
+
+    def _recover_reservation_locked(self, call_id: str, reservation: dict[str, Any]) -> None:
+        try:
+            reserved_usd = float(reservation["reserved_usd"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            ) from exc
+        if not math.isfinite(reserved_usd) or reserved_usd < 0:
+            raise BudgetConfigurationError(
+                f"Cannot resume session {self.session_id!r}: spend ledger is corrupt"
+            )
+        charged = reserved_usd if reservation.get("budget_enforcing", reserved_usd > 0) else 0.0
+        event = {
+            "event": "call_settled",
+            "call_id": call_id,
+            "timestamp": self._timestamp(),
+            "stage": reservation.get("stage"),
+            "model": reservation.get("model"),
+            "provider": reservation.get("provider"),
+            "status": "recovered_ambiguous_failure",
+            "reserved_usd": reserved_usd,
+            "cost_usd": charged,
+            "cost_source": "reservation" if charged else "none",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "metadata": (
+                reservation["metadata"] if isinstance(reservation.get("metadata"), dict) else {}
+            ),
+            "error": "Process exited before spend settlement; charged on resume",
+        }
+        self._records.append(event)
+        self._spent_usd += charged
+        self._persist_event_locked(event)
 
     @property
     def enforcing(self) -> bool:
@@ -239,6 +375,7 @@ class SpendLedger:
         model: str,
         provider: str,
         supports_output_limit: bool,
+        endpoint_pricing: EndpointPricing | None = None,
     ) -> ModelPricing:
         """Fail before spending when strict pricing/capping is unavailable."""
 
@@ -246,6 +383,7 @@ class SpendLedger:
             model,
             provider=provider,
             strict=self.enforcing,
+            endpoint_pricing=endpoint_pricing,
         )
         if self.enforcing and pricing.output_per_million > 0 and not supports_output_limit:
             raise BudgetConfigurationError(
@@ -264,6 +402,7 @@ class SpendLedger:
         requested_max_output_tokens: int | None,
         supports_output_limit: bool,
         metadata: dict[str, Any] | None = None,
+        endpoint_pricing: EndpointPricing | None = None,
     ) -> BudgetReservation:
         """Atomically reserve the worst-case price and return the output cap."""
 
@@ -271,6 +410,7 @@ class SpendLedger:
             model=model,
             provider=provider,
             supports_output_limit=supports_output_limit,
+            endpoint_pricing=endpoint_pricing,
         )
         input_token_upper_bound = max(0, int(input_token_upper_bound))
         metadata = dict(metadata or {})
@@ -356,6 +496,7 @@ class SpendLedger:
                     "stage": stage,
                     "model": model,
                     "provider": provider,
+                    "budget_enforcing": self.enforcing,
                     "reserved_usd": reserved_usd,
                     "input_token_upper_bound": input_token_upper_bound,
                     "max_output_tokens": effective_max_tokens,
@@ -612,12 +753,16 @@ class SpendLedger:
         *,
         provider: str,
         strict: bool,
+        endpoint_pricing: EndpointPricing | None = None,
     ) -> ModelPricing:
         # Highest precedence: the active endpoint's own price. When an
         # LLMEndpoint carries a `pricing` block it is the authoritative,
         # already-resolved per-model price and outranks both the operator
         # override and the built-in pricing table. Absent it (the default for
         # every endpoint) this is None and the existing sources apply unchanged.
+        call_pricing = _pricing_value(endpoint_pricing)
+        if call_pricing is not None:
+            return call_pricing
         if self._endpoint_pricing is not None:
             return self._endpoint_pricing
 

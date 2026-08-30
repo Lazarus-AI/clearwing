@@ -485,6 +485,19 @@ class TestBuildHunterAgent:
         )
         assert ctx.specialist == "propagation"
 
+    def test_specialist_prompt_preserves_campaign_hint(self):
+        hunter, _ctx = build_hunter_agent(
+            file_target=_make_file_target("foo.c", tier="B"),
+            repo_path=str(FIXTURE_C_PROPAGATION),
+            sandbox=None,
+            llm=MagicMock(),
+            session_id="s1",
+            prompt_mode="specialist",
+            campaign_hint="audit target arithmetic",
+        )
+
+        assert "We are particularly interested in audit target arithmetic." in hunter.prompt
+
     def test_v02_seam_seeded_crash_param_accepted(self):
         llm = MagicMock()
         ft = _make_file_target("foo.c")
@@ -595,6 +608,26 @@ class TestHunterToolsHostFallback:
         read = next(t for t in tools if t.name == "read_source_file")
         out = read.invoke({"path": "include/codec_limits.h"})
         assert "MAX_FRAME_BYTES" in out
+
+    def test_constrained_trace_requires_the_read_line_range(self):
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
+        tools = build_hunter_tools(ctx)
+        read = next(t for t in tools if t.name == "read_source_file")
+        trace = next(t for t in tools if t.name == "record_trace_step")
+
+        read.invoke({"path": "include/codec_limits.h", "start_line": 1, "end_line": 1})
+
+        assert ctx.read_ranges == {"include/codec_limits.h": [(1, 1)]}
+        assert (
+            trace.invoke(
+                {"file": "include/codec_limits.h", "line": 1, "note": "ENTRY: observed"}
+            )
+            == "Trace step 1 recorded."
+        )
+        rejected = trace.invoke(
+            {"file": "include/codec_limits.h", "line": 2, "note": "SINK: unseen"}
+        )
+        assert rejected["error"]["code"] == "UNREAD_TRACE_SOURCE"
 
     def test_read_source_file_path_traversal_blocked(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))

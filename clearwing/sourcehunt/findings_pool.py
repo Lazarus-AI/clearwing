@@ -192,6 +192,11 @@ class FindingsPool:
     async def add(self, finding: Finding) -> Finding:
         """Add a finding, classify primitive, run dedup, return updated finding."""
         async with self._lock:
+            # Idempotent on finding id: a resumed run re-adds findings carried in
+            # from cached hunter work, and must not double-count or re-classify them.
+            existing = self._findings.get(finding.get("id", ""))
+            if existing is not None:
+                return existing
             if not finding.get("primitive_type"):
                 finding.primitive_type = await self._classify_primitive(finding)
 

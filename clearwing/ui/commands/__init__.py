@@ -22,6 +22,7 @@ from . import (
     setup,
     sourcehunt,
     tool,
+    visualize,
     webui,
 )
 
@@ -48,4 +49,5 @@ ALL_COMMANDS = [
     campaign,
     bench,
     eval,
+    visualize,
 ]

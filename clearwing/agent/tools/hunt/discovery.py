@@ -236,6 +236,9 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             )
         else:
             footer = ""
+        if sliced:
+            ctx.files_read.add(rel)
+            ctx.read_ranges.setdefault(rel, []).append((first + 1, first + len(sliced)))
         return _safe_source_output("".join(sliced) + footer, "source file")
 
     def list_source_tree(dir_path: str = ".", max_depth: int = 2) -> list[str]:

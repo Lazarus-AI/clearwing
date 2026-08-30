@@ -6,8 +6,9 @@ so we can exercise the budget math without any LLM or sandbox calls.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -124,6 +125,38 @@ class TestTierAssignmentOnInit:
         assert files[1]["tier"] == "B"
         assert files[2]["tier"] == "C"
         assert files[3]["tier"] == "B"  # critical regression — must be B not C
+
+
+def test_default_hunter_factory_receives_callgraph():
+    callgraph = object()
+    config = HuntPoolConfig(
+        files=[_ft("target.c", 5, 5)],
+        repo_path="/tmp/repo",
+        llm=MagicMock(),
+        callgraph=callgraph,
+    )
+    pool = HunterPool(config)
+    factory = MagicMock(return_value=(MagicMock(), MagicMock()))
+
+    with patch("clearwing.sourcehunt.pool._DEFAULT_HUNTER_FACTORY", factory):
+        pool._build_hunter_for_file(config.files[0], sandbox=None)
+
+    assert factory.call_args.kwargs["callgraph"] is callgraph
+
+
+def test_sandbox_startup_failure_does_not_exit_process():
+    def fail_sandbox():
+        raise RuntimeError("daemon unavailable")
+
+    config = HuntPoolConfig(
+        files=[_ft("target.c", 5, 5)],
+        repo_path="/tmp/repo",
+        sandbox_factory=fail_sandbox,
+    )
+    pool = HunterPool(config)
+
+    with pytest.raises(RuntimeError, match="sandbox startup failed: daemon unavailable"):
+        asyncio.run(pool._run_one_hunter(config.files[0], cost_limit=1.0))
 
 
 # --- Within-tier priority ordering -----------------------------------------
