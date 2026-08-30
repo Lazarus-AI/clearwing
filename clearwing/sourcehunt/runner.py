@@ -58,6 +58,7 @@ from .disclosure import (
 )
 from .exploiter import AgenticExploiter, Exploiter, apply_exploiter_result
 from .harness_generator import HarnessGenerator, HarnessGeneratorConfig, SeededCrash
+from .hunt_work_cache import HuntWorkCache
 from .instrumentation import SourceHuntInstrumentation, stable_run_id
 from .manifest import build_run_metadata
 from .mechanism_memory import (
@@ -252,6 +253,7 @@ class SourceHuntRunner:
         exploiter_llm: Any = None,
         sandbox_factory: Any = None,  # callable[[], SandboxContainer]
         parent_session_id: str | None = None,
+        resume_session_id: str | None = None,
         checkpoint: dict[str, Any] | str | None = None,
         checkpoint_path: str | Path | None = None,
         agent_mode: str = "auto",  # "auto" | "constrained" | "deep"
@@ -544,7 +546,18 @@ class SourceHuntRunner:
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
         self._preprocessor: Preprocessor | None = None
-        self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
+        # --resume reuses a prior session directory in place: same session id,
+        # so its checkpoint, spend ledger, findings pool, and hunt work cache
+        # are all continued rather than started fresh. It routes entirely through
+        # the checkpoint machinery below — there is no separate resume path.
+        if resume_session_id is not None:
+            if parent_session_id is not None:
+                raise ValueError("resume_session_id cannot be combined with parent_session_id")
+            session_dir = Path(self.output_dir) / resume_session_id
+            if not session_dir.is_dir():
+                raise ValueError(f"Sourcehunt session {resume_session_id!r} does not exist")
+        self._resuming = resume_session_id is not None
+        self._session_id = resume_session_id or parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._checkpoint_path = (
             Path(checkpoint_path)
             if checkpoint_path is not None
@@ -787,6 +800,7 @@ class SourceHuntRunner:
                 manifest_filename=(
                     "spend-summary.json" if self._flow == "proof" else "manifest.json"
                 ),
+                resume=self._resuming,
             )
         return self._spend_ledger
 
@@ -2453,6 +2467,16 @@ class SourceHuntRunner:
                 files=stage_files,
                 symbols=hunt_symbols,
             )
+            # Work-item-granular hunt resume: when this run is checkpointed
+            # (always, once preprocessing has produced a checkpoint), memoize
+            # each completed hunter work item under the session directory. A
+            # resumed run reuses the finished work and re-runs only what was
+            # interrupted, instead of the coarse all-or-nothing HuntCheckpoint.
+            work_cache = (
+                HuntWorkCache(self._ensure_output_dir_layout() / "hunt-work")
+                if self._checkpoint is not None
+                else None
+            )
             pool = HunterPool(
                 HuntPoolConfig(
                     files=files,
@@ -2461,6 +2485,7 @@ class SourceHuntRunner:
                     sandbox_manager=self._sandbox_manager,
                     hunter_factory=None,
                     llm=hunter_llm,
+                    work_cache=work_cache,
                     max_parallel=self.max_parallel,
                     budget_usd=self.budget_usd,
                     tier_budget=self.tier_budget,
