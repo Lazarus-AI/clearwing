@@ -514,6 +514,8 @@ class SourceHuntRunner:
             raise ValueError("flow must be 'legacy' or 'proof'")
         if checkpoint is not None and flow != "legacy":
             raise ValueError("checkpoint restoration is currently supported only for legacy flow")
+        if stop_after is not None and flow != "legacy":
+            raise ValueError("stop_after is currently supported only for legacy flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
