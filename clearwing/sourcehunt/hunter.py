@@ -1703,7 +1703,6 @@ class NativeHunter:
                     messages=messages,
                     system=self.prompt,
                     tools=active_tools,
-                    max_tokens=24000,
                     # Prompt caching: mark the growing prefix cacheable so each
                     # turn re-reads system + tools + prior history from cache
                     # instead of paying full input price to re-send it. This is

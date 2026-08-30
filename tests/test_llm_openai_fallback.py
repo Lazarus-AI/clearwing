@@ -44,6 +44,9 @@ def test_openai_fallback_request_body_includes_system_tools_and_json_schema():
     assert body["tools"][0]["function"]["name"] == "lookup"
     assert body["reasoning_effort"] == "medium"
     assert body["response_format"]["type"] == "json_schema"
+    assert "max_tokens" not in body
+    assert "max_completion_tokens" not in body
+    assert "max_output_tokens" not in body
 
 
 def test_openai_fallback_parses_reasoning_content_usage_and_tool_calls():

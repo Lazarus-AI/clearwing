@@ -427,12 +427,12 @@ class ProviderManager:
               roles:                             # explicit bindings
                 reviewer:
                   model: qwen_a95b               # -> a models: name, or literal
-                  inference: {reasoning: xhigh, max_output_tokens: 32768}
+                  inference: {reasoning: xhigh}
                   constraints: {independent_model_family: true}
               overrides: {frontier: {reasoning: max}}   # legacy flat overrides
 
         Bindings are validated against model capabilities at load time — an
-        unsupported reasoning level or an over-ceiling output budget raises
+        unsupported inference setting raises
         :class:`clearwing.providers.binding.BindingValidationError` here,
         before any scan starts.
         """
@@ -871,8 +871,7 @@ class ProviderManager:
         # model family (a local Qwen that rejects the param is downgraded to
         # None). Unset reasoning keeps the client's "auto" per-model default.
         effort = effective_reasoning_effort(model, reasoning) if reasoning is not None else "auto"
-        # Inference budgets become client-level defaults: they fill a call's
-        # temperature/max_tokens only when the call site leaves them None.
+        # Inference settings become client-level defaults.
         temp = inference.temperature if inference else None
         max_out = inference.max_output_tokens if inference else None
         ctx_budget = inference.context_budget_tokens if inference else None

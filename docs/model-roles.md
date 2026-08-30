@@ -49,8 +49,8 @@ task string  ->  role  ->  (tier, inference profile)  ->  concrete model
 - **`tier`** is a rung on a provider's ladder (`small` / `mid` / `large`).
   A provider only answers three questions, and every role resolves.
 - **`inference profile`** is the policy: `reasoning` budget (in
-  `AsyncLLMClient` vocabulary, `none` … `max`), `max_output_tokens`,
-  `temperature`, and (staged) `context_budget_tokens`, `tool_choice`,
+  `AsyncLLMClient` vocabulary, `none` … `max`), `temperature`, and (staged)
+  `context_budget_tokens`, `tool_choice`,
   `parallel_tool_calls`, `timeout_seconds`.
 
 Concrete model ids never appear in the role layer. That indirection is
@@ -183,13 +183,13 @@ model_roles:
   roles:
     researcher:
       model: flash
-      inference: { reasoning: high, max_output_tokens: 32768, temperature: 0.2 }
+      inference: { reasoning: high, temperature: 0.2 }
     builder:
       model: flash
-      inference: { reasoning: high, max_output_tokens: 24576, temperature: 0.1 }
+      inference: { reasoning: high, temperature: 0.1 }
     reviewer:
       model: a95b
-      inference: { reasoning: xhigh, max_output_tokens: 32768 }
+      inference: { reasoning: xhigh }
       constraints: { independent_model_family: true }
 ```
 
@@ -209,11 +209,11 @@ denylist the client uses (Qwen2 / Gemma / Llama / Mistral reject the
 parameter) and validates against that — it just never invents a ceiling
 it doesn't actually know.
 
-**Wired to the wire now:** `reasoning`, `max_output_tokens`, `temperature`,
-`top_p` (these become client-level defaults a call site can still
-override), `timeout_seconds` (a per-attempt wall clock enforced by the
-client), `context_budget_tokens` (see below), and `fallback:` availability
-failover (see below). **Schema + validation only:** `tool_choice` and
+**Provider request settings:** `reasoning`, `temperature`, and `top_p`.
+`timeout_seconds` is a per-attempt wall clock enforced by the client;
+`context_budget_tokens` controls local context management (see below); and
+`fallback:` controls availability failover (see below). **Schema + validation
+only:** `tool_choice` and
 `parallel_tool_calls` — the native `genai_pyo3` transport doesn't expose
 these yet, so they're carried and validated but not sent; they light up
 once the transport gains support. **Further step:** runtime call-failure
@@ -294,7 +294,7 @@ model_roles:
     network.investigate:            # a new named route
       role: researcher
       agent: { max_steps: 20 }
-      inference: { max_output_tokens: 12000 }   # trim output for this route only
+      inference: { temperature: 0.1 }
 ```
 
 `agent:` limits (`max_steps` / `max_tool_calls` / `max_retries`, positive
