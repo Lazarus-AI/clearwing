@@ -27,6 +27,7 @@ from typing import Any
 
 from clearwing.llm import AsyncLLMClient, BudgetExceeded, extract_json_object
 from clearwing.reporting.safety import redact_tree
+from clearwing.sourcehunt.paths import resolve_repo_file
 
 from .state import Finding
 
@@ -216,9 +217,12 @@ class VariantSearcher:
                 if rel in exclude_paths:
                     continue
                 try:
-                    if os.path.getsize(full_path) > self.MAX_FILE_SIZE:
+                    safe_path = resolve_repo_file(repo_path, rel)
+                    if safe_path is None:
                         continue
-                    with open(full_path, encoding="utf-8", errors="replace") as f:
+                    if safe_path.stat().st_size > self.MAX_FILE_SIZE:
+                        continue
+                    with safe_path.open(encoding="utf-8", errors="replace") as f:
                         for i, line in enumerate(f, 1):
                             if rel == source_file and i == source_line:
                                 continue  # skip the source finding's own line

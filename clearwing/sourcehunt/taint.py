@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from clearwing.sourcehunt.paths import resolve_repo_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -918,7 +920,12 @@ class TaintAnalyzer:
         for dirpath, dirnames, filenames in os.walk(repo_path):
             dirnames[:] = [d for d in dirnames if d not in self.SKIP_DIRS]
             for fname in filenames:
-                yield os.path.join(dirpath, fname)
+                candidate = os.path.join(dirpath, fname)
+                safe_path = resolve_repo_file(
+                    repo_path, os.path.relpath(candidate, repo_path)
+                )
+                if safe_path is not None:
+                    yield candidate
 
 
 # --- Tree-sitter node-type tables ------------------------------------------

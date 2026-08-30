@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from clearwing.llm import NativeToolSpec
+from clearwing.sourcehunt.callgraph import CallGraph
 from clearwing.sourcehunt.runner import SourceHuntRunner
 from clearwing.sourcehunt.state import FileTarget, StageOutcome, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
@@ -202,6 +203,103 @@ def test_subsystem_from_path_max_files():
     files = [_ft(f"net/ipv4/f_{i}.c", float(i % 5)) for i in range(80)]
     result = subsystem_from_path("net/ipv4", files, max_files=50)
     assert len(result.files) == 50
+
+
+# ---------------------------------------------------------------------------
+# subsystem_from_path — single-file callgraph-neighborhood expansion
+# ---------------------------------------------------------------------------
+
+
+def _callgraph_seed_with_neighbors():
+    """CallGraph where the seed calls a callee and is called by a caller."""
+    cg = CallGraph()
+    seed = "crypto/aes/aes_core.c"
+    # Seed -> callee (aes_asm defines a function the seed calls).
+    cg.calls_out[seed] = {"aes_encrypt"}
+    cg.defined_in["aes_encrypt"] = {"crypto/aes/aes_asm.c"}
+    # Caller -> seed (cbc calls a function the seed defines).
+    cg.calls_out["crypto/modes/cbc.c"] = {"AES_set_key"}
+    cg.defined_in["AES_set_key"] = {seed}
+    return cg
+
+
+def test_subsystem_from_path_single_file_expands_neighborhood():
+    files = [
+        _ft("crypto/aes/aes_core.c", 4.0),
+        _ft("crypto/aes/aes_asm.c", 3.0),   # callee
+        _ft("crypto/modes/cbc.c", 3.5),     # caller
+        _ft("fs/ext4/inode.c", 2.0),        # unrelated
+    ]
+    result = subsystem_from_path(
+        "crypto/aes/aes_core.c", files, callgraph=_callgraph_seed_with_neighbors()
+    )
+    paths = {f.get("path") for f in result.files}
+    assert paths == {
+        "crypto/aes/aes_core.c",
+        "crypto/aes/aes_asm.c",
+        "crypto/modes/cbc.c",
+    }
+    # Seed anchors the target; unrelated file is excluded.
+    assert result.root_path == "crypto/aes/aes_core.c"
+    assert result.source == "manual"
+
+
+def test_subsystem_from_path_single_file_no_callgraph():
+    # Without a callgraph, a single file stays a single-file subsystem.
+    files = [_ft("crypto/aes/aes_core.c", 4.0), _ft("crypto/aes/aes_asm.c", 3.0)]
+    result = subsystem_from_path("crypto/aes/aes_core.c", files)
+    assert len(result.files) == 1
+    assert result.files[0].get("path") == "crypto/aes/aes_core.c"
+
+
+def test_subsystem_from_path_single_file_no_neighbors():
+    # Callgraph present but the file has no edges -> hunt it alone.
+    files = [_ft("crypto/aes/aes_core.c", 4.0), _ft("crypto/aes/aes_asm.c", 3.0)]
+    result = subsystem_from_path(
+        "crypto/aes/aes_core.c", files, callgraph=CallGraph()
+    )
+    assert len(result.files) == 1
+
+
+def test_subsystem_from_path_single_file_neighbor_without_target_skipped():
+    # A neighbor path with no FileTarget (e.g. a system header) is skipped.
+    files = [_ft("crypto/aes/aes_core.c", 4.0)]  # callee/caller have no targets
+    result = subsystem_from_path(
+        "crypto/aes/aes_core.c", files, callgraph=_callgraph_seed_with_neighbors()
+    )
+    assert len(result.files) == 1
+    assert result.files[0].get("path") == "crypto/aes/aes_core.c"
+
+
+def test_subsystem_from_path_single_file_cap_keeps_seed():
+    cg = CallGraph()
+    seed = "crypto/aes/aes_core.c"
+    # Seed calls into 10 callee files, all lower priority than the seed.
+    cg.calls_out[seed] = {f"f{i}" for i in range(10)}
+    for i in range(10):
+        cg.defined_in[f"f{i}"] = {f"crypto/aes/callee_{i}.c"}
+    files = [_ft(seed, 1.0)] + [
+        _ft(f"crypto/aes/callee_{i}.c", float(i)) for i in range(10)
+    ]
+    result = subsystem_from_path(seed, files, callgraph=cg, max_files=3)
+    paths = {f.get("path") for f in result.files}
+    assert len(result.files) == 3
+    assert seed in paths  # seed pinned despite its low priority
+
+
+def test_subsystem_from_path_directory_not_expanded():
+    # A directory prefix keeps prefix matching even when a callgraph is present:
+    # neighbors outside the prefix are not pulled in.
+    files = [
+        _ft("crypto/aes/aes_core.c", 4.0),
+        _ft("crypto/aes/aes_asm.c", 3.0),
+        _ft("crypto/modes/cbc.c", 3.5),
+    ]
+    result = subsystem_from_path(
+        "crypto/aes", files, callgraph=_callgraph_seed_with_neighbors()
+    )
+    paths = {f.get("path") for f in result.files}
+    assert paths == {"crypto/aes/aes_core.c", "crypto/aes/aes_asm.c"}
 
 
 # ---------------------------------------------------------------------------

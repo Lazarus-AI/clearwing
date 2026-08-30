@@ -44,6 +44,8 @@ clearwing sourcehunt <repo_url_or_path>
   [--reporter-affiliation AFFILIATION]
   [--reporter-email EMAIL]
   [--model MODEL_NAME]        # override per-task model selection
+  [--target-files PATH]       # repeatable exact-file hunt; bypasses ranker
+  [--target-window-lines N]   # numbered first-turn window size (default: 480)
   [--base-url URL]            # OpenAI-compat endpoint (OpenRouter, Ollama, ...)
   [--api-key KEY]             # credential for --base-url
   [--output-dir DIR]          # default: ./results/sourcehunt (dev) or ~/.clearwing/results/sourcehunt
@@ -78,6 +80,24 @@ Depths:
 - **`--prompt-mode`**: `unconstrained` uses a simple discovery prompt
   (Glasswing-style); `specialist` uses prescriptive checklists per CWE
   category.
+
+### Exact-file targeting
+
+```bash
+clearwing sourcehunt /path/to/repo \
+  --target-files src/parser.c \
+  --target-window-lines 480
+```
+
+`--target-file`/`--target-files` is repeatable and accepts repository-relative
+source files. It bypasses the ranker, filters static-analysis results to those
+files, and sends each hunter an independently seeded, line-numbered source
+window on its first turn. Hunters may still follow concrete callers and
+callees elsewhere through their source-navigation tools. Window sizes from
+40 through 500 lines are supported; 480 is the default and 160 is useful for
+denser, more focused passes. To keep direct prompt fan-out bounded, a request
+may contain at most 100 files, 512 windows, 2 MiB per file, and 16 MiB total;
+an individual rendered window may not exceed 512 KiB.
 
 ### Band promotion & budget (spec 003)
 
@@ -210,10 +230,40 @@ use a lowered 70% threshold with 100 runs.
 ### Pipeline toggles
 
 ```bash
+  [--semgrep]                   # run the Semgrep hint scan during preprocessing
   [--no-variant-loop]           # skip variant hunter loop
   [--no-mechanism-memory]       # skip cross-run mechanism memory
   [--no-patch-oracle]           # skip patch-oracle truth test
 ```
+
+Semgrep is an external subprocess and is **off by default** — `standard`/`deep`
+depth no longer implies it, and having it installed or discoverable never
+activates it. Enable it explicitly with `--semgrep`, or with `semgrep: true` in
+a machine request (a strict boolean; `false` is the default and simply declines
+to enable it). Semgrep applies to the **legacy** flow only — requesting it with
+`--flow proof` fails at runner construction.
+
+### Checkpointing & resume
+
+Every legacy run checkpoints its pipeline stages under
+`<output-dir>/<session>/`. Resume is a single system built on those
+checkpoints:
+
+```bash
+  [--checkpoint JSON]           # restore from a portable checkpoint blob
+  [--checkpoint-path PATH]      # where the checkpoint is saved
+  [--stop-after STAGE]          # stop after preprocess|rank|verify|exploit|hunt
+  [--resume SESSION_ID]         # resume a prior run in place (e.g. sh-535ed81b)
+```
+
+A completed stage restores whole. The **hunt** stage additionally memoizes
+each completed work item (file/band/attempt/context) under
+`<session>/hunt-work/`, so a run interrupted part way through resumes at
+work-item granularity — finished files are reused and only unfinished work
+re-runs. `--resume` continues the same session directory, including its spend
+ledger, so the dollar budget stays a lifetime cap across the resume. The repo
+and hunt options must match the original run; the model, endpoint, and
+credentials may change.
 
 ### `sourcehunt --nday` — N-day exploit pipeline
 
@@ -447,6 +497,7 @@ extras (`pip install -e '.[web]'`).
 ```bash
 clearwing setup                              # menu-driven
 clearwing setup --provider openrouter        # skip the menu
+clearwing setup --provider orcarouter        # OrcaRouter preset
 clearwing setup --provider ollama --no-test  # skip the live test
 clearwing setup -y                           # skip confirmations
 clearwing init                               # alias — same wizard
@@ -454,8 +505,8 @@ clearwing init                               # alias — same wizard
 
 Walks through LLM backend selection, credential entry, optional
 connection testing, and persistence to `~/.clearwing/config.yaml`.
-The menu currently lists Anthropic, OpenRouter, Ollama, LM Studio,
-OpenAI, Together, Groq, Fireworks, DeepSeek, and a "custom
+The menu currently lists Anthropic, OpenRouter, OrcaRouter, Ollama,
+LM Studio, OpenAI, Together, Groq, Fireworks, DeepSeek, and a "custom
 OpenAI-compatible endpoint" catch-all. Safe to re-run — existing
 config is shown and can be overwritten.
 

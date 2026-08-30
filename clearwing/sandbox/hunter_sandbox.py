@@ -275,7 +275,7 @@ class HunterSandbox:
             _t = time.monotonic()
             try:
                 proc = subprocess.Popen(
-                    ["docker", "build", "--progress=plain", "--platform", platform_flag, "-t", tag, build_dir],
+                    ["docker", "build", "--platform", platform_flag, "-t", tag, build_dir],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -404,10 +404,18 @@ class HunterSandbox:
         if writable_workspace:
             sb.copy_tree_into(self.repo_path, "/workspace")
             try:
-                sb.exec(
-                    "cd /workspace && git init -q && git add -A && git commit -m initial -q",
+                baseline = sb.exec(
+                    "cd /workspace && "
+                    "rm -rf /workspace/.git && "
+                    "find . -name .git -type f -delete && "
+                    "git init -q && git add -A && "
+                    "git -c user.name=clearwing -c user.email=clearwing@localhost "
+                    "commit -m initial -q && git rev-parse HEAD",
                     timeout=120,
                 )
+                if baseline.exit_code != 0:
+                    raise RuntimeError(baseline.stderr or "git baseline creation failed")
+                sb.workspace_baseline_commit = baseline.stdout.strip()
             except Exception:
                 logger.warning("git init in writable workspace failed", exc_info=True)
 

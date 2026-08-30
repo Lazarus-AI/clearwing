@@ -7,6 +7,8 @@ Public entry points:
                                       memory_safety / logic_auth / general
                                       specialists.
 - `build_propagation_auditor_tools(ctx)` — the Tier C static-analysis set.
+- `build_verification_tools(ctx)`      — sandbox tools used only by the
+                                      independent verification phase.
 
 Internal layout:
     sandbox.py    — HunterContext dataclass + sanitizer-variant routing
@@ -45,6 +47,7 @@ from .discovery import (
 from .pool_query import build_pool_query_tools
 from .reporting import build_reporting_tools
 from .sandbox import HunterContext, _parse_variant_arg
+from .verification import build_verification_workspace_tools
 
 
 def build_hunter_tools(ctx: HunterContext) -> list:
@@ -76,12 +79,23 @@ def build_propagation_auditor_tools(ctx: HunterContext) -> list:
     return tools
 
 
+def build_verification_tools(ctx: HunterContext) -> list:
+    """Build the sandbox tool set for independent dynamic verification.
+
+    The verifier gets the same three primitives a human needs to inspect,
+    instrument, build, and run a real checkout. Keeping this palette minimal
+    avoids duplicating compile/fuzz helper schemas in every verification turn.
+    """
+    return build_verification_workspace_tools(ctx)
+
+
 __all__ = [
     # Public API
     "HunterContext",
     "build_deep_agent_tools",
     "build_hunter_tools",
     "build_propagation_auditor_tools",
+    "build_verification_tools",
     # Per-domain builders (for callers that want a narrower tool set)
     "build_discovery_tools",
     "build_semgrep_tool",

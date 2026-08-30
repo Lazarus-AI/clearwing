@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from clearwing.core.events import EventBus
+from clearwing.sourcehunt.paths import resolve_repo_file
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,40 @@ class CallGraph:
     def empty(self) -> bool:
         return not self.functions
 
+    def to_json(self) -> dict:
+        """Serialize to a JSON-safe dict for checkpoint storage."""
+        return {
+            "functions": {k: sorted(v) for k, v in self.functions.items()},
+            "calls_out": {k: sorted(v) for k, v in self.calls_out.items()},
+            "defined_in": {k: sorted(v) for k, v in self.defined_in.items()},
+            "function_info": {
+                k: [{"name": fi.name, "start_line": fi.start_line, "end_line": fi.end_line} for fi in v]
+                for k, v in self.function_info.items()
+            },
+            "func_calls_out": {
+                file: {func: sorted(callees) for func, callees in func_map.items()}
+                for file, func_map in self.func_calls_out.items()
+            },
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> CallGraph:
+        """Restore from a checkpoint dict."""
+        cg = cls()
+        for file, funcs in data.get("functions", {}).items():
+            cg.functions[file] = set(funcs)
+        for file, calls in data.get("calls_out", {}).items():
+            cg.calls_out[file] = set(calls)
+        for name, files in data.get("defined_in", {}).items():
+            cg.defined_in[name] = set(files)
+        for file, infos in data.get("function_info", {}).items():
+            cg.function_info[file] = [
+                FunctionInfo(name=fi["name"], start_line=fi["start_line"], end_line=fi["end_line"])
+                for fi in infos
+            ]
+        for file, func_map in data.get("func_calls_out", {}).items():
+            cg.func_calls_out[file] = {func: set(callees) for func, callees in func_map.items()}
+        return cg
 
 # --- Builder -----------------------------------------------------------------
 
@@ -310,7 +345,12 @@ class CallGraphBuilder:
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
             for fname in filenames:
                 if os.path.splitext(fname)[1].lower() in _LANG_EXT_MAP:
-                    yield os.path.join(dirpath, fname)
+                    candidate = os.path.join(dirpath, fname)
+                    safe_path = resolve_repo_file(
+                        repo_path, os.path.relpath(candidate, repo_path)
+                    )
+                    if safe_path is not None:
+                        yield candidate
 
     def _ingest_file(
         self,

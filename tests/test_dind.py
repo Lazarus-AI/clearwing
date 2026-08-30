@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from clearwing.sandbox.dind import (
     _CLEARWING_ENV,
     _DEFAULT_SOCKET,
@@ -82,9 +80,14 @@ class TestGetDockerClient:
     def test_connects_to_explicit_host(self, mock_host):
         mock_client = MagicMock()
         mock_client.ping.return_value = True
-        with patch("docker.DockerClient", return_value=mock_client) as mock_ctor:
+        with (
+            patch("docker.utils.kwargs_from_env", return_value={"tls": "configured-tls"}),
+            patch("docker.DockerClient", return_value=mock_client) as mock_ctor,
+        ):
             client = get_docker_client(timeout=1)
-        mock_ctor.assert_called_once_with(base_url="tcp://sidecar:2375")
+        mock_ctor.assert_called_once_with(
+            base_url="tcp://sidecar:2375", tls="configured-tls"
+        )
         assert client is mock_client
 
     @patch("clearwing.sandbox.dind.get_docker_host", return_value=None)

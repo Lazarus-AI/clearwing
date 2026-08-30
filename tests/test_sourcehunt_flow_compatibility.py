@@ -39,6 +39,11 @@ def test_cli_and_config_keep_legacy_as_the_default(tmp_path) -> None:
     assert runner._flow == "legacy"
 
 
+def test_proof_flow_rejects_legacy_stop_after_contract(tmp_path) -> None:
+    with pytest.raises(ValueError, match="stop_after.*only for legacy flow"):
+        _runner(tmp_path, flow="proof", stop_after="preprocess")
+
+
 @pytest.mark.asyncio
 async def test_legacy_routes_without_loading_the_proof_engine(tmp_path, monkeypatch) -> None:
     class LegacyPathEntered(RuntimeError):

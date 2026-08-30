@@ -29,26 +29,55 @@ def safe_repo_relative_path(reference: object) -> str | None:
         return None
     normalized = value.replace("\\", "/")
     path = PurePosixPath(normalized)
-    if path.is_absolute() or any(part in {"", ".."} for part in path.parts):
+    if path.is_absolute() or any(
+        part in {"", ".."} or part.casefold() == ".git" for part in path.parts
+    ):
         return None
     cleaned = path.as_posix()
     return cleaned if cleaned not in {"", "."} else None
 
 
-def resolve_repo_file(repo_root: str | Path, reference: object) -> Path | None:
-    """Resolve an existing regular file only when it remains under *repo_root*.
+def resolve_repo_path(
+    repo_root: str | Path,
+    reference: object,
+    *,
+    allow_root: bool = False,
+    allow_missing: bool = False,
+) -> Path | None:
+    """Resolve an existing entry only when it remains under *repo_root*.
 
     ``Path.resolve`` follows symlinks, so an in-repo link to a host file fails
     the containment check instead of becoming an outbound model context read.
     """
 
-    relative = safe_repo_relative_path(reference)
+    raw = normalize_repo_reference(reference)
+    relative = (
+        "." if allow_root and raw in {"", ".", "./"} else safe_repo_relative_path(raw)
+    )
     if relative is None:
         return None
     try:
         root = Path(repo_root).resolve()
         candidate = (root / relative).resolve()
-        candidate.relative_to(root)
+        resolved_relative = candidate.relative_to(root)
     except (OSError, RuntimeError, ValueError):
         return None
-    return candidate if candidate.is_file() else None
+    if any(part.casefold() == ".git" for part in resolved_relative.parts) or (
+        not allow_missing and not candidate.exists()
+    ):
+        return None
+    return candidate
+
+
+def resolve_repo_file(repo_root: str | Path, reference: object) -> Path | None:
+    """Resolve an existing regular repository source file."""
+
+    candidate = resolve_repo_path(repo_root, reference)
+    return candidate if candidate is not None and candidate.is_file() else None
+
+
+def resolve_repo_directory(repo_root: str | Path, reference: object = ".") -> Path | None:
+    """Resolve an existing repository directory, including the root itself."""
+
+    candidate = resolve_repo_path(repo_root, reference, allow_root=True)
+    return candidate if candidate is not None and candidate.is_dir() else None

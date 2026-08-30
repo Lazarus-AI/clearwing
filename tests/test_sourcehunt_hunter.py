@@ -485,6 +485,19 @@ class TestBuildHunterAgent:
         )
         assert ctx.specialist == "propagation"
 
+    def test_specialist_prompt_preserves_campaign_hint(self):
+        hunter, _ctx = build_hunter_agent(
+            file_target=_make_file_target("foo.c", tier="B"),
+            repo_path=str(FIXTURE_C_PROPAGATION),
+            sandbox=None,
+            llm=MagicMock(),
+            session_id="s1",
+            prompt_mode="specialist",
+            campaign_hint="audit target arithmetic",
+        )
+
+        assert "We are particularly interested in audit target arithmetic." in hunter.prompt
+
     def test_v02_seam_seeded_crash_param_accepted(self):
         llm = MagicMock()
         ft = _make_file_target("foo.c")
@@ -596,12 +609,73 @@ class TestHunterToolsHostFallback:
         out = read.invoke({"path": "include/codec_limits.h"})
         assert "MAX_FRAME_BYTES" in out
 
+    def test_constrained_trace_requires_the_read_line_range(self):
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
+        tools = build_hunter_tools(ctx)
+        read = next(t for t in tools if t.name == "read_source_file")
+        trace = next(t for t in tools if t.name == "record_trace_step")
+
+        read.invoke({"path": "include/codec_limits.h", "start_line": 1, "end_line": 1})
+
+        assert ctx.read_ranges == {"include/codec_limits.h": [(1, 1)]}
+        assert (
+            trace.invoke(
+                {"file": "include/codec_limits.h", "line": 1, "note": "ENTRY: observed"}
+            )
+            == "Trace step 1 recorded."
+        )
+        rejected = trace.invoke(
+            {"file": "include/codec_limits.h", "line": 2, "note": "SINK: unseen"}
+        )
+        assert rejected["error"]["code"] == "UNREAD_TRACE_SOURCE"
+
     def test_read_source_file_path_traversal_blocked(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
         tools = build_hunter_tools(ctx)
         read = next(t for t in tools if t.name == "read_source_file")
         out = read.invoke({"path": "../../../etc/passwd"})
         assert "Error" in out
+
+    def test_read_source_file_checked_in_symlink_escape_blocked(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text("secret outside the run lease\n")
+        (repo / "leak.c").symlink_to(outside)
+
+        ctx = HunterContext(repo_path=str(repo))
+        read = next(t for t in build_hunter_tools(ctx) if t.name == "read_source_file")
+
+        out = read.invoke({"path": "leak.c"})
+        assert "Error" in out
+        assert "secret outside" not in out
+
+    def test_read_source_file_git_metadata_blocked_and_hidden(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+
+        ctx = HunterContext(repo_path=str(repo))
+        tools = build_hunter_tools(ctx)
+        read = next(t for t in tools if t.name == "read_source_file")
+        listing = next(t for t in tools if t.name == "list_source_tree")
+
+        assert "Error" in read.invoke({"path": ".git/HEAD"})
+        assert not any(
+            entry.startswith(".git") for entry in listing.invoke({"dir_path": "."})
+        )
+
+    def test_grep_source_does_not_follow_symlink_outside_repository(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text("UNIQUE_SECRET_TOKEN\n")
+        (repo / "leak.c").symlink_to(outside)
+
+        ctx = HunterContext(repo_path=str(repo))
+        grep = next(t for t in build_hunter_tools(ctx) if t.name == "grep_source")
+
+        assert grep.invoke({"pattern": "UNIQUE_SECRET_TOKEN", "path": "."}) == []
 
     def test_list_source_tree(self):
         ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))

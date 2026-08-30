@@ -125,7 +125,7 @@ def test_reservations_are_atomic_across_concurrent_native_calls(tmp_path, monkey
 
     assert sum(isinstance(result, ChatResponse) for result in results) == 1
     assert sum(isinstance(result, BudgetExceeded) for result in results) == 7
-    assert observed_caps == [1]
+    assert observed_caps == [None]
     assert ledger.spent_usd == pytest.approx(1.0)
     assert ledger.remaining_usd == pytest.approx(0.0)
 
@@ -282,7 +282,7 @@ def test_streaming_calls_settle_against_the_same_ledger(tmp_path, monkeypatch):
 
     assert result is response
     assert deltas == ["ok"]
-    assert observed_caps == [1]
+    assert observed_caps == [None]
     assert ledger.spent_usd == pytest.approx(1.0)
 
 
@@ -684,6 +684,35 @@ def test_endpoint_without_pricing_falls_back_to_table(tmp_path):
     )
 
     assert pricing.source == "pricing_table:claude-sonnet-4-6"
+
+
+def test_client_pricing_overrides_strict_unknown_model_rejection(tmp_path):
+    """Per-route pricing follows a native client into the shared run ledger."""
+
+    ledger = SpendLedger(
+        limit_usd=1.0,
+        session_id="client-priced",
+        repo_url="/tmp/repo",
+        output_dir=tmp_path,
+    )
+    client = AsyncLLMClient(
+        model_name="glm-5.3",
+        provider_name="anthropic",
+        api_key="test",
+        pricing=EndpointPricing(input_per_mtok=0.0, output_per_mtok=0.0),
+    )
+
+    bound = client.with_spend_ledger(ledger, stage="hunt")
+    pricing = ledger.validate_model(
+        model=bound.model_name,
+        provider=bound.provider_name,
+        supports_output_limit=True,
+        endpoint_pricing=bound.pricing,
+    )
+
+    assert pricing.source == "endpoint_pricing"
+    assert pricing.input_per_million == 0.0
+    assert pricing.output_per_million == 0.0
 
 
 def test_no_endpoint_preserves_strict_unknown_model_rejection(tmp_path):

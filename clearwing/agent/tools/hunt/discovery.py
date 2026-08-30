@@ -22,6 +22,11 @@ from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
 from clearwing.reporting.safety import redact_text
+from clearwing.sourcehunt.paths import (
+    resolve_repo_directory,
+    resolve_repo_file,
+    resolve_repo_path,
+)
 from clearwing.sourcehunt.semgrep_sidecar import SemgrepSidecar, finding_to_dict
 
 from .potentials import build_potential_tools
@@ -88,17 +93,14 @@ def _normalize_path(repo_path: str, path: str) -> str:
     Returns a repo-relative path (no leading slash). Caller can prepend
     repo_path or '/workspace' depending on context.
     """
-    repo_root = os.path.abspath(repo_path)
     # Strip a leading slash/backslash so POSIX-looking inputs like
     # "/foo/bar" still resolve inside the repo on Windows.
     if path.startswith(("/", "\\")):
         path = path.lstrip("/\\")
-    # Resolve and check it's still under repo_path
-    abs_path = os.path.abspath(os.path.join(repo_root, path))
-    common = os.path.commonpath([abs_path, repo_root])
-    if common != repo_root:
+    resolved = resolve_repo_path(repo_path, path, allow_root=True, allow_missing=True)
+    if resolved is None:
         raise ValueError(f"path escapes repo: {path}")
-    return Path(os.path.relpath(abs_path, repo_root)).as_posix()
+    return resolved.relative_to(Path(repo_path).resolve()).as_posix()
 
 
 def _container_path(rel_path: str) -> str:
@@ -162,7 +164,11 @@ def _grep_python_fallback(
 
     for full in candidate_files:
         fname = os.path.basename(full)
-        rel_file = Path(os.path.relpath(full, repo_path)).as_posix()
+        requested = Path(os.path.relpath(full, repo_path)).as_posix()
+        safe_path = resolve_repo_file(repo_path, requested)
+        if safe_path is None:
+            continue
+        rel_file = safe_path.relative_to(Path(repo_path).resolve()).as_posix()
         if file_glob and not (
             fnmatch.fnmatch(rel_file, file_glob)
             or fnmatch.fnmatch(fname, file_glob)
@@ -170,7 +176,7 @@ def _grep_python_fallback(
         ):
             continue
         try:
-            with open(full, encoding="utf-8", errors="ignore") as f:
+            with safe_path.open(encoding="utf-8", errors="ignore") as f:
                 for i, line in enumerate(f, 1):
                     if regex.search(line):
                         matches.append(
@@ -210,9 +216,11 @@ def build_discovery_tools(ctx: HunterContext) -> list:
         except ValueError as e:
             return f"Error: {e}"
         ctx.files_read.add(rel)
-        host_path = os.path.join(ctx.repo_path, rel)
+        host_path = resolve_repo_file(ctx.repo_path, rel)
+        if host_path is None:
+            return f"Error reading {rel}: not a repository source file"
         try:
-            with open(host_path, encoding="utf-8", errors="replace") as f:
+            with host_path.open(encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
         except OSError as e:
             return f"Error reading {rel}: {e}"
@@ -228,6 +236,9 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             )
         else:
             footer = ""
+        if sliced:
+            ctx.files_read.add(rel)
+            ctx.read_ranges.setdefault(rel, []).append((first + 1, first + len(sliced)))
         return _safe_source_output("".join(sliced) + footer, "source file")
 
     def list_source_tree(dir_path: str = ".", max_depth: int = 2) -> list[str]:
@@ -241,12 +252,23 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             rel = _normalize_path(ctx.repo_path, dir_path)
         except ValueError as e:
             return [f"Error: {e}"]
-        base = os.path.join(ctx.repo_path, rel)
-        if not os.path.isdir(base):
+        base_path = resolve_repo_directory(ctx.repo_path, rel)
+        if base_path is None:
             return [f"Error: not a directory: {rel}"]
+        base = str(base_path)
         out: list[str] = []
         base_depth = base.rstrip(os.sep).count(os.sep)
         for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [
+                directory
+                for directory in dirnames
+                if directory != ".git"
+                and resolve_repo_directory(
+                    ctx.repo_path,
+                    os.path.relpath(os.path.join(dirpath, directory), ctx.repo_path),
+                )
+                is not None
+            ]
             depth = dirpath.rstrip(os.sep).count(os.sep) - base_depth
             if depth >= max_depth:
                 dirnames[:] = []
@@ -255,6 +277,11 @@ def build_discovery_tools(ctx: HunterContext) -> list:
                     Path(os.path.relpath(os.path.join(dirpath, d), ctx.repo_path)).as_posix() + "/"
                 )
             for f in filenames:
+                if resolve_repo_file(
+                    ctx.repo_path,
+                    os.path.relpath(os.path.join(dirpath, f), ctx.repo_path),
+                ) is None:
+                    continue
                 out.append(
                     Path(os.path.relpath(os.path.join(dirpath, f), ctx.repo_path)).as_posix()
                 )

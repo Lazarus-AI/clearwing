@@ -55,6 +55,15 @@ def add_parser(subparsers):
         choices=["preprocess", "rank", "hunt", "verify", "exploit"],
         help="Stop after the named stage completes (checkpoint is saved for resumption)",
     )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help=(
+            "Resume a prior legacy run in place by its session id (e.g. sh-535ed81b). "
+            "Reuses that session's checkpoint, spend ledger, and completed hunter work; "
+            "the repo and hunt options must match the original run"
+        ),
+    )
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
@@ -272,8 +281,10 @@ def add_parser(subparsers):
         default=[],
         metavar="PATH",
         dest="subsystem_paths",
-        help="Manually specify a subsystem directory to hunt (repeatable). "
-        "Implies --subsystem-hunt. Example: --subsystem net/ipv4/",
+        help="Manually specify a subsystem to hunt (repeatable). Accepts a "
+        "directory prefix (net/ipv4/), a glob (libavcodec/h264*), or a single "
+        "file — a file path is expanded to that file plus its 1-hop callgraph "
+        "neighborhood (direct callers + callees). Implies --subsystem-hunt.",
     )
     parser.add_argument(
         "--subsystem-max-files",
@@ -298,6 +309,25 @@ def add_parser(subparsers):
         default=False,
         dest="no_rank",
         help="Skip the ranker; assign default priority scores to all files.",
+    )
+    parser.add_argument(
+        "--target-file",
+        "--target-files",
+        action="append",
+        default=[],
+        metavar="PATH",
+        dest="target_files",
+        help=(
+            "Hunt only this repository-relative file (repeatable). Bypasses the "
+            "ranker and seeds line-numbered source windows directly to hunters."
+        ),
+    )
+    parser.add_argument(
+        "--target-window-lines",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Lines per directly seeded target-file window (40-500; default: 480).",
     )
     parser.add_argument(
         "--seed-corpus",
@@ -1166,8 +1196,11 @@ def handle(cli, args):
     runner = SourceHuntRunner(
         repo_url=args.repo,
         checkpoint=args.checkpoint,
+        resume_session_id=getattr(args, "resume", None),
         branch=args.branch,
         local_path=args.local_path,
+        target_files=args.target_files or None,
+        target_window_lines=args.target_window_lines,
         depth=args.depth,
         budget_usd=args.budget,
         input_price_per_million=getattr(args, "input_price_per_million", None),
@@ -1285,6 +1318,9 @@ def handle(cli, args):
     if result.status == "budget_exhausted":
         cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
         cli.console.print("  Status: partial (budget exhausted)")
+    elif result.status == "incomplete":
+        cli.console.print("\n[bold yellow]Sourcehunt target plan incomplete[/bold yellow]")
+        cli.console.print("  Status: partial (one or more target windows did not complete)")
     else:
         cli.console.print("\n[bold]Sourcehunt complete[/bold]")
     cli.console.print(f"  Session: {result.session_id}")
@@ -1347,6 +1383,8 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 flow=parsed["flow"],
                 agent_mode=parsed["agent_mode"],
                 no_rank=parsed["no_rank"],
+                target_files=parsed.get("target_files"),
+                target_window_lines=parsed.get("target_window_lines"),
                 no_per_file_hunt=parsed["no_per_file_hunt"],
                 enable_subsystem_hunt=parsed["subsystem_hunt"]
                 or bool(parsed.get("subsystem_paths")),
@@ -1383,6 +1421,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "flow",
         "agent_mode",
         "no_rank",
+        "target_files",
+        "target_window_lines",
         "format",
         "subsystem_hunt",
         "subsystem_paths",
@@ -1420,6 +1460,17 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "subsystem_hunt": _boolean(value.get("subsystem_hunt", False), "subsystem_hunt"),
         "semgrep": _boolean(value.get("semgrep", False), "semgrep"),
     }
+    if "target_files" in value:
+        target_files = value["target_files"]
+        if not isinstance(target_files, list) or not 1 <= len(target_files) <= 100:
+            raise ValueError("target_files must be a list containing 1 to 100 paths")
+        parsed["target_files"] = [
+            _bounded_text(path, "target_files entry", 1024) for path in target_files
+        ]
+    if "target_window_lines" in value:
+        parsed["target_window_lines"] = _bounded_integer(
+            value["target_window_lines"], "target_window_lines", 40, 500
+        )
     if "subsystem_paths" in value:
         parsed["subsystem_paths"] = value["subsystem_paths"]
     if "subsystem_budget_usd" in value:
@@ -1446,37 +1497,59 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_result(result: Any) -> dict[str, Any]:
+    max_findings_per_bucket = 16
+
+    def text(value: Any, maximum_bytes: int) -> str | None:
+        if not isinstance(value, str) or not value:
+            return None
+        return value.encode("utf-8")[:maximum_bytes].decode("utf-8", errors="ignore")
+
     def finding(value: Any) -> dict[str, Any]:
         item = asdict(value) if not isinstance(value, dict) else dict(value)
-        item.pop("extra", None)
         file = item.get("file")
         if isinstance(file, str) and os.path.isabs(file):
-            item["file"] = os.path.basename(file)
-        return item
+            file = os.path.basename(file)
+        public = {
+            "id": text(item.get("id"), 512),
+            "title": text(item.get("title"), 1024),
+            "finding_type": text(item.get("finding_type"), 512),
+            "severity": text(item.get("severity"), 64),
+            "severity_verified": text(item.get("severity_verified"), 64),
+            "file": text(file, 2048),
+            "line_number": item.get("line_number")
+            if isinstance(item.get("line_number"), int)
+            else None,
+            "end_line": item.get("end_line") if isinstance(item.get("end_line"), int) else None,
+            "cwe": text(item.get("cwe"), 128),
+            "description": text(item.get("description"), 4096),
+            "evidence_level": text(item.get("evidence_level"), 128),
+            "confidence": text(item.get("confidence"), 64),
+            "code_snippet": text(item.get("code_snippet"), 8192),
+            "recommendation": text(item.get("recommendation"), 4096),
+            "verified": item.get("verified") if isinstance(item.get("verified"), bool) else None,
+        }
+        return {key: value for key, value in public.items() if value is not None and value != ""}
+
+    def findings_bucket(values: list[Any]) -> list[dict[str, Any]]:
+        return [finding(item) for item in values[:max_findings_per_bucket]]
+
+    findings = list(result.findings)
+    verified_findings = list(result.verified_findings)
+    exploited_findings = list(result.exploited_findings)
 
     return {
-        "status": result.status,
-        "exit_code": result.exit_code,
-        "repo_url": result.repo_url,
-        "session_id": result.session_id,
-        "findings": [finding(item) for item in result.findings],
-        "verified_findings": [finding(item) for item in result.verified_findings],
-        "exploited_findings": [finding(item) for item in result.exploited_findings],
+        "status": text(result.status, 64),
+        "findings": findings_bucket(findings),
+        "verified_findings": findings_bucket(verified_findings),
+        "exploited_findings": findings_bucket(exploited_findings),
+        "finding_count": len(findings),
+        "verified_finding_count": len(verified_findings),
+        "exploited_finding_count": len(exploited_findings),
         "files_ranked": result.files_ranked,
         "files_hunted": result.files_hunted,
         "duration_seconds": result.duration_seconds,
         "cost_usd": result.cost_usd,
         "tokens_used": result.tokens_used,
-        "budget_usd": result.budget_usd,
-        "checkpoint": result.checkpoint,
-        "pipeline": {
-            name: {
-                "outcome": stage.outcome.value,
-                "error": stage.error,
-                "fallback_description": stage.fallback_description,
-            }
-            for name, stage in result.pipeline_status.stages.items()
-        },
     }
 
 

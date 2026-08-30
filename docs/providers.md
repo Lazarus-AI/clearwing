@@ -18,7 +18,7 @@ Backends covered below:
 - **OpenAI (Responses API)** — GPT-5.x / o-series via `/v1/responses`
   (`openai_resp` adapter). Required for GPT-5.x and o-series.
 - **OpenAI OAuth (ChatGPT)** — Plus/Pro login via Codex backend (`openai_codex`).
-- **OpenRouter, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
+- **OpenRouter, OrcaRouter, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
   anything that speaks `/v1/chat/completions` (`openai` adapter).
 - **MiniMax** — M2.7 / M2.5 via the Anthropic-compatible endpoint
   (`anthropic` adapter at `api.minimax.io/anthropic`).
@@ -211,6 +211,57 @@ at runtime — don't commit real secrets to the YAML. Clearwing's
 `config set-provider` quotes the literal for you; if you edit the
 YAML by hand, quote it so the shell doesn't eat the `$`.
 
+## OrcaRouter
+
+[OrcaRouter](https://www.orcarouter.ai) is an OpenAI-compatible
+multi-model gateway. Model names follow the same `provider/model`
+convention as OpenRouter: `anthropic/claude-sonnet-4.6`,
+`openai/gpt-5.5`, `deepseek/deepseek-chat`, or `orcarouter/auto` for
+automatic routing. Grab a key from the [OrcaRouter site](https://www.orcarouter.ai)
+(keys start with `sk-orca-`) and point Clearwing at it with the
+`openai` adapter — it is a preset in the setup wizard, so you can also
+just run `clearwing setup --provider orcarouter`.
+
+### Per-command (flags)
+
+```bash
+clearwing sourcehunt /path/to/repo \
+    --base-url https://api.orcarouter.ai/v1 \
+    --api-key "$ORCAROUTER_API_KEY" \
+    --model anthropic/claude-sonnet-4.6
+```
+
+### Per-session (env vars)
+
+```bash
+export CLEARWING_BASE_URL=https://api.orcarouter.ai/v1
+export CLEARWING_API_KEY=$ORCAROUTER_API_KEY
+export CLEARWING_MODEL=anthropic/claude-sonnet-4.6
+
+# Every command picks this up automatically
+clearwing interactive
+clearwing sourcehunt /path/to/repo
+```
+
+### Persistent (config file)
+
+```bash
+clearwing config --set-provider \
+    base_url=https://api.orcarouter.ai/v1 \
+    api_key='${ORCAROUTER_API_KEY}' \
+    model=anthropic/claude-sonnet-4.6
+```
+
+This writes `~/.clearwing/config.yaml` with:
+
+```yaml
+provider:
+  base_url: https://api.orcarouter.ai/v1
+  api_key: ${ORCAROUTER_API_KEY}
+  model: anthropic/claude-sonnet-4.6
+  adapter: openai
+```
+
 ## Ollama
 
 Ollama is spoken natively by `rust-genai` via its own adapter — no
@@ -363,13 +414,16 @@ providers:
   openrouter:
     base_url: https://openrouter.ai/api/v1
     api_key: ${OPENROUTER_API_KEY}
+  orcarouter:
+    base_url: https://api.orcarouter.ai/v1
+    api_key: ${ORCAROUTER_API_KEY}
   local_qwen:
     base_url: http://localhost:11434/v1
     api_key: ollama
 
 routes:
   default: openrouter
-  ranker: openrouter
+  ranker: orcarouter
   hunter: openrouter
   verifier: local_qwen              # Independence via cross-provider
   sourcehunt_exploit: openrouter
@@ -405,6 +459,7 @@ Models that definitely work (tested during Phase 5):
 
 - Anthropic: `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
 - OpenRouter: any `anthropic/*`, `openai/gpt-4o`, `openai/gpt-4o-mini`
+- OrcaRouter: any `anthropic/*`, `openai/gpt-5.5`, `openai/gpt-4o`, `deepseek/deepseek-chat`, `orcarouter/auto`
 - OpenAI direct: `gpt-4o`, `gpt-4o-mini`, `o1-preview` (no tool calling on o1)
 - Ollama (qwen2.5-coder:32b, llama3.3:70b with function-calling prompts)
 - Groq: `llama-3.3-70b-versatile`, `qwen-2.5-coder-32b`

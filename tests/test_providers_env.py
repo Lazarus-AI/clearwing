@@ -24,6 +24,7 @@ from clearwing.providers import (
     ENV_API_KEY,
     ENV_BASE_URL,
     ENV_MODEL,
+    EndpointPricing,
     LLMEndpoint,
     ProviderManager,
     resolve_llm_endpoint,
@@ -428,3 +429,32 @@ class TestProviderManagerFromConfig:
         # The named provider configs were stored
         assert pm._configs["openrouter"].api_key == "sk-or-routed"
         assert pm._configs["local_llama"].api_key == "ollama"
+
+    def test_zero_pricing_survives_model_alias_resolution(self, clean_env):
+        cfg = {
+            "model_aliases": {
+                "sourcehunt": {
+                    "provider": {
+                        "model": "glm-5.3",
+                        "base_url": "https://api.z.ai/api/anthropic/v1",
+                        "api_key": "coding-plan-key",
+                        "adapter": "anthropic",
+                        "pricing": {
+                            "input_per_mtok": 0,
+                            "output_per_mtok": 0,
+                            "cached_per_mtok": 0,
+                            "cache_creation_per_mtok": 0,
+                        },
+                    }
+                }
+            }
+        }
+
+        client = ProviderManager.from_config(cfg).get_native_client("hunter")
+
+        assert client.pricing == EndpointPricing(
+            input_per_mtok=0.0,
+            output_per_mtok=0.0,
+            cached_per_mtok=0.0,
+            cache_creation_per_mtok=0.0,
+        )

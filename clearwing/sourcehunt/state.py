@@ -35,6 +35,13 @@ from clearwing.llm import BaseMessage
 # Canonical definitions now live in clearwing.findings.types.
 # Re-exported here for backwards compatibility.
 
+VerificationOutcome = Literal[
+    "confirmed",
+    "refuted",
+    "inconclusive",
+    "operational_error",
+]
+
 
 def filter_by_evidence(
     findings: list[Finding],
@@ -100,6 +107,14 @@ class FileTarget(TypedDict, total=False):
     defines_constants: bool
     has_fuzz_entry_point: bool  # v0.2: detected by tagger
     fuzz_harness_path: str | None  # v0.2: filled by Harness Generator
+    # Explicit --target-files hunts may split a large file into independently
+    # seeded, line-numbered windows. These fields scope the hunter's first
+    # message without restricting its read-only navigation tools.
+    target_start_line: int
+    target_end_line: int
+    target_total_lines: int
+    target_size_bytes: int
+    target_sha256: str
 
 
 # Phase 3 unified the legacy sourcehunt finding TypedDict with the
@@ -224,6 +239,8 @@ class ValidatorVerdict:
     patch_oracle_passed: bool | None = None
     patch_oracle_diff: str = ""
     patch_oracle_notes: str = ""
+    dynamic_evidence: list[dict[str, Any]] = field(default_factory=list)
+    outcome: VerificationOutcome | None = None
 
     def to_verifier_result(self):
         from clearwing.sourcehunt.verifier import VerifierResult
@@ -242,6 +259,8 @@ class ValidatorVerdict:
             patch_oracle_passed=self.patch_oracle_passed,
             patch_oracle_diff=self.patch_oracle_diff,
             patch_oracle_notes=self.patch_oracle_notes,
+            dynamic_evidence=self.dynamic_evidence,
+            outcome=self.outcome,
         )
 
 

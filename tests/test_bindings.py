@@ -556,4 +556,3 @@ class TestInferenceWiring:
 
         opts = ChatOptions(top_p=0.8, reasoning_effort="high", max_tokens=1000)
         assert AsyncLLMClient._rebuild_options_without_reasoning(opts).top_p == 0.8
-        assert AsyncLLMClient._rebuild_options_without_max_tokens(opts).top_p == 0.8
