@@ -242,12 +242,56 @@ class _SourceResult:
     )
 
 
-def test_sourcehunt_public_result_removes_host_paths():
-    result = sourcehunt._public_result(_SourceResult())
-    assert result["findings"] == [{"file": "app.py"}]
-    assert "repo_path" not in result
-    assert "output_paths" not in result
-    assert result["checkpoint"]["schema_version"] == 1
+def test_sourcehunt_public_result_is_bounded_and_removes_workspace_state():
+    def _bucket(prefix: str, count: int) -> list[dict]:
+        return [
+            {
+                "file": f"/private/repo/{prefix}-{index}.py",
+                "description": "x" * 10_000,
+                "extra": {"artifact": "/private/proof"},
+            }
+            for index in range(count)
+        ]
+
+    source = _SourceResult(
+        findings=_bucket("file", 20),
+        verified_findings=_bucket("verified", 30),
+        exploited_findings=_bucket("exploited", 18),
+    )
+    result = sourcehunt._public_result(source)
+
+    # Every finding bucket is capped, but its true total is preserved alongside.
+    assert len(result["findings"]) == 16
+    assert result["finding_count"] == 20
+    assert len(result["verified_findings"]) == 16
+    assert result["verified_finding_count"] == 30
+    assert len(result["exploited_findings"]) == 16
+    assert result["exploited_finding_count"] == 18
+
+    assert result["findings"][0]["file"] == "file-0.py"
+    assert result["exploited_findings"][0]["file"] == "exploited-0.py"
+    assert len(result["findings"][0]["description"].encode("utf-8")) == 4096
+
+    assert set(result) == {
+        "status",
+        "findings",
+        "verified_findings",
+        "exploited_findings",
+        "finding_count",
+        "verified_finding_count",
+        "exploited_finding_count",
+        "files_ranked",
+        "files_hunted",
+        "duration_seconds",
+        "cost_usd",
+        "tokens_used",
+    }
+    assert "extra" not in result["findings"][0]
+    assert "extra" not in result["exploited_findings"][0]
+    assert "checkpoint" not in result
+    assert "pipeline" not in result
+    assert "session_id" not in result
+    assert "repo_url" not in result
     assert "/private" not in repr(result)
 
 
