@@ -207,6 +207,15 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "UNREAD_TRACE_SOURCE",
                 f"File '{file}' has not been read yet. Call read_source_file first.",
             )
+        ranges = ctx.read_ranges.get(file, [])
+        if ctx.agent_mode != "deep" and ranges and not any(
+            start <= line <= end for start, end in ranges
+        ):
+            return _tool_error(
+                "UNREAD_TRACE_SOURCE",
+                f"Line {line} of '{file}' has not been read yet. "
+                "Call read_source_file for that range first.",
+            )
         step = TraceStep(
             file=file,
             line=line,
