@@ -230,10 +230,18 @@ use a lowered 70% threshold with 100 runs.
 ### Pipeline toggles
 
 ```bash
+  [--semgrep]                   # run the Semgrep hint scan during preprocessing
   [--no-variant-loop]           # skip variant hunter loop
   [--no-mechanism-memory]       # skip cross-run mechanism memory
   [--no-patch-oracle]           # skip patch-oracle truth test
 ```
+
+Semgrep is an external subprocess and is **off by default** — `standard`/`deep`
+depth no longer implies it, and having it installed or discoverable never
+activates it. Enable it explicitly with `--semgrep`, or with `semgrep: true` in
+a machine request (a strict boolean; `false` is the default and simply declines
+to enable it). Semgrep applies to the **legacy** flow only — requesting it with
+`--flow proof` fails at runner construction.
 
 ### Checkpointing & resume
 

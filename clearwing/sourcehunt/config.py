@@ -78,6 +78,7 @@ class FeatureFlags:
     no_rank: bool = False
     seed_harness_crashes: bool = False
     preprocessing: bool = True
+    enable_semgrep: bool = False
     adversarial_verifier: bool = True
     adversarial_threshold: str | None = "static_corroboration"
     validator_mode: str = "v2"  # "v1" (old Verifier) | "v2" (4-axis Validator)

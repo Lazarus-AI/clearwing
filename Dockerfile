@@ -5,7 +5,7 @@ WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 COPY pyproject.toml uv.lock ./
-RUN uv pip install --system --no-cache -r pyproject.toml
+RUN uv pip install --system --no-cache --extra sourcehunt -r pyproject.toml
 
 COPY . .
 RUN uv pip install --system --no-cache --no-deps .

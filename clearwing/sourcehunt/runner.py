@@ -296,6 +296,7 @@ class SourceHuntRunner:
         enable_artifact_store: bool = False,
         gvisor_runtime: str | None = None,
         preprocessing: bool = True,
+        enable_semgrep: bool = False,
         seed_harness_crashes: bool = False,
         respect_gitignore: bool = False,
         live: bool = False,
@@ -406,6 +407,7 @@ class SourceHuntRunner:
             no_rank = no_rank or f.no_rank
             seed_harness_crashes = seed_harness_crashes or f.seed_harness_crashes
             preprocessing = preprocessing and f.preprocessing
+            enable_semgrep = enable_semgrep or f.enable_semgrep
             adversarial_verifier = adversarial_verifier and f.adversarial_verifier
             adversarial_threshold = (
                 adversarial_threshold
@@ -516,6 +518,8 @@ class SourceHuntRunner:
             raise ValueError("checkpoint restoration is currently supported only for legacy flow")
         if stop_after is not None and flow != "legacy":
             raise ValueError("stop_after is currently supported only for legacy flow")
+        if enable_semgrep and flow != "legacy":
+            raise ValueError("Semgrep is currently supported only for legacy flow")
         if proof_max_actions < 1:
             raise ValueError("proof_max_actions must be positive")
         if proof_max_model_calls < 0 or proof_max_dynamic_actions < 0:
@@ -642,6 +646,7 @@ class SourceHuntRunner:
         self._sandbox_cpus = None if sandbox_cpus is None else float(sandbox_cpus)
         self._gvisor_runtime = self._check_runtime_available(gvisor_runtime)
         self._preprocessing = preprocessing
+        self._enable_semgrep = enable_semgrep
         self._seed_harness_crashes = seed_harness_crashes
         self._respect_gitignore = respect_gitignore
         self._live = live
@@ -3316,14 +3321,14 @@ class SourceHuntRunner:
 
     @tracer.chain(name="Preprocess")
     def _preprocess(self) -> PreprocessResult:
-        # v0.2: enable callgraph + reachability + Semgrep by default at
-        # standard/deep depths. Quick depth stays cheap — just enumerate
-        # and tag files.
+        # Callgraph, reachability, and taint run by default at standard/deep
+        # depths. Semgrep is an external subprocess and remains explicitly
+        # opt-in at every depth.
         options = {
             "tag_files": True,
             "build_callgraph": self.depth != "quick" and self._preprocessing,
             "propagate_reachability": self.depth != "quick" and self._preprocessing,
-            "run_semgrep": self.depth != "quick" and self._preprocessing,
+            "run_semgrep": self._enable_semgrep and self._preprocessing,
             "run_taint": self.depth != "quick" and self._preprocessing,
             "respect_gitignore": self._respect_gitignore,
             "subsystem_paths": sorted(self._subsystem_paths or []),

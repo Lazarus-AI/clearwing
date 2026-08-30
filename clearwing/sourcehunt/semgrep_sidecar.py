@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,15 @@ _BUNDLED_RULES_DIR = Path(__file__).parent / "semgrep_rules"
 
 DEFAULT_SEMGREP_CONFIG = "p/security-audit"
 SEMGREP_TIMEOUT_SECONDS = 300
+
+
+def _active_environment_semgrep() -> str | None:
+    """Return the Semgrep executable installed beside the running Python."""
+
+    candidate = Path(sys.executable).with_name("semgrep")
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
 
 
 @dataclass
@@ -65,7 +75,14 @@ class SemgrepSidecar:
 
     @property
     def available(self) -> bool:
-        return shutil.which(self.binary) is not None
+        return self._command() is not None
+
+    def _command(self) -> str | None:
+        if self.binary == "semgrep":
+            active_environment_binary = _active_environment_semgrep()
+            if active_environment_binary is not None:
+                return active_environment_binary
+        return shutil.which(self.binary)
 
     def run_scan(self, repo_path: str, base_path: str | None = None) -> list[SemgrepFinding]:
         """Invoke `semgrep --json --config <config> <repo_path>`.
@@ -74,12 +91,13 @@ class SemgrepSidecar:
         returns an empty list — Semgrep is a hint source, not a
         correctness-critical dependency.
         """
-        if not self.available:
+        command = self._command()
+        if command is None:
             logger.debug("Semgrep binary not found; skipping")
             return []
 
         cmd = [
-            self.binary,
+            command,
             "scan",
             "--json",
             "--config",

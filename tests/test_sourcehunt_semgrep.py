@@ -43,12 +43,40 @@ class TestSemgrepFinding:
 
 class TestSemgrepAvailability:
     def test_available_true_when_binary_found(self):
-        with patch("shutil.which", return_value="/usr/local/bin/semgrep"):
+        with (
+            patch(
+                "clearwing.sourcehunt.semgrep_sidecar._active_environment_semgrep",
+                return_value=None,
+            ),
+            patch("shutil.which", return_value="/usr/local/bin/semgrep"),
+        ):
             assert SemgrepSidecar().available is True
 
     def test_available_false_when_binary_missing(self):
-        with patch("shutil.which", return_value=None):
+        with (
+            patch(
+                "clearwing.sourcehunt.semgrep_sidecar._active_environment_semgrep",
+                return_value=None,
+            ),
+            patch("shutil.which", return_value=None),
+        ):
             assert SemgrepSidecar().available is False
+
+    def test_prefers_semgrep_from_the_running_python_environment(self):
+        with (
+            patch(
+                "clearwing.sourcehunt.semgrep_sidecar._active_environment_semgrep",
+                return_value="/opt/clearwing/.venv/bin/semgrep",
+            ),
+            patch("shutil.which", return_value=None),
+            patch(
+                "subprocess.run",
+                return_value=_fake_proc(json.dumps({"results": []}), returncode=0),
+            ) as mock_run,
+        ):
+            SemgrepSidecar().run_scan("/abs/repo")
+
+        assert mock_run.call_args.args[0][0] == "/opt/clearwing/.venv/bin/semgrep"
 
 
 # --- run_scan mocking subprocess -------------------------------------------
@@ -95,7 +123,13 @@ def _fake_proc(stdout: str, returncode: int = 1):
 
 class TestRunScanMocked:
     def test_not_available_returns_empty(self):
-        with patch("shutil.which", return_value=None):
+        with (
+            patch(
+                "clearwing.sourcehunt.semgrep_sidecar._active_environment_semgrep",
+                return_value=None,
+            ),
+            patch("shutil.which", return_value=None),
+        ):
             findings = SemgrepSidecar().run_scan("/abs/repo")
         assert findings == []
 
