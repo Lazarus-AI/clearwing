@@ -606,6 +606,8 @@ class SourceAnalyzer:
 
     def _iter_source_files(self, root: str):
         """Yield source file paths, skipping irrelevant directories."""
+        from clearwing.sourcehunt.paths import resolve_repo_file
+
         gitignore = _GitignoreMatcher.from_repo(root) if self.respect_gitignore else None
         for dirpath, dirnames, filenames in os.walk(root):
             # Prune skip directories
@@ -623,7 +625,12 @@ class SourceAnalyzer:
                 if gitignore and gitignore.matches_file(full_path):
                     continue
                 try:
-                    if os.path.getsize(full_path) > self.MAX_FILE_SIZE:
+                    safe_path = resolve_repo_file(
+                        root, os.path.relpath(full_path, root)
+                    )
+                    if safe_path is None:
+                        continue
+                    if safe_path.stat().st_size > self.MAX_FILE_SIZE:
                         continue
                 except OSError:
                     continue

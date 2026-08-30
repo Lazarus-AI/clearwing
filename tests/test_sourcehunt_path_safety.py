@@ -4,8 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from clearwing.sourcehunt.paths import resolve_repo_file, safe_repo_relative_path
+from clearwing.sourcehunt.callgraph import CallGraphBuilder
+from clearwing.sourcehunt.paths import (
+    resolve_repo_directory,
+    resolve_repo_file,
+    safe_repo_relative_path,
+)
 from clearwing.sourcehunt.poc_runner import PocRunner
+from clearwing.sourcehunt.taint import TaintAnalyzer
+from clearwing.sourcehunt.variant_loop import VariantPattern, VariantSearcher
 
 
 @pytest.mark.parametrize(
@@ -40,6 +47,36 @@ def test_resolve_repo_file_rejects_symlink_escape(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks are unavailable on this platform")
     assert resolve_repo_file(repo, "source.c") is None
+
+
+def test_repository_paths_hide_git_metadata(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    assert safe_repo_relative_path(".git/HEAD") is None
+    assert safe_repo_relative_path(".GIT/config") is None
+    assert resolve_repo_file(repo, ".git/HEAD") is None
+    assert resolve_repo_directory(repo, ".git") is None
+
+
+def test_recursive_host_walkers_skip_symlink_escape(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    safe = repo / "safe.c"
+    safe.write_text("int safe(void) { return 0; }\n", encoding="utf-8")
+    outside = tmp_path / "outside.c"
+    outside.write_text("UNIQUE_SECRET_TOKEN\n", encoding="utf-8")
+    (repo / "leak.c").symlink_to(outside)
+
+    assert list(CallGraphBuilder()._walk_repo(str(repo))) == [str(safe)]
+    assert list(TaintAnalyzer()._walk(str(repo))) == [str(safe)]
+    matches = VariantSearcher().search(
+        str(repo),
+        VariantPattern(grep_regex="UNIQUE_SECRET_TOKEN", semantic_description="secret"),
+        {"id": "source", "file": "safe.c", "line_number": 1},
+    )
+    assert matches == []
 
 
 class _NoExecSandbox:
