@@ -275,7 +275,7 @@ class HunterSandbox:
             _t = time.monotonic()
             try:
                 proc = subprocess.Popen(
-                    ["docker", "build", "--progress=plain", "--platform", platform_flag, "-t", tag, build_dir],
+                    ["docker", "build", "--platform", platform_flag, "-t", tag, build_dir],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
