@@ -117,7 +117,7 @@ class LLMEndpoint:
         """True if this endpoint talks the OpenAI-compatible dialect.
 
         That covers: OpenRouter, Ollama (via /v1), LM Studio, vLLM,
-        Together, Fireworks, Groq, Anyscale, SiliconFlow, DeepSeek,
+        Together, Fireworks, Groq, Anyscale, SiliconFlow, DeepSeek, Kimi,
         and OpenAI direct. ChatGPT/Codex OAuth is not OpenAI-compatible.
         """
         return self.provider == "openai_compat"
@@ -534,6 +534,8 @@ def _default_openai_compat_model(base_url: str) -> str:
         return "gpt-4o"
     if "api.deepseek.com" in host:
         return "deepseek-chat"
+    if "api.kimi.com" in host and "/coding" in host:
+        return "k3-256k"
     # Catch-all
     return "default"
 

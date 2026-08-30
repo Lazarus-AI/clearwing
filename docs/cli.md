@@ -456,7 +456,7 @@ clearwing init                               # alias — same wizard
 Walks through LLM backend selection, credential entry, optional
 connection testing, and persistence to `~/.clearwing/config.yaml`.
 The menu currently lists Anthropic, OpenRouter, OrcaRouter, Ollama,
-LM Studio, OpenAI, Together, Groq, Fireworks, DeepSeek, and a "custom
+OpenAI, Together, Groq, Fireworks, DeepSeek, Kimi Code, MiniMax, and a "custom
 OpenAI-compatible endpoint" catch-all. Safe to re-run — existing
 config is shown and can be overwritten.
 

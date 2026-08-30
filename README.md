@@ -11,7 +11,7 @@ The challenge:  Produce similar results as Glasswing - using models everyone has
 **Autonomous vulnerability scanner and source-code hunter.** Built on
 `genai-pyo3`, a native Rust-backed LLM runtime speaking every major
 provider (Anthropic, OpenAI, OpenRouter, OrcaRouter, Ollama, LM Studio,
-Together, Groq, DeepSeek, MiniMax, Gemini, any OpenAI-compatible endpoint).
+Together, Groq, DeepSeek, Kimi, MiniMax, Gemini, any OpenAI-compatible endpoint).
 
 Clearwing is a dual-mode offensive-security tool:
 
@@ -92,7 +92,7 @@ Or skip the wizard and configure directly:
 export ANTHROPIC_API_KEY=sk-ant-...
 
 # Or any OpenAI-compatible endpoint — OpenRouter, OrcaRouter, Ollama,
-# LM Studio, vLLM, Together, Groq, DeepSeek, OpenAI:
+# LM Studio, vLLM, Together, Groq, DeepSeek, Kimi, OpenAI:
 export CLEARWING_BASE_URL=https://openrouter.ai/api/v1
 export CLEARWING_API_KEY=sk-or-...
 export CLEARWING_MODEL=anthropic/claude-opus-4
@@ -319,7 +319,7 @@ Deep dives live in [`docs/`](docs/):
 |---|---|
 | [`docs/index.md`](docs/index.md) | Landing page + table of contents |
 | [`docs/quickstart.md`](docs/quickstart.md) | Full install + first run walkthrough |
-| [`docs/providers.md`](docs/providers.md) | OpenRouter / Ollama / LM Studio / vLLM / Together / Groq recipes, per-task routing, env-var precedence |
+| [`docs/providers.md`](docs/providers.md) | OpenRouter / Ollama / LM Studio / vLLM / Kimi / Together / Groq recipes, per-task routing, env-var precedence |
 | [`docs/architecture.md`](docs/architecture.md) | Both pipelines, substrate, capability gating, tool layout |
 | [`docs/cli.md`](docs/cli.md) | Every subcommand flag, grouped by workflow |
 | [`docs/api.md`](docs/api.md) | API reference (mkdocstrings autogen) |
