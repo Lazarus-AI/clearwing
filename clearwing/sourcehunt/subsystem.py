@@ -166,6 +166,27 @@ def identify_subsystems_auto(
     return subsystems
 
 
+def _callgraph_neighbor_paths(seed_path: str, callgraph: Any) -> set[str]:
+    """Return the 1-hop callgraph neighborhood of *seed_path*.
+
+    Both directions: files the seed calls into (callees) and files that call
+    into the seed (callers). The seed itself is excluded. Returns an empty set
+    if the callgraph exposes no edges for the file.
+    """
+    neighbors: set[str] = set()
+    calls_out = getattr(callgraph, "calls_out", None) or {}
+    defined_in = getattr(callgraph, "defined_in", None) or {}
+    # Callees: files defining any function the seed calls.
+    for func_name in calls_out.get(seed_path, set()):
+        neighbors |= set(defined_in.get(func_name, set()))
+    # Callers: files that call any function defined in the seed.
+    callers_of_file = getattr(callgraph, "callers_of_file", None)
+    if callable(callers_of_file):
+        neighbors |= set(callers_of_file(seed_path))
+    neighbors.discard(seed_path)
+    return neighbors
+
+
 def subsystem_from_path(
     path: str,
     file_targets: list[FileTarget],
@@ -173,13 +194,21 @@ def subsystem_from_path(
     entry_points_by_file: dict | None = None,
     max_files: int | None = None,
 ) -> SubsystemTarget:
-    """Build a SubsystemTarget from a directory path or glob pattern.
+    """Build a SubsystemTarget from a directory path, glob pattern, or single file.
 
     Raises ValueError if no files match.
 
+    When *path* resolves to a single file (not a glob, exact path match), the
+    scope is expanded to that file plus its **1-hop callgraph neighborhood**
+    (direct callers + callees) so the cross-file hunt has real cross-file
+    context instead of a group of one. The seed file is always pinned into scope
+    and anchors the target's ``root_path``. Directory prefixes and globs keep
+    their prefix/glob matching unchanged.
+
     An explicit path is a deliberate operator scope, so *max_files* defaults to
-    ``None`` (no cap) — the full matched set is hunted. If a cap is supplied and
-    exceeded, files are dropped with a loud WARNING rather than silently.
+    ``None`` (no cap) — the full matched (or expanded) set is hunted. If a cap is
+    supplied and exceeded, files are dropped with a loud WARNING rather than
+    silently; the seed file is never dropped.
     """
     normalized = path.rstrip("/")
     is_glob = "*" in normalized or "?" in normalized
@@ -197,17 +226,62 @@ def subsystem_from_path(
     if not matched:
         raise ValueError(f"No files match subsystem path: {path}")
 
-    matched.sort(key=lambda f: f.get("priority", 0.0), reverse=True)
-    if max_files is not None and len(matched) > max_files:
-        _warn_files_dropped(
-            f"{path!r}",
-            kept=max_files,
-            dropped=matched[max_files:],
-            explicit=True,
-        )
-        capped = matched[:max_files]
+    # Single-file target: expand to its 1-hop callgraph neighborhood. A file
+    # path can only match via ``fp == normalized`` (a real file is never a path
+    # prefix of another), so an exact match means the operator named one file.
+    seed = next((ft for ft in matched if ft.get("path", "") == normalized), None)
+    seed_pinned = False
+    if seed is not None and not is_glob and callgraph is not None:
+        neighbor_paths = _callgraph_neighbor_paths(normalized, callgraph)
+        by_path = {ft.get("path", ""): ft for ft in file_targets}
+        neighbors = [
+            by_path[p]
+            for p in neighbor_paths
+            if p in by_path and by_path[p] is not seed
+        ]
+        if neighbors:
+            neighbors.sort(key=lambda f: f.get("priority", 0.0), reverse=True)
+            matched = [seed] + neighbors
+            seed_pinned = True
+            logger.info(
+                "Expanded single-file subsystem %r to %d files via 1-hop "
+                "callgraph neighborhood (direct callers + callees).",
+                normalized,
+                len(matched),
+            )
+        else:
+            logger.info(
+                "Single-file subsystem %r has no callgraph neighbors; hunting "
+                "the file alone.",
+                normalized,
+            )
+
+    if seed_pinned:
+        # Seed is pinned at index 0; neighbors follow in priority order. Keep the
+        # seed even when a cap drops neighbors off the tail.
+        if max_files is not None and len(matched) > max_files:
+            kept = max(max_files, 1)
+            _warn_files_dropped(
+                f"{path!r} (callgraph neighborhood)",
+                kept=kept,
+                dropped=matched[kept:],
+                explicit=True,
+            )
+            capped = matched[:kept]
+        else:
+            capped = matched
     else:
-        capped = matched
+        matched.sort(key=lambda f: f.get("priority", 0.0), reverse=True)
+        if max_files is not None and len(matched) > max_files:
+            _warn_files_dropped(
+                f"{path!r}",
+                kept=max_files,
+                dropped=matched[max_files:],
+                explicit=True,
+            )
+            capped = matched[:max_files]
+        else:
+            capped = matched
     priority = max(f.get("priority", 0.0) for f in capped)
 
     eps: list = []
