@@ -69,9 +69,13 @@ def get_docker_client(timeout: int = 60):
     import docker
 
     host = get_docker_host()
+    # kwargs_from_env honors DOCKER_TLS_VERIFY and DOCKER_CERT_PATH. Passing
+    # only base_url here would silently downgrade a TLS-configured client.
     if host:
         logger.debug("Connecting to Docker daemon at %s", host)
-        client = docker.DockerClient(base_url=host)
+        kwargs = docker.utils.kwargs_from_env()
+        kwargs["base_url"] = host
+        client = docker.DockerClient(**kwargs)
     else:
         client = docker.from_env()
 
