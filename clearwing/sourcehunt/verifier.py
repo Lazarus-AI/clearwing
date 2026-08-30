@@ -18,15 +18,31 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, cast
 
-from clearwing.llm import AsyncLLMClient, BudgetExceeded, extract_json_object
+from clearwing.llm import (
+    AsyncLLMClient,
+    BudgetExceeded,
+    NativeToolSpec,
+    extract_json_object,
+)
 from clearwing.reporting.safety import redact_text, redact_tree
 
+from .dynamic_verification import (
+    clamp_dynamic_evidence_level,
+    run_tool_assisted_verification,
+)
 from .patcher import _invoke_rerun_poc
-from .state import EVIDENCE_LEVELS, EvidenceLevel, Finding, evidence_at_or_above
+from .state import (
+    EVIDENCE_LEVELS,
+    EvidenceLevel,
+    Finding,
+    VerificationOutcome,
+    evidence_at_or_above,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +152,8 @@ class VerifierResult:
     patch_oracle_passed: bool | None = None  # None = not attempted
     patch_oracle_diff: str = ""
     patch_oracle_notes: str = ""
+    dynamic_evidence: list[dict[str, Any]] = field(default_factory=list)
+    outcome: VerificationOutcome | None = None
 
 
 # --- Verifier agent ---------------------------------------------------------
@@ -192,6 +210,8 @@ class Verifier:
         self,
         finding: Finding,
         file_content: str = "",
+        *,
+        verification_tools: Sequence[NativeToolSpec] | None = None,
     ) -> VerifierResult:
         """Run a single verification pass on one finding.
 
@@ -202,7 +222,25 @@ class Verifier:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
         try:
-            response = await self.llm.aask_text(system=system_prompt, user=user_msg)
+            if verification_tools:
+                verification = await run_tool_assisted_verification(
+                    self.llm,
+                    system_prompt=system_prompt,
+                    user_message=user_msg,
+                    tools=verification_tools,
+                    product_file=str(finding.get("file") or "") or None,
+                )
+                response = verification.response
+                if verification.completed_dynamic_calls == 0:
+                    result = self._error_result(
+                        finding,
+                        response.first_text or "",
+                        "dynamic verification incomplete: no build, run, or fuzz tool completed",
+                    )
+                    result.dynamic_evidence = list(verification.evidence)
+                    return result
+            else:
+                response = await self.llm.aask_text(system=system_prompt, user=user_msg)
             content = response.first_text or ""
         except BudgetExceeded:
             raise
@@ -217,9 +255,23 @@ class Verifier:
                 counter_argument="",
                 tie_breaker=f"verifier error: {e}",
                 duplicate_cve=None,
+                outcome="operational_error",
             )
 
-        return self._parse_response(finding, content)
+        result = self._parse_response(finding, content)
+        if verification_tools:
+            result.dynamic_evidence = list(verification.evidence)
+            clamped = clamp_dynamic_evidence_level(
+                result.evidence_level,
+                qualifying_crash_calls=verification.qualifying_crash_calls,
+            )
+            if clamped != result.evidence_level:
+                result.evidence_level = clamped
+                result.tie_breaker = (
+                    "Host evidence gate limited the model-selected evidence level. "
+                    + result.tie_breaker
+                ).strip()
+        return result
 
     def _build_user_message(self, finding: Finding, file_content: str) -> str:
         # Note: we deliberately do NOT include the hunter's reasoning chain
@@ -294,8 +346,8 @@ class Verifier:
             str(finding.get("code_snippet") or ""),
             str(finding.get("crash_evidence") or ""),
         ]
-        for field in text_fields:
-            for match in _LINE_REF_RE.finditer(field):
+        for text_field in text_fields:
+            for match in _LINE_REF_RE.finditer(text_field):
                 start = int(match.group(1))
                 end = int(match.group(2) or start)
                 refs.extend(range(start, min(end, start + 6) + 1))
@@ -347,6 +399,7 @@ class Verifier:
             tie_breaker=str(parsed.get("tie_breaker", "")),
             duplicate_cve=parsed.get("duplicate_cve"),
             raw_response=content,
+            outcome="confirmed" if is_real else "refuted",
         )
 
     def _error_result(
@@ -365,6 +418,7 @@ class Verifier:
             tie_breaker=reason,
             duplicate_cve=None,
             raw_response=raw,
+            outcome="operational_error",
         )
 
     # --- v0.3 patch oracle -------------------------------------------------
@@ -484,6 +538,8 @@ def apply_verifier_result(
             finding["patch_oracle_passed"] = result.patch_oracle_passed
             if result.patch_oracle_passed:
                 finding.bump_evidence("root_cause_explained")
+        if result.dynamic_evidence:
+            finding["verification_evidence"] = result.dynamic_evidence
     else:
         # Legacy dict path
         finding["verified"] = result.is_real  # type: ignore[index]
@@ -508,4 +564,6 @@ def apply_verifier_result(
                     level = "suspicion"
                 if EVIDENCE_LEVELS.index("root_cause_explained") > EVIDENCE_LEVELS.index(level):
                     finding["evidence_level"] = "root_cause_explained"  # type: ignore[index]
+        if result.dynamic_evidence:
+            finding["verification_evidence"] = result.dynamic_evidence  # type: ignore[index]
     return finding
