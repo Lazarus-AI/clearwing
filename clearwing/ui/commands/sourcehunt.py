@@ -1472,12 +1472,16 @@ def _public_result(result: Any) -> dict[str, Any]:
 
     findings = list(result.findings)
     verified_findings = list(result.verified_findings)
+    exploited_findings = list(result.exploited_findings)
 
     return {
         "status": text(result.status, 64),
         "findings": findings_bucket(findings),
         "verified_findings": findings_bucket(verified_findings),
+        "exploited_findings": findings_bucket(exploited_findings),
         "finding_count": len(findings),
+        "verified_finding_count": len(verified_findings),
+        "exploited_finding_count": len(exploited_findings),
         "files_ranked": result.files_ranked,
         "files_hunted": result.files_hunted,
         "duration_seconds": result.duration_seconds,
