@@ -121,6 +121,11 @@ and sanitizer-image sandbox features. `genai-pyo3` ships as prebuilt
 wheels on PyPI (linux x86_64/aarch64, macOS universal2, windows x86_64,
 Python 3.9–3.13), so no Rust toolchain is needed for installation.
 
+SourceHunt uses Docker by default. Deployments with a trusted external
+sandbox service can set `CLEARWING_SANDBOX_ENDPOINT` to a Unix socket
+(`unix:///run/clearwing/sandbox.sock`) or an inherited full-duplex socket
+(`fd://4`). See the [sandbox backend contract](docs/sandbox-backends.md).
+
 ## Quickstart
 
 ```bash

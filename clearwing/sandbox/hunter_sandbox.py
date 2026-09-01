@@ -4,7 +4,7 @@ Lifecycle:
     1. SourceHuntRunner instantiates HunterSandbox(repo_path, languages).
     2. .build_image() runs once after preprocessing — produces a tagged image
        with the toolchain, apt deps, and sanitizer flags pre-baked.
-    3. Each hunter agent calls .spawn(session_id) → SandboxContainer with
+    3. Each hunter agent calls .spawn(session_id) → SandboxInstance with
        /workspace mounted read-only and /scratch as a tmpfs scratch dir.
     4. .cleanup() removes spawned containers and (optionally) the image.
 """
@@ -23,20 +23,26 @@ import time
 
 from clearwing.core.events import EventBus
 
+from .backend import (
+    SandboxBackend,
+    SandboxImageBuild,
+    SandboxInstance,
+    sandbox_backend_from_env,
+)
 from .builders import (
     BuildRecipe,
     BuildSystemDetector,
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
-from .container import SandboxConfig, SandboxContainer
+from .container import SandboxConfig
 from .seccomp_profiles import get_seccomp_profile
 
 logger = logging.getLogger(__name__)
 
 
 class HunterSandbox:
-    """Per-hunt sanitizer-instrumented Docker image and container manager.
+    """Per-hunt sanitizer image and sandbox-instance manager.
 
     Builds an image with the project's build dependencies and ASan/UBSan
     flags, then spawns no-network containers for hunter agents that mount
@@ -75,6 +81,7 @@ class HunterSandbox:
         deep_agent_mode: bool = False,
         post_install_commands: list[str] | None = None,
         default_cpus: float | None = None,
+        backend: SandboxBackend | None = None,
     ):
         self._validate_cpu_limit(default_cpus, name="default_cpus")
         self.repo_path = os.path.abspath(repo_path)
@@ -99,10 +106,19 @@ class HunterSandbox:
             self._optional_packages.extend(self.DEEP_AGENT_OPTIONAL_PACKAGES)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
+        self.backend = (
+            backend
+            if backend is not None
+            else sandbox_backend_from_env(
+                self._get_client,
+                process=subprocess,
+                temporary_directory=tempfile.TemporaryDirectory,
+            )
+        )
         self._image_tag: str | None = None  # primary variant tag
         # Variant image map — {variant_key: image_tag}
         self._variant_images: dict[str, str] = {}
-        self._spawned: list[SandboxContainer] = []
+        self._spawned: list[SandboxInstance] = []
         self._default_cpus = None if default_cpus is None else float(default_cpus)
         self._resolved_default_cpus: float | None = None
         self._available_cpus: float | None = None
@@ -144,16 +160,16 @@ class HunterSandbox:
 
     def _detect_available_cpus(self) -> tuple[float, str]:
         try:
-            daemon_cpus = self._get_client().info().get("NCPU")
+            daemon_cpus, source = self.backend.available_cpus()
             if (
                 isinstance(daemon_cpus, (int, float))
                 and not isinstance(daemon_cpus, bool)
                 and math.isfinite(daemon_cpus)
                 and daemon_cpus > 0
             ):
-                return float(daemon_cpus), "Docker daemon"
+                return float(daemon_cpus), source
         except Exception:
-            logger.debug("Could not query Docker daemon CPU count", exc_info=True)
+            logger.debug("Could not query sandbox backend CPU count", exc_info=True)
 
         try:
             get_affinity = getattr(os, "sched_getaffinity", None)
@@ -229,78 +245,52 @@ class HunterSandbox:
         return "linux/amd64"
 
     def _build_variant_image(self, sanitizers: list[str]) -> str:
-        """Build one sandbox image for the given sanitizer combo.
+        """Prepare one sandbox image for the given sanitizer combo.
 
-        Uses the `docker build` CLI instead of the Python SDK's images.build()
-        because the SDK eagerly resolves ALL credential helpers configured in
-        ~/.docker/config.json. If any helper errors (e.g. docker-credential-gcloud
-        with an expired token), the entire build fails — even though the base
-        image doesn't need that registry. The CLI only authenticates against
-        registries it actually needs to pull from.
+        The default backend uses the ``docker build`` CLI so it only resolves
+        credentials for registries the build actually contacts. External
+        backends receive the same content-addressed Dockerfile build request.
         """
         dockerfile = self._render_dockerfile(sanitizers=sanitizers)
         tag = self._compute_tag(dockerfile, sanitizers=sanitizers)
 
-        # Check cache via CLI — avoids credential helper issues on cache check too
-        from .dind import get_subprocess_env
-
-        docker_env = get_subprocess_env()
-        check = subprocess.run(
-            ["docker", "image", "inspect", tag],
-            capture_output=True, timeout=10, env=docker_env,
+        build = SandboxImageBuild(
+            image=tag,
+            dockerfile=dockerfile,
+            platform=self._target_platform(),
+            timeout_seconds=300,
         )
-        if check.returncode == 0:
+        san_str = ",".join(sanitizers) if sanitizers else "none"
+        logger.info(
+            "Preparing sourcehunt sandbox image %s (backend=%s, sanitizers=%s, platform=%s)",
+            tag,
+            self.backend.name,
+            san_str,
+            build.platform,
+        )
+        EventBus().emit_message(
+            f"sandbox preparing  backend={self.backend.name}  "
+            f"base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
+            f"  sanitizers={san_str}  tag={tag[:16]}",
+            "info",
+        )
+        _t = time.monotonic()
+        try:
+            cached = self.backend.ensure_image(
+                build,
+                on_output=lambda line: EventBus().emit_message(f"sandbox | {line}", "debug"),
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.warning("Sandbox image preparation failed: %s", e)
+            logger.debug("Sandbox image preparation failed", exc_info=True)
+            raise RuntimeError(f"Failed to prepare sandbox image: {e}") from e
+        if cached:
             logger.debug("Reusing sourcehunt sandbox image %s", tag)
             EventBus().emit_message(f"sandbox cached  tag={tag[:16]}", "info")
             return tag
-
-        with tempfile.TemporaryDirectory(prefix="clearwing-sandbox-build-") as build_dir:
-            dockerfile_path = os.path.join(build_dir, "Dockerfile")
-            with open(dockerfile_path, "w", encoding="utf-8") as f:
-                f.write(dockerfile)
-
-            platform_flag = self._target_platform()
-            san_str = ",".join(sanitizers) if sanitizers else "none"
-            logger.info(
-                "Building sourcehunt sandbox image %s (sanitizers=%s, platform=%s)",
-                tag,
-                san_str,
-                platform_flag,
-            )
-            EventBus().emit_message(
-                f"sandbox building  base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
-                f"  sanitizers={san_str}  tag={tag[:16]}",
-                "info",
-            )
-            _t = time.monotonic()
-            try:
-                proc = subprocess.Popen(
-                    ["docker", "build", "--platform", platform_flag, "-t", tag, build_dir],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    env=docker_env,
-                )
-                output_lines: list[str] = []
-                assert proc.stdout is not None
-                for line in proc.stdout:
-                    line = line.rstrip()
-                    if line:
-                        output_lines.append(line)
-                        EventBus().emit_message(f"docker | {line}", "debug")
-                proc.wait(timeout=300)
-                if proc.returncode != 0:
-                    raise RuntimeError("\n".join(output_lines[-40:]))
-            except subprocess.TimeoutExpired as e:
-                proc.kill()
-                raise RuntimeError("Sandbox image build timed out after 300s") from e
-            except RuntimeError:
-                raise
-            except Exception as e:
-                logger.warning("Sandbox image build failed: %s", e)
-                logger.debug("Sandbox image build failed", exc_info=True)
-                raise RuntimeError(f"Failed to build sandbox image: {e}") from e
-
+        logger.debug("Prepared sandbox image %s in %.2fs", tag, time.monotonic() - _t)
         EventBus().emit_message(f"sandbox ready  tag={tag[:16]}", "info")
         return tag
 
@@ -314,7 +304,7 @@ class HunterSandbox:
         writable_workspace: bool = False,
         cpus: float | None = None,
         runtime: str | None = None,
-    ) -> SandboxContainer:
+    ) -> SandboxInstance:
         """Start a fresh container from one of the built variant images.
 
         The container has:
@@ -336,7 +326,7 @@ class HunterSandbox:
             cpus: CPU limit. ``None`` uses the manager default, while 0
                 explicitly disables the limit. Passed to SandboxConfig.
 
-        Returns a SandboxContainer ready for exec/write/read.
+        Returns a SandboxInstance ready for exec/write/read.
         """
         if self._image_tag is None:
             self.build_image()
@@ -396,10 +386,12 @@ class HunterSandbox:
             runtime=runtime,
         )
 
-        sb = SandboxContainer(cfg)
+        sb = self.backend.create(cfg)
         _t = time.monotonic()
         sb.start()
-        logger.debug("Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t)
+        logger.debug(
+            "Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t
+        )
 
         if writable_workspace:
             sb.copy_tree_into(self.repo_path, "/workspace")
@@ -450,8 +442,7 @@ class HunterSandbox:
 
         if remove_image and self._image_tag:
             try:
-                client = self._get_client()
-                client.images.remove(self._image_tag, force=True)
+                self.backend.remove_image(self._image_tag)
             except Exception:
                 logger.debug("HunterSandbox image remove failed", exc_info=True)
 

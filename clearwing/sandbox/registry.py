@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class ContainerRegistry:
-    """Process-wide registry of live SandboxContainer instances."""
+    """Process-wide registry of live sandbox instances."""
 
     _instance: ContainerRegistry | None = None
     _init_lock = threading.Lock()

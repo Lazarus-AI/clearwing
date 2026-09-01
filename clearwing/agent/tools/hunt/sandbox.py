@@ -2,7 +2,7 @@
 
 `HunterContext` is the mutable state passed to every per-hunter tool
 builder (discovery/analysis/reporting). It owns the primary
-SandboxContainer plus a cache of sanitizer-variant containers so that
+SandboxInstance plus a cache of sanitizer-variant sandboxes so that
 an MSan hunter can transparently spawn a second image without the
 caller tracking it.
 
@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import cast
 
-from clearwing.sandbox.container import SandboxContainer
+from clearwing.sandbox.backend import SandboxInstance
 from clearwing.sourcehunt.state import Finding
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class HunterContext:
     """Per-hunter mutable context. Closured into every tool for state access."""
 
     repo_path: str  # absolute host path
-    sandbox: SandboxContainer | None = None  # primary sandbox; set by hunt loop
+    sandbox: SandboxInstance | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
     trace_steps: list = field(default_factory=list)  # accumulator for TraceStep dicts
     files_read: set = field(default_factory=set)  # files accessed via read_source_file
@@ -43,7 +43,7 @@ class HunterContext:
     # Variant containers are cached in `variant_sandboxes` and torn down
     # at hunter cleanup time.
     sandbox_manager: object | None = None  # HunterSandbox (avoiding circular import)
-    variant_sandboxes: dict = field(default_factory=dict)  # {variant_key: SandboxContainer}
+    variant_sandboxes: dict = field(default_factory=dict)  # {variant_key: SandboxInstance}
     default_sanitizers: tuple = ("asan", "ubsan")
     findings_pool: object | None = None  # FindingsPool (avoiding circular import)
     trajectory_dir: object | None = None  # Path override for transcript output
@@ -61,8 +61,8 @@ class HunterContext:
     def get_sandbox_for_variant(
         self,
         sanitizer_variant: list[str] | None = None,
-    ) -> SandboxContainer | None:
-        """Return the SandboxContainer for the requested sanitizer variant.
+    ) -> SandboxInstance | None:
+        """Return the sandbox instance for the requested sanitizer variant.
 
         - variant=None or matches default → returns self.sandbox (fast path)
         - different variant → spawns from self.sandbox_manager and caches
@@ -77,7 +77,7 @@ class HunterContext:
         key = "+".join(sorted(chosen))
         cached = self.variant_sandboxes.get(key)
         if cached is not None:
-            return cast(SandboxContainer, cached)
+            return cast(SandboxInstance, cached)
         # Need to spawn a new variant container
         if self.sandbox_manager is None:
             # No manager — degrade to the primary sandbox
@@ -95,7 +95,7 @@ class HunterContext:
             logger.warning("Failed to spawn variant sandbox %s", chosen, exc_info=True)
             return self.sandbox
         self.variant_sandboxes[key] = sb
-        return cast(SandboxContainer, sb)
+        return cast(SandboxInstance, sb)
 
     def cleanup_variants(self) -> None:
         """Stop every cached variant container. Call when the hunter finishes."""
