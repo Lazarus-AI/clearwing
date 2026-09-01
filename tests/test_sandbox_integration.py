@@ -25,20 +25,18 @@ from __future__ import annotations
 import platform
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
 
-from clearwing.sandbox.builders import DEFAULT_BASE_IMAGES, BuildSystemDetector
+from clearwing.sandbox.backend import DockerSandboxBackend
+from clearwing.sandbox.builders import BuildSystemDetector
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 
 def _docker_available() -> bool:
     try:
-        result = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=10
-        )
+        result = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -61,12 +59,12 @@ def c_repo(tmp_path: Path) -> Path:
         "CC=gcc\nCFLAGS ?= -Wall\n\nall: main\n\nmain: main.c\n\t$(CC) $(CFLAGS) -o $@ $<\n"
     )
     (tmp_path / "main.c").write_text(
-        '#include <stdio.h>\n#include <string.h>\n\n'
+        "#include <stdio.h>\n#include <string.h>\n\n"
         "int main(int argc, char **argv) {\n"
-        '    char buf[64];\n'
-        '    if (argc > 1) strcpy(buf, argv[1]);\n'
+        "    char buf[64];\n"
+        "    if (argc > 1) strcpy(buf, argv[1]);\n"
         '    printf("ok\\n");\n'
-        '    return 0;\n'
+        "    return 0;\n"
         "}\n"
     )
     return tmp_path
@@ -103,7 +101,9 @@ def go_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def python_repo(tmp_path: Path) -> Path:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test_sandbox'\nversion = '0.1.0'\n")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'test_sandbox'\nversion = '0.1.0'\n"
+    )
     (tmp_path / "main.py").write_text("print('ok')\n")
     return tmp_path
 
@@ -136,7 +136,7 @@ class TestDockerSdkVsCliBuilds:
         """
         sb = HunterSandbox(repo_path=str(c_repo))
         try:
-            tag = sb.build_image()
+            sb.build_image()
             # If we get here, SDK build works (no cred helper issue)
             sb.cleanup(remove_image=True)
         except RuntimeError as e:
@@ -162,7 +162,9 @@ class TestDockerSdkVsCliBuilds:
 
             result = subprocess.run(
                 ["docker", "build", "--progress=plain", "-t", tag, build_dir],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
 
         assert result.returncode == 0, (
@@ -171,7 +173,8 @@ class TestDockerSdkVsCliBuilds:
         # Verify image exists
         inspect = subprocess.run(
             ["docker", "image", "inspect", tag],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         assert inspect.returncode == 0
         subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=10)
@@ -190,7 +193,9 @@ class TestDockerSdkVsCliBuilds:
 
             result = subprocess.run(
                 ["docker", "build", "--progress=plain", "-t", tag, build_dir],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
 
         assert result.returncode == 0, (
@@ -214,12 +219,12 @@ class TestImageBuildActuallyWorks:
             (Path(build_dir) / "Dockerfile").write_text(dockerfile)
             result = subprocess.run(
                 ["docker", "build", "--progress=plain", "-t", tag, build_dir],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"docker build failed:\n{result.stderr[-2000:]}"
-                )
+                raise RuntimeError(f"docker build failed:\n{result.stderr[-2000:]}")
         return tag
 
     @pytest.mark.integration
@@ -230,7 +235,8 @@ class TestImageBuildActuallyWorks:
         assert tag.startswith("clearwing-sourcehunt:")
         result = subprocess.run(
             ["docker", "image", "inspect", tag],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         assert result.returncode == 0, f"Image {tag} not found after build"
         subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=10)
@@ -243,7 +249,8 @@ class TestImageBuildActuallyWorks:
         assert tag.startswith("clearwing-sourcehunt:")
         result = subprocess.run(
             ["docker", "image", "inspect", tag],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         assert result.returncode == 0, f"Image {tag} not found after build"
         subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=10)
@@ -257,7 +264,9 @@ class TestImageBuildActuallyWorks:
         try:
             result = subprocess.run(
                 ["docker", "run", "--rm", tag, "cmake", "--version"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert result.returncode == 0, f"cmake not available: {result.stderr}"
             assert "cmake version" in result.stdout
@@ -273,13 +282,19 @@ class TestImageBuildActuallyWorks:
         try:
             result = subprocess.run(
                 [
-                    "docker", "run", "--rm", tag,
-                    "sh", "-c",
+                    "docker",
+                    "run",
+                    "--rm",
+                    tag,
+                    "sh",
+                    "-c",
                     "echo 'int main(){}' > /tmp/t.c && "
                     "gcc -fsanitize=address -o /tmp/t /tmp/t.c && "
                     "echo SUCCESS",
                 ],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert result.returncode == 0, (
                 f"gcc -fsanitize=address failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -297,7 +312,9 @@ class TestImageBuildActuallyWorks:
         try:
             result = subprocess.run(
                 ["docker", "run", "--rm", tag, "rg", "--version"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert result.returncode == 0, f"ripgrep not available: {result.stderr}"
         finally:
@@ -311,7 +328,9 @@ class TestImageBuildActuallyWorks:
         try:
             result = subprocess.run(
                 ["docker", "run", "--rm", tag, "python3", "--version"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert result.returncode == 0
         finally:
@@ -348,13 +367,10 @@ class TestContainerSpawnAndExec:
             # The important thing is gcc + asan are available.
             # Let's compile in /scratch instead
             result = container.exec(
-                "cp /workspace/main.c /scratch/ && "
-                "cd /scratch && gcc $CFLAGS -o main main.c 2>&1",
+                "cp /workspace/main.c /scratch/ && cd /scratch && gcc $CFLAGS -o main main.c 2>&1",
                 timeout=30,
             )
-            assert result.exit_code == 0, (
-                f"ASan compile failed:\n{result.stdout}\n{result.stderr}"
-            )
+            assert result.exit_code == 0, f"ASan compile failed:\n{result.stdout}\n{result.stderr}"
 
             # Run — should work without crashing
             result = container.exec("/scratch/main", timeout=10)
@@ -392,13 +408,11 @@ class TestContainerSpawnAndExec:
             # Build with cmake
             result = container.exec(
                 "cd /scratch && mkdir -p build && cd build && "
-                "cmake -DCMAKE_C_FLAGS=\"$CFLAGS\" -DCMAKE_CXX_FLAGS=\"$CXXFLAGS\" .. && "
+                'cmake -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" .. && '
                 "make 2>&1",
                 timeout=60,
             )
-            assert result.exit_code == 0, (
-                f"cmake build failed:\n{result.stdout}\n{result.stderr}"
-            )
+            assert result.exit_code == 0, f"cmake build failed:\n{result.stdout}\n{result.stderr}"
 
             # Run
             result = container.exec("/scratch/build/main", timeout=10)
@@ -480,45 +494,53 @@ class TestPlatformBuild:
     def test_base_image_pullable(self, c_repo: Path):
         """Verify the configured base image can be pulled."""
         recipe = BuildSystemDetector.detect(str(c_repo))
-        base = recipe.base_image
+        base = DockerSandboxBackend()._profile_images[recipe.profile]
         result = subprocess.run(
             ["docker", "pull", base],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
-        assert result.returncode == 0, (
-            f"Cannot pull base image {base}:\n{result.stderr}"
-        )
+        assert result.returncode == 0, f"Cannot pull base image {base}:\n{result.stderr}"
 
     @pytest.mark.integration
     @pytest.mark.timeout(180)
     def test_cpp_base_image_pullable(self, cpp_repo: Path):
         recipe = BuildSystemDetector.detect(str(cpp_repo))
-        base = recipe.base_image
+        base = DockerSandboxBackend()._profile_images[recipe.profile]
         result = subprocess.run(
             ["docker", "pull", base],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
-        assert result.returncode == 0, (
-            f"Cannot pull base image {base}:\n{result.stderr}"
-        )
+        assert result.returncode == 0, f"Cannot pull base image {base}:\n{result.stderr}"
 
     @pytest.mark.integration
     @pytest.mark.timeout(180)
-    def test_apt_install_common_packages_native_arch(self, c_repo: Path):
-        """Verify COMMON_APT_PACKAGES install on native arch."""
+    def test_required_features_resolve_on_native_arch(self, c_repo: Path):
+        """Verify Docker's private feature packages install on native arch."""
         recipe = BuildSystemDetector.detect(str(c_repo))
-        base = recipe.base_image
-        from clearwing.sandbox.builders import COMMON_APT_PACKAGES
-
-        pkg_list = " ".join(COMMON_APT_PACKAGES)
+        backend = DockerSandboxBackend()
+        base = backend._profile_images[recipe.profile]
+        packages = [
+            package for feature in recipe.features for package in backend._feature_packages[feature]
+        ]
+        pkg_list = " ".join(dict.fromkeys(packages))
         result = subprocess.run(
             [
-                "docker", "run", "--rm", base,
-                "sh", "-c",
+                "docker",
+                "run",
+                "--rm",
+                base,
+                "sh",
+                "-c",
                 f"apt-get update -qq && "
                 f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {pkg_list} 2>&1",
             ],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         assert result.returncode == 0, (
             f"apt-get install failed for packages [{pkg_list}] in {base}:\n"
@@ -540,14 +562,18 @@ class TestPlatformBuild:
         2. strace is always available as the portable alternative.
         """
         sandbox = HunterSandbox(
-            str(c_repo), languages=["c"], deep_agent_mode=True,
+            str(c_repo),
+            languages=["c"],
+            deep_agent_mode=True,
         )
         tag = sandbox.build_image()
         try:
             # strace must always be present
             result = subprocess.run(
                 ["docker", "run", "--rm", tag, "strace", "--version"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             assert result.returncode == 0, (
                 f"strace missing from deep_agent_mode image: {result.stderr}"
@@ -556,7 +582,9 @@ class TestPlatformBuild:
             # ltrace is best-effort — document its presence/absence
             ltrace_result = subprocess.run(
                 ["docker", "run", "--rm", tag, "which", "ltrace"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             host_arch = platform.machine()
             if host_arch in ("arm64", "aarch64"):
@@ -564,9 +592,7 @@ class TestPlatformBuild:
                 assert True
             else:
                 # On x86_64 we expect ltrace to have installed
-                assert ltrace_result.returncode == 0, (
-                    f"ltrace should be available on {host_arch}"
-                )
+                assert ltrace_result.returncode == 0, f"ltrace should be available on {host_arch}"
         finally:
             sandbox.cleanup(remove_image=True)
 
@@ -579,20 +605,30 @@ class TestPlatformBuild:
         If ANY package is unavailable, the entire Dockerfile build fails because
         apt-get runs as one RUN layer.
         """
-        recipe = BuildSystemDetector.detect(str(c_repo))
-        base = recipe.base_image
-        from clearwing.sandbox.builders import COMMON_APT_PACKAGES
-
-        all_packages = COMMON_APT_PACKAGES + list(HunterSandbox.DEEP_AGENT_PACKAGES)
+        sandbox = HunterSandbox(str(c_repo), deep_agent_mode=True)
+        recipe = sandbox.build_recipe
+        backend = DockerSandboxBackend()
+        base = backend._profile_images[recipe.profile]
+        features = [*recipe.features, *sandbox.extra_features]
+        all_packages = [
+            package for feature in features for package in backend._feature_packages[feature]
+        ]
+        all_packages = list(dict.fromkeys(all_packages))
         pkg_list = " ".join(all_packages)
         result = subprocess.run(
             [
-                "docker", "run", "--rm", base,
-                "sh", "-c",
+                "docker",
+                "run",
+                "--rm",
+                base,
+                "sh",
+                "-c",
                 f"apt-get update -qq && "
                 f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {pkg_list} 2>&1",
             ],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode != 0:
             # Find which package failed
@@ -600,12 +636,18 @@ class TestPlatformBuild:
             for pkg in all_packages:
                 check = subprocess.run(
                     [
-                        "docker", "run", "--rm", base,
-                        "sh", "-c",
+                        "docker",
+                        "run",
+                        "--rm",
+                        base,
+                        "sh",
+                        "-c",
                         f"apt-get update -qq 2>/dev/null && "
                         f"apt-cache show {pkg} >/dev/null 2>&1 && echo FOUND || echo MISSING",
                     ],
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
                 if "MISSING" in check.stdout:
                     missing.append(pkg)
@@ -624,7 +666,9 @@ class TestPlatformBuild:
         """Document what arch Docker uses by default on this host."""
         result = subprocess.run(
             ["docker", "run", "--rm", "alpine:latest", "uname", "-m"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         container_arch = result.stdout.strip()
         host_arch = platform.machine()
@@ -653,7 +697,8 @@ class TestMsanVariant:
         tag = sb.build_image()
         result = subprocess.run(
             ["docker", "image", "inspect", tag],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         assert result.returncode == 0
         sb.cleanup(remove_image=True)
@@ -700,11 +745,11 @@ class TestDeepAgentMode:
         for tool in ["valgrind", "python3", "git"]:
             result = subprocess.run(
                 ["docker", "run", "--rm", tag, "which", tool],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
-            assert result.returncode == 0, (
-                f"Deep agent tool {tool!r} not found in image {tag}"
-            )
+            assert result.returncode == 0, f"Deep agent tool {tool!r} not found in image {tag}"
         sb.cleanup(remove_image=True)
 
     @pytest.mark.integration
@@ -755,9 +800,7 @@ class TestDeepAgentMode:
                 "cd /workspace && gcc $CFLAGS -o main main.c 2>&1",
                 timeout=30,
             )
-            assert result.exit_code == 0, (
-                f"Compile failed:\n{result.stdout}\n{result.stderr}"
-            )
+            assert result.exit_code == 0, f"Compile failed:\n{result.stdout}\n{result.stderr}"
 
             # Trigger overflow
             result = container.exec(
@@ -765,8 +808,6 @@ class TestDeepAgentMode:
                 timeout=10,
             )
             combined = (result.stdout or "") + (result.stderr or "")
-            assert "AddressSanitizer" in combined, (
-                f"Expected ASan report, got:\n{combined}"
-            )
+            assert "AddressSanitizer" in combined, f"Expected ASan report, got:\n{combined}"
         finally:
             sb.cleanup(remove_image=True)

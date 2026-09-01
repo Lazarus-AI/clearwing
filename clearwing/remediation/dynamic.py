@@ -33,7 +33,7 @@ class SandboxPatchValidator:
                 notes="finding has no PoC input for sandbox replay",
             )
         if not self._built:
-            self.manager.build_image()
+            self.manager.prepare_environment()
             self._built = True
         sandbox = self.manager.spawn(runtime=self.runtime)
         try:

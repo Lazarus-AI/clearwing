@@ -234,25 +234,24 @@ class TestHunterSandboxVariantImages:
         )
         assert asan_tag != msan_tag
 
-    def test_dockerfile_includes_variant_comment(self, temp_c_repo):
+    def test_docker_materialization_records_sanitizer_requirements(self, temp_c_repo):
         sb = HunterSandbox(repo_path=str(temp_c_repo))
         df = sb._render_dockerfile(sanitizers=["msan", "ubsan"])
-        assert "Sanitizer variant: msan,ubsan" in df
+        assert "Sanitizer requirements: msan,ubsan" in df
 
-    def test_msan_dockerfile_has_track_origins(self, temp_c_repo):
+    def test_msan_environment_has_track_origins(self, temp_c_repo):
         sb = HunterSandbox(repo_path=str(temp_c_repo))
-        df = sb._render_dockerfile(sanitizers=["msan"])
-        assert "-fsanitize=memory" in df
-        assert "-fsanitize-memory-track-origins" in df
-        # MSan dockerfile should NOT mention ASan
-        assert "-fsanitize=address" not in df
+        environment = sb._environment_spec(["msan"]).environment
+        assert "-fsanitize=memory" in environment["CFLAGS"]
+        assert "-fsanitize-memory-track-origins" in environment["CFLAGS"]
+        assert "-fsanitize=address" not in environment["CFLAGS"]
 
-    def test_asan_dockerfile_has_no_msan_flags(self, temp_c_repo):
+    def test_asan_environment_has_no_msan_flags(self, temp_c_repo):
         sb = HunterSandbox(repo_path=str(temp_c_repo))
-        df = sb._render_dockerfile(sanitizers=["asan", "ubsan"])
-        assert "-fsanitize=address" in df
-        assert "-fsanitize=undefined" in df
-        assert "-fsanitize=memory" not in df
+        environment = sb._environment_spec(["asan", "ubsan"]).environment
+        assert "-fsanitize=address" in environment["CFLAGS"]
+        assert "-fsanitize=undefined" in environment["CFLAGS"]
+        assert "-fsanitize=memory" not in environment["CFLAGS"]
 
     def test_build_variant_images_returns_map(self, temp_c_repo, mock_docker):
         mock_docker.images.get.side_effect = Exception("not found")

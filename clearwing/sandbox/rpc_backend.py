@@ -7,7 +7,6 @@ import binascii
 import itertools
 import json
 import logging
-import os
 import socket
 import threading
 from collections.abc import Callable
@@ -15,8 +14,13 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from .backend import SandboxImageBuild, SandboxInstance
-from .container import ExecResult, SandboxConfig
+from .backend import (
+    SandboxEnvironment,
+    SandboxEnvironmentSpec,
+    SandboxInstance,
+    SandboxRunConfig,
+)
+from .container import ExecResult
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +49,9 @@ class JsonRpcConnection:
 
     Each message is a UTF-8 JSON object followed by a newline.  Calls are
     multiplexed by JSON-RPC id, so parallel SourceHunt workers do not serialize
-    their sandbox commands.  ``fd://N`` must name an already-connected Unix
-    stream socket; a one-way pipe is intentionally rejected.
+    their sandbox commands. ``fd://N`` transfers ownership of an
+    already-connected Unix stream socket to this connection; a one-way pipe is
+    intentionally rejected.
     """
 
     def __init__(self, endpoint: str, *, max_message_bytes: int = _MAX_RPC_BYTES):
@@ -206,12 +211,10 @@ def _connect(endpoint: str) -> socket.socket:
         descriptor_text = parsed.netloc or parsed.path.lstrip("/")
         if not descriptor_text.isdigit() or int(descriptor_text) < 3:
             raise ValueError("fd sandbox endpoint must name a descriptor of at least 3")
-        duplicate = os.dup(int(descriptor_text))
         try:
-            connection = socket.socket(fileno=duplicate)
-        except BaseException:
-            os.close(duplicate)
-            raise
+            connection = socket.socket(fileno=int(descriptor_text))
+        except OSError as error:
+            raise ValueError("fd sandbox endpoint must name a socket") from error
         if (
             connection.family != socket.AF_UNIX
             or connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
@@ -279,46 +282,62 @@ class SocketSandboxBackend:
             raise SandboxRpcError("sandbox.capacity returned invalid source")
         return (float(cpus) if cpus is not None else None), source
 
-    def ensure_image(
+    def ensure_environment(
         self,
-        build: SandboxImageBuild,
+        spec: SandboxEnvironmentSpec,
         on_output: Callable[[str], None] | None = None,
-    ) -> bool:
+    ) -> SandboxEnvironment:
         self._check_capabilities()
         result = _object(
             self._connection.call(
-                "sandbox.image.ensure",
-                {"build": asdict(build)},
-                timeout=build.timeout_seconds + 30,
+                "sandbox.environment.ensure",
+                {"spec": asdict(spec)},
+                timeout=spec.timeout_seconds + 30,
             ),
-            "sandbox.image.ensure",
+            "sandbox.environment.ensure",
         )
+        environment_ref = result.get("environment_ref")
+        if not isinstance(environment_ref, str) or not environment_ref:
+            raise SandboxRpcError("sandbox.environment.ensure returned an invalid environment_ref")
         cached = result.get("cached")
         if not isinstance(cached, bool):
-            raise SandboxRpcError("sandbox.image.ensure returned invalid cached state")
+            raise SandboxRpcError("sandbox.environment.ensure returned invalid cached state")
         output = result.get("output", [])
         if not isinstance(output, list) or any(not isinstance(line, str) for line in output):
-            raise SandboxRpcError("sandbox.image.ensure returned invalid output")
+            raise SandboxRpcError("sandbox.environment.ensure returned invalid output")
         if on_output is not None:
             for line in output:
                 on_output(line)
-        return cached
+        return SandboxEnvironment(environment_ref, cached)
 
-    def create(self, config: SandboxConfig) -> SandboxInstance:
+    def create(
+        self,
+        environment_ref: str,
+        config: SandboxRunConfig,
+    ) -> SandboxInstance:
         self._check_capabilities()
-        return SocketSandboxInstance(self._connection, config)
+        return SocketSandboxInstance(self._connection, environment_ref, config)
 
-    def remove_image(self, image: str) -> None:
+    def release_environment(self, environment_ref: str) -> None:
         self._check_capabilities()
-        self._connection.call("sandbox.image.remove", {"image": image})
+        self._connection.call(
+            "sandbox.environment.release",
+            {"environment_ref": environment_ref},
+        )
 
 
 class SocketSandboxInstance:
     """``SandboxInstance`` implemented by the JSON-RPC backend."""
 
-    def __init__(self, connection: JsonRpcConnection, config: SandboxConfig):
+    def __init__(
+        self,
+        connection: JsonRpcConnection,
+        environment_ref: str,
+        config: SandboxRunConfig,
+    ):
         self.config = config
         self._connection = connection
+        self._environment_ref = environment_ref
         self._sandbox_id: str | None = None
         self._short_id: str | None = None
         self.scratch_host_dir: str | None = None
@@ -329,7 +348,13 @@ class SocketSandboxInstance:
         if self._sandbox_id is not None:
             return self._sandbox_id
         result = _object(
-            self._connection.call("sandbox.start", {"config": asdict(self.config)}),
+            self._connection.call(
+                "sandbox.start",
+                {
+                    "environment_ref": self._environment_ref,
+                    "config": asdict(self.config),
+                },
+            ),
             "sandbox.start",
         )
         sandbox_id = result.get("sandbox_id")

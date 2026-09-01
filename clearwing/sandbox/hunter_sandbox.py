@@ -1,12 +1,13 @@
-"""HunterSandbox: builds and manages a sanitizer-instrumented container per hunt.
+"""HunterSandbox: prepares and manages isolated SourceHunt environments.
 
 Lifecycle:
     1. SourceHuntRunner instantiates HunterSandbox(repo_path, languages).
-    2. .build_image() runs once after preprocessing — produces a tagged image
-       with the toolchain, apt deps, and sanitizer flags pre-baked.
+    2. .prepare_environment() asks the configured backend for the required
+       toolchain, tools, and sanitizer support.
     3. Each hunter agent calls .spawn(session_id) → SandboxInstance with
        /workspace mounted read-only and /scratch as a tmpfs scratch dir.
-    4. .cleanup() removes spawned containers and (optionally) the image.
+    4. .cleanup() removes spawned instances and optionally releases prepared
+       environments.
 """
 
 from __future__ import annotations
@@ -24,9 +25,11 @@ import time
 from clearwing.core.events import EventBus
 
 from .backend import (
+    DockerSandboxBackend,
     SandboxBackend,
-    SandboxImageBuild,
+    SandboxEnvironmentSpec,
     SandboxInstance,
+    SandboxRunConfig,
     sandbox_backend_from_env,
 )
 from .builders import (
@@ -35,40 +38,34 @@ from .builders import (
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
-from .container import SandboxConfig
-from .seccomp_profiles import get_seccomp_profile
 
 logger = logging.getLogger(__name__)
 
 
 class HunterSandbox:
-    """Per-hunt sanitizer image and sandbox-instance manager.
+    """Per-hunt environment and sandbox-instance manager.
 
-    Builds an image with the project's build dependencies and ASan/UBSan
-    flags, then spawns no-network containers for hunter agents that mount
-    the source tree read-only.
+    Requests a logical toolchain environment with the project's build tools
+    and sanitizer support, then spawns no-network instances that mount the
+    source tree read-only. Providers decide how environments are materialized.
     """
 
     IMAGE_NAME_PREFIX = "clearwing-sourcehunt"
     AUTO_CPU_CAP = 3.0
     MIN_CPU_LIMIT = 0.5
 
-    # Default "extra" variants to build alongside the primary. These let
-    # a single HunterSandbox own both an ASan+UBSan image and an MSan
-    # image, and spawn containers from either one by name.
+    # Default extra variants to prepare alongside the primary. These let one
+    # HunterSandbox own both ASan+UBSan and MSan environments.
     DEFAULT_EXTRA_VARIANTS: tuple[tuple[str, ...], ...] = ()
 
-    DEEP_AGENT_PACKAGES = ["python3", "valgrind", "ccache", "git"]
-    # Packages that are useful but not available on all architectures.
-    # ltrace is x86_64-only (not packaged for arm64 on any Debian release).
-    # Installed in a separate best-effort layer so their absence doesn't
-    # fail the entire image build.
-    DEEP_AGENT_OPTIONAL_PACKAGES = ["ltrace"]
-    EXPLOIT_AGENT_PACKAGES = ["gdb", "python3-pip", "ruby", "binutils"]
-    EXPLOIT_POST_INSTALL = [
-        "pip3 install --break-system-packages pwntools ROPgadget seccomp-tools 2>/dev/null || true",
-        "gem install one_gadget 2>/dev/null || true",
+    DEEP_AGENT_FEATURES = [
+        "runtime.python",
+        "debug.valgrind",
+        "build.ccache",
+        "vcs.git",
     ]
+    # Library-call tracing is useful but unavailable on some architectures.
+    DEEP_AGENT_OPTIONAL_FEATURES = ["trace.library-calls"]
 
     def __init__(
         self,
@@ -76,10 +73,9 @@ class HunterSandbox:
         languages: list[str] | None = None,
         sanitizers: list[str] | None = None,  # primary combo
         extra_variants: list[list[str]] | None = None,  # e.g. [["msan"]]
-        extra_packages: list[str] | None = None,
+        extra_features: list[str] | None = None,
         build_recipe: BuildRecipe | None = None,
         deep_agent_mode: bool = False,
-        post_install_commands: list[str] | None = None,
         default_cpus: float | None = None,
         backend: SandboxBackend | None = None,
     ):
@@ -95,15 +91,14 @@ class HunterSandbox:
         ]
         for v in self.extra_variants:
             validate_sanitizer_combo(v)
-        self.extra_packages = list(extra_packages or [])
-        self._optional_packages: list[str] = []
-        self.post_install_commands = list(post_install_commands or [])
+        self.extra_features = list(extra_features or [])
+        self._optional_features: list[str] = []
         self.deep_agent_mode = deep_agent_mode
         if deep_agent_mode:
-            for pkg in self.DEEP_AGENT_PACKAGES:
-                if pkg not in self.extra_packages:
-                    self.extra_packages.append(pkg)
-            self._optional_packages.extend(self.DEEP_AGENT_OPTIONAL_PACKAGES)
+            for feature in self.DEEP_AGENT_FEATURES:
+                if feature not in self.extra_features:
+                    self.extra_features.append(feature)
+            self._optional_features.extend(self.DEEP_AGENT_OPTIONAL_FEATURES)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
         self.backend = (
@@ -115,9 +110,11 @@ class HunterSandbox:
                 temporary_directory=tempfile.TemporaryDirectory,
             )
         )
-        self._image_tag: str | None = None  # primary variant tag
-        # Variant image map — {variant_key: image_tag}
-        self._variant_images: dict[str, str] = {}
+        self._environment_ref: str | None = None
+        self._variant_environments: dict[str, str] = {}
+        # Compatibility aliases for callers that predate pluggable backends.
+        self._image_tag: str | None = None
+        self._variant_images = self._variant_environments
         self._spawned: list[SandboxInstance] = []
         self._default_cpus = None if default_cpus is None else float(default_cpus)
         self._resolved_default_cpus: float | None = None
@@ -199,100 +196,115 @@ class HunterSandbox:
             self._client = get_docker_client()
         return self._client
 
-    def build_image(self) -> str:
-        """Build the primary sandbox image. Returns its tag.
+    def prepare_environment(self) -> str:
+        """Prepare the primary environment and return its opaque reference.
 
-        Also builds any declared `extra_variants` so subsequent `spawn(variant=)`
-        calls can pick between them without another build pass. MSan is the
-        motivating case: it can't coexist with ASan in a single binary, so
-        the caller declares it as an extra variant.
+        Also prepares declared ``extra_variants`` so later ``spawn`` calls can
+        select them without another preparation pass. MSan is the motivating
+        case: it cannot coexist with ASan in a single instrumented binary.
         """
         primary_key = self._variant_key(self.sanitizers)
-        primary_tag = self._build_variant_image(self.sanitizers)
-        self._variant_images[primary_key] = primary_tag
-        self._image_tag = primary_tag
+        primary_ref = self._prepare_variant_environment(self.sanitizers)
+        self._variant_environments[primary_key] = primary_ref
+        self._environment_ref = primary_ref
+        self._image_tag = primary_ref
 
         for variant in self.extra_variants:
             key = self._variant_key(variant)
             if key == primary_key:
-                continue  # already built
-            tag = self._build_variant_image(variant)
-            self._variant_images[key] = tag
+                continue
+            environment_ref = self._prepare_variant_environment(variant)
+            self._variant_environments[key] = environment_ref
 
-        return primary_tag
+        return primary_ref
+
+    def build_image(self) -> str:
+        """Compatibility alias for :meth:`prepare_environment`."""
+
+        return self.prepare_environment()
+
+    def prepare_variant_environments(self) -> dict[str, str]:
+        """Prepare every declared variant and return opaque references.
+
+        Providers may satisfy an equivalent request from their own cache.
+        """
+        self.prepare_environment()
+        return dict(self._variant_environments)
 
     def build_variant_images(self) -> dict[str, str]:
-        """Build every declared variant. Returns {variant_key: image_tag}.
+        """Compatibility alias for :meth:`prepare_variant_environments`."""
 
-        Idempotent — variants that are already built (cached by content hash
-        in the docker daemon) just get re-tagged without rebuilding.
-        """
-        self.build_image()
-        return dict(self._variant_images)
+        return self.prepare_variant_environments()
 
-    def _target_platform(self) -> str:
-        """Docker platform string for builds.
-
-        C/C++ toolchains (gcc, valgrind, sanitizers) run painfully slow under
-        qemu on Apple Silicon and occasionally miscompile. Use native arm64 for
-        those languages; pin amd64 for everything else for reproducibility.
-        """
-        import platform as _plat
-
-        lang = (self.build_recipe.primary_language or "").lower()
-        if lang in ("c", "cpp", "c++") and _plat.machine() in ("arm64", "aarch64"):
-            return "linux/arm64"
-        return "linux/amd64"
-
-    def _build_variant_image(self, sanitizers: list[str]) -> str:
-        """Prepare one sandbox image for the given sanitizer combo.
-
-        The default backend uses the ``docker build`` CLI so it only resolves
-        credentials for registries the build actually contacts. External
-        backends receive the same content-addressed Dockerfile build request.
-        """
-        dockerfile = self._render_dockerfile(sanitizers=sanitizers)
-        tag = self._compute_tag(dockerfile, sanitizers=sanitizers)
-
-        build = SandboxImageBuild(
-            image=tag,
-            dockerfile=dockerfile,
-            platform=self._target_platform(),
-            timeout_seconds=300,
+    def _environment_spec(self, sanitizers: list[str]) -> SandboxEnvironmentSpec:
+        environment = compute_sanitizer_env(self.build_recipe, sanitizers)
+        features = list(dict.fromkeys([*self.build_recipe.features, *self.extra_features]))
+        optional_features = list(dict.fromkeys(self._optional_features))
+        identity = {
+            "profile": self.build_recipe.profile,
+            "features": sorted(features),
+            "optional_features": sorted(optional_features),
+            "sanitizers": sorted(sanitizers),
+            "environment": environment,
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return SandboxEnvironmentSpec(
+            cache_key=cache_key,
+            profile=self.build_recipe.profile,
+            features=features,
+            optional_features=optional_features,
+            sanitizers=list(sanitizers),
+            environment=environment,
         )
+
+    def _prepare_variant_environment(self, sanitizers: list[str]) -> str:
+        """Prepare one logical environment for a sanitizer combination."""
+
+        spec = self._environment_spec(sanitizers)
         san_str = ",".join(sanitizers) if sanitizers else "none"
         logger.info(
-            "Preparing sourcehunt sandbox image %s (backend=%s, sanitizers=%s, platform=%s)",
-            tag,
+            "Preparing SourceHunt environment %s (backend=%s, profile=%s, sanitizers=%s)",
+            spec.cache_key[:16],
             self.backend.name,
+            spec.profile,
             san_str,
-            build.platform,
         )
         EventBus().emit_message(
             f"sandbox preparing  backend={self.backend.name}  "
-            f"base={self.build_recipe.base_image}  lang={self.build_recipe.primary_language}"
-            f"  sanitizers={san_str}  tag={tag[:16]}",
+            f"profile={spec.profile}  lang={self.build_recipe.primary_language}"
+            f"  sanitizers={san_str}  key={spec.cache_key[:16]}",
             "info",
         )
         _t = time.monotonic()
         try:
-            cached = self.backend.ensure_image(
-                build,
+            environment = self.backend.ensure_environment(
+                spec,
                 on_output=lambda line: EventBus().emit_message(f"sandbox | {line}", "debug"),
             )
         except RuntimeError:
             raise
         except Exception as e:
-            logger.warning("Sandbox image preparation failed: %s", e)
-            logger.debug("Sandbox image preparation failed", exc_info=True)
-            raise RuntimeError(f"Failed to prepare sandbox image: {e}") from e
-        if cached:
-            logger.debug("Reusing sourcehunt sandbox image %s", tag)
-            EventBus().emit_message(f"sandbox cached  tag={tag[:16]}", "info")
-            return tag
-        logger.debug("Prepared sandbox image %s in %.2fs", tag, time.monotonic() - _t)
-        EventBus().emit_message(f"sandbox ready  tag={tag[:16]}", "info")
-        return tag
+            logger.warning("Sandbox environment preparation failed: %s", e)
+            logger.debug("Sandbox environment preparation failed", exc_info=True)
+            raise RuntimeError(f"Failed to prepare sandbox environment: {e}") from e
+        if environment.cached:
+            logger.debug("Reusing SourceHunt environment %s", environment.reference)
+            EventBus().emit_message(f"sandbox cached  key={spec.cache_key[:16]}", "info")
+            return environment.reference
+        logger.debug(
+            "Prepared SourceHunt environment %s in %.2fs",
+            environment.reference,
+            time.monotonic() - _t,
+        )
+        EventBus().emit_message(f"sandbox ready  key={spec.cache_key[:16]}", "info")
+        return environment.reference
+
+    def _build_variant_image(self, sanitizers: list[str]) -> str:
+        """Compatibility alias for the pre-provider image implementation."""
+
+        return self._prepare_variant_environment(sanitizers)
 
     def spawn(
         self,
@@ -305,7 +317,7 @@ class HunterSandbox:
         cpus: float | None = None,
         runtime: str | None = None,
     ) -> SandboxInstance:
-        """Start a fresh container from one of the built variant images.
+        """Start a fresh sandbox from one of the prepared environments.
 
         The container has:
             - /workspace mounted read-only from self.repo_path (default),
@@ -318,8 +330,8 @@ class HunterSandbox:
         Args:
             variant: Sanitizer combo for the spawned container. Defaults to
                 self.sanitizers (the primary combo). Must have been built
-                via `build_image()` or listed in `extra_variants`. Pass e.g.
-                `variant=["msan"]` to spawn from the MSan image.
+                via ``prepare_environment()`` or listed in ``extra_variants``.
+                Pass e.g. ``variant=["msan"]`` to select the MSan environment.
             writable_workspace: If True, copy the source tree into the
                 container instead of bind-mounting it read-only. The agent
                 can then modify source, recompile, and use git diff.
@@ -328,21 +340,21 @@ class HunterSandbox:
 
         Returns a SandboxInstance ready for exec/write/read.
         """
-        if self._image_tag is None:
-            self.build_image()
+        if self._environment_ref is None:
+            self.prepare_environment()
 
         chosen = list(variant) if variant is not None else list(self.sanitizers)
         key = self._variant_key(chosen)
-        image_tag = self._variant_images.get(key)
-        if image_tag is None:
-            # Auto-build on demand if the caller asks for a variant that
+        environment_ref = self._variant_environments.get(key)
+        if environment_ref is None:
+            # Prepare on demand if the caller asks for a variant that
             # wasn't declared up front.
             try:
                 validate_sanitizer_combo(chosen)
             except ValueError:
                 raise
-            image_tag = self._build_variant_image(chosen)
-            self._variant_images[key] = image_tag
+            environment_ref = self._prepare_variant_environment(chosen)
+            self._variant_environments[key] = environment_ref
 
         # Build mounts list
         mounts: list[tuple[str, str, str]] = []
@@ -357,40 +369,29 @@ class HunterSandbox:
         env = compute_sanitizer_env(self.build_recipe, chosen)
         if session_id:
             env["CLEARWING_SESSION_ID"] = session_id
-        # Mark the variant so hunter tools can introspect which image is running
+        # Mark the variant so hunter tools can introspect the active instrumentation.
         env["CLEARWING_SANITIZER_VARIANT"] = ",".join(chosen)
 
-        # Docker's Python SDK passes security_opt values directly to the
-        # Engine API, which expects seccomp content to be inline JSON — not
-        # a path (unlike the `docker run` CLI, which reads the file client-
-        # side). Passing a path makes the daemon reject the request with
-        # "Decoding seccomp profile failed: invalid character '/'..."
-        seccomp_json = json.dumps(get_seccomp_profile("hunter"))
-
         resolved_cpus = self._resolve_cpu_limit(cpus)
-        cfg = SandboxConfig(
-            image=image_tag,
-            network_mode="none",
+        cfg = SandboxRunConfig(
+            policy="sourcehunt",
+            isolation="enhanced" if runtime else "default",
             mounts=mounts,
             memory_mb=memory_mb,
-            cpu_shares=1024,
             cpus=resolved_cpus,
             timeout_seconds=timeout_seconds,
             env=env,
             working_dir="/workspace",
-            name=None,
             pids_limit=512,
-            security_opt=[f"seccomp={seccomp_json}"],
-            cap_drop=["ALL"],
-            cap_add=["SYS_PTRACE"],
-            runtime=runtime,
         )
 
-        sb = self.backend.create(cfg)
+        sb = self.backend.create(environment_ref, cfg)
         _t = time.monotonic()
         sb.start()
         logger.debug(
-            "Sandbox container started image=%s in %.2fs", image_tag, time.monotonic() - _t
+            "Sandbox instance started environment=%s in %.2fs",
+            environment_ref,
+            time.monotonic() - _t,
         )
 
         if writable_workspace:
@@ -419,14 +420,19 @@ class HunterSandbox:
 
     @property
     def available_variants(self) -> list[list[str]]:
-        """Return every sanitizer combo that has a built image."""
+        """Return every sanitizer combo that has a prepared environment."""
         out: list[list[str]] = []
-        for key in self._variant_images.keys():
+        for key in self._variant_environments.keys():
             out.append(key.split("+") if key else [])
         return out
 
     def cleanup(self, remove_image: bool = False) -> None:
-        """Stop all spawned containers and optionally remove the image."""
+        """Stop instances and optionally release their environments.
+
+        ``remove_image`` is retained as a compatibility name. A non-Docker
+        provider may release an overlay, pod template, or another cached
+        substrate instead of an OCI image.
+        """
         for sb in self._spawned:
             try:
                 sb.stop()
@@ -440,11 +446,12 @@ class HunterSandbox:
                     pass
         self._spawned.clear()
 
-        if remove_image and self._image_tag:
-            try:
-                self.backend.remove_image(self._image_tag)
-            except Exception:
-                logger.debug("HunterSandbox image remove failed", exc_info=True)
+        if remove_image:
+            for environment_ref in set(self._variant_environments.values()):
+                try:
+                    self.backend.release_environment(environment_ref)
+                except Exception:
+                    logger.debug("HunterSandbox environment release failed", exc_info=True)
 
     # --- Context manager ----------------------------------------------------
 
@@ -455,95 +462,34 @@ class HunterSandbox:
         self.cleanup()
         return False
 
-    # --- Dockerfile rendering -----------------------------------------------
+    # --- Compatibility helpers for the original Docker-only API -------------
 
     def _render_dockerfile(self, sanitizers: list[str] | None = None) -> str:
-        """Render the Dockerfile for a specific sanitizer variant.
+        """Render the default Docker adapter's private materialization."""
 
-        When `sanitizers` is None the primary combo is used — which is what
-        the old single-variant build_image() called.
-        """
-        recipe = self.build_recipe
         variant = sanitizers if sanitizers is not None else self.sanitizers
-        # Compute the env block for THIS variant (not the recipe's default)
-        env_dict = compute_sanitizer_env(recipe, variant)
-
-        apt_packages = " ".join(recipe.apt_packages + self.extra_packages)
-        env_lines = []
-        for k, v in env_dict.items():
-            if " " in v or '"' in v:
-                v_escaped = v.replace('"', '\\"')
-                env_lines.append(f'ENV {k}="{v_escaped}"')
-            else:
-                env_lines.append(f"ENV {k}={v}")
-        env_block = "\n".join(env_lines)
-
-        if apt_packages.strip():
-            apt_block = (
-                "RUN apt-get update -qq && "
-                f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {apt_packages} && "
-                "rm -rf /var/lib/apt/lists/*"
-            )
-        else:
-            apt_block = "# (no apt packages)"
-
-        # Optional packages: installed best-effort (e.g. ltrace is missing on
-        # arm64/bookworm). Separate layer so a missing package doesn't fail the
-        # entire build.
-        optional_apt_block = ""
-        if self._optional_packages:
-            opt_list = " ".join(self._optional_packages)
-            optional_apt_block = (
-                f"RUN apt-get update -qq && "
-                f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {opt_list} 2>/dev/null || true ; "
-                f"rm -rf /var/lib/apt/lists/*"
-            )
-
-        post_install_block = ""
-        if self.post_install_commands:
-            post_install_block = "\n".join(f"RUN {cmd}" for cmd in self.post_install_commands)
-
-        # Variant header makes the Dockerfile self-documenting so a human
-        # inspecting the built image via `docker history` knows what's in it
-        variant_header = f"# Sanitizer variant: {','.join(variant)}"
-        dockerfile = f"""FROM {recipe.base_image}
-
-{variant_header}
-
-{apt_block}
-
-{optional_apt_block}
-
-{post_install_block}
-
-{env_block}
-
-WORKDIR /workspace
-
-# /scratch is mounted at runtime as a writable tmpfs
-RUN mkdir -p /scratch
-"""
-        return dockerfile
+        docker_backend = (
+            self.backend
+            if isinstance(self.backend, DockerSandboxBackend)
+            else DockerSandboxBackend()
+        )
+        return docker_backend._render_dockerfile(self._environment_spec(variant))
 
     def _compute_tag(
         self,
         dockerfile: str,
         sanitizers: list[str] | None = None,
     ) -> str:
-        """Content-addressed image tag.
+        """Return the default Docker adapter's content-addressed tag."""
 
-        The sanitizer list is baked into the hash so every variant gets a
-        distinct tag — otherwise the daemon would cache-collide when the
-        same repo is built with ASan+UBSan AND MSan variants.
-        """
+        del dockerfile  # Dockerfile content is no longer the logical identity.
         variant = sanitizers if sanitizers is not None else self.sanitizers
-        h = hashlib.sha256()
-        h.update(dockerfile.encode("utf-8"))
-        h.update(",".join(sorted(variant)).encode("utf-8"))
-        h.update(",".join(sorted(self.extra_packages)).encode("utf-8"))
-        h.update("\n".join(self.post_install_commands).encode("utf-8"))
-        digest = h.hexdigest()[:12]
-        return f"{self.IMAGE_NAME_PREFIX}:{digest}"
+        docker_backend = (
+            self.backend
+            if isinstance(self.backend, DockerSandboxBackend)
+            else DockerSandboxBackend()
+        )
+        return docker_backend._environment_image(self._environment_spec(variant))
 
     @staticmethod
     def _variant_key(sanitizers: list[str]) -> str:
@@ -553,6 +499,10 @@ RUN mkdir -p /scratch
     @property
     def image_tag(self) -> str | None:
         return self._image_tag
+
+    @property
+    def environment_ref(self) -> str | None:
+        return self._environment_ref
 
     @property
     def primary_language(self) -> str:

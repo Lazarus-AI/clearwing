@@ -17,11 +17,13 @@ import pytest
 from clearwing.sandbox.backend import (
     DockerSandboxBackend,
     SandboxBackend,
-    SandboxImageBuild,
+    SandboxEnvironment,
+    SandboxEnvironmentSpec,
     SandboxInstance,
+    SandboxRunConfig,
     sandbox_backend_from_env,
 )
-from clearwing.sandbox.container import ExecResult, SandboxConfig
+from clearwing.sandbox.container import ExecResult
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 from clearwing.sandbox.rpc_backend import (
     JsonRpcConnection,
@@ -71,8 +73,7 @@ class _RpcPeer:
 def _fd_connection(handler):
     client_socket, server_socket = socket.socketpair()
     peer = _RpcPeer(server_socket, handler)
-    connection = JsonRpcConnection(f"fd://{client_socket.fileno()}")
-    client_socket.close()
+    connection = JsonRpcConnection(f"fd://{client_socket.detach()}")
     return connection, peer
 
 
@@ -95,14 +96,29 @@ def test_connection_close_is_idempotent_and_stops_reader():
     peer.close()
 
 
+def test_fd_endpoint_takes_ownership_of_descriptor():
+    client_socket, server_socket = socket.socketpair()
+    descriptor = client_socket.detach()
+    connection = JsonRpcConnection(f"fd://{descriptor}")
+
+    connection.close()
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    server_socket.close()
+
+
 def test_fd_endpoint_rejects_a_one_way_pipe():
     read_fd, write_fd = os.pipe()
     try:
         with pytest.raises((OSError, ValueError)):
             JsonRpcConnection(f"fd://{read_fd}")
     finally:
-        os.close(read_fd)
-        os.close(write_fd)
+        for descriptor in (read_fd, write_fd):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def test_unix_endpoint_connects_to_socket_path():
@@ -134,8 +150,7 @@ def test_unix_endpoint_connects_to_socket_path():
 
 def test_connection_multiplexes_out_of_order_responses():
     client_socket, server_socket = socket.socketpair()
-    connection = JsonRpcConnection(f"fd://{client_socket.fileno()}")
-    client_socket.close()
+    connection = JsonRpcConnection(f"fd://{client_socket.detach()}")
 
     def serve_reversed():
         reader = server_socket.makefile("rb")
@@ -177,8 +192,7 @@ def test_remote_error_is_exposed_as_typed_exception():
 
     server = threading.Thread(target=serve_error, daemon=True)
     server.start()
-    connection = JsonRpcConnection(f"fd://{client_socket.fileno()}")
-    client_socket.close()
+    connection = JsonRpcConnection(f"fd://{client_socket.detach()}")
     try:
         with pytest.raises(SandboxRpcError, match="capacity exhausted") as caught:
             connection.call("sandbox.start")
@@ -196,8 +210,8 @@ def test_socket_backend_implements_complete_sandbox_contract():
             return {"protocol_version": 1}
         if method == "sandbox.capacity":
             return {"cpus": 8, "source": "test runtime"}
-        if method == "sandbox.image.ensure":
-            return {"cached": True}
+        if method == "sandbox.environment.ensure":
+            return {"environment_ref": "environment:test", "cached": True}
         if method == "sandbox.start":
             return {"sandbox_id": "runtime-id", "short_id": "short"}
         if method == "sandbox.exec":
@@ -214,7 +228,7 @@ def test_socket_backend_implements_complete_sandbox_contract():
             "sandbox.file.write",
             "sandbox.tree.copy",
             "sandbox.stop",
-            "sandbox.image.remove",
+            "sandbox.environment.release",
         }:
             return {}
         raise AssertionError(f"unexpected method {method}")
@@ -224,11 +238,17 @@ def test_socket_backend_implements_complete_sandbox_contract():
     try:
         assert isinstance(backend, SandboxBackend)
         assert backend.available_cpus() == (8.0, "test runtime")
-        assert backend.ensure_image(
-            SandboxImageBuild("image:test", "FROM scratch\n", "linux/amd64")
+        environment = backend.ensure_environment(
+            SandboxEnvironmentSpec(
+                cache_key="a" * 64,
+                profile="c-cpp",
+                features=["build.make", "source.search"],
+                sanitizers=["asan"],
+            )
         )
+        assert environment == SandboxEnvironment("environment:test", cached=True)
 
-        instance = backend.create(SandboxConfig(image="image:test"))
+        instance = backend.create(environment.reference, SandboxRunConfig())
         assert isinstance(instance, SandboxInstance)
         assert instance.start() == "runtime-id"
         assert instance.short_id == "short"
@@ -240,13 +260,13 @@ def test_socket_backend_implements_complete_sandbox_contract():
         assert instance.read_file("/scratch/output") == b"result"
         instance.copy_tree_into("/host/source")
         instance.stop()
-        backend.remove_image("image:test")
+        backend.release_environment(environment.reference)
 
         methods = [request["method"] for request in peer.requests]
         assert methods == [
             "sandbox.capabilities",
             "sandbox.capacity",
-            "sandbox.image.ensure",
+            "sandbox.environment.ensure",
             "sandbox.start",
             "sandbox.exec",
             "sandbox.exec",
@@ -255,11 +275,22 @@ def test_socket_backend_implements_complete_sandbox_contract():
             "sandbox.file.read",
             "sandbox.tree.copy",
             "sandbox.stop",
-            "sandbox.image.remove",
+            "sandbox.environment.release",
         ]
+        environment_spec = peer.requests[2]["params"]["spec"]
+        assert environment_spec["profile"] == "c-cpp"
+        assert environment_spec["features"] == ["build.make", "source.search"]
+        assert "image" not in environment_spec
+        assert "dockerfile" not in environment_spec
+        assert "packages" not in environment_spec
         start_config = peer.requests[3]["params"]["config"]
-        assert start_config["network_mode"] == "none"
-        assert start_config["cap_drop"] == ["ALL"]
+        assert peer.requests[3]["params"]["environment_ref"] == "environment:test"
+        assert start_config["policy"] == "sourcehunt"
+        assert start_config["isolation"] == "default"
+        assert "network_mode" not in start_config
+        assert "security_opt" not in start_config
+        assert "cap_drop" not in start_config
+        assert "runtime" not in start_config
         assert peer.requests[5]["params"]["timeout_seconds"] == 300
         assert peer.requests[6]["params"]["timeout_seconds"] == 0
     finally:
@@ -272,9 +303,44 @@ def test_backend_selection_defaults_to_docker(monkeypatch):
     assert isinstance(sandbox_backend_from_env(), DockerSandboxBackend)
 
 
+def test_docker_backend_rejects_unknown_required_environment_codes():
+    process = MagicMock()
+    backend = DockerSandboxBackend(process=process)
+
+    with pytest.raises(ValueError, match="profile"):
+        backend.ensure_environment(SandboxEnvironmentSpec(cache_key="a" * 64, profile="made-up"))
+    with pytest.raises(ValueError, match="feature"):
+        backend.ensure_environment(
+            SandboxEnvironmentSpec(
+                cache_key="b" * 64,
+                profile="c-cpp",
+                features=["package.libssl-dev"],
+            )
+        )
+
+    # Validation happens before even consulting the image cache.
+    process.run.assert_not_called()
+
+
+def test_docker_package_resolution_stays_inside_adapter():
+    backend = DockerSandboxBackend()
+    spec = SandboxEnvironmentSpec(
+        cache_key="a" * 64,
+        profile="c-cpp",
+        features=["source.search", "debug.native", "build.cmake"],
+    )
+
+    dockerfile = backend._render_dockerfile(spec)
+
+    assert "ripgrep" in dockerfile
+    assert "gdb" in dockerfile
+    assert "cmake" in dockerfile
+    assert "ripgrep" not in vars(spec).values()
+
+
 def test_backend_selection_uses_configured_socket(monkeypatch):
     client_socket, server_socket = socket.socketpair()
-    endpoint = f"fd://{client_socket.fileno()}"
+    endpoint = f"fd://{client_socket.detach()}"
     monkeypatch.setenv("CLEARWING_SANDBOX_ENDPOINT", endpoint)
     backend = None
     try:
@@ -284,7 +350,6 @@ def test_backend_selection_uses_configured_socket(monkeypatch):
     finally:
         if backend is not None:
             backend._connection.close()
-        client_socket.close()
         server_socket.close()
 
 
@@ -294,7 +359,7 @@ def test_hunter_sandbox_accepts_an_injected_backend(tmp_path: Path):
     instance.workspace_baseline_commit = None
     backend = MagicMock(spec=SandboxBackend)
     backend.name = "test"
-    backend.ensure_image.return_value = False
+    backend.ensure_environment.return_value = SandboxEnvironment("environment:test", cached=False)
     backend.available_cpus.return_value = (4.0, "test")
     backend.create.return_value = instance
 
@@ -303,7 +368,8 @@ def test_hunter_sandbox_accepts_an_injected_backend(tmp_path: Path):
     spawned = manager.spawn(scratch_mount=False)
 
     assert spawned is instance
-    backend.ensure_image.assert_called_once()
+    backend.ensure_environment.assert_called_once()
     backend.create.assert_called_once()
+    assert backend.create.call_args.args[0] == "environment:test"
     instance.start.assert_called_once_with()
     assert manager.default_cpu_limit == 3.0

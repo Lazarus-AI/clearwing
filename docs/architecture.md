@@ -154,15 +154,16 @@ dataclass or a plain dict. Test fixtures lean on this heavily.
 
 ## The sandbox layer
 
-`clearwing.sandbox` provides per-hunter disposable sandboxes with
-sanitizer images (ASan+UBSan primary, MSan variant, optional LSan/TSan).
+`clearwing.sandbox` provides per-hunter disposable sandboxes with prepared
+toolchain environments (ASan+UBSan primary, MSan variant, optional LSan/TSan).
 `HunterSandbox` depends on the runtime-neutral `SandboxBackend` and
 `SandboxInstance` protocols. Docker is the default backend; a trusted
 supervisor can instead provide the same lifecycle over the
 [JSON-RPC socket adapter](sandbox-backends.md). Each `HunterContext`
 (`clearwing.agent.tools.hunt.sandbox.HunterContext`) owns:
 
-- A primary `SandboxInstance` attached at hunt start.
+- A primary `SandboxInstance` attached at hunt start from an opaque prepared
+  environment reference.
 - A `sandbox_manager` reference for spawning sanitizer-variant
   containers on demand (e.g., an MSan run for a specific finding).
 - A cache of variant containers that tears down in `cleanup_variants()`

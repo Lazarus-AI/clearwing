@@ -3,14 +3,16 @@
 Distinct from clearwing/agent/tools/kali_docker_tool.py — that tool is
 attack-focused (approval gates, apt-get install, network access). The sandbox
 primitives here are isolation-focused: no network, read-only mounts, resource
-limits, and sanitizer-instrumented build images.
+limits, and sanitizer-capable toolchain environments.
 """
 
 from .backend import (
     DockerSandboxBackend,
     SandboxBackend,
-    SandboxImageBuild,
+    SandboxEnvironment,
+    SandboxEnvironmentSpec,
     SandboxInstance,
+    SandboxRunConfig,
     sandbox_backend_from_env,
 )
 from .builders import BuildRecipe, BuildSystemDetector
@@ -28,9 +30,11 @@ __all__ = [
     "SandboxBackend",
     "SandboxConfig",
     "SandboxContainer",
-    "SandboxImageBuild",
+    "SandboxEnvironment",
+    "SandboxEnvironmentSpec",
     "SandboxInstance",
     "SandboxRpcError",
+    "SandboxRunConfig",
     "SocketSandboxBackend",
     "BuildRecipe",
     "BuildSystemDetector",
