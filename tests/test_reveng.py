@@ -266,6 +266,34 @@ class TestRevengReconstructor:
         # 20 functions / batch_size 8 = 3 LLM calls
         assert mock_llm.aask_text.call_count == 3
 
+    @pytest.mark.asyncio
+    async def test_custom_batch_size_respected(self):
+        mock_llm = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.first_text = "[]"
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
+
+        reconstructor = RevengReconstructor(mock_llm, batch_size=4)
+        functions = [
+            DecompiledFunction(name=f"FUN_{i:08x}", decompiled_c=f"void f{i}() {{}}")
+            for i in range(10)
+        ]
+        decompilation = DecompilationResult(
+            functions=functions, total_functions=10,
+        )
+
+        await reconstructor.areconstruct(decompilation, StaticAnalysisResult())
+        # 10 functions / batch_size 4 = 3 LLM calls (4+4+2)
+        assert mock_llm.aask_text.call_count == 3
+
+    def test_batch_size_zero_raises(self):
+        with pytest.raises(ValueError, match="batch_size must be >= 1"):
+            RevengReconstructor(AsyncMock(), batch_size=0)
+
+    def test_batch_size_negative_raises(self):
+        with pytest.raises(ValueError, match="batch_size must be >= 1"):
+            RevengReconstructor(AsyncMock(), batch_size=-1)
+
 
 # --- RevengPipeline tests ----------------------------------------------------
 

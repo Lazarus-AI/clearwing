@@ -108,6 +108,40 @@ class TestNdayFilter:
         assert len(result) == 1
 
     @pytest.mark.asyncio
+    async def test_filter_default_batch_size_single_call(self):
+        mock_llm = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.first_text = "[]"
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
+
+        nf = NdayFilter(mock_llm)
+        candidates = [NdayCandidate(cve_id=f"CVE-2024-{i:04d}") for i in range(10)]
+        await nf.afilter(candidates)
+        # 10 candidates / default batch 10 = 1 LLM call
+        assert mock_llm.aask_text.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_filter_custom_batch_size_respected(self):
+        mock_llm = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.first_text = "[]"
+        mock_llm.aask_text = AsyncMock(return_value=mock_response)
+
+        nf = NdayFilter(mock_llm, batch_size=3)
+        candidates = [NdayCandidate(cve_id=f"CVE-2024-{i:04d}") for i in range(10)]
+        await nf.afilter(candidates)
+        # 10 candidates / batch 3 = 4 LLM calls (3+3+3+1)
+        assert mock_llm.aask_text.call_count == 4
+
+    def test_batch_size_zero_raises(self):
+        with pytest.raises(ValueError, match="batch_size must be >= 1"):
+            NdayFilter(AsyncMock(), batch_size=0)
+
+    def test_batch_size_negative_raises(self):
+        with pytest.raises(ValueError, match="batch_size must be >= 1"):
+            NdayFilter(AsyncMock(), batch_size=-1)
+
+    @pytest.mark.asyncio
     async def test_filter_llm_failure_defaults_possibly(self):
         mock_llm = AsyncMock()
         mock_llm.aask_text = AsyncMock(side_effect=RuntimeError("LLM down"))

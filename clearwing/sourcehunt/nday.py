@@ -78,6 +78,7 @@ class NdayPipeline:
         budget_band: str = "deep",
         project: str = "",
         output_dir: str | None = None,
+        filter_batch_size: int | None = None,
     ):
         self._llm = llm
         self._repo_path = repo_path
@@ -85,6 +86,13 @@ class NdayPipeline:
         self._sandbox_factory = sandbox_factory
         self._budget_band = budget_band
         self._project = project
+        from .config import HuntTuning
+
+        self._filter_batch_size = (
+            filter_batch_size
+            if filter_batch_size is not None
+            else HuntTuning().nday_filter_batch_size
+        )
         if output_dir is None:
             from clearwing.core.config import default_results_dir
 
@@ -102,7 +110,7 @@ class NdayPipeline:
                 except Exception:
                     logger.debug("Patch fetch failed for %s", c.cve_id, exc_info=True)
 
-        nday_filter = NdayFilter(self._llm)
+        nday_filter = NdayFilter(self._llm, batch_size=self._filter_batch_size)
         filtered = await nday_filter.afilter(candidates)
         pipeline_result.filtered_cves = len(filtered)
 
