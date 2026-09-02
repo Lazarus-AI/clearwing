@@ -101,6 +101,8 @@ class HuntTuning:
     campaign_hint: str | None = None
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
+    nday_filter_batch_size: int = 10
+    reveng_batch_size: int = 8
 
 
 @dataclass(frozen=True)
