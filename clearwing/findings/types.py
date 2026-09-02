@@ -96,6 +96,8 @@ class TraceStep(BaseModel):
     function: str = ""  # enclosing function name
     code_snippet: str = ""  # MUST be from read_source_file
     note: str = ""  # free-form: role, taint state, assumptions, reasoning
+    truncated: bool = False  # set when code_snippet or note was capped at record time
+    original_chars: int = 0  # pre-truncation combined char count of code_snippet + note
 
 
 class VulnerabilityTrace(BaseModel):
