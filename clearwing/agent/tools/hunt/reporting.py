@@ -173,6 +173,39 @@ class RecordFindingInput(ToolInputModel):
     )
 
 
+def _cap_trace_strings(
+    code_snippet: str, note: str, cap: int
+) -> tuple[str, str, bool, int]:
+    """Cap trace-step strings. Returns (snippet, note, truncated, original_chars)."""
+    if not cap or cap <= 0:
+        return code_snippet, note, False, 0
+    orig_chars = len(code_snippet) + len(note)
+    truncated = False
+    if len(code_snippet) > cap:
+        code_snippet = code_snippet[:cap]
+        truncated = True
+    if len(note) > cap:
+        note = note[:cap]
+        truncated = True
+    return code_snippet, note, truncated, (orig_chars if truncated else 0)
+
+
+def _build_capped_trace_step(step: dict, cap: int) -> TraceStep:
+    """Build a TraceStep from an inline trace dict, capping snippet/note."""
+    data = dict(step)
+    snippet, note, truncated, orig_chars = _cap_trace_strings(
+        str(data.get("code_snippet", "") or ""),
+        str(data.get("note", "") or ""),
+        cap,
+    )
+    data["code_snippet"] = snippet
+    data["note"] = note
+    if truncated:
+        data["truncated"] = True
+        data["original_chars"] = orig_chars
+    return TraceStep(**data)
+
+
 def build_reporting_tools(ctx: HunterContext) -> list:
     """Build the finding-reporter and trace-step tools for a hunter session."""
 
@@ -216,12 +249,17 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 f"Line {line} of '{file}' has not been read yet. "
                 "Call read_source_file for that range first.",
             )
+        code_snippet, note, truncated, orig_chars = _cap_trace_strings(
+            code_snippet, note, ctx.trace_step_max_chars
+        )
         step = TraceStep(
             file=file,
             line=line,
             function=function,
             code_snippet=code_snippet,
             note=note,
+            truncated=truncated,
+            original_chars=orig_chars,
         )
         ctx.trace_steps.append(step)
         n = len(ctx.trace_steps)
@@ -310,7 +348,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             authoritative_steps = (
                 list(ctx.trace_steps)
                 if ctx.trace_steps
-                else [TraceStep(**step) for step in explicit_steps]
+                else [
+                    _build_capped_trace_step(step, ctx.trace_step_max_chars)
+                    for step in explicit_steps
+                ]
             )
             if not authoritative_steps:
                 return _tool_error(

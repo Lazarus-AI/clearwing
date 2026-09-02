@@ -320,6 +320,7 @@ class SourceHuntRunner:
         falsify: bool = True,
         stop_after: str | None = None,
         on_progress: SourceHuntProgressCallback | None = None,
+        trace_step_max_chars: int = 4096,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -435,6 +436,11 @@ class SourceHuntRunner:
             campaign_hint = campaign_hint if campaign_hint is not None else h.campaign_hint
             gvisor_runtime = gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
+            trace_step_max_chars = (
+                trace_step_max_chars
+                if trace_step_max_chars != 4096
+                else h.trace_step_max_chars
+            )
             p = config.proof
             flow = flow if flow != "legacy" else p.flow
             proof_compile_commands = (
@@ -633,6 +639,7 @@ class SourceHuntRunner:
         self._no_per_file_hunt = no_per_file_hunt
         self._no_rank = no_rank or bool(self._target_files)
         self._stop_after = stop_after
+        self._trace_step_max_chars = trace_step_max_chars
         self._subsystem_budget_usd = subsystem_budget_usd
         self._subsystem_max_parallel = subsystem_max_parallel
         # None = library default (DEFAULT_MAX_FILES_PER_SUBSYSTEM for auto
@@ -2407,6 +2414,7 @@ class SourceHuntRunner:
                 sandbox_manager=self._sandbox_manager,
                 session_id=self._session_id + "-v",
                 specialist="verifier",
+                trace_step_max_chars=self._trace_step_max_chars,
             )
             return sandbox, ctx, build_verification_tools(ctx)
         except Exception:
@@ -3017,6 +3025,7 @@ class SourceHuntRunner:
                     instrumentation=self._instrumentation,
                     explicit_target_windows=bool(self._target_files),
                     callgraph=callgraph,
+                    trace_step_max_chars=self._trace_step_max_chars,
                 )
             )
             try:

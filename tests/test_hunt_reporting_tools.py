@@ -139,3 +139,64 @@ def test_record_finding_accepts_complete_invariant_map(tools, ctx):
     assert ctx.potentials == []
     assert ctx.potential_history[0]["status"] == "confirmed"
     assert ctx.potential_history[0]["finding_id"] == ctx.findings[0].id
+
+
+def test_record_trace_step_below_cap_preserves_strings(tools, ctx):
+    snippet = "x" * 100
+    note = "y" * 200
+    tools["record_trace_step"](file="app.py", line=1, code_snippet=snippet, note=note)
+    step = ctx.trace_steps[0]
+    assert step.code_snippet == snippet
+    assert step.note == note
+    assert step.truncated is False
+    assert step.original_chars == 0
+
+
+def test_record_trace_step_truncates_above_cap(ctx):
+    ctx.trace_step_max_chars = 32
+    tools = {t.name: t.handler for t in build_reporting_tools(ctx)}
+    snippet = "a" * 100
+    note = "b" * 50
+    tools["record_trace_step"](file="app.py", line=1, code_snippet=snippet, note=note)
+    step = ctx.trace_steps[0]
+    assert step.code_snippet == "a" * 32
+    assert step.note == "b" * 32
+    assert step.truncated is True
+    assert step.original_chars == 150
+
+
+def test_record_finding_inline_trace_step_is_capped(tools, ctx):
+    long_snippet = "x" * 10_000
+    long_note = "ENTRY/SINK: " + "y" * 10_000
+    result = _record_finding(
+        tools,
+        trace={
+            "steps": [
+                {
+                    "file": "app.py",
+                    "line": 42,
+                    "code_snippet": long_snippet,
+                    "note": long_note,
+                }
+            ]
+        },
+    )
+    assert "Finding recorded" in result
+    step = ctx.findings[0].vulnerability_trace["steps"][0]
+    assert step["truncated"] is True
+    assert len(step["code_snippet"]) <= 4096
+    assert len(step["note"]) <= 4096
+    assert step["original_chars"] == len(long_snippet) + len(long_note)
+
+
+def test_record_trace_step_cap_disabled_leaves_strings_untouched(ctx):
+    ctx.trace_step_max_chars = 0
+    tools = {t.name: t.handler for t in build_reporting_tools(ctx)}
+    snippet = "a" * 10_000
+    note = "b" * 8_000
+    tools["record_trace_step"](file="app.py", line=1, code_snippet=snippet, note=note)
+    step = ctx.trace_steps[0]
+    assert step.code_snippet == snippet
+    assert step.note == note
+    assert step.truncated is False
+    assert step.original_chars == 0

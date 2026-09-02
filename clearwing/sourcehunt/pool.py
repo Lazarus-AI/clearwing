@@ -247,6 +247,9 @@ class HuntPoolConfig:
     work_cache: Any = None  # HuntWorkCache | None — work-item-granular hunt resume
     explicit_target_windows: bool = False
     callgraph: Any = None
+    # Per-step character cap for trace snippets attached to record_finding.
+    # 0 or negative disables the cap (full trace retained).
+    trace_step_max_chars: int = 4096
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -1010,5 +1013,6 @@ class HunterPool:
             return
         context.work_item_id = work_item_id
         context.instrumentation = self.config.instrumentation
+        context.trace_step_max_chars = self.config.trace_step_max_chars
         if self.config.trajectory_root is not None:
             context.trajectory_dir = Path(self.config.trajectory_root) / work_item_id
