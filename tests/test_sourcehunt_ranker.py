@@ -721,3 +721,114 @@ class TestRankerSystemPrompt:
         assert "constants.h" in RANKER_SYSTEM_PROMPT or "propagat" in RANKER_SYSTEM_PROMPT.lower()
         # Must request JSON output
         assert "JSON" in RANKER_SYSTEM_PROMPT
+
+
+class TestLargeRepoBandMinimum:
+    """`_select_llm_candidates` reserves a per-band minimum so a lower-band
+    ground-truth file is not dropped by a plain head cut."""
+
+    @staticmethod
+    def _files_with_priorities(priorities: list[float]) -> list[dict]:
+        files = []
+        for i, prio in enumerate(priorities):
+            ft = _make_file(f"f{i}.c")
+            ft["priority"] = prio
+            files.append(ft)
+        return files
+
+    def test_below_threshold_returns_all(self):
+        config = RankerConfig(large_repo_file_threshold=100)
+        ranker = Ranker(AsyncMock(), config)
+        files = self._files_with_priorities([1.0, 2.0, 3.0])
+        assert ranker._select_llm_candidates(files) == files
+
+    def test_band_minimum_keeps_a_low_band_file(self):
+        # 8 files over the threshold; limit 4. Files cluster in the high band,
+        # one sits alone in the lowest band. A plain head cut keeps only the
+        # top 4 (all high band) and drops the low-band file; band reservation
+        # keeps a representative of every band.
+        config = RankerConfig(
+            large_repo_file_threshold=5,
+            large_repo_llm_file_limit=4,
+            large_repo_band_min=1,
+            large_repo_bands=4,
+        )
+        ranker = Ranker(AsyncMock(), config)
+        files = self._files_with_priorities(
+            [10.0, 9.9, 9.8, 9.7, 9.6, 9.5, 9.4, 0.0]
+        )
+        out = ranker._select_llm_candidates(files)
+        paths = {ft["path"] for ft in out}
+        assert len(out) == 4
+        assert "f7.c" in paths  # the lone low-band file survives the cut
+
+    def test_band_min_zero_is_plain_head_cut(self):
+        config = RankerConfig(
+            large_repo_file_threshold=5,
+            large_repo_llm_file_limit=3,
+            large_repo_band_min=0,
+        )
+        ranker = Ranker(AsyncMock(), config)
+        files = self._files_with_priorities([10.0, 9.9, 9.8, 9.7, 9.6, 0.0])
+        out = ranker._select_llm_candidates(files)
+        assert [ft["path"] for ft in out] == ["f0.c", "f1.c", "f2.c"]
+
+    def test_default_is_plain_head_cut(self):
+        # The band-reservation behaviour is opt-in: the shipped defaults must
+        # preserve the historical head-cut selection so existing users see no
+        # change until they set ``large_repo_band_min`` themselves.
+        config = RankerConfig(
+            large_repo_file_threshold=5,
+            large_repo_llm_file_limit=3,
+        )
+        assert config.large_repo_band_min == 0
+        ranker = Ranker(AsyncMock(), config)
+        files = self._files_with_priorities([10.0, 9.9, 9.8, 9.7, 9.6, 0.0])
+        out = ranker._select_llm_candidates(files)
+        assert [ft["path"] for ft in out] == ["f0.c", "f1.c", "f2.c"]
+
+    def test_overflow_falls_back_to_head_cut(self, caplog):
+        # When ``band_min * bands`` exceeds the candidate limit the reservation
+        # cannot be honoured; the selector must fall back to the plain head cut
+        # and log a WARNING naming the overflow.
+        config = RankerConfig(
+            large_repo_file_threshold=5,
+            large_repo_llm_file_limit=10,
+            large_repo_band_min=100,
+            large_repo_bands=4,
+        )
+        ranker = Ranker(AsyncMock(), config)
+        files = self._files_with_priorities(
+            [10.0, 9.9, 9.8, 9.7, 9.6, 9.5, 9.4, 9.3, 9.2, 9.1, 9.0, 0.0]
+        )
+        with caplog.at_level("WARNING", logger="clearwing.sourcehunt.ranker"):
+            out = ranker._select_llm_candidates(files)
+        expected = [ft["path"] for ft in files[:10]]
+        assert [ft["path"] for ft in out] == expected
+        assert any(
+            "band_min=100" in r.message
+            and "bands=4" in r.message
+            and "limit=10" in r.message
+            for r in caplog.records
+        )
+
+    def test_empty_ordered_returns_empty(self):
+        config = RankerConfig(
+            large_repo_band_min=1,
+            large_repo_bands=4,
+        )
+        ranker = Ranker(AsyncMock(), config)
+        assert ranker._reserve_band_minimum([], limit=10) == []
+
+    def test_uniform_priority_is_plain_head_cut(self):
+        # --no-rank leaves every priority equal: no bands to protect.
+        config = RankerConfig(
+            large_repo_file_threshold=3,
+            large_repo_llm_file_limit=2,
+            large_repo_band_min=1,
+            large_repo_bands=4,
+        )
+        ranker = Ranker(AsyncMock(), config)
+        files = self._files_with_priorities([5.0, 5.0, 5.0, 5.0])
+        out = ranker._select_llm_candidates(files)
+        assert [ft["path"] for ft in out] == ["f0.c", "f1.c"]
