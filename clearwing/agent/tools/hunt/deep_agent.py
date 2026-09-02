@@ -159,6 +159,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
             return _cap_output(f"error reading {path}: {result.stderr.strip()}", "file error")
+        ctx.deep_files_read.add(str(path))
         return _cap_output(result.stdout, "file")
 
     def write_file(path: str, contents: str, **_: object) -> str:

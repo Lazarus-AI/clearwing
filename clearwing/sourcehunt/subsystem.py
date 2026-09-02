@@ -329,6 +329,7 @@ class SubsystemHuntConfig:
     # Max files enumerated in each subsystem hunt prompt. None = list every file
     # (correct for an explicit scope so the ground-truth file is never hidden).
     max_files_in_prompt: int | None = None
+    max_steps_without_progress: int = 8
 
 
 class SubsystemHuntRunner:
@@ -482,6 +483,7 @@ class SubsystemHuntRunner:
                 campaign_hint=self.config.campaign_hint,
                 callgraph=self.config.callgraph,
                 max_files_in_prompt=self.config.max_files_in_prompt,
+                max_steps_without_progress=self.config.max_steps_without_progress,
             )
             ctx.work_item_id = work_item_id
             ctx.instrumentation = instrumentation

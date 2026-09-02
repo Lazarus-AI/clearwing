@@ -96,6 +96,7 @@ class HuntTuning:
     shard_entry_points: bool | None = None  # None = auto (deep depth)
     min_shard_rank: int = 4
     min_project_loc: int = 50_000
+    max_steps_without_progress: int = 8
     seed_corpus_sources: list[str] | None = None
     subsystem_paths: list[str] | None = None
     campaign_hint: str | None = None
