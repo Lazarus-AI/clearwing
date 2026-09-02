@@ -57,7 +57,12 @@ def _warn_files_dropped(
             "Explicit scope %s matched %d file(s) but max_files=%d caps it — "
             "DROPPING %d file(s) from a deliberately-named scope: %s%s. Pass "
             "max_files=None (or raise it) to hunt the full scope.",
-            context, total, kept, len(dropped), sample, more,
+            context,
+            total,
+            kept,
+            len(dropped),
+            sample,
+            more,
         )
     else:
         logger.warning(
@@ -65,7 +70,11 @@ def _warn_files_dropped(
             "Under --no-rank all priorities are equal, so this keeps os.walk "
             "order and can drop the ground-truth file. Raise the cap "
             "(or set it to None) to widen scope.",
-            context, kept, len(dropped), sample, more,
+            context,
+            kept,
+            len(dropped),
+            sample,
+            more,
         )
 
 
@@ -119,10 +128,7 @@ def identify_subsystems_auto(
             continue
 
         sorted_files = sorted(files, key=lambda f: f.get("priority", 0.0), reverse=True)
-        if (
-            max_files_per_subsystem is not None
-            and len(sorted_files) > max_files_per_subsystem
-        ):
+        if max_files_per_subsystem is not None and len(sorted_files) > max_files_per_subsystem:
             _warn_files_dropped(
                 f"auto subsystem {prefix!r}",
                 kept=max_files_per_subsystem,
@@ -234,11 +240,7 @@ def subsystem_from_path(
     if seed is not None and not is_glob and callgraph is not None:
         neighbor_paths = _callgraph_neighbor_paths(normalized, callgraph)
         by_path = {ft.get("path", ""): ft for ft in file_targets}
-        neighbors = [
-            by_path[p]
-            for p in neighbor_paths
-            if p in by_path and by_path[p] is not seed
-        ]
+        neighbors = [by_path[p] for p in neighbor_paths if p in by_path and by_path[p] is not seed]
         if neighbors:
             neighbors.sort(key=lambda f: f.get("priority", 0.0), reverse=True)
             matched = [seed] + neighbors
@@ -251,8 +253,7 @@ def subsystem_from_path(
             )
         else:
             logger.info(
-                "Single-file subsystem %r has no callgraph neighbors; hunting "
-                "the file alone.",
+                "Single-file subsystem %r has no callgraph neighbors; hunting the file alone.",
                 normalized,
             )
 
@@ -329,6 +330,7 @@ class SubsystemHuntConfig:
     # Max files enumerated in each subsystem hunt prompt. None = list every file
     # (correct for an explicit scope so the ground-truth file is never hidden).
     max_files_in_prompt: int | None = None
+    max_steps_without_progress: int = 8
 
 
 class SubsystemHuntRunner:
@@ -482,6 +484,7 @@ class SubsystemHuntRunner:
                 campaign_hint=self.config.campaign_hint,
                 callgraph=self.config.callgraph,
                 max_files_in_prompt=self.config.max_files_in_prompt,
+                max_steps_without_progress=self.config.max_steps_without_progress,
             )
             ctx.work_item_id = work_item_id
             ctx.instrumentation = instrumentation

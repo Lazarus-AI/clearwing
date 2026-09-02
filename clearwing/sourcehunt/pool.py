@@ -237,6 +237,7 @@ class HuntPoolConfig:
     max_band: str = "standard"  # highest band promotion can reach
     band_budget: BandBudget = field(default_factory=BandBudget)
     redundancy_override: int | None = None
+    max_steps_without_progress: int = 8
     entry_points_by_file: dict = field(default_factory=dict)  # {path: [EntryPoint]}
     seed_corpus_by_file: dict = field(default_factory=dict)  # {path: [SeedCorpusEntry]}
     shard_entry_points: bool = False
@@ -525,10 +526,7 @@ class HunterPool:
             result.target
             for result in self._results.values()
             if result.status == "completed"
-            and (
-                not self.config.explicit_target_windows
-                or result.stop_reason == "completed"
-            )
+            and (not self.config.explicit_target_windows or result.stop_reason == "completed")
         }
         labels_by_file: dict[str, set[str]] = {}
         for file_target in self.config.files:
@@ -585,10 +583,7 @@ class HunterPool:
                 cached.target != _target_label(wi.file_target)
                 or cached.tier != tier
                 or cached.band != wi.band
-                or (
-                    self.config.explicit_target_windows
-                    and cached.stop_reason != "completed"
-                )
+                or (self.config.explicit_target_windows and cached.stop_reason != "completed")
             ):
                 logger.warning("Ignoring mismatched cached hunter work %s", work_item_id)
                 cached = None
@@ -997,6 +992,7 @@ class HunterPool:
             seed_context=seed_context,
             findings_pool=self.config.findings_pool,
             callgraph=self.config.callgraph,
+            max_steps_without_progress=self.config.max_steps_without_progress,
         )
         self._configure_hunter_context(result, work_item_id)
         return result
