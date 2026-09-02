@@ -101,6 +101,9 @@ class HuntTuning:
     campaign_hint: str | None = None
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
+    # Per-step character cap for trace snippets attached to record_finding
+    # (combined code_snippet + note). 0 or negative disables the cap.
+    trace_step_max_chars: int = 4096
 
 
 @dataclass(frozen=True)

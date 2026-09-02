@@ -330,6 +330,16 @@ def add_parser(subparsers):
         help="Lines per directly seeded target-file window (40-500; default: 480).",
     )
     parser.add_argument(
+        "--full-trace",
+        action="store_true",
+        default=False,
+        dest="full_trace",
+        help=(
+            "Retain the full trace-step snippets attached to record_finding "
+            "instead of capping each step at 4096 characters."
+        ),
+    )
+    parser.add_argument(
         "--seed-corpus",
         default=None,
         dest="seed_corpus",
@@ -1270,6 +1280,7 @@ def handle(cli, args):
         falsify=args.falsify,
         checkpoint_path=getattr(args, "checkpoint_path", None),
         stop_after=getattr(args, "stop_after", None),
+        trace_step_max_chars=0 if getattr(args, "full_trace", False) else 4096,
     )
 
     cli.console.print(
