@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from itertools import islice
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
@@ -106,8 +106,9 @@ If a PoC is provided, you MUST attempt to reproduce it. Report the exact result.
   "duplicate_cve": null
 }
 
-When you reject a finding, set tie_breaker_file and tie_breaker_line to the \
-exact source location your rejection rests on, so the rejection can be located.
+If you reject (advance=false), you MUST set tie_breaker_file and \
+tie_breaker_line to the exact source location your rejection rests on; the \
+response will be rejected otherwise.
 
 A finding advances ONLY if all four axes pass, or if REAL + IMPACTFUL pass \
 and TRIGGERABLE + GENERAL have confidence >= medium with stated assumptions."""
@@ -226,12 +227,28 @@ class _VerdictSchema(BaseModel):
     )
     tie_breaker_line: int | None = Field(
         default=None,
+        ge=1,
         description="1-indexed line of the tie_breaker in tie_breaker_file, or null.",
     )
     duplicate_cve: str | None = Field(
         default=None,
         description="CVE id if this duplicates a known issue, else null.",
     )
+
+    @model_validator(mode="after")
+    def _reject_requires_tie_breaker_location(self) -> _VerdictSchema:
+        # Spec 009 §3.3: a rejection (advance=False) must anchor itself in the
+        # source so the false-reject audit can locate it. Advancing verdicts may
+        # leave the fields null. Legacy verdicts read back via ValidatorVerdict
+        # (dataclass) bypass this validator, so old checkpoints still load.
+        if not self.advance and (
+            self.tie_breaker_file is None or self.tie_breaker_line is None
+        ):
+            raise ValueError(
+                "verdicts with advance=False must set tie_breaker_file "
+                "and tie_breaker_line"
+            )
+        return self
 
     def to_verdict(self, finding_id: str) -> ValidatorVerdict:
         """Map this validated wire object to the domain ValidatorVerdict.

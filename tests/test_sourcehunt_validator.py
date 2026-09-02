@@ -190,6 +190,8 @@ class TestResponseParsing:
             "advance": False,
             "severity": "high",
             "evidence_level": "static_corroboration",
+            "tie_breaker_file": "src/parse.c",
+            "tie_breaker_line": 42,
         })
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is False
@@ -251,6 +253,90 @@ class TestResponseParsing:
         assert verdict.advance is True
         assert {name for name, _ in verdict.axes.items()} == {"real", "triggerable"}
         assert verdict.axes.impactful is None
+
+    def test_reject_without_tie_breaker_file_is_rejected(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            _VerdictSchema.model_validate({
+                "axes": {
+                    "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": False,
+                "severity": "info",
+                "evidence_level": "static_corroboration",
+                "tie_breaker_line": 42,
+            })
+
+    def test_reject_without_tie_breaker_line_is_rejected(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            _VerdictSchema.model_validate({
+                "axes": {
+                    "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": False,
+                "severity": "info",
+                "evidence_level": "static_corroboration",
+                "tie_breaker_file": "src/parse.c",
+            })
+
+    def test_advance_true_needs_no_tie_breaker(self):
+        schema = _VerdictSchema.model_validate({
+            "axes": {
+                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+            },
+            "advance": True,
+            "severity": "low",
+            "evidence_level": "static_corroboration",
+        })
+        assert schema.tie_breaker_file is None
+        assert schema.tie_breaker_line is None
+
+    def test_reject_with_both_fields_succeeds(self):
+        schema = _VerdictSchema.model_validate({
+            "axes": {
+                "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+            },
+            "advance": False,
+            "severity": "info",
+            "evidence_level": "static_corroboration",
+            "tie_breaker_file": "src/parse.c",
+            "tie_breaker_line": 142,
+        })
+        assert schema.tie_breaker_file == "src/parse.c"
+        assert schema.tie_breaker_line == 142
+
+    def test_tie_breaker_line_zero_rejected(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            _VerdictSchema.model_validate({
+                "axes": {
+                    "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": False,
+                "severity": "info",
+                "evidence_level": "static_corroboration",
+                "tie_breaker_file": "src/parse.c",
+                "tie_breaker_line": 0,
+            })
+
+    def test_legacy_verdict_without_tie_breaker_still_loads(self):
+        # Legacy checkpoints read back via ValidatorVerdict (dataclass) bypass
+        # the wire-schema validator, so old rejections with no source anchor
+        # still load.
+        v = ValidatorVerdict(
+            finding_id="legacy", axes=Axes(), advance=False,
+            severity_validated=None, evidence_level="suspicion",
+            pro_argument="", counter_argument="", tie_breaker="legacy",
+            duplicate_cve=None,
+        )
+        assert v.tie_breaker_file is None
+        assert v.tie_breaker_line is None
 
     def test_schema_rejects_invalid_enums(self):
         # Constrained decoding can't emit these; assert the schema enforces them
@@ -376,6 +462,8 @@ class TestRejectedFindings:
             "advance": False,
             "severity": "high",
             "evidence_level": "static_corroboration",
+            "tie_breaker_file": "src/parse.c",
+            "tie_breaker_line": 7,
         })
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.severity_validated is None
