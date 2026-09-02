@@ -282,6 +282,7 @@ class SourceHuntRunner:
         shard_entry_points: bool | None = None,  # None = auto (deep depth)
         min_shard_rank: int = 4,
         min_project_loc: int = 50_000,
+        max_steps_without_progress: int = 8,
         seed_corpus_sources: list[str] | None = None,
         enable_findings_pool: bool = True,
         historical_db_path: Any = None,
@@ -428,6 +429,11 @@ class SourceHuntRunner:
             )
             min_shard_rank = min_shard_rank if min_shard_rank != 4 else h.min_shard_rank
             min_project_loc = min_project_loc if min_project_loc != 50_000 else h.min_project_loc
+            max_steps_without_progress = (
+                max_steps_without_progress
+                if max_steps_without_progress != 8
+                else h.max_steps_without_progress
+            )
             seed_corpus_sources = (
                 seed_corpus_sources if seed_corpus_sources is not None else h.seed_corpus_sources
             )
@@ -622,6 +628,7 @@ class SourceHuntRunner:
         self._exploit_mode = exploit_mode
         self._starting_band_override = starting_band
         self._redundancy_override = redundancy_override
+        self._max_steps_without_progress = max_steps_without_progress
         self._shard_entry_points_override = shard_entry_points
         self._min_shard_rank = min_shard_rank
         self._min_project_loc = min_project_loc
@@ -3009,6 +3016,7 @@ class SourceHuntRunner:
                     starting_band=self._starting_band,
                     max_band=self._max_band,
                     redundancy_override=self._redundancy_override,
+                    max_steps_without_progress=self._max_steps_without_progress,
                     entry_points_by_file=entry_points_by_file,
                     seed_corpus_by_file=seed_corpus_by_file,
                     shard_entry_points=self._shard_entry_points,
@@ -3274,6 +3282,7 @@ class SourceHuntRunner:
                 campaign_hint=self._campaign_hint,
                 callgraph=callgraph,
                 max_files_in_prompt=self._subsystem_max_files,
+                max_steps_without_progress=self._max_steps_without_progress,
                 trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                 instrumentation=self._instrumentation,
             )

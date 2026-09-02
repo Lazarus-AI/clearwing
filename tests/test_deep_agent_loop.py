@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -602,3 +603,234 @@ async def test_hunter_completes_when_no_tool_calls():
     assert llm.achat.call_count == 1
     assert len(result.findings) == 0
     assert result.stop_reason == "completed"
+
+
+def _stub_sandbox_for_deep_read():
+    sandbox = MagicMock()
+    exec_result = MagicMock()
+    exec_result.exit_code = 0
+    exec_result.stdout = "     1\tline one\n     2\tline two\n"
+    exec_result.stderr = ""
+    exec_result.timed_out = False
+    exec_result.duration_seconds = 0.01
+    sandbox.exec.return_value = exec_result
+    return sandbox
+
+
+def _build_deep_hunter(sandbox, max_steps=20):
+    from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
+
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=sandbox)
+    tools = build_deep_agent_tools(ctx)
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=tools,
+        ctx=ctx,
+        max_steps=max_steps,
+        agent_mode="deep",
+    )
+    return hunter, llm, ctx
+
+
+@pytest.mark.asyncio
+async def test_deep_read_file_counts_as_progress():
+    # Deep-mode read_file doesn't populate ctx.files_read (that set is fed by
+    # the constrained read_source_file tool). Each first read of a NEW file
+    # must count as progress via ctx.deep_files_read, otherwise the stall
+    # guard collapses to (0, 0, 0, 0) during early exploration.
+    hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read())
+    hunter.max_steps_without_progress = 3
+
+    paths = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call(
+                "read_file",
+                {"path": f"/workspace/foo_{next(paths)}.c"},
+            )
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    # Distinct file paths keep the deep_files_read set growing → progress on
+    # every step → should run to max_steps.
+    assert result.stop_reason == "max_steps"
+    assert llm.achat.call_count == 20
+    assert len(ctx.deep_files_read) == 20
+
+
+@pytest.mark.asyncio
+async def test_deep_read_same_file_repeated_does_not_reset_stall():
+    # Re-reading the SAME path 10 times must not reset the stall counter —
+    # spec: only the *first* read of an unread file counts as progress.
+    hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read())
+    hunter.max_steps_without_progress = 3
+
+    # Vary offset each call so the degenerate_loop guard (which fires on
+    # identical repeated calls) doesn't preempt the stall guard — but the
+    # path is always the same, so no new file enters deep_files_read.
+    offsets = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call(
+                "read_file",
+                {"path": "/workspace/only_file.c", "offset": next(offsets) * 100, "limit": 50},
+            )
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count < 20
+    assert ctx.deep_files_read == {"/workspace/only_file.c"}
+
+
+@pytest.mark.asyncio
+async def test_deep_execute_failing_does_not_reset_stall():
+    # A stream of varied FAILING execute commands (distinct arguments, so not
+    # a degenerate_loop) must not reset the stall counter — execute never
+    # counts as progress.
+    from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
+
+    llm = AsyncMock()
+    sandbox = MagicMock()
+    fail_result = MagicMock()
+    fail_result.exit_code = 2
+    fail_result.stdout = ""
+    fail_result.stderr = "ls: no such file"
+    fail_result.timed_out = False
+    fail_result.duration_seconds = 0.01
+    sandbox.exec.return_value = fail_result
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=sandbox)
+    tools = build_deep_agent_tools(ctx)
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=tools,
+        ctx=ctx,
+        max_steps=20,
+        agent_mode="deep",
+    )
+    hunter.max_steps_without_progress = 3
+
+    counter = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call(
+                "execute",
+                {"command": f"ls /nonexistent{next(counter)}"},
+            )
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count < 20
+    assert ctx.deep_files_read == set()
+
+
+@pytest.mark.asyncio
+async def test_deep_write_file_does_not_reset_stall():
+    # write_file never counts as progress.
+    from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
+
+    llm = AsyncMock()
+    sandbox = MagicMock()
+    ok_result = MagicMock()
+    ok_result.exit_code = 0
+    ok_result.stdout = ""
+    ok_result.stderr = ""
+    ok_result.timed_out = False
+    ok_result.duration_seconds = 0.01
+    sandbox.exec.return_value = ok_result
+    sandbox.write_file.return_value = None
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=sandbox)
+    tools = build_deep_agent_tools(ctx)
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=tools,
+        ctx=ctx,
+        max_steps=20,
+        agent_mode="deep",
+    )
+    hunter.max_steps_without_progress = 3
+
+    counter = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call(
+                "write_file",
+                {"path": f"/tmp/scratch_{next(counter)}.txt", "contents": "x"},
+            )
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count < 20
+    assert ctx.deep_files_read == set()
+
+
+def test_hunt_tuning_max_steps_without_progress_default():
+    from clearwing.sourcehunt.config import HuntTuning
+
+    assert HuntTuning().max_steps_without_progress == 8
+
+
+@pytest.mark.asyncio
+async def test_max_steps_without_progress_zero_disables_stall_guard():
+    # A hunter configured with max_steps_without_progress=0 must never stall,
+    # only stop on max_steps / budget / degenerate_loop / empty_response.
+    hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read(), max_steps=6)
+    hunter.max_steps_without_progress = 0
+
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call("read_file", {"path": "/workspace/only_file.c"}),
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    # Same path reread every step: stall guard would fire at step 3, but it's
+    # disabled — the degenerate_loop guard picks it up instead.
+    assert result.stop_reason != "stalled"
+
+
+@pytest.mark.asyncio
+async def test_hunter_stalls_when_no_progress():
+    # Distinct, schema-valid calls that never add a finding, a potential, or a
+    # first file read. Not identical (so not degenerate_loop) and not empty
+    # (so not empty_response): only the stalled guard stops it before max_steps.
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=500, budget_usd=0.0)
+    hunter.max_steps_without_progress = 3
+
+    counter = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        text="still thinking",
+        tool_calls_list=[_make_tool_call("think", {"notes": f"step {next(counter)}"})],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count < 20  # stops well short of max_steps

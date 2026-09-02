@@ -237,6 +237,7 @@ class HuntPoolConfig:
     max_band: str = "standard"  # highest band promotion can reach
     band_budget: BandBudget = field(default_factory=BandBudget)
     redundancy_override: int | None = None
+    max_steps_without_progress: int = 8
     entry_points_by_file: dict = field(default_factory=dict)  # {path: [EntryPoint]}
     seed_corpus_by_file: dict = field(default_factory=dict)  # {path: [SeedCorpusEntry]}
     shard_entry_points: bool = False
@@ -997,6 +998,7 @@ class HunterPool:
             seed_context=seed_context,
             findings_pool=self.config.findings_pool,
             callgraph=self.config.callgraph,
+            max_steps_without_progress=self.config.max_steps_without_progress,
         )
         self._configure_hunter_context(result, work_item_id)
         return result

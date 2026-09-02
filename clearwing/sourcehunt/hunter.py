@@ -1453,6 +1453,7 @@ def build_subsystem_hunter_agent(
     campaign_hint: str | None = None,
     callgraph: Any = None,
     max_files_in_prompt: int | None = None,
+    max_steps_without_progress: int = 8,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a subsystem-level hunter agent (spec 006).
 
@@ -1516,6 +1517,7 @@ def build_subsystem_hunter_agent(
         max_steps=max_steps,
         agent_mode="deep",
         budget_usd=budget_usd,
+        max_steps_without_progress=max_steps_without_progress,
         initial_user_message=_initial_msg,
     ), ctx
 
@@ -1529,7 +1531,7 @@ class HunterRunResult:
     cost_usd: float
     tokens_used: int
     # "completed" | "budget_exhausted" | "max_steps" | "degenerate_loop"
-    # | "empty_response"
+    # | "empty_response" | "stalled"
     stop_reason: str
     transcript_summary: str = ""
     potentials: list[dict] = field(default_factory=list)
@@ -1547,14 +1549,26 @@ class NativeHunter:
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
     lead_checkpoint_calls: int = 4
+    # Stop when this many consecutive steps make no new progress — no new
+    # finding, no new potential, and no first read of an unread file. 0 disables.
+    # Complements degenerate_loop (repeated identical calls) and empty_response
+    # (empty turns), which do not catch varied-but-unproductive reading.
+    max_steps_without_progress: int = 8
     summarizer: ContextSummarizer | None = field(default=None)
 
-    def _should_stop(self, step: int, cost_usd: float) -> str | None:
+    def _should_stop(
+        self, step: int, cost_usd: float, steps_since_progress: int = 0
+    ) -> str | None:
         """Return a stop reason string, or None to continue."""
         if self.budget_usd > 0 and cost_usd >= self.budget_usd * 0.9:
             return "budget_exhausted"
         if step > self.max_steps:
             return "max_steps"
+        if (
+            self.max_steps_without_progress > 0
+            and steps_since_progress >= self.max_steps_without_progress
+        ):
+            return "stalled"
         return None
 
     @tracer.agent(name="sourcehunt.hunter")
@@ -1597,8 +1611,37 @@ class NativeHunter:
 
         synthesis_injected = False
         step = 0
+        # Progress guard: a step counts as progress when it adds a finding, a
+        # potential, or the first read of a previously-unread file (via the
+        # constrained read_source_file tool or the deep read_file tool). A
+        # successful execute or write_file does not count — otherwise a stream
+        # of varied failing commands would silently reset the stall counter.
+        # When nothing advances for max_steps_without_progress steps the hunter
+        # stops (see _should_stop). Steps that only reissued an already-
+        # throttled call are left to the degenerate_loop terminal, so they do
+        # not count toward the stall.
+        last_progress_sig = (
+            len(self.ctx.findings),
+            len(self.ctx.potentials),
+            len(self.ctx.files_read),
+            len(self.ctx.deep_files_read),
+        )
+        steps_since_progress = 0
+        prev_step_had_skip = False
         while True:
             step += 1
+            progress_sig = (
+                len(self.ctx.findings),
+                len(self.ctx.potentials),
+                len(self.ctx.files_read),
+                len(self.ctx.deep_files_read),
+            )
+            if progress_sig != last_progress_sig:
+                last_progress_sig = progress_sig
+                steps_since_progress = 0
+            elif not prev_step_had_skip:
+                steps_since_progress += 1
+            prev_step_had_skip = False
             # Forced fresh synthesis: when approaching the stop boundary,
             # inject a user message demanding the model consolidate findings
             # before we cut it off.
@@ -1617,7 +1660,7 @@ class NativeHunter:
                             "to fully verify them — record them with the evidence you have.",
                         )
                     )
-            stop_reason = self._should_stop(step, total_cost_usd)
+            stop_reason = self._should_stop(step, total_cost_usd, steps_since_progress)
             if stop_reason:
                 logger.warning(
                     "Hunter stopped for %s: %s (step=%d, cost=$%.4f, findings=%d)",
@@ -2033,6 +2076,7 @@ class NativeHunter:
                         )
                     elif skipped:
                         total_repeated_skips += 1
+                        prev_step_had_skip = True
                         tool_output = {
                             "error": (
                                 "tool call skipped: you already made this exact call and it "
@@ -2713,6 +2757,7 @@ def build_hunter_agent(
     seed_context: str | None = None,
     findings_pool: Any = None,
     callgraph: Any = None,
+    max_steps_without_progress: int = 8,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a per-file native hunter runtime.
 
@@ -2849,6 +2894,7 @@ def build_hunter_agent(
         max_steps=max_steps,
         agent_mode=agent_mode,
         budget_usd=budget_usd,
+        max_steps_without_progress=max_steps_without_progress,
         summarizer=ContextSummarizer(),
         initial_user_message=initial_user_message,
     ), ctx

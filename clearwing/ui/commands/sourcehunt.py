@@ -252,6 +252,17 @@ def add_parser(subparsers):
         help="Override redundancy count for high-ranked files (default: auto from priority)",
     )
     parser.add_argument(
+        "--max-steps-without-progress",
+        type=int,
+        default=8,
+        metavar="N",
+        dest="max_steps_without_progress",
+        help=(
+            "Stop a hunter after N consecutive steps with no new finding, "
+            "potential, or first read of an unread file (0 disables; default 8)"
+        ),
+    )
+    parser.add_argument(
         "--shard-entry-points",
         action="store_true",
         default=False,
@@ -1236,6 +1247,7 @@ def handle(cli, args):
         exploit_mode=args.exploit_mode,
         starting_band=args.starting_band,
         redundancy_override=args.redundancy,
+        max_steps_without_progress=args.max_steps_without_progress,
         shard_entry_points=True if args.shard_entry_points else None,
         min_shard_rank=args.min_shard_rank,
         seed_corpus_sources=((["git_cve"] if args.seed_cves else []) or None),
