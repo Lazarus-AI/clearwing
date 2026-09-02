@@ -165,6 +165,30 @@ def test_record_trace_step_truncates_above_cap(ctx):
     assert step.original_chars == 150
 
 
+def test_record_finding_inline_trace_step_is_capped(tools, ctx):
+    long_snippet = "x" * 10_000
+    long_note = "ENTRY/SINK: " + "y" * 10_000
+    result = _record_finding(
+        tools,
+        trace={
+            "steps": [
+                {
+                    "file": "app.py",
+                    "line": 42,
+                    "code_snippet": long_snippet,
+                    "note": long_note,
+                }
+            ]
+        },
+    )
+    assert "Finding recorded" in result
+    step = ctx.findings[0].vulnerability_trace["steps"][0]
+    assert step["truncated"] is True
+    assert len(step["code_snippet"]) <= 4096
+    assert len(step["note"]) <= 4096
+    assert step["original_chars"] == len(long_snippet) + len(long_note)
+
+
 def test_record_trace_step_cap_disabled_leaves_strings_untouched(ctx):
     ctx.trace_step_max_chars = 0
     tools = {t.name: t.handler for t in build_reporting_tools(ctx)}

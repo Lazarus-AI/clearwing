@@ -190,6 +190,22 @@ def _cap_trace_strings(
     return code_snippet, note, truncated, (orig_chars if truncated else 0)
 
 
+def _build_capped_trace_step(step: dict, cap: int) -> TraceStep:
+    """Build a TraceStep from an inline trace dict, capping snippet/note."""
+    data = dict(step)
+    snippet, note, truncated, orig_chars = _cap_trace_strings(
+        str(data.get("code_snippet", "") or ""),
+        str(data.get("note", "") or ""),
+        cap,
+    )
+    data["code_snippet"] = snippet
+    data["note"] = note
+    if truncated:
+        data["truncated"] = True
+        data["original_chars"] = orig_chars
+    return TraceStep(**data)
+
+
 def build_reporting_tools(ctx: HunterContext) -> list:
     """Build the finding-reporter and trace-step tools for a hunter session."""
 
@@ -234,7 +250,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 "Call read_source_file for that range first.",
             )
         code_snippet, note, truncated, orig_chars = _cap_trace_strings(
-            code_snippet, note, getattr(ctx, "trace_step_max_chars", 4096)
+            code_snippet, note, ctx.trace_step_max_chars
         )
         step = TraceStep(
             file=file,
@@ -332,7 +348,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             authoritative_steps = (
                 list(ctx.trace_steps)
                 if ctx.trace_steps
-                else [TraceStep(**step) for step in explicit_steps]
+                else [
+                    _build_capped_trace_step(step, ctx.trace_step_max_chars)
+                    for step in explicit_steps
+                ]
             )
             if not authoritative_steps:
                 return _tool_error(
