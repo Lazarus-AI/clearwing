@@ -235,6 +235,11 @@ class ValidatorVerdict:
     tie_breaker: str
     duplicate_cve: str | None
     raw_response: str = ""
+    # Optional source anchor for the tie_breaker: the file and 1-indexed line
+    # the verdict rests on. Populated when the model supplies it (asked for on
+    # rejection so a rejection can be located), else None.
+    tie_breaker_file: str | None = None
+    tie_breaker_line: int | None = None
     patch_oracle_attempted: bool = False
     patch_oracle_passed: bool | None = None
     patch_oracle_diff: str = ""

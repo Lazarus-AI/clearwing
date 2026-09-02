@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from itertools import islice
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
@@ -101,8 +101,14 @@ If a PoC is provided, you MUST attempt to reproduce it. Report the exact result.
   "pro_argument": "max 200 words — strongest case FOR the vulnerability",
   "counter_argument": "max 200 words — strongest case AGAINST",
   "tie_breaker": "what single piece of evidence resolved it",
+  "tie_breaker_file": "repo-relative file the tie_breaker rests on, or null",
+  "tie_breaker_line": "1-indexed line in that file, or null",
   "duplicate_cve": null
 }
+
+If you reject (advance=false), you MUST set tie_breaker_file and \
+tie_breaker_line to the exact source location your rejection rests on; the \
+response will be rejected otherwise.
 
 A finding advances ONLY if all four axes pass, or if REAL + IMPACTFUL pass \
 and TRIGGERABLE + GENERAL have confidence >= medium with stated assumptions."""
@@ -212,10 +218,37 @@ class _VerdictSchema(BaseModel):
     tie_breaker: str = Field(
         default="", description="The single piece of evidence that resolved it."
     )
+    tie_breaker_file: str | None = Field(
+        default=None,
+        description=(
+            "Repo-relative file the tie_breaker rests on. Required when rejecting "
+            "so the rejection can be located; null otherwise."
+        ),
+    )
+    tie_breaker_line: int | None = Field(
+        default=None,
+        ge=1,
+        description="1-indexed line of the tie_breaker in tie_breaker_file, or null.",
+    )
     duplicate_cve: str | None = Field(
         default=None,
         description="CVE id if this duplicates a known issue, else null.",
     )
+
+    @model_validator(mode="after")
+    def _reject_requires_tie_breaker_location(self) -> _VerdictSchema:
+        # Spec 009 §3.3: a rejection (advance=False) must anchor itself in the
+        # source so the false-reject audit can locate it. Advancing verdicts may
+        # leave the fields null. Legacy verdicts read back via ValidatorVerdict
+        # (dataclass) bypass this validator, so old checkpoints still load.
+        if not self.advance and (
+            self.tie_breaker_file is None or self.tie_breaker_line is None
+        ):
+            raise ValueError(
+                "verdicts with advance=False must set tie_breaker_file "
+                "and tie_breaker_line"
+            )
+        return self
 
     def to_verdict(self, finding_id: str) -> ValidatorVerdict:
         """Map this validated wire object to the domain ValidatorVerdict.
@@ -243,6 +276,8 @@ class _VerdictSchema(BaseModel):
             pro_argument=self.pro_argument,
             counter_argument=self.counter_argument,
             tie_breaker=self.tie_breaker,
+            tie_breaker_file=self.tie_breaker_file,
+            tie_breaker_line=self.tie_breaker_line,
             duplicate_cve=self.duplicate_cve,
             outcome="confirmed" if advance else "refuted",
         )
@@ -509,6 +544,8 @@ def apply_validator_verdict(
     finding["verifier_pro_argument"] = verdict.pro_argument
     finding["verifier_counter_argument"] = verdict.counter_argument
     finding["verifier_tie_breaker"] = verdict.tie_breaker
+    finding["verifier_tie_breaker_file"] = verdict.tie_breaker_file
+    finding["verifier_tie_breaker_line"] = verdict.tie_breaker_line
     finding["verifier_session_id"] = session_id
     finding["validation_mode"] = "v2"
 
