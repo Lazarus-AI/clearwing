@@ -167,6 +167,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         result = ctx.sandbox.exec(cmd, timeout=30)
         if result.exit_code != 0:
             return _cap_output(f"error reading {path}: {result.stderr.strip()}", "file error")
+        ctx.deep_files_read.add(str(path))
         content = _cap_output(result.stdout, "file")
         total_match = re.search(r"__CLEARWING_TOTAL_LINES__=(\d+)", result.stderr)
         if total_match:

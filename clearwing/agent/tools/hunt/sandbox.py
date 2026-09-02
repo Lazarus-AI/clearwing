@@ -34,6 +34,11 @@ class HunterContext:
     files_read: set = field(default_factory=set)  # files accessed via read_source_file
     read_ranges: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
     agent_mode: str = "constrained"  # "constrained" | "deep"; deep reads via shell so files_read is not authoritative
+    # Set of file paths successfully read via deep-mode read_file. Only the
+    # first read of a previously-unread path counts as progress for the
+    # hunter's stall guard — re-reading the same file (or a varied series of
+    # failing execute/write_file calls) must not reset the stall counter.
+    deep_files_read: set[str] = field(default_factory=set)
     file_path: str | None = None  # the file this hunter is scoped to
     session_id: str | None = None
     specialist: str = "general"  # "general" | "memory_safety" | "logic_auth" | "propagation"
@@ -51,7 +56,9 @@ class HunterContext:
     instrumentation: object | None = None  # SourceHuntInstrumentation, kept generic
     exploit_result: object | None = None  # ExploiterResult slot for exploit agent
     elaboration_result: object | None = None  # ElaborationResult slot for elaboration agent
-    potentials: list[dict] = field(default_factory=list)  # investigation queue for flag_potential tool
+    potentials: list[dict] = field(
+        default_factory=list
+    )  # investigation queue for flag_potential tool
     potential_history: list[dict] = field(default_factory=list)  # resolved leads retained for audit
     require_invariant_map: bool = False  # subsystem findings must promote a mapped potential
     callgraph: object | None = None  # CallGraph from preprocessor (avoiding circular import)
