@@ -196,6 +196,45 @@ class TestResponseParsing:
         assert verdict.axes.triggerable.passed is False
         assert verdict.severity_validated is None  # cleared when advance is False
 
+    def test_reject_carries_tie_breaker_location(self):
+        # A rejection may cite the source location it rests on; to_verdict and
+        # apply_validator_verdict carry it through. The fields default to None
+        # when the model omits them, so existing verdicts are unaffected.
+        schema = _VerdictSchema.model_validate({
+            "axes": {
+                "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+            },
+            "advance": False,
+            "severity": "info",
+            "evidence_level": "static_corroboration",
+            "tie_breaker": "length is checked before the copy",
+            "tie_breaker_file": "src/parse.c",
+            "tie_breaker_line": 142,
+        })
+        verdict = schema.to_verdict("hunter-xyz")
+        assert verdict.tie_breaker_file == "src/parse.c"
+        assert verdict.tie_breaker_line == 142
+
+        finding: dict = {}
+        apply_validator_verdict(finding, verdict)
+        assert finding["verifier_tie_breaker_file"] == "src/parse.c"
+        assert finding["verifier_tie_breaker_line"] == 142
+
+    def test_tie_breaker_location_defaults_to_none(self):
+        schema = _VerdictSchema.model_validate({
+            "axes": {
+                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+            },
+            "advance": True,
+            "severity": "low",
+            "evidence_level": "static_corroboration",
+        })
+        verdict = schema.to_verdict("hunter-xyz")
+        assert verdict.tie_breaker_file is None
+        assert verdict.tie_breaker_line is None
+
     def test_quick_pass_two_axes_only(self):
         # impactful/general are optional (quick-pass prompt); to_verdict maps
         # only the axes that are present.
