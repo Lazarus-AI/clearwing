@@ -101,8 +101,13 @@ If a PoC is provided, you MUST attempt to reproduce it. Report the exact result.
   "pro_argument": "max 200 words — strongest case FOR the vulnerability",
   "counter_argument": "max 200 words — strongest case AGAINST",
   "tie_breaker": "what single piece of evidence resolved it",
+  "tie_breaker_file": "repo-relative file the tie_breaker rests on, or null",
+  "tie_breaker_line": "1-indexed line in that file, or null",
   "duplicate_cve": null
 }
+
+When you reject a finding, set tie_breaker_file and tie_breaker_line to the \
+exact source location your rejection rests on, so the rejection can be located.
 
 A finding advances ONLY if all four axes pass, or if REAL + IMPACTFUL pass \
 and TRIGGERABLE + GENERAL have confidence >= medium with stated assumptions."""
@@ -212,6 +217,17 @@ class _VerdictSchema(BaseModel):
     tie_breaker: str = Field(
         default="", description="The single piece of evidence that resolved it."
     )
+    tie_breaker_file: str | None = Field(
+        default=None,
+        description=(
+            "Repo-relative file the tie_breaker rests on. Required when rejecting "
+            "so the rejection can be located; null otherwise."
+        ),
+    )
+    tie_breaker_line: int | None = Field(
+        default=None,
+        description="1-indexed line of the tie_breaker in tie_breaker_file, or null.",
+    )
     duplicate_cve: str | None = Field(
         default=None,
         description="CVE id if this duplicates a known issue, else null.",
@@ -243,6 +259,8 @@ class _VerdictSchema(BaseModel):
             pro_argument=self.pro_argument,
             counter_argument=self.counter_argument,
             tie_breaker=self.tie_breaker,
+            tie_breaker_file=self.tie_breaker_file,
+            tie_breaker_line=self.tie_breaker_line,
             duplicate_cve=self.duplicate_cve,
             outcome="confirmed" if advance else "refuted",
         )
@@ -509,6 +527,8 @@ def apply_validator_verdict(
     finding["verifier_pro_argument"] = verdict.pro_argument
     finding["verifier_counter_argument"] = verdict.counter_argument
     finding["verifier_tie_breaker"] = verdict.tie_breaker
+    finding["verifier_tie_breaker_file"] = verdict.tie_breaker_file
+    finding["verifier_tie_breaker_line"] = verdict.tie_breaker_line
     finding["verifier_session_id"] = session_id
     finding["validation_mode"] = "v2"
 
