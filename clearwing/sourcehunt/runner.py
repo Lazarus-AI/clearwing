@@ -1384,6 +1384,7 @@ class SourceHuntRunner:
                     preprocess_result=preprocess_result,
                     files_ranked=files_ranked,
                     pipeline_status=pipeline_status,
+                    skip_detail="Run stopped after preprocess",
                 )
 
             _t = time.monotonic()
@@ -1429,6 +1430,7 @@ class SourceHuntRunner:
                     preprocess_result=preprocess_result,
                     files_ranked=files_ranked,
                     pipeline_status=pipeline_status,
+                    skip_detail="Run stopped after rank",
                 )
 
             # depth=quick exits here with the static_findings as-is
@@ -3583,8 +3585,9 @@ class SourceHuntRunner:
         preprocess_result: PreprocessResult,
         files_ranked: int,
         pipeline_status: PipelineStatus | None = None,
+        skip_detail: str = "Quick depth performs static analysis only",
     ) -> SourceHuntResult:
-        """depth=quick exit — only static findings, no LLM hunters."""
+        """Build a static-only result for quick depth or a staged early exit."""
         all_findings = self._merge_static_findings([], preprocess_result)
         target_files = [str(item.get("path") or "") for item in preprocess_result.file_targets]
         finding_files = [str(finding.file or "") for finding in all_findings]
@@ -3593,7 +3596,7 @@ class SourceHuntRunner:
         self._emit_stage(
             "hunt",
             "skipped",
-            detail="Quick depth performs static analysis only",
+            detail=skip_detail,
             files=target_files,
         )
         for stage in ("verify", "exploit"):
@@ -3601,7 +3604,7 @@ class SourceHuntRunner:
                 stage,
                 "skipped",
                 findings_so_far=len(all_findings),
-                detail="Quick depth performs static analysis only",
+                detail=skip_detail,
                 files=finding_files,
                 symbols=finding_symbols,
                 finding_ids=finding_ids,

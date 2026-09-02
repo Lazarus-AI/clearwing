@@ -698,6 +698,34 @@ def test_stop_after_hunt_returns_accumulated_hunt_result(tmp_path: Path, monkeyp
     assert result.spent_per_tier == {"A": 1.25, "B": 0.0, "C": 0.0}
 
 
+def test_stop_after_preprocess_does_not_report_quick_depth(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    progress = []
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        depth="deep",
+        stop_after="preprocess",
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+        enable_knowledge_graph=False,
+        on_progress=progress.append,
+    )
+    runner._preprocess_restored = False
+    monkeypatch.setattr(runner, "_preprocess", lambda: _result(repo))
+
+    result = runner.run()
+
+    skipped = [event for event in progress if event.status == "skipped"]
+    assert result.status == "completed"
+    assert skipped
+    assert {event.detail for event in skipped} == {"Run stopped after preprocess"}
+    assert "Quick depth" not in repr(progress)
+
+
 def test_stop_after_verify_returns_accumulated_verification_result(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()

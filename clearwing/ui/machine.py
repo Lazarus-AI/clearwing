@@ -11,6 +11,7 @@ from typing import Any
 
 PROTOCOL_VERSION = 1
 MAX_START_BYTES = 1_048_576
+MAX_RECORD_BYTES = 1_048_576
 
 
 class MachineProtocolError(ValueError):
@@ -99,9 +100,105 @@ class MachineChannel:
             **payload,
         }
         encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
+        original_bytes = len(encoded)
+        if len(encoded) >= MAX_RECORD_BYTES:
+            record = (
+                self._compact_terminal(record, original_bytes)
+                if terminal
+                else self._compact_progress(record, original_bytes)
+            )
+            encoded = json.dumps(
+                record, separators=(",", ":"), ensure_ascii=False
+            ).encode()
+        if len(encoded) >= MAX_RECORD_BYTES:
+            record = {
+                "v": record["v"],
+                "type": record["type"],
+                "seq": record["seq"],
+                "data": {
+                    "truncated": True,
+                    "original_bytes": original_bytes,
+                },
+            }
+            encoded = json.dumps(
+                record, separators=(",", ":"), ensure_ascii=False
+            ).encode()
         self._writer.write(encoded + b"\n")
         if terminal:
             self._terminal = True
+
+    @staticmethod
+    def _compact_progress(
+        record: dict[str, Any], original_bytes: int
+    ) -> dict[str, Any]:
+        """Keep routing fields from an oversized progress event."""
+        data = record.get("data")
+        summary: dict[str, Any] = {
+            "truncated": True,
+            "original_bytes": original_bytes,
+        }
+        if isinstance(data, dict):
+            for key in (
+                "event",
+                "stage",
+                "status",
+                "tool",
+                "finding_id",
+                "hunter_target",
+            ):
+                value = data.get(key)
+                if isinstance(value, str):
+                    summary[key] = _bounded_utf8(value, 512)
+                elif isinstance(value, (int, float, bool)) or value is None:
+                    summary[key] = value
+        record["data"] = summary
+        return record
+
+    @staticmethod
+    def _compact_terminal(
+        record: dict[str, Any], original_bytes: int
+    ) -> dict[str, Any]:
+        """Project an oversized result onto a bounded workflow-safe summary.
+
+        Large checkpoint objects are intentionally omitted here. Managed
+        SourceHunt runs persist them in their workspace, where later stages
+        reload them without crossing the machine-protocol boundary.
+        """
+        if "error" in record:
+            record["error"] = _bounded_utf8(str(record["error"]), 2048)
+            record["truncated"] = True
+            record["original_bytes"] = original_bytes
+            return record
+
+        data = record.get("data")
+        if not isinstance(data, dict):
+            record["data"] = {
+                "truncated": True,
+                "original_bytes": original_bytes,
+            }
+            return record
+
+        summary: dict[str, Any] = {
+            "truncated": True,
+            "original_bytes": original_bytes,
+        }
+        for key, value in data.items():
+            if isinstance(value, str):
+                summary[key] = _bounded_utf8(value, 2048)
+            elif isinstance(value, (int, float, bool)) or value is None:
+                summary[key] = value
+            elif isinstance(value, list):
+                summary[f"{key}_count"] = len(value)
+            elif isinstance(value, dict):
+                nested = json.dumps(
+                    value, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+                if len(nested) < 4096:
+                    summary[key] = value
+                else:
+                    summary[f"{key}_keys"] = sorted(value)[:20]
+        record["data"] = summary
+        return record
 
 
 def _decode_provider_routing(value: Any, *, required: bool) -> dict[str, Any] | None:
@@ -137,3 +234,10 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _bounded_utf8(value: str, maximum_bytes: int) -> str:
+    encoded = value.encode()
+    if len(encoded) <= maximum_bytes:
+        return value
+    return encoded[:maximum_bytes].decode(errors="ignore")
