@@ -173,9 +173,7 @@ class RecordFindingInput(ToolInputModel):
     )
 
 
-def _cap_trace_strings(
-    code_snippet: str, note: str, cap: int
-) -> tuple[str, str, bool, int]:
+def _cap_trace_strings(code_snippet: str, note: str, cap: int) -> tuple[str, str, bool, int]:
     """Cap trace-step strings. Returns (snippet, note, truncated, original_chars)."""
     if not cap or cap <= 0:
         return code_snippet, note, False, 0
@@ -241,8 +239,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 f"File '{file}' has not been read yet. Call read_source_file first.",
             )
         ranges = ctx.read_ranges.get(file, [])
-        if ctx.agent_mode != "deep" and ranges and not any(
-            start <= line <= end for start, end in ranges
+        if (
+            ctx.agent_mode != "deep"
+            and ranges
+            and not any(start <= line <= end for start, end in ranges)
         ):
             return _tool_error(
                 "UNREAD_TRACE_SOURCE",

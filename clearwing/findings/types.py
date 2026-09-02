@@ -256,7 +256,9 @@ class Finding:
     def is_strong_evidence(self) -> bool:
         """True if evidence_level is crash_reproduced or higher."""
         try:
-            return EVIDENCE_LEVELS.index(self.evidence_level) >= EVIDENCE_LEVELS.index("crash_reproduced")
+            return EVIDENCE_LEVELS.index(self.evidence_level) >= EVIDENCE_LEVELS.index(
+                "crash_reproduced"
+            )
         except ValueError:
             return False
 
