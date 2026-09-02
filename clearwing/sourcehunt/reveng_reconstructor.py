@@ -74,8 +74,12 @@ class RevengReconstructor:
 
     BATCH_SIZE = RECONSTRUCTION_BATCH_SIZE
 
-    def __init__(self, llm: Any):
+    def __init__(self, llm: Any, batch_size: int | None = None):
         self._llm = llm
+        resolved = batch_size if batch_size is not None else self.BATCH_SIZE
+        if resolved <= 0:
+            raise ValueError(f"batch_size must be >= 1, got {resolved}")
+        self._batch_size = resolved
 
     async def areconstruct(
         self,
@@ -98,8 +102,8 @@ class RevengReconstructor:
         # Build shared context from static analysis
         context = self._build_context(static_info)
 
-        for i in range(0, len(prioritized), self.BATCH_SIZE):
-            batch = prioritized[i:i + self.BATCH_SIZE]
+        for i in range(0, len(prioritized), self._batch_size):
+            batch = prioritized[i:i + self._batch_size]
             reconstructed = await self._reconstruct_batch(batch, context)
             result.sources.extend(reconstructed)
 

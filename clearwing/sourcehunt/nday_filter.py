@@ -124,15 +124,18 @@ def fetch_recent_cves(repo_path: str, days: int = 90) -> list[NdayCandidate]:
 class NdayFilter:
     """Cheap LLM-based triage to filter CVEs for exploitability."""
 
-    def __init__(self, llm):
+    def __init__(self, llm, batch_size: int = FILTER_BATCH_SIZE):
         self._llm = llm
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        self._batch_size = batch_size
 
     async def afilter(self, candidates: list[NdayCandidate]) -> list[NdayCandidate]:
         if not candidates:
             return []
 
-        for i in range(0, len(candidates), FILTER_BATCH_SIZE):
-            batch = candidates[i:i + FILTER_BATCH_SIZE]
+        for i in range(0, len(candidates), self._batch_size):
+            batch = candidates[i:i + self._batch_size]
             await self._filter_batch(batch)
 
         return [

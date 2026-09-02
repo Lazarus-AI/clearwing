@@ -686,6 +686,22 @@ def add_parser(subparsers):
         help="Budget band for --reveng hunting (default: deep)",
     )
     parser.add_argument(
+        "--nday-filter-batch-size",
+        type=int,
+        default=None,
+        help="Candidates per LLM call in the --nday filter stage "
+        "(default: 10). Shrink for smaller local models whose output "
+        "budget truncates a 10-item batch.",
+    )
+    parser.add_argument(
+        "--reveng-batch-size",
+        type=int,
+        default=None,
+        help="Functions per LLM call in the --reveng reconstruction stage "
+        "(default: 8). Shrink for smaller local models whose output "
+        "budget truncates an 8-item batch.",
+    )
+    parser.add_argument(
         "--model", default=None, help="Override all role models with one model name"
     )
     parser.add_argument(
@@ -917,6 +933,7 @@ def handle(cli, args):
             budget_band=args.nday_budget,
             project=args.repo,
             output_dir=args.output_dir,
+            filter_batch_size=args.nday_filter_batch_size,
         )
         result = asyncio.run(pipeline.arun(candidates))
 
@@ -972,6 +989,7 @@ def handle(cli, args):
             budget_band=args.reveng_budget,
             output_dir=args.output_dir,
             project_name=os.path.basename(binary_path),
+            reconstruction_batch_size=args.reveng_batch_size,
         )
         result = asyncio.run(pipeline.arun())
 

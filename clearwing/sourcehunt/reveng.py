@@ -95,6 +95,7 @@ class RevengPipeline:
         output_dir: str | None = None,
         project_name: str = "",
         sandbox_factory: Any = None,
+        reconstruction_batch_size: int | None = None,
     ):
         self._llm = llm
         self._binary_path = binary_path
@@ -107,6 +108,13 @@ class RevengPipeline:
         self._output_dir = output_dir
         self._project_name = project_name or os.path.basename(binary_path)
         self._sandbox_factory = sandbox_factory
+        from .config import HuntTuning
+
+        self._reconstruction_batch_size = (
+            reconstruction_batch_size
+            if reconstruction_batch_size is not None
+            else HuntTuning().reveng_batch_size
+        )
 
     async def arun(self) -> RevengResult:
         start_time = time.monotonic()
@@ -168,7 +176,9 @@ class RevengPipeline:
             result.status = "decompiled"
 
             # 5. LLM source reconstruction
-            reconstructor = RevengReconstructor(self._llm)
+            reconstructor = RevengReconstructor(
+                self._llm, batch_size=self._reconstruction_batch_size,
+            )
             result.reconstruction = await reconstructor.areconstruct(
                 result.decompilation, result.static_analysis,
             )
