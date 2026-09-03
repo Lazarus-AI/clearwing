@@ -870,6 +870,36 @@ class TestRecordFinding:
         assert f["vulnerability_trace"]["summary"] == "input flows to memcpy unchecked"
         assert len(f["vulnerability_trace"]["steps"]) == 2
 
+    def test_accepts_stringified_compatibility_trace(self):
+        ctx = HunterContext(repo_path=str(FIXTURE_C_PROPAGATION))
+        record = next(t for t in build_hunter_tools(ctx) if t.name == "record_finding")
+
+        msg = record.invoke(
+            {
+                "file": "src/codec_a.c",
+                "line_number": 9,
+                "finding_type": "memory_safety",
+                "severity": "high",
+                "cwe": "CWE-787",
+                "description": "memcpy with unchecked length",
+                "trace": json.dumps(
+                    {
+                        "steps": [
+                            {"file": "src/codec_a.c", "line": 3, "note": "ENTRY: input"},
+                            {"file": "src/codec_a.c", "line": 9, "note": "SINK: memcpy"},
+                        ],
+                        "summary": "input flows to memcpy unchecked",
+                    }
+                ),
+            }
+        )
+
+        assert "Finding recorded" in msg
+        assert len(ctx.findings) == 1
+        assert ctx.findings[0]["vulnerability_trace"]["summary"] == (
+            "input flows to memcpy unchecked"
+        )
+
     def test_seeded_from_crash_flag(self):
         ctx = HunterContext(
             repo_path=str(FIXTURE_C_PROPAGATION),

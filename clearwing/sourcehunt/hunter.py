@@ -1614,9 +1614,22 @@ class NativeHunter:
                             "findings now. For each lead you investigated, either record_finding "
                             "if it is source-backed, or discard it only if the source affirmatively "
                             "disproves it. Do not drop leads merely because you ran out of time "
-                            "to fully verify them — record them with the evidence you have.",
+                            "to fully verify them — record them with the evidence you have. After "
+                            "any needed reporting calls complete, end the hunt with a concise final "
+                            "response containing no tool calls; that tool-free response is required "
+                            "before the step limit.",
                         )
                     )
+            final_synthesis_turn = step == self.max_steps
+            if final_synthesis_turn:
+                messages.append(
+                    ChatMessage(
+                        "user",
+                        "This is the final synthesis turn. Do not call any tools. Briefly "
+                        "summarize the completed investigation and the findings already "
+                        "recorded. If no finding was recorded, state that plainly.",
+                    )
+                )
             stop_reason = self._should_stop(step, total_cost_usd)
             if stop_reason:
                 logger.warning(
@@ -1726,8 +1739,8 @@ class NativeHunter:
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 provider_name = getattr(self.llm, "provider_name", None)
-                active_tools = self.tools
-                if not self.ctx.potentials:
+                active_tools = [] if final_synthesis_turn else self.tools
+                if active_tools and not self.ctx.potentials:
                     inactive_potential_tools = {
                         "update_potential",
                         "dismiss_potential",
