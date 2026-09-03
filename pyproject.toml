@@ -79,6 +79,7 @@ dependencies = [
 metasploit = ["pymetasploit3>=1.0.0"]
 browser = ["playwright>=1.40.0"]
 sourcehunt = ["semgrep>=1.0.0"]
+kubernetes = ["kubernetes>=30.1.0"]
 vector = [
     "sentence-transformers>=2.2.0",
 ]
@@ -98,7 +99,7 @@ docs = [
     "mkdocstrings[python]>=0.24.0",
 ]
 all = [
-    "clearwing[metasploit,browser,vector,dev,docs,sourcehunt]",
+    "clearwing[metasploit,browser,vector,dev,docs,sourcehunt,kubernetes]",
 ]
 
 [project.urls]
