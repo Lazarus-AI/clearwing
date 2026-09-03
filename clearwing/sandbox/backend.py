@@ -417,6 +417,13 @@ def sandbox_backend_from_env(
         from .rpc_backend import SocketSandboxBackend
 
         return SocketSandboxBackend(endpoint)
+    provider = os.environ.get("CLEARWING_SANDBOX_BACKEND", "docker").strip().lower()
+    if provider == "kubernetes":
+        from .kubernetes import KubernetesSandboxBackend
+
+        return KubernetesSandboxBackend()
+    if provider != "docker":
+        raise ValueError(f"unknown sandbox backend {provider!r}")
     return DockerSandboxBackend(
         docker_client_factory,
         process=process,
