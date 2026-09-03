@@ -24,7 +24,7 @@ from clearwing.providers import (
 )
 from clearwing.providers import runtime as provider_runtime
 from clearwing.ui.commands import operate, sourcehunt, tool
-from clearwing.ui.machine import MachineChannel, MachineProtocolError
+from clearwing.ui.machine import MAX_RECORD_BYTES, MachineChannel, MachineProtocolError
 
 
 def _routing(value: dict | None = None) -> dict:
@@ -304,6 +304,53 @@ def test_operate_machine_uses_host_routing_and_emits_typed_records():
     assert records[-1]["data"]["status"] == "completed"
 
 
+def test_machine_channel_compacts_oversized_progress_records():
+    parent, channel = _channel("sourcehunt", {"repo_url": "https://example.test/repo"})
+    channel.read_start()
+    channel.emit(
+        "progress",
+        {
+            "event": "hunter_status",
+            "hunter_target": "app.py",
+            "text": "x" * MAX_RECORD_BYTES,
+        },
+    )
+    channel.result({"status": "completed"})
+    channel.close()
+
+    records = _records(parent)
+    compacted = records[0]["data"]
+    assert compacted["event"] == "hunter_status"
+    assert compacted["hunter_target"] == "app.py"
+    assert compacted["truncated"] is True
+    assert compacted["original_bytes"] > MAX_RECORD_BYTES
+    assert len(json.dumps(records[0], separators=(",", ":")).encode()) < MAX_RECORD_BYTES
+
+
+def test_machine_channel_compacts_oversized_terminal_and_keeps_summary():
+    parent, channel = _channel("sourcehunt", {"repo_url": "https://example.test/repo"})
+    channel.read_start()
+    channel.result(
+        {
+            "status": "completed",
+            "files_ranked": 120,
+            "findings": [{"description": "x" * MAX_RECORD_BYTES}],
+            "checkpoint": {"result": {"files": "y" * MAX_RECORD_BYTES}},
+        }
+    )
+    channel.close()
+
+    record = _records(parent)[0]
+    compacted = record["data"]
+    assert compacted["status"] == "completed"
+    assert compacted["files_ranked"] == 120
+    assert compacted["findings_count"] == 1
+    assert compacted["checkpoint_keys"] == ["result"]
+    assert compacted["truncated"] is True
+    assert compacted["original_bytes"] > MAX_RECORD_BYTES
+    assert len(json.dumps(record, separators=(",", ":")).encode()) < MAX_RECORD_BYTES
+
+
 @dataclass
 class _Stage:
     outcome: object
@@ -404,6 +451,46 @@ def test_sourcehunt_public_result_is_bounded_and_removes_workspace_state():
     assert "session_id" not in result
     assert "repo_url" not in result
     assert "/private" not in repr(result)
+
+
+def test_sourcehunt_public_progress_keeps_counts_out_of_bulk_event_state():
+    result = sourcehunt._public_progress(
+        {
+            "type": "stage",
+            "stage": "preprocess",
+            "status": "completed",
+            "detail": "x" * 10_000,
+            "findings_so_far": 3,
+            "cost_usd": 1.25,
+            "files": [f"file-{index}.py" for index in range(1000)],
+            "symbols": [f"symbol-{index}" for index in range(500)],
+            "finding_ids": [f"finding-{index}" for index in range(25)],
+            "error": {"code": "partial", "message": "bounded message", "raw": "private"},
+            "checkpoint": {"bulk": "must not cross progress"},
+        }
+    )
+
+    assert result == {
+        "type": "stage",
+        "stage": "preprocess",
+        "status": "completed",
+        "detail": "x" * 2048,
+        "findings_so_far": 3,
+        "cost_usd": 1.25,
+        "file_count": 1000,
+        "symbol_count": 500,
+        "finding_id_count": 25,
+        "error_code": "partial",
+        "error_message": "bounded message",
+    }
+
+
+def test_sourcehunt_machine_request_preserves_deep_depth():
+    result = sourcehunt._machine_request(
+        {"repo_url": "https://example.test/repo", "depth": "deep"}
+    )
+
+    assert result["depth"] == "deep"
 
 
 def test_machine_fd_is_not_secret_bearing_argv(monkeypatch):

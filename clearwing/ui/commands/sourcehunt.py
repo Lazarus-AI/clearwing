@@ -1397,7 +1397,9 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 stop_after=parsed.get("stop_after"),
                 enable_semgrep=enable_semgrep or parsed["semgrep"],
                 provider_manager=provider_manager,
-                on_progress=lambda progress: channel.emit("progress", progress),
+                on_progress=lambda progress: channel.emit(
+                    "progress", _public_progress(progress)
+                ),
             ).arun()
         )
         channel.result(_public_result(result))
@@ -1494,6 +1496,47 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"stop_after must be one of {sorted(valid_stages)}, got {sa!r}")
         parsed["stop_after"] = sa
     return parsed
+
+
+def _public_progress(progress: Any) -> dict[str, Any]:
+    """Project stage progress onto bounded event metadata."""
+    item = asdict(progress) if not isinstance(progress, dict) else dict(progress)
+
+    def text(key: str, maximum_bytes: int) -> str | None:
+        value = item.get(key)
+        if not isinstance(value, str) or not value:
+            return None
+        return value.encode("utf-8")[:maximum_bytes].decode("utf-8", errors="ignore")
+
+    public = {
+        "type": text("type", 64),
+        "stage": text("stage", 128),
+        "status": text("status", 128),
+        "detail": text("detail", 2048),
+        "findings_so_far": item.get("findings_so_far")
+        if isinstance(item.get("findings_so_far"), int)
+        else None,
+        "cost_usd": item.get("cost_usd")
+        if isinstance(item.get("cost_usd"), (int, float))
+        else None,
+    }
+    for source, count in (
+        ("files", "file_count"),
+        ("symbols", "symbol_count"),
+        ("finding_ids", "finding_id_count"),
+    ):
+        values = item.get(source)
+        if isinstance(values, (list, tuple, set)):
+            public[count] = len(values)
+    error = item.get("error")
+    if isinstance(error, dict):
+        for source, target in (("code", "error_code"), ("message", "error_message")):
+            value = error.get(source)
+            if isinstance(value, str) and value:
+                public[target] = value.encode("utf-8")[:1024].decode(
+                    "utf-8", errors="ignore"
+                )
+    return {key: value for key, value in public.items() if value is not None and value != ""}
 
 
 def _public_result(result: Any) -> dict[str, Any]:
