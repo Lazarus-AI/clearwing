@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from clearwing.analysis import SourceAnalyzer
 from clearwing.analysis.source_analyzer import AnalyzerFinding as StaticFinding
 from clearwing.analysis.source_analyzer import _GitignoreMatcher
+from clearwing.core.event_payloads import SourcehuntStagePayload
+from clearwing.core.events import EventBus
 from clearwing.sourcehunt.paths import resolve_repo_directory, resolve_repo_file
 
 from .callgraph import CallGraph, CallGraphBuilder
@@ -30,6 +32,22 @@ from .state import FileTag, FileTarget
 from .taint import TaintAnalyzer, TaintPath
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_preprocess_progress(repo_path: str, progress: float, detail: str = "") -> None:
+    """Fire a lightweight stage event so the live panel can update its bar."""
+    EventBus().emit_sourcehunt_stage(
+        SourcehuntStagePayload(
+            session_id="",
+            repo=repo_path,
+            stage="preprocess",
+            status="progress",
+            findings_so_far=0,
+            cost_usd=0.0,
+            detail=detail,
+            progress=progress,
+        )
+    )
 
 
 class PreprocessResult(BaseModel):
@@ -345,6 +363,7 @@ class Preprocessor:
             "Preprocessor: static analyzer complete (%d findings)",
             len(static_findings),
         )
+        _emit_preprocess_progress(repo_path, 0.2, "static analysis complete")
 
         # Build per-file static_hint counts
         per_file_hints: dict[str, int] = {}
@@ -415,6 +434,10 @@ class Preprocessor:
                     "Preprocessor: enumerating  %d/%d files  found=%d",
                     _i + 1, _total, len(file_targets),
                 )
+                _emit_preprocess_progress(
+                    repo_path, 0.2 + 0.4 * (_i + 1) / _total,
+                    f"enumerating {_i + 1}/{_total} files",
+                )
             ext = Path(abs_path).suffix.lower()
             language = _SOURCE_EXTS_TO_LANG.get(ext)
             if not language:
@@ -481,11 +504,15 @@ class Preprocessor:
             except Exception:
                 logger.warning("Callgraph build failed", exc_info=True)
 
+        _emit_preprocess_progress(repo_path, 0.7, "callgraph done")
+
         if propagate_reachability:
             if callgraph is not None and not callgraph.empty:
                 self._propagate_reachability(file_targets, callgraph)
             else:
                 logger.info("propagate_reachability=True but no callgraph; skipping")
+
+        _emit_preprocess_progress(repo_path, 0.8, "reachability done")
 
         if self.run_semgrep:
             try:
@@ -510,6 +537,8 @@ class Preprocessor:
         if self.ingest_fuzz_corpora:
             logger.info("ingest_fuzz_corpora=True but corpus detection is not wired in yet")
 
+        _emit_preprocess_progress(repo_path, 0.9, "semgrep done")
+
         # v0.4: tree-sitter taint analysis
         taint_paths: list[TaintPath] = []
         if not run_taint:
@@ -527,6 +556,8 @@ class Preprocessor:
                     logger.info("tree-sitter grammars not available; taint skipped")
             except Exception:
                 logger.warning("Taint analysis failed", exc_info=True)
+
+        _emit_preprocess_progress(repo_path, 0.95, "taint analysis done")
 
         return PreprocessResult(
             repo_path=repo_path,

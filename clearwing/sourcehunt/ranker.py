@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from clearwing.core.event_payloads import SourcehuntStagePayload
 from clearwing.core.events import EventBus
 from clearwing.llm import AsyncLLMClient, BudgetExceeded
 from clearwing.llm.native import extract_json_array, extract_json_object
@@ -235,6 +236,18 @@ class Ranker:
                 EventBus().emit_message(
                     f"ranking progress  {completed}/{total_chunks} chunks ranked",
                     "info",
+                )
+                EventBus().emit_sourcehunt_stage(
+                    SourcehuntStagePayload(
+                        session_id="",
+                        repo="",
+                        stage="rank",
+                        status="progress",
+                        findings_so_far=0,
+                        cost_usd=0.0,
+                        detail=f"{completed}/{total_chunks} chunks",
+                        progress=completed / total_chunks,
+                    )
                 )
         except BudgetExceeded:
             for task in tasks:
