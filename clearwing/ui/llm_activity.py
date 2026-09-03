@@ -234,19 +234,16 @@ def _build_stage_bars() -> list:
         bar_fill = "\u2588" * filled
         if done:
             bar_rest = "\u2588" * (bar_width - filled)
-            bar_text = f"[{bar_fill}{bar_rest}]"
+            bar_text = f"{bar_fill}{bar_rest}"
         else:
             bar_rest = "\u2591" * (bar_width - filled)
-            bar_text = f"[{bar_fill}{bar_rest}]"
+            bar_text = f"{bar_fill}{bar_rest}"
         label = f"{stage}:".ljust(max_label + 1)
         line = Text.assemble(
             (label + " ", "cyan"),
             (bar_text, "green" if done else "yellow"),
         )
         lines.append(line)
-    all_done = all(_stage_progress.get(s, 0.0) >= 1.0 for s in _TRACKED_STAGES if s in _stage_progress)
-    if all_done and len(_stage_progress) >= 2:
-        lines.append(Text("DONE!", style="bold green"))
     return lines
 
 
