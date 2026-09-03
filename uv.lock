@@ -801,6 +801,7 @@ all = [
     { name = "black" },
     { name = "build" },
     { name = "flake8" },
+    { name = "kubernetes" },
     { name = "mkdocs" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
@@ -832,6 +833,9 @@ docs = [
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
 ]
+kubernetes = [
+    { name = "kubernetes" },
+]
 metasploit = [
     { name = "pymetasploit3" },
 ]
@@ -856,13 +860,14 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2.0" },
     { name = "chromadb", specifier = ">=1.0.0" },
-    { name = "clearwing", extras = ["metasploit", "browser", "vector", "dev", "docs", "sourcehunt"], marker = "extra == 'all'" },
+    { name = "clearwing", extras = ["metasploit", "browser", "vector", "dev", "docs", "sourcehunt", "kubernetes"], marker = "extra == 'all'" },
     { name = "docker", specifier = ">=7.0.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "genai-pyo3", specifier = ">=0.7.0b14.dev3" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "jsonschema", specifier = ">=4.0.0" },
+    { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=30.1.0" },
     { name = "libpnet-pyo3", specifier = ">=0.1.2" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.4.0" },
@@ -902,7 +907,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.20.0" },
     { name = "websockets", specifier = ">=11.0" },
 ]
-provides-extras = ["metasploit", "browser", "sourcehunt", "vector", "dev", "docs", "all"]
+provides-extras = ["metasploit", "browser", "sourcehunt", "kubernetes", "vector", "dev", "docs", "all"]
 
 [package.metadata.requires-dev]
 dev = [

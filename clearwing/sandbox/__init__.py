@@ -19,6 +19,7 @@ from .builders import BuildRecipe, BuildSystemDetector
 from .container import ExecResult, SandboxConfig, SandboxContainer
 from .dind import get_docker_client, get_docker_host, get_subprocess_env
 from .hunter_sandbox import HunterSandbox
+from .kubernetes import KubernetesSandbox, KubernetesSandboxBackend
 from .registry import ContainerRegistry
 from .rpc_backend import JsonRpcConnection, SandboxRpcError, SocketSandboxBackend
 
@@ -39,6 +40,8 @@ __all__ = [
     "BuildRecipe",
     "BuildSystemDetector",
     "HunterSandbox",
+    "KubernetesSandbox",
+    "KubernetesSandboxBackend",
     "get_docker_client",
     "get_docker_host",
     "get_subprocess_env",
