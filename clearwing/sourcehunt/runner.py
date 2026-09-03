@@ -334,9 +334,7 @@ class SourceHuntRunner:
             local_path = local_path if local_path is not None else t.local_path
             target_files = target_files if target_files is not None else t.target_files
             target_window_lines = (
-                target_window_lines
-                if target_window_lines is not None
-                else t.target_window_lines
+                target_window_lines if target_window_lines is not None else t.target_window_lines
             )
             depth = depth if depth != "standard" else t.depth
             # Budget params
@@ -751,9 +749,7 @@ class SourceHuntRunner:
             if not source_bytes:
                 raise ValueError(f"target file is empty: {relative}")
             if len(source_bytes) > MAX_TARGET_FILE_BYTES:
-                raise ValueError(
-                    f"target file exceeds {MAX_TARGET_FILE_BYTES} bytes: {relative}"
-                )
+                raise ValueError(f"target file exceeds {MAX_TARGET_FILE_BYTES} bytes: {relative}")
 
             lines = split_physical_source_lines(source_bytes)
             line_count = len(lines)
@@ -1328,12 +1324,8 @@ class SourceHuntRunner:
         self._run_started_at = datetime.now(timezone.utc).isoformat()
         self._run_started_monotonic = time.monotonic()
         span_context = otel_trace.get_current_span().get_span_context()
-        self._otel_trace_id = (
-            f"{span_context.trace_id:032x}" if span_context.is_valid else None
-        )
-        self._otel_span_id = (
-            f"{span_context.span_id:016x}" if span_context.is_valid else None
-        )
+        self._otel_trace_id = f"{span_context.trace_id:032x}" if span_context.is_valid else None
+        self._otel_span_id = f"{span_context.span_id:016x}" if span_context.is_valid else None
         if self._flow == "proof":
             try:
                 return await self._arun_proof_flow()
@@ -2445,9 +2437,7 @@ class SourceHuntRunner:
         verifier_llm = (
             None
             if self.no_verify
-            else self._get_native_client(
-                "verifier", self.verifier_llm, budget_stage="verify"
-            )
+            else self._get_native_client("verifier", self.verifier_llm, budget_stage="verify")
         )
         options = {
             "no_verify": self.no_verify,
@@ -2514,8 +2504,7 @@ class SourceHuntRunner:
                         for finding in findings:
                             finding["verified"] = False
                             finding["verifier_tie_breaker"] = (
-                                "Independent verifier model unavailable; "
-                                "finding left unverified"
+                                "Independent verifier model unavailable; finding left unverified"
                             )
                         pipeline_status.record_degraded(
                             "verifier", "Independent verifier model unavailable"
@@ -2593,9 +2582,7 @@ class SourceHuntRunner:
                     file_content=self._load_file_content(repo_path, finding),
                     verification_tools=verification_tools,
                 )
-                outcome = result.outcome or (
-                    "confirmed" if result.is_real else "refuted"
-                )
+                outcome = result.outcome or ("confirmed" if result.is_real else "refuted")
                 if outcome in {"operational_error", "inconclusive"}:
                     self._verification_incomplete = True
                     finding["verified"] = False
@@ -2659,9 +2646,7 @@ class SourceHuntRunner:
                     file_content=self._load_file_content(repo_path, finding),
                     verification_tools=verification_tools,
                 )
-                outcome = verdict.outcome or (
-                    "confirmed" if verdict.advance else "refuted"
-                )
+                outcome = verdict.outcome or ("confirmed" if verdict.advance else "refuted")
                 if outcome in {"operational_error", "inconclusive"}:
                     self._verification_incomplete = True
                     finding["verified"] = False
@@ -3526,8 +3511,9 @@ class SourceHuntRunner:
                 languages=languages,
                 deep_agent_mode=use_deep,
                 default_cpus=self._sandbox_cpus,
+                gvisor_runtime=self._gvisor_runtime,
             )
-            image_tag = manager.build_image()
+            environment_ref = manager.prepare_environment()
         except Exception as exc:
             logger.error(
                 "HunterSandbox startup failed: %s",
@@ -3544,8 +3530,8 @@ class SourceHuntRunner:
         cpu_limit = manager.default_cpu_limit
         available_cpus = manager.available_cpus
         logger.info(
-            "HunterSandbox ready image=%s cpu_limit=%.2f available_cpus=%.2f",
-            image_tag,
+            "HunterSandbox ready environment=%s cpu_limit=%.2f available_cpus=%.2f",
+            environment_ref,
             cpu_limit,
             available_cpus,
         )
@@ -3791,7 +3777,11 @@ class SourceHuntRunner:
             exit_code=(
                 3
                 if run_status in {"budget_exhausted", "incomplete"}
-                else (0 if self._stop_after else self._exit_code(findings if self.no_verify else verified))
+                else (
+                    0
+                    if self._stop_after
+                    else self._exit_code(findings if self.no_verify else verified)
+                )
             ),
             repo_url=self.repo_url,
             repo_path=repo_path,
@@ -3865,8 +3855,7 @@ class SourceHuntRunner:
     def _finding_set_digest(findings: list[Finding]) -> str:
         """Bind downstream checkpoints to their exact ordered finding input."""
         portable = [
-            dict(finding) if isinstance(finding, dict) else asdict(finding)
-            for finding in findings
+            dict(finding) if isinstance(finding, dict) else asdict(finding) for finding in findings
         ]
         encoded = json.dumps(
             portable,

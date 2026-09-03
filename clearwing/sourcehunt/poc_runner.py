@@ -1,6 +1,6 @@
 """PoC replay — the sandbox leg of the verify-by-recompile gate.
 
-Given a finding, a candidate diff, and a running SandboxContainer, this
+Given a finding, a candidate diff, and a running SandboxInstance, this
 module applies the diff, rebuilds the target, re-runs the PoC input, and
 returns True/False for "crash still happens."
 
@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from clearwing.sandbox.container import SandboxContainer
+from clearwing.sandbox.backend import SandboxInstance
 
 from .paths import safe_repo_relative_path
 from .state import Finding
@@ -66,7 +66,7 @@ class PocRunner:
 
     def __init__(
         self,
-        sandbox: SandboxContainer,
+        sandbox: SandboxInstance,
         repo_path_in_sandbox: str = "/workspace",
         config: PocRunnerConfig | None = None,
     ):
@@ -325,7 +325,7 @@ class PocRunner:
 
 
 def build_rerun_poc_callback(
-    sandbox: SandboxContainer,
+    sandbox: SandboxInstance,
     repo_path_in_sandbox: str = "/workspace",
     config: PocRunnerConfig | None = None,
 ) -> Callable[[Any, Finding, str], bool]:

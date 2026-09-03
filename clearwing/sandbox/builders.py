@@ -1,8 +1,8 @@
-"""Build system detection for source-hunt sandbox image generation.
+"""Build system detection for SourceHunt execution environments.
 
 Inspects a cloned repo and detects make/cmake/cargo/go/maven/npm/python.
-Returns a BuildRecipe that the HunterSandbox uses to write a Dockerfile that
-compiles the project with the requested sanitizers.
+Returns a provider-neutral ``BuildRecipe`` describing the toolchain profile,
+logical tool features, and commands needed to inspect the project.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BuildRecipe:
-    """Per-language build recipe for the hunter sandbox image."""
+    """Per-language recipe for a SourceHunt execution environment."""
 
     system: str  # "make" | "cmake" | "cargo" | "go" | "maven" | "npm" | "python" | "unknown"
     primary_language: str  # "c" | "cpp" | "rust" | "go" | "java" | "node" | "python" | "unknown"
-    base_image: str  # docker base image
-    apt_packages: list[str] = field(default_factory=list)
+    profile: str  # logical toolchain profile, resolved by the sandbox provider
+    features: list[str] = field(default_factory=list)
     build_cmd: str = ""  # shell command to build the project
     test_cmd: str = ""  # shell command to run tests
     sanitizer_flags: dict[str, str] = field(default_factory=dict)
@@ -34,29 +34,12 @@ class BuildRecipe:
 
         The recipe's default `env` reflects the ASan+UBSan combo. This
         method recomputes CFLAGS/CXXFLAGS/LDFLAGS for any subset, so the
-        HunterSandbox can build an MSan variant image with the right flags.
+        HunterSandbox can prepare an MSan variant with the right flags.
 
         MSan cannot coexist with ASan in the same binary — the caller is
         responsible for not passing both (HunterSandbox validates this).
         """
         return compute_sanitizer_env(self, sanitizers)
-
-
-# Per-language base images. gcc:12-bullseye ships libasan/libubsan on Debian 11
-# (bullseye). gcc:13 is bookworm-based and has no ltrace on amd64 either (the
-# package exists but was removed from the slim image). rust uses the slim image;
-# python doesn't need a build but benefits from gcc for native extensions.
-# unknown uses debian:11-slim.
-DEFAULT_BASE_IMAGES = {
-    "c": "gcc:12-bullseye",
-    "cpp": "gcc:12-bullseye",
-    "rust": "rust:1-slim",
-    "go": "golang:1.22",
-    "python": "python:3.12-slim",
-    "java": "eclipse-temurin:21",
-    "node": "node:20-slim",
-    "unknown": "debian:11-slim",
-}
 
 
 # Per-sanitizer compile flags. MSan's flag set is intentionally different
@@ -148,17 +131,16 @@ def compute_sanitizer_env(recipe: BuildRecipe, sanitizers: list[str]) -> dict[st
     return env
 
 
-# Tools we want available in every hunter sandbox image: ripgrep for grep_source,
-# gdb/strace for debugging, coreutils' `timeout` for exec timeouts. Keep this
-# list portable across base-image architectures; ltrace is useful but is not
-# available everywhere.
-COMMON_APT_PACKAGES = [
-    "ripgrep",
-    "gdb",
-    "strace",
-    "coreutils",
-    "ca-certificates",
-    "build-essential",
+# Logical features requested by native-code hunter profiles. Runtime adapters
+# resolve these names to their own images, rootfs contents, or package manager;
+# distro package names deliberately do not cross the backend boundary.
+COMMON_NATIVE_FEATURES = [
+    "source.search",
+    "debug.native",
+    "trace.syscalls",
+    "process.timeout",
+    "trust.roots",
+    "build.native",
 ]
 
 
@@ -210,8 +192,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="make",
             primary_language="c",
-            base_image=DEFAULT_BASE_IMAGES["c"],
-            apt_packages=COMMON_APT_PACKAGES,
+            profile="c-cpp",
+            features=[*COMMON_NATIVE_FEATURES, "build.make"],
             build_cmd="make",
             test_cmd="make test || true",
             sanitizer_flags={
@@ -233,8 +215,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="cmake",
             primary_language="cpp",
-            base_image=DEFAULT_BASE_IMAGES["cpp"],
-            apt_packages=COMMON_APT_PACKAGES + ["cmake"],
+            profile="c-cpp",
+            features=[*COMMON_NATIVE_FEATURES, "build.cmake"],
             build_cmd="mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Debug .. && make",
             test_cmd="cd build && ctest --output-on-failure || true",
             sanitizer_flags={
@@ -255,8 +237,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="cargo",
             primary_language="rust",
-            base_image=DEFAULT_BASE_IMAGES["rust"],
-            apt_packages=COMMON_APT_PACKAGES,
+            profile="rust",
+            features=[*COMMON_NATIVE_FEATURES, "build.cargo"],
             build_cmd="cargo build",
             test_cmd="cargo test || true",
             sanitizer_flags={
@@ -274,8 +256,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="go",
             primary_language="go",
-            base_image=DEFAULT_BASE_IMAGES["go"],
-            apt_packages=COMMON_APT_PACKAGES,
+            profile="go",
+            features=[*COMMON_NATIVE_FEATURES, "build.go"],
             build_cmd="go build ./...",
             test_cmd="go test -race ./... || true",
             sanitizer_flags={"race": "-race"},
@@ -287,8 +269,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="maven",
             primary_language="java",
-            base_image=DEFAULT_BASE_IMAGES["java"],
-            apt_packages=["maven", "ripgrep", "ca-certificates"],
+            profile="java",
+            features=["build.maven", "source.search", "trust.roots"],
             build_cmd="mvn -B -DskipTests package",
             test_cmd="mvn -B test || true",
         )
@@ -298,8 +280,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="npm",
             primary_language="node",
-            base_image=DEFAULT_BASE_IMAGES["node"],
-            apt_packages=["ripgrep", "ca-certificates"],
+            profile="node",
+            features=["build.npm", "source.search", "trust.roots"],
             build_cmd="npm install --no-audit --no-fund || true",
             test_cmd="npm test || true",
         )
@@ -309,8 +291,8 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="python",
             primary_language="python",
-            base_image=DEFAULT_BASE_IMAGES["python"],
-            apt_packages=["ripgrep", "gcc", "g++", "ca-certificates"],
+            profile="python",
+            features=["source.search", "toolchain.native", "trust.roots"],
             build_cmd="pip install --quiet -e . || pip install --quiet . || true",
             test_cmd="pytest -q || true",
         )
@@ -387,6 +369,6 @@ class BuildSystemDetector:
         return BuildRecipe(
             system="unknown",
             primary_language="unknown",
-            base_image=DEFAULT_BASE_IMAGES["unknown"],
-            apt_packages=["ripgrep", "ca-certificates"],
+            profile="generic",
+            features=["source.search", "trust.roots"],
         )

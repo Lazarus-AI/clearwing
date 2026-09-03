@@ -1003,10 +1003,10 @@ class ProofFlowRunner:
             self._sandbox = HunterSandbox(
                 repo_path,
                 languages=languages,
-                extra_packages=["clang"],
+                extra_features=["toolchain.clang"],
                 default_cpus=self.config.sandbox_cpus,
             )
-            self._sandbox.build_image()
+            self._sandbox.prepare_environment()
             container = self._sandbox.spawn(
                 session_id=self.config.session_id or None,
                 runtime=self.config.gvisor_runtime,

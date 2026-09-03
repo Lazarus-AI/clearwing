@@ -38,7 +38,7 @@ from clearwing.llm.budget import spend_metadata
 from clearwing.observability.otel import get_oi_tracer
 from clearwing.observability.telemetry import CostTracker
 from clearwing.reporting.safety import redact_tree
-from clearwing.sandbox.container import SandboxContainer
+from clearwing.sandbox.backend import SandboxInstance
 
 from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
@@ -1443,7 +1443,7 @@ def _build_subsystem_prompt(
 def build_subsystem_hunter_agent(
     subsystem: SubsystemTarget,
     repo_path: str,
-    sandbox: SandboxContainer | None,
+    sandbox: SandboxInstance | None,
     llm: AsyncLLMClient,
     session_id: str,
     project_name: str = "target",
@@ -2706,7 +2706,7 @@ def _estimate_cost_usd(
 def build_hunter_agent(
     file_target: FileTarget,
     repo_path: str,
-    sandbox: SandboxContainer | None,
+    sandbox: SandboxInstance | None,
     llm: AsyncLLMClient,
     session_id: str,
     project_name: str = "target",
@@ -2732,7 +2732,7 @@ def build_hunter_agent(
     Args:
         file_target: The FileTarget to scope the hunter to.
         repo_path: Absolute host path to the cloned repo.
-        sandbox: SandboxContainer for compile/run tools. May be None for tests
+        sandbox: SandboxInstance for compile/run tools. May be None for tests
                  (the tools fall back to host file I/O for read/grep, and
                  return errors for compile/run).
         llm: Native async LLM client.

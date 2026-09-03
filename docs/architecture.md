@@ -154,22 +154,31 @@ dataclass or a plain dict. Test fixtures lean on this heavily.
 
 ## The sandbox layer
 
-`clearwing.sandbox` wraps the Docker SDK to provide per-hunter
-disposable containers with sanitizer images (ASan+UBSan primary,
-MSan variant, optional LSan/TSan). Each `HunterContext`
+`clearwing.sandbox` provides per-hunter disposable sandboxes with prepared
+toolchain environments (ASan+UBSan primary, MSan variant, optional LSan/TSan).
+`HunterSandbox` depends on the runtime-neutral `SandboxBackend` and
+`SandboxInstance` protocols. Docker is the default backend; a trusted
+supervisor can instead provide the same lifecycle over the
+[JSON-RPC socket adapter](sandbox-backends.md). Each `HunterContext`
 (`clearwing.agent.tools.hunt.sandbox.HunterContext`) owns:
 
-- A primary `SandboxContainer` attached at hunt start.
+- A primary `SandboxInstance` attached at hunt start from an opaque prepared
+  environment reference.
 - A `sandbox_manager` reference for spawning sanitizer-variant
   containers on demand (e.g., an MSan run for a specific finding).
 - A cache of variant containers that tears down in `cleanup_variants()`
   when the hunter finishes.
 
-The sandbox is read-only under `/workspace` (the cloned repo is
-mounted there) and read-write under `/scratch` (where the hunter's
+The sandbox is read-only under `/workspace` (the cloned repo is mounted or
+materialized there) and read-write under `/scratch` (where the hunter's
 `write_test_case`, `compile_file`, and `fuzz_harness` tools emit
 artifacts). Exec timeout, memory limit, and the workspace mount are
 all configured per-container.
+
+Backend configuration is deployment-owned. If
+`CLEARWING_SANDBOX_ENDPOINT` is unset, the original local Docker behavior is
+used. See [Sandbox backends](sandbox-backends.md) for the extension contract
+and transport security requirements.
 
 ## The knowledge graph
 

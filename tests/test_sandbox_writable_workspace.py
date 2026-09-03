@@ -122,7 +122,9 @@ class TestHunterSandboxCpuPolicy:
         manager._client = client
 
         with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="sandbox:test"),
+            patch.object(
+                HunterSandbox, "_prepare_variant_environment", return_value="sandbox:test"
+            ),
             patch.object(SandboxContainer, "start", return_value="cid"),
         ):
             sandbox = manager.spawn(scratch_mount=False)
@@ -133,7 +135,9 @@ class TestHunterSandboxCpuPolicy:
         manager = HunterSandbox(repo_path=str(tmp_path), default_cpus=1.0)
 
         with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="sandbox:test"),
+            patch.object(
+                HunterSandbox, "_prepare_variant_environment", return_value="sandbox:test"
+            ),
             patch.object(SandboxContainer, "start", return_value="cid"),
         ):
             sandbox = manager.spawn(scratch_mount=False, cpus=2.5)
@@ -164,6 +168,7 @@ class TestSourceHuntSandboxCpuWiring:
             languages=["c"],
             deep_agent_mode=True,
             default_cpus=1.5,
+            gvisor_runtime=None,
         )
         assert runner.sandbox_factory is not None
         runner.sandbox_factory()
@@ -317,7 +322,7 @@ class TestCopyTreeInto:
 
 
 class TestHunterSandboxWritableWorkspace:
-    @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._build_variant_image")
+    @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._prepare_variant_environment")
     @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._get_client")
     def test_spawn_writable_omits_ro_mount(self, mock_client, mock_build):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox
@@ -341,7 +346,7 @@ class TestHunterSandboxWritableWorkspace:
             if container == "/workspace":
                 pytest.fail(f"Found /workspace mount with mode={mode}, expected none")
 
-    @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._build_variant_image")
+    @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._prepare_variant_environment")
     @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._get_client")
     def test_spawn_writable_calls_copy_and_git(self, mock_client, mock_build):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox
@@ -373,7 +378,7 @@ class TestHunterSandboxWritableWorkspace:
         assert "rm -rf /workspace/.git" in git_calls[0][0][0]
         assert "find . -name .git -type f -delete" in git_calls[0][0][0]
 
-    def test_deep_agent_mode_adds_packages(self):
+    def test_deep_agent_mode_adds_features(self):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
         with patch("clearwing.sandbox.hunter_sandbox.BuildSystemDetector.detect"):
@@ -383,10 +388,10 @@ class TestHunterSandboxWritableWorkspace:
                 deep_agent_mode=True,
             )
 
-        for pkg in HunterSandbox.DEEP_AGENT_PACKAGES:
-            assert pkg in manager.extra_packages
+        for feature in HunterSandbox.DEEP_AGENT_FEATURES:
+            assert feature in manager.extra_features
 
-    @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._build_variant_image")
+    @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._prepare_variant_environment")
     @patch("clearwing.sandbox.hunter_sandbox.HunterSandbox._get_client")
     def test_spawn_writable_passes_cpus(self, mock_client, mock_build):
         from clearwing.sandbox.hunter_sandbox import HunterSandbox

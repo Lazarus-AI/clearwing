@@ -8,10 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clearwing.sandbox.builders import (
-    DEFAULT_BASE_IMAGES,
-    BuildSystemDetector,
-)
+from clearwing.sandbox.builders import BuildSystemDetector
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 
@@ -37,14 +34,14 @@ class TestBuildSystemDetector:
         recipe = BuildSystemDetector.detect(str(temp_repo))
         assert recipe.system == "cmake"
         assert recipe.primary_language == "cpp"
-        assert "cmake" in " ".join(recipe.apt_packages)
+        assert "build.cmake" in recipe.features
 
     def test_detects_cargo(self, temp_repo: Path):
         (temp_repo / "Cargo.toml").write_text('[package]\nname = "x"\n')
         recipe = BuildSystemDetector.detect(str(temp_repo))
         assert recipe.system == "cargo"
         assert recipe.primary_language == "rust"
-        assert recipe.base_image == DEFAULT_BASE_IMAGES["rust"]
+        assert recipe.profile == "rust"
 
     def test_detects_go(self, temp_repo: Path):
         (temp_repo / "go.mod").write_text("module foo\n")
@@ -101,10 +98,10 @@ class TestBuildSystemDetector:
         recipe = BuildSystemDetector.detect(str(temp_repo))
         assert recipe.primary_language == "c"
 
-    def test_recipe_includes_ripgrep_in_apt(self, temp_repo: Path):
+    def test_recipe_includes_source_search_feature(self, temp_repo: Path):
         (temp_repo / "Makefile").write_text("all:\n")
         recipe = BuildSystemDetector.detect(str(temp_repo))
-        assert "ripgrep" in recipe.apt_packages
+        assert "source.search" in recipe.features
 
 
 # --- HunterSandbox.build_image ---------------------------------------------
@@ -112,8 +109,10 @@ class TestBuildSystemDetector:
 
 @pytest.fixture
 def mock_docker():
-    with patch("clearwing.sandbox.dind.get_docker_host", return_value=None), \
-         patch("docker.from_env") as mock_from_env:
+    with (
+        patch("clearwing.sandbox.dind.get_docker_host", return_value=None),
+        patch("docker.from_env") as mock_from_env,
+    ):
         mock_client = MagicMock()
         mock_from_env.return_value = mock_client
         yield mock_client
@@ -165,13 +164,11 @@ class TestHunterSandboxBuildImage:
         assert "gdb" in df
         assert "ltrace" not in df
 
-    def test_dockerfile_sets_sanitizer_env(self, temp_repo: Path):
+    def test_environment_spec_sets_sanitizer_env(self, temp_repo: Path):
         (temp_repo / "Makefile").write_text("all:\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
-        df = sb._render_dockerfile()
-        # CFLAGS should be set with the sanitizer flags from the recipe
-        assert "CFLAGS=" in df
-        assert "fsanitize=address" in df
+        spec = sb._environment_spec(["asan", "ubsan"])
+        assert "fsanitize=address" in spec.environment["CFLAGS"]
 
     def test_dockerfile_for_python_no_gcc_needed(self, temp_repo: Path):
         (temp_repo / "pyproject.toml").write_text("[project]\nname='x'\n")

@@ -322,7 +322,7 @@ def test_sandbox_dynamic_validator_replays_exact_diff(monkeypatch, tmp_path: Pat
             self.builds = 0
             self.spawns = 0
 
-        def build_image(self):
+        def prepare_environment(self):
             self.builds += 1
 
         def spawn(self, **_kwargs):

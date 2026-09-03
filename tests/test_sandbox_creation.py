@@ -1,7 +1,8 @@
 """Tests for sandbox creation correctness.
 
-Validates that HunterSandbox produces correctly-configured containers:
-- Dockerfile renders with correct base images and sanitizer flags
+Validates that HunterSandbox produces correctly-configured sandboxes:
+- Environment requirements are provider-neutral and content-addressed
+- The default Docker adapter resolves profiles and features privately
 - Workspace mounts are correct (ro vs writable copy)
 - Image tags are deterministic and content-addressed
 - Build failures are surfaced cleanly
@@ -13,22 +14,18 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from clearwing.sandbox.builders import (
-    DEFAULT_BASE_IMAGES,
-    BuildRecipe,
     BuildSystemDetector,
     compute_sanitizer_env,
     validate_sanitizer_combo,
 )
-from clearwing.sandbox.container import SandboxConfig, SandboxContainer
+from clearwing.sandbox.container import SandboxContainer
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -58,8 +55,10 @@ def python_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def mock_docker():
-    with patch("clearwing.sandbox.dind.get_docker_host", return_value=None), \
-         patch("docker.from_env") as mock_from_env:
+    with (
+        patch("clearwing.sandbox.dind.get_docker_host", return_value=None),
+        patch("docker.from_env") as mock_from_env,
+    ):
         client = MagicMock()
         mock_from_env.return_value = client
         yield client
@@ -88,43 +87,40 @@ class TestDockerfileRendering:
         # Python doesn't get CFLAGS sanitizer injection
         assert "fsanitize" not in df
 
-    def test_sanitizer_env_in_dockerfile(self, c_repo: Path):
+    def test_sanitizer_requirements_are_in_environment_spec(self, c_repo: Path):
         sb = HunterSandbox(repo_path=str(c_repo), sanitizers=["asan", "ubsan"])
-        df = sb._render_dockerfile()
-        assert "fsanitize=address" in df
-        assert "fsanitize=undefined" in df
-        assert "ASAN_OPTIONS" in df
-        assert "UBSAN_OPTIONS" in df
+        spec = sb._environment_spec(["asan", "ubsan"])
+        assert spec.sanitizers == ["asan", "ubsan"]
+        assert "fsanitize=address" in spec.environment["CFLAGS"]
+        assert "fsanitize=undefined" in spec.environment["CFLAGS"]
+        assert "ASAN_OPTIONS" in spec.environment
+        assert "UBSAN_OPTIONS" in spec.environment
 
-    def test_msan_variant_dockerfile(self, c_repo: Path):
+    def test_msan_variant_environment(self, c_repo: Path):
         sb = HunterSandbox(repo_path=str(c_repo), sanitizers=["msan"])
-        df = sb._render_dockerfile()
-        assert "fsanitize=memory" in df
-        assert "MSAN_OPTIONS" in df
+        spec = sb._environment_spec(["msan"])
+        assert "fsanitize=memory" in spec.environment["CFLAGS"]
+        assert "MSAN_OPTIONS" in spec.environment
         # Must NOT contain asan flags
-        assert "fsanitize=address" not in df
+        assert "fsanitize=address" not in spec.environment["CFLAGS"]
 
-    def test_apt_packages_include_ripgrep_and_gdb(self, c_repo: Path):
+    def test_docker_adapter_maps_search_and_debug_features(self, c_repo: Path):
         sb = HunterSandbox(repo_path=str(c_repo))
         df = sb._render_dockerfile()
         assert "ripgrep" in df
         assert "gdb" in df
 
-    def test_extra_packages_appear_in_dockerfile(self, c_repo: Path):
-        sb = HunterSandbox(
-            repo_path=str(c_repo), extra_packages=["python3-pip", "curl"]
-        )
+    def test_extra_feature_is_resolved_by_docker_adapter(self, c_repo: Path):
+        sb = HunterSandbox(repo_path=str(c_repo), extra_features=["toolchain.clang"])
         df = sb._render_dockerfile()
-        assert "python3-pip" in df
-        assert "curl" in df
+        assert "clang" in df
 
-    def test_post_install_commands_render(self, c_repo: Path):
-        sb = HunterSandbox(
-            repo_path=str(c_repo),
-            post_install_commands=["pip3 install pyjwt || true"],
-        )
-        df = sb._render_dockerfile()
-        assert "RUN pip3 install pyjwt || true" in df
+    def test_environment_spec_exposes_no_build_recipe(self, c_repo: Path):
+        spec = vars(HunterSandbox(repo_path=str(c_repo))._environment_spec(["asan"]))
+        assert "dockerfile" not in spec
+        assert "image" not in spec
+        assert "packages" not in spec
+        assert "setup_commands" not in spec
 
     def test_deep_agent_mode_adds_valgrind_and_ltrace(self, c_repo: Path):
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
@@ -160,9 +156,9 @@ class TestImageTagDeterminism:
         tag_msan = sb_msan._compute_tag(sb_msan._render_dockerfile())
         assert tag_asan != tag_msan
 
-    def test_different_extra_packages_different_tag(self, c_repo: Path):
+    def test_different_extra_features_different_tag(self, c_repo: Path):
         sb1 = HunterSandbox(repo_path=str(c_repo))
-        sb2 = HunterSandbox(repo_path=str(c_repo), extra_packages=["curl"])
+        sb2 = HunterSandbox(repo_path=str(c_repo), extra_features=["toolchain.clang"])
         tag1 = sb1._compute_tag(sb1._render_dockerfile())
         tag2 = sb2._compute_tag(sb2._render_dockerfile())
         assert tag1 != tag2
@@ -171,9 +167,9 @@ class TestImageTagDeterminism:
         sb = HunterSandbox(repo_path=str(c_repo))
         tag = sb._compute_tag(sb._render_dockerfile())
         assert tag.startswith("clearwing-sourcehunt:")
-        # Hash portion is 12 hex chars
+        # The Docker adapter uses a compact SHA-256-derived tag.
         hash_part = tag.split(":")[1]
-        assert len(hash_part) == 12
+        assert len(hash_part) == 20
         assert all(c in "0123456789abcdef" for c in hash_part)
 
 
@@ -271,7 +267,7 @@ class TestSpawnContainer:
 
         sb = HunterSandbox(repo_path=str(c_repo))
         sb.build_image()
-        container = sb.spawn(session_id="test-ro", scratch_mount=False)
+        sb.spawn(session_id="test-ro", scratch_mount=False)
 
         kwargs = mock_docker.containers.run.call_args.kwargs
         volumes = kwargs["volumes"]
@@ -296,12 +292,13 @@ class TestSpawnContainer:
             patch.object(SandboxContainer, "exec") as mock_exec,
         ):
             mock_exec.return_value = MagicMock(exit_code=0)
-            container = sb.spawn(writable_workspace=True)
+            sb.spawn(writable_workspace=True)
 
         # Must copy, then git init
         mock_copy.assert_called_once_with(str(c_repo), "/workspace")
         git_calls = [
-            c for c in mock_exec.call_args_list
+            c
+            for c in mock_exec.call_args_list
             if isinstance(c[0][0], str) and "git init" in c[0][0]
         ]
         assert len(git_calls) == 1
@@ -313,7 +310,7 @@ class TestSpawnContainer:
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
 
         with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="img:test"),
+            patch.object(HunterSandbox, "_prepare_variant_environment", return_value="img:test"),
             patch.object(SandboxContainer, "start", return_value="cid"),
             patch.object(SandboxContainer, "copy_tree_into"),
             patch.object(SandboxContainer, "exec", return_value=MagicMock(exit_code=0)),
@@ -324,8 +321,7 @@ class TestSpawnContainer:
             host, container_path, mode = mount
             if container_path == "/workspace":
                 pytest.fail(
-                    f"Writable workspace should not have a /workspace mount, "
-                    f"found mode={mode}"
+                    f"Writable workspace should not have a /workspace mount, found mode={mode}"
                 )
 
     def test_spawn_network_disabled(self, c_repo: Path, mock_docker):
@@ -358,7 +354,7 @@ class TestSpawnContainer:
         sec_opts = kwargs["security_opt"]
         seccomp_opts = [o for o in sec_opts if o.startswith("seccomp=")]
         assert len(seccomp_opts) == 1
-        value = seccomp_opts[0][len("seccomp="):]
+        value = seccomp_opts[0][len("seccomp=") :]
         # Must not be a path
         assert not value.startswith("/")
         parsed = json.loads(value)
@@ -392,10 +388,7 @@ class TestSpawnContainer:
 
         kwargs = mock_docker.containers.run.call_args.kwargs
         volumes = kwargs["volumes"]
-        rw_mounts = [
-            (host, info) for host, info in volumes.items()
-            if info.get("mode") == "rw"
-        ]
+        rw_mounts = [(host, info) for host, info in volumes.items() if info.get("mode") == "rw"]
         assert len(rw_mounts) == 1
         assert rw_mounts[0][1]["bind"] == "/scratch"
 
@@ -572,11 +565,12 @@ class TestWritableWorkspaceResilience:
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
 
         with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="img:t"),
+            patch.object(HunterSandbox, "_prepare_variant_environment", return_value="img:t"),
             patch.object(SandboxContainer, "start", return_value="cid"),
             patch.object(SandboxContainer, "copy_tree_into"),
             patch.object(
-                SandboxContainer, "exec",
+                SandboxContainer,
+                "exec",
                 side_effect=RuntimeError("git not installed"),
             ),
         ):
@@ -591,10 +585,11 @@ class TestWritableWorkspaceResilience:
         sb = HunterSandbox(repo_path=str(c_repo), deep_agent_mode=True)
 
         with (
-            patch.object(HunterSandbox, "_build_variant_image", return_value="img:t"),
+            patch.object(HunterSandbox, "_prepare_variant_environment", return_value="img:t"),
             patch.object(SandboxContainer, "start", return_value="cid"),
             patch.object(
-                SandboxContainer, "copy_tree_into",
+                SandboxContainer,
+                "copy_tree_into",
                 side_effect=RuntimeError("tar failed"),
             ),
         ):
@@ -635,7 +630,9 @@ class TestVariantSpawn:
 
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.Popen")
     @patch("clearwing.sandbox.hunter_sandbox.subprocess.run")
-    def test_spawn_unbuilt_variant_auto_builds(self, mock_run, mock_popen, c_repo: Path, mock_docker):
+    def test_spawn_unbuilt_variant_auto_builds(
+        self, mock_run, mock_popen, c_repo: Path, mock_docker
+    ):
         """Requesting an unbuilt variant auto-builds on demand."""
         # subprocess.run: inspect calls always miss
         mock_run.return_value = MagicMock(returncode=1)
