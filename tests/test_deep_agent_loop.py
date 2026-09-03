@@ -73,6 +73,37 @@ def _make_hunter(agent_mode="constrained", max_steps=20, budget_usd=0.0):
 
 
 @pytest.mark.asyncio
+async def test_near_limit_synthesis_requires_a_tool_free_final_response():
+    hunter, llm = _make_hunter(agent_mode="constrained", max_steps=3)
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("think", {"notes": "inspect"})]),
+        FakeResponse(tool_calls_list=[_make_tool_call("think", {"notes": "report"})]),
+        FakeResponse(text="Investigation complete."),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    second_messages = llm.achat.call_args_list[1].kwargs["messages"]
+    synthesis = next(
+        str(message.to_dict().get("content", ""))
+        for message in second_messages
+        if "approaching the end of your budget" in str(message.to_dict().get("content", ""))
+    )
+    assert "final response containing no tool calls" in synthesis
+    assert "required before the step limit" in synthesis
+    final_call = llm.achat.call_args_list[2]
+    assert final_call.kwargs["tools"] == []
+    final_messages = [message.to_dict() for message in final_call.kwargs["messages"]]
+    assert any(
+        "This is the final synthesis turn" in str(message.get("content", ""))
+        for message in final_messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_hunter_reminds_model_to_preserve_articulated_potential():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=5)
     llm.achat.side_effect = [

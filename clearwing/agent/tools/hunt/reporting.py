@@ -164,7 +164,7 @@ class RecordFindingInput(ToolInputModel):
     algorithm: str = ""
     crypto_attack_class: str = ""
     key_material_exposed: str = ""
-    trace: CompatibilityTraceInput | None = Field(
+    trace: CompatibilityTraceInput | str | None = Field(
         default=None,
         description=(
             "Optional compatibility dataflow trace. Steps streamed via "
@@ -264,7 +264,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         algorithm: str = "",
         crypto_attack_class: str = "",
         key_material_exposed: str = "",
-        trace: dict | None = None,
+        trace: dict | str | None = None,
         **_: object,
     ) -> str:
         """Record a finding into the hunter's state.
@@ -300,12 +300,15 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             trace: Optional compatibility trace or summary. Streamed trace
                 steps take precedence when present.
         """
+        normalized_trace: dict | None
         if isinstance(trace, str):
             try:
-                trace = json.loads(trace)
+                normalized_trace = json.loads(trace)
             except json.JSONDecodeError as exc:
                 return _tool_error("INVALID_TRACE_JSON", f"Invalid trace JSON ({exc}).")
-        explicit_steps = trace.get("steps", []) if trace else []
+        else:
+            normalized_trace = trace
+        explicit_steps = normalized_trace.get("steps", []) if normalized_trace else []
         try:
             authoritative_steps = (
                 list(ctx.trace_steps)
@@ -333,7 +336,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 )
             vuln_trace = VulnerabilityTrace(
                 steps=authoritative_steps,
-                summary=(trace or {}).get("summary", ""),
+                summary=(normalized_trace or {}).get("summary", ""),
             )
         except Exception as exc:
             return _tool_error(

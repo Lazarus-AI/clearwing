@@ -1382,6 +1382,7 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 no_exploit=not parsed["exploit"],
                 flow=parsed["flow"],
                 agent_mode=parsed["agent_mode"],
+                campaign_hint=parsed.get("campaign_hint"),
                 no_rank=parsed["no_rank"],
                 target_files=parsed.get("target_files"),
                 target_window_lines=parsed.get("target_window_lines"),
@@ -1422,6 +1423,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "exploit",
         "flow",
         "agent_mode",
+        "campaign_hint",
         "no_rank",
         "target_files",
         "target_window_lines",
@@ -1469,6 +1471,8 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         parsed["target_files"] = [
             _bounded_text(path, "target_files entry", 1024) for path in target_files
         ]
+    if "campaign_hint" in value:
+        parsed["campaign_hint"] = _bounded_text(value["campaign_hint"], "campaign_hint", 4096)
     if "target_window_lines" in value:
         parsed["target_window_lines"] = _bounded_integer(
             value["target_window_lines"], "target_window_lines", 40, 500

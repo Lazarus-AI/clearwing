@@ -198,7 +198,11 @@ def test_sourcehunt_machine_handler_propagates_semgrep(monkeypatch):
 
         def read_start(self):
             return (
-                {"repo_url": "https://example.test/repo", "semgrep": True},
+                {
+                    "repo_url": "https://example.test/repo",
+                    "semgrep": True,
+                    "campaign_hint": "Audit the parser's length arithmetic.",
+                },
                 {"provider": {"model": "test-model"}},
             )
 
@@ -231,6 +235,22 @@ def test_sourcehunt_machine_handler_propagates_semgrep(monkeypatch):
 
     assert sourcehunt._handle_machine(7) == 0
     assert captured["runner"]["enable_semgrep"] is True
+    assert captured["runner"]["campaign_hint"] == "Audit the parser's length arithmetic."
+
+
+def test_sourcehunt_machine_request_bounds_campaign_hint():
+    parsed = sourcehunt._machine_request(
+        {
+            "repo_url": "https://example.test/repo",
+            "campaign_hint": "Audit the parser's length arithmetic.",
+        }
+    )
+    assert parsed["campaign_hint"] == "Audit the parser's length arithmetic."
+
+    with pytest.raises(ValueError, match="campaign_hint"):
+        sourcehunt._machine_request(
+            {"repo_url": "https://example.test/repo", "campaign_hint": "x" * 4097}
+        )
 
 
 def test_sourcehunt_machine_handler_honors_visible_cli_semgrep(monkeypatch):
