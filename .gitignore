@@ -119,3 +119,6 @@ working-directory/
 
 # uv run inspect eval ...
 logs/
+
+# Local Claude Code settings
+.claude/
