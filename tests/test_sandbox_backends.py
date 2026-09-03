@@ -373,3 +373,197 @@ def test_hunter_sandbox_accepts_an_injected_backend(tmp_path: Path):
     assert backend.create.call_args.args[0] == "environment:test"
     instance.start.assert_called_once_with()
     assert manager.default_cpu_limit == 3.0
+
+
+# --- Regression tests for review findings on PR #200 --------------------------
+
+
+def test_docker_enhanced_isolation_honors_configured_runtime():
+    # Finding #1: "enhanced" isolation must map to the operator-selected runtime
+    # instead of a hardcoded "runsc" (which silently downgraded e.g. kata to
+    # plain runc when the requested runtime was discarded).
+    backend = DockerSandboxBackend(enhanced_runtime="kata-runtime")
+
+    enhanced = backend.create("image:test", SandboxRunConfig(isolation="enhanced"))
+    assert enhanced.config.runtime == "kata-runtime"
+
+    default = backend.create("image:test", SandboxRunConfig(isolation="default"))
+    assert default.config.runtime is None
+
+    # Unset -> the zero-config default remains runsc.
+    fallback = DockerSandboxBackend().create(
+        "image:test", SandboxRunConfig(isolation="enhanced")
+    )
+    assert fallback.config.runtime == "runsc"
+
+
+def test_backend_from_env_threads_enhanced_runtime(monkeypatch):
+    monkeypatch.delenv("CLEARWING_SANDBOX_ENDPOINT", raising=False)
+    backend = sandbox_backend_from_env(enhanced_runtime="runsc-kvm")
+    assert isinstance(backend, DockerSandboxBackend)
+    assert backend._enhanced_runtime == "runsc-kvm"
+
+
+def test_hunter_sandbox_threads_gvisor_runtime_to_backend(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("CLEARWING_SANDBOX_ENDPOINT", raising=False)
+    manager = HunterSandbox(repo_path=str(tmp_path), gvisor_runtime="kata-runtime")
+    assert isinstance(manager.backend, DockerSandboxBackend)
+    assert manager.backend._enhanced_runtime == "kata-runtime"
+    assert manager.gvisor_runtime == "kata-runtime"
+
+
+class _HangingBuildProcess:
+    """A docker build that emits one line then hangs with stdout still open."""
+
+    def __init__(self):
+        self._released = threading.Event()
+        self.returncode = None
+        self.killed = False
+        self.stdout = self._stream()
+
+    def _stream(self):
+        yield "Step 1/2 : FROM base-image\n"
+        # Stall here (e.g. a wedged base-image pull) without closing stdout.
+        self._released.wait()
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self._released.set()
+
+    def wait(self, timeout=None):
+        self._released.wait(timeout)
+        return self.returncode
+
+
+class _FakeProcessModule:
+    PIPE = -1
+    STDOUT = -2
+
+    def __init__(self, process):
+        self._process = process
+
+    def run(self, *args, **kwargs):
+        result = MagicMock()
+        result.returncode = 1  # cache miss -> force a build
+        return result
+
+    def Popen(self, *args, **kwargs):
+        return self._process
+
+
+def test_build_watchdog_bounds_a_hanging_build():
+    # Finding #3: reading stdout to EOF and only then calling wait(timeout=...)
+    # never bounds a build that hangs with stdout open. The watchdog must kill
+    # it after timeout_seconds regardless.
+    process = _HangingBuildProcess()
+    backend = DockerSandboxBackend(process=_FakeProcessModule(process))
+    spec = SandboxEnvironmentSpec(
+        cache_key="c" * 64,
+        profile="c-cpp",
+        features=["build.make"],
+        timeout_seconds=0.2,
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        backend.ensure_environment(spec)
+    assert process.killed
+
+
+def test_oversized_response_does_not_tear_down_connection():
+    # Finding #4: one worker's oversized response must not fail every other
+    # concurrent/subsequent call on the shared connection.
+    client_socket, server_socket = socket.socketpair()
+    connection = JsonRpcConnection(f"fd://{client_socket.detach()}", max_message_bytes=4096)
+
+    def serve():
+        reader = server_socket.makefile("rb")
+        first = json.loads(reader.readline())
+        assert first is not None
+        # Oversized, unterminated-within-cap frame, closed by a trailing newline.
+        server_socket.sendall(b"x" * 9000 + b"\n")
+        second = json.loads(reader.readline())
+        response = {"jsonrpc": "2.0", "id": second["id"], "result": second["params"]}
+        server_socket.sendall(json.dumps(response).encode() + b"\n")
+        reader.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    try:
+        with pytest.raises(SandboxRpcError):
+            connection.call("test.big", {"value": 1}, timeout=1)
+        assert not connection.is_closed
+        assert connection.call("test.echo", {"value": 2}) == {"value": 2}
+    finally:
+        connection.close()
+        server_socket.close()
+        server.join(timeout=1)
+
+
+def test_malformed_frame_fails_only_its_call():
+    # Finding #4: a well-framed but invalid response fails just its call, not
+    # the whole connection.
+    client_socket, server_socket = socket.socketpair()
+    connection = JsonRpcConnection(f"fd://{client_socket.detach()}")
+
+    def serve():
+        reader = server_socket.makefile("rb")
+        first = json.loads(reader.readline())
+        # Both result and error present: malformed, but the frame is intact.
+        server_socket.sendall(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": first["id"],
+                    "result": 1,
+                    "error": {"code": 1, "message": "x"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        second = json.loads(reader.readline())
+        response = {"jsonrpc": "2.0", "id": second["id"], "result": second["params"]}
+        server_socket.sendall(json.dumps(response).encode() + b"\n")
+        reader.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    try:
+        with pytest.raises(SandboxRpcError):
+            connection.call("test.bad", {"value": 1})
+        assert not connection.is_closed
+        assert connection.call("test.echo", {"value": 2}) == {"value": 2}
+    finally:
+        connection.close()
+        server_socket.close()
+        server.join(timeout=1)
+
+
+def test_peer_disconnect_releases_descriptor():
+    # Finding #5: a peer disconnect (no explicit close()) must still release the
+    # inherited descriptor via the reader thread's teardown, not leak it.
+    client_socket, server_socket = socket.socketpair()
+    descriptor = client_socket.detach()
+    connection = JsonRpcConnection(f"fd://{descriptor}")
+    try:
+        server_socket.close()
+        connection._reader_thread.join(timeout=2)
+        assert not connection._reader_thread.is_alive()
+        assert connection.is_closed
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    finally:
+        connection.close()
+
+
+def test_call_with_nonpositive_timeout_sends_nothing():
+    # Finding #7: a non-positive timeout is reported before the request is
+    # written, so the backend never runs the method's side effects.
+    connection, peer = _fd_connection(lambda request: request["params"])
+    try:
+        with pytest.raises(SandboxRpcError, match="timed out"):
+            connection.call("test.echo", {"value": 1}, timeout=0)
+        assert peer.requests == []
+    finally:
+        connection.close()
+        peer.close()

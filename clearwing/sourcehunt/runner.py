@@ -3507,6 +3507,7 @@ class SourceHuntRunner:
                 languages=languages,
                 deep_agent_mode=use_deep,
                 default_cpus=self._sandbox_cpus,
+                gvisor_runtime=self._gvisor_runtime,
             )
             environment_ref = manager.prepare_environment()
         except Exception as exc:

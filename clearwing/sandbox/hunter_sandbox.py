@@ -78,6 +78,7 @@ class HunterSandbox:
         deep_agent_mode: bool = False,
         default_cpus: float | None = None,
         backend: SandboxBackend | None = None,
+        gvisor_runtime: str | None = None,
     ):
         self._validate_cpu_limit(default_cpus, name="default_cpus")
         self.repo_path = os.path.abspath(repo_path)
@@ -101,6 +102,10 @@ class HunterSandbox:
             self._optional_features.extend(self.DEEP_AGENT_OPTIONAL_FEATURES)
         self.build_recipe = build_recipe or BuildSystemDetector.detect(self.repo_path)
         self._client = None
+        # The operator-selected gVisor-compatible runtime that implements
+        # "enhanced" isolation. Preserved as the exact name so spawn() honors
+        # e.g. "kata-runtime" instead of silently falling back to plain runc.
+        self.gvisor_runtime = gvisor_runtime
         self.backend = (
             backend
             if backend is not None
@@ -108,6 +113,7 @@ class HunterSandbox:
                 self._get_client,
                 process=subprocess,
                 temporary_directory=tempfile.TemporaryDirectory,
+                enhanced_runtime=gvisor_runtime or "runsc",
             )
         )
         self._environment_ref: str | None = None

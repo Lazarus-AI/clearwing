@@ -13,6 +13,7 @@ import os
 import platform
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, field
@@ -184,6 +185,7 @@ class DockerSandboxBackend:
         ] = tempfile.TemporaryDirectory,
         profile_images: Mapping[str, str] | None = None,
         feature_packages: Mapping[str, tuple[str, ...]] | None = None,
+        enhanced_runtime: str = "runsc",
     ) -> None:
         self._client_factory = client_factory
         self._process = process
@@ -193,6 +195,12 @@ class DockerSandboxBackend:
             **_DOCKER_FEATURE_PACKAGES,
             **(feature_packages or {}),
         }
+        # The concrete container runtime that implements "enhanced" isolation.
+        # This is a Docker-adapter detail that never crosses the neutral
+        # SandboxRunConfig (or the RPC boundary); operators select an installed
+        # gVisor-compatible runtime (e.g. "runsc", "runsc-kvm", "kata-runtime")
+        # and the adapter honors that exact name instead of assuming "runsc".
+        self._enhanced_runtime = enhanced_runtime or "runsc"
 
     def _client(self):
         if self._client_factory is not None:
@@ -252,19 +260,37 @@ class DockerSandboxBackend:
             )
             output_lines: list[str] = []
             assert process.stdout is not None
-            for line in process.stdout:
-                line = line.rstrip()
-                if line:
-                    output_lines.append(line)
-                    if on_output is not None:
-                        on_output(line)
+            # A wall-clock watchdog bounds the *whole* build. Reading stdout to
+            # EOF and only then calling wait(timeout=...) never bounds a build
+            # that hangs with stdout still open (e.g. a stalled base-image
+            # pull): the read blocks until the process exits, so wait() sees an
+            # already-finished process. The timer kills the build after
+            # timeout_seconds regardless of whether it is producing output.
+            timed_out = threading.Event()
+
+            def _kill_on_timeout() -> None:
+                timed_out.set()
+                try:
+                    process.kill()
+                except Exception:  # noqa: BLE001 - process may have already exited
+                    pass
+
+            watchdog = threading.Timer(spec.timeout_seconds, _kill_on_timeout)
+            watchdog.start()
             try:
-                process.wait(timeout=spec.timeout_seconds)
-            except self._process.TimeoutExpired as error:
-                process.kill()
+                for line in process.stdout:
+                    line = line.rstrip()
+                    if line:
+                        output_lines.append(line)
+                        if on_output is not None:
+                            on_output(line)
+                process.wait()
+            finally:
+                watchdog.cancel()
+            if timed_out.is_set():
                 raise RuntimeError(
                     f"Sandbox environment preparation timed out after {spec.timeout_seconds}s"
-                ) from error
+                )
             if process.returncode != 0:
                 raise RuntimeError("\n".join(output_lines[-40:]))
         return SandboxEnvironment(image, cached=False)
@@ -361,7 +387,7 @@ RUN mkdir -p /scratch
                 security_opt=[f"seccomp={seccomp_json}"],
                 cap_drop=["ALL"],
                 cap_add=["SYS_PTRACE"],
-                runtime="runsc" if config.isolation == "enhanced" else None,
+                runtime=self._enhanced_runtime if config.isolation == "enhanced" else None,
             )
         )
 
@@ -374,8 +400,15 @@ def sandbox_backend_from_env(
     *,
     process: ModuleType = subprocess,
     temporary_directory: Callable[..., AbstractContextManager[str]] = tempfile.TemporaryDirectory,
+    enhanced_runtime: str = "runsc",
 ) -> SandboxBackend:
-    """Select the configured backend, defaulting to the original Docker path."""
+    """Select the configured backend, defaulting to the original Docker path.
+
+    ``enhanced_runtime`` is the operator-selected container runtime that
+    implements "enhanced" isolation for the Docker adapter. It is deliberately
+    a Docker-only concern: a remote RPC supervisor decides for itself how to
+    realize "enhanced", so the runtime name never crosses the RPC boundary.
+    """
 
     endpoint = os.environ.get("CLEARWING_SANDBOX_ENDPOINT", "").strip()
     if endpoint:
@@ -386,4 +419,5 @@ def sandbox_backend_from_env(
         docker_client_factory,
         process=process,
         temporary_directory=temporary_directory,
+        enhanced_runtime=enhanced_runtime,
     )

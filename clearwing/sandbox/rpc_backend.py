@@ -44,6 +44,16 @@ class _PendingCall:
     failure: BaseException | None = None
 
 
+class _FrameError(Exception):
+    """A single response frame was malformed but the stream stayed in sync.
+
+    Raised while dispatching one complete, newline-terminated frame. Because
+    the frame boundary was intact, the reader can discard just this frame (and
+    fail at most the one matching call) and keep serving every other worker on
+    the shared connection.
+    """
+
+
 class JsonRpcConnection:
     """Thread-safe JSON-RPC 2.0 client over one full-duplex stream.
 
@@ -58,7 +68,10 @@ class JsonRpcConnection:
         self.endpoint = endpoint
         self.max_message_bytes = max_message_bytes
         self._socket = _connect(endpoint)
-        self._reader = self._socket.makefile("rb", buffering=0)
+        # Buffered reader: an unbuffered SocketIO makes readline() issue one
+        # recv() per byte (no peek), so a single large response would pin the
+        # shared reader thread for seconds and stall every concurrent worker.
+        self._reader = self._socket.makefile("rb")
         self._ids = itertools.count(1)
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -92,6 +105,11 @@ class JsonRpcConnection:
         encoded = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) + 1 > self.max_message_bytes:
             raise SandboxRpcError("sandbox RPC request exceeds the message limit")
+        # A non-positive timeout can never wait for a response, so report it
+        # before writing the request: otherwise the backend would still run the
+        # method's side effects for a call the caller has already given up on.
+        if timeout is not None and timeout <= 0:
+            raise SandboxRpcError(f"sandbox RPC method {method!r} timed out")
         pending = _PendingCall(threading.Event())
         with self._state_lock:
             if self._closed is not None:
@@ -105,10 +123,6 @@ class JsonRpcConnection:
                 self._pending.pop(request_id, None)
             self._fail_connection(error)
             raise SandboxRpcError("sandbox RPC write failed") from error
-        if timeout is not None and timeout <= 0:
-            with self._state_lock:
-                self._pending.pop(request_id, None)
-            raise SandboxRpcError(f"sandbox RPC method {method!r} timed out")
         if not pending.ready.wait(timeout):
             with self._state_lock:
                 self._pending.pop(request_id, None)
@@ -132,19 +146,13 @@ class JsonRpcConnection:
         return response["result"]
 
     def close(self) -> None:
-        with self._close_lock:
-            if self._resources_closed:
-                return
-            self._resources_closed = True
-            self._fail_connection(ConnectionError("sandbox RPC connection was closed"))
-            try:
-                self._socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            self._socket.close()
-            if threading.current_thread() is not self._reader_thread:
-                self._reader_thread.join(timeout=1)
-            self._reader.close()
+        self._fail_connection(ConnectionError("sandbox RPC connection was closed"))
+        if threading.current_thread() is not self._reader_thread:
+            # The shutdown() in _fail_connection unblocks the reader; wait for
+            # it to run its teardown so the descriptor is released before we
+            # return (belt-and-suspenders _close_resources below is idempotent).
+            self._reader_thread.join(timeout=1)
+        self._close_resources()
 
     @property
     def is_closed(self) -> bool:
@@ -158,27 +166,70 @@ class JsonRpcConnection:
                 if not encoded:
                     raise ConnectionError("sandbox RPC peer closed the connection")
                 if len(encoded) > self.max_message_bytes or not encoded.endswith(b"\n"):
-                    raise SandboxRpcError("sandbox RPC response exceeds the message limit")
-                try:
-                    response = json.loads(encoded)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise SandboxRpcError("sandbox RPC response is not valid JSON") from error
-                if not isinstance(response, dict) or response.get("jsonrpc") != "2.0":
-                    raise SandboxRpcError("sandbox RPC response is not JSON-RPC 2.0")
-                request_id = response.get("id")
-                if not isinstance(request_id, int) or isinstance(request_id, bool):
-                    raise SandboxRpcError("sandbox RPC response has an invalid id")
-                if ("result" in response) == ("error" in response):
-                    raise SandboxRpcError("sandbox RPC response must contain result or error")
-                with self._state_lock:
-                    pending = self._pending.pop(request_id, None)
-                if pending is None:
-                    # A late response after a caller timeout is safe to discard.
+                    # Oversized/unterminated frame: the newline-delimited stream
+                    # is desynced. Discard to the next boundary and keep serving
+                    # every other worker instead of tearing down the shared
+                    # connection over one giant response. _drain_to_boundary
+                    # raises on EOF, which does end the connection.
+                    logger.warning(
+                        "sandbox RPC response exceeded %d bytes; discarding and resyncing",
+                        self.max_message_bytes,
+                    )
+                    self._drain_to_boundary()
                     continue
-                pending.response = response
-                pending.ready.set()
+                # A complete, newline-terminated frame keeps the stream in sync
+                # regardless of its contents, so a malformed one fails at most
+                # its matching call — never the connection.
+                try:
+                    self._dispatch_frame(encoded)
+                except _FrameError as error:
+                    logger.warning("discarding malformed sandbox RPC response: %s", error)
         except BaseException as error:  # noqa: BLE001 - wake every blocked caller
             self._fail_connection(error)
+        finally:
+            # The reader thread owns teardown of the reader/socket: doing it
+            # here (rather than from another thread that may race a blocked
+            # readline) frees the descriptor on every failure path, not just
+            # the explicit close() path.
+            self._close_resources()
+
+    def _dispatch_frame(self, encoded: bytes) -> None:
+        try:
+            response = json.loads(encoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise _FrameError("response is not valid JSON") from error
+        if not isinstance(response, dict) or response.get("jsonrpc") != "2.0":
+            raise _FrameError("response is not JSON-RPC 2.0")
+        request_id = response.get("id")
+        if not isinstance(request_id, int) or isinstance(request_id, bool):
+            raise _FrameError("response has an invalid id")
+        with self._state_lock:
+            pending = self._pending.pop(request_id, None)
+        if pending is None:
+            # A late response after a caller timeout is safe to discard.
+            return
+        if ("result" in response) == ("error" in response):
+            # Well-framed but invalid: fail just this call so the caller gets a
+            # definitive error rather than blocking until its timeout.
+            pending.failure = SandboxRpcError(
+                "sandbox RPC response must contain result or error"
+            )
+            pending.ready.set()
+            return
+        pending.response = response
+        pending.ready.set()
+
+    def _drain_to_boundary(self) -> None:
+        # Discard the remainder of an oversized frame up to (and including) the
+        # next newline. Reads are bounded per iteration; the total is bounded by
+        # the frame the trusted supervisor actually sent. EOF mid-drain means
+        # the peer is gone, which does fail the connection.
+        while True:
+            chunk = self._reader.readline(self.max_message_bytes + 1)
+            if not chunk:
+                raise ConnectionError("sandbox RPC peer closed the connection")
+            if chunk.endswith(b"\n"):
+                return
 
     def _fail_connection(self, error: BaseException) -> None:
         with self._state_lock:
@@ -189,6 +240,32 @@ class JsonRpcConnection:
         for call in pending:
             call.failure = error
             call.ready.set()
+        # Wake a reader blocked in readline() so it exits and runs its teardown.
+        # Safe from any thread and when the socket is already closed.
+        try:
+            self._socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def _close_resources(self) -> None:
+        with self._close_lock:
+            if self._resources_closed:
+                return
+            self._resources_closed = True
+        # Close the makefile and the socket. makefile() reference-counts the
+        # descriptor, so both must close for the fd to actually be released.
+        try:
+            self._socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._reader.close()
+        except OSError:
+            pass
+        try:
+            self._socket.close()
+        except OSError:
+            pass
 
 
 def _connect(endpoint: str) -> socket.socket:

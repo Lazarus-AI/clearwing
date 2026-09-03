@@ -168,6 +168,7 @@ class TestSourceHuntSandboxCpuWiring:
             languages=["c"],
             deep_agent_mode=True,
             default_cpus=1.5,
+            gvisor_runtime=None,
         )
         assert runner.sandbox_factory is not None
         runner.sandbox_factory()
