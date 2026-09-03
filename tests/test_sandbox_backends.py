@@ -287,6 +287,7 @@ def test_socket_backend_implements_complete_sandbox_contract():
         assert peer.requests[3]["params"]["environment_ref"] == "environment:test"
         assert start_config["policy"] == "sourcehunt"
         assert start_config["isolation"] == "default"
+        assert start_config["cpus"] is None
         assert "network_mode" not in start_config
         assert "security_opt" not in start_config
         assert "cap_drop" not in start_config
@@ -336,6 +337,30 @@ def test_docker_package_resolution_stays_inside_adapter():
     assert "gdb" in dockerfile
     assert "cmake" in dockerfile
     assert "ripgrep" not in vars(spec).values()
+
+
+def test_optional_docker_packages_remain_best_effort_without_hiding_stderr():
+    backend = DockerSandboxBackend()
+    dockerfile = backend._render_dockerfile(
+        SandboxEnvironmentSpec(
+            cache_key="a" * 64,
+            profile="c-cpp",
+            optional_features=["debug.valgrind"],
+        )
+    )
+
+    assert "valgrind || true ;" in dockerfile
+    assert "2>/dev/null" not in dockerfile
+
+
+def test_docker_translates_an_unspecified_cpu_limit_to_its_legacy_sentinel():
+    backend = DockerSandboxBackend()
+
+    unspecified = backend.create("image:test", SandboxRunConfig())
+    explicit = backend.create("image:test", SandboxRunConfig(cpus=2.5))
+
+    assert unspecified.config.cpus == 0.0
+    assert explicit.config.cpus == 2.5
 
 
 def test_backend_selection_uses_configured_socket(monkeypatch):

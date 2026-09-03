@@ -57,7 +57,7 @@ class SandboxRunConfig:
     isolation: str = "default"
     mounts: list[tuple[str, str, str]] = field(default_factory=list)
     memory_mb: int = 2048
-    cpus: float = 0.0
+    cpus: float | None = None
     timeout_seconds: int = 300
     env: dict[str, str] = field(default_factory=dict)
     working_dir: str = "/workspace"
@@ -350,7 +350,7 @@ RUN mkdir -p /scratch
         if not packages:
             return "# (no optional features)" if optional else "# (no additional features)"
         package_list = " ".join(packages)
-        failure = " 2>/dev/null || true ;" if optional else " &&"
+        failure = " || true ;" if optional else " &&"
         return (
             "RUN apt-get update -qq && "
             "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
@@ -379,7 +379,9 @@ RUN mkdir -p /scratch
                 mounts=config.mounts,
                 memory_mb=config.memory_mb,
                 cpu_shares=1024,
-                cpus=config.cpus,
+                # The provider-neutral contract uses None for an unspecified
+                # limit. Docker's existing adapter represents that as 0.0.
+                cpus=0.0 if config.cpus is None else config.cpus,
                 timeout_seconds=config.timeout_seconds,
                 env=config.env,
                 working_dir=config.working_dir,
