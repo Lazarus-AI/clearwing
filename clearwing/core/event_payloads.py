@@ -26,6 +26,7 @@ class SourcehuntStagePayload:
     findings_so_far: int
     cost_usd: float
     detail: str
+    progress: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

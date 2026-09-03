@@ -977,8 +977,9 @@ class SourceHuntRunner:
         symbols: list[str] | tuple[str, ...] = (),
         finding_ids: list[str] | tuple[str, ...] = (),
         error: dict[str, Any] | None = None,
+        progress: float | None = None,
     ) -> None:
-        progress = SourceHuntProgress(
+        prog = SourceHuntProgress(
             stage=stage,
             status=status,
             findings_so_far=findings_so_far,
@@ -998,11 +999,12 @@ class SourceHuntRunner:
                 findings_so_far=findings_so_far,
                 cost_usd=cost_usd,
                 detail=detail,
+                progress=progress,
             )
         )
         if self._on_progress is not None:
             try:
-                self._on_progress(progress)
+                self._on_progress(prog)
             except Exception:  # pragma: no cover - observer isolation
                 logger.warning("sourcehunt progress observer failed", exc_info=True)
         try:

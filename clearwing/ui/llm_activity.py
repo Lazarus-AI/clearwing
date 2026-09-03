@@ -41,6 +41,12 @@ _recent_execs: deque[dict] = deque(maxlen=6)
 _latest_reasoning: deque[dict] = deque(maxlen=1)
 _latest_result: deque[dict] = deque(maxlen=1)
 
+# Determinate stage progress (preprocess / rank)
+_stage_progress: dict[str, float] = {}  # stage name -> 0.0 .. 1.0
+_stage_order: list[str] = []  # insertion-order for display
+_TRACKED_STAGES = ("preprocess", "rank")
+_TERMINAL_STATUSES = frozenset({"completed", "degraded", "skipped", "budget_exhausted"})
+
 
 def _fmt_tokens(n: int | None) -> str:
     """Compact token count: 1840 -> '1.8k', 48210 -> '48.2k'."""
@@ -195,6 +201,55 @@ def _append_latest_reasoning_and_result(renderables: list[Any]) -> None:
         )
 
 
+def _on_stage_event(payload: Any) -> None:
+    """Track determinate stage progress for preprocess / rank bars."""
+    stage = getattr(payload, "stage", None)
+    if stage not in _TRACKED_STAGES:
+        return
+    status = getattr(payload, "status", "")
+    if status == "started":
+        if stage not in _stage_progress:
+            _stage_order.append(stage)
+        _stage_progress[stage] = 0.0
+    elif status == "progress":
+        pct = getattr(payload, "progress", None)
+        if pct is not None:
+            _stage_progress[stage] = max(_stage_progress.get(stage, 0.0), pct)
+    elif status in _TERMINAL_STATUSES:
+        _stage_progress[stage] = 1.0
+
+
+def _build_stage_bars() -> list:
+    """Render determinate progress bars for preprocess / rank stages."""
+    if not _stage_order:
+        return []
+    bar_width = 20
+    max_label = max(len(s) for s in _stage_order)
+    lines: list = []
+    for stage in _stage_order:
+        pct = _stage_progress.get(stage, 0.0)
+        filled = int(pct * bar_width)
+        filled = min(filled, bar_width)
+        done = pct >= 1.0
+        bar_fill = "\u2588" * filled
+        if done:
+            bar_rest = "\u2588" * (bar_width - filled)
+            bar_text = f"[{bar_fill}{bar_rest}]"
+        else:
+            bar_rest = "\u2591" * (bar_width - filled)
+            bar_text = f"[{bar_fill}{bar_rest}]"
+        label = f"{stage}:".ljust(max_label + 1)
+        line = Text.assemble(
+            (label + " ", "cyan"),
+            (bar_text, "green" if done else "yellow"),
+        )
+        lines.append(line)
+    all_done = all(_stage_progress.get(s, 0.0) >= 1.0 for s in _TRACKED_STAGES if s in _stage_progress)
+    if all_done and len(_stage_progress) >= 2:
+        lines.append(Text("DONE!", style="bold green"))
+    return lines
+
+
 def _build_panel(
     budget_usd: float | None = None,
     spend_ledger: Any = None,
@@ -263,6 +318,10 @@ def _build_panel(
         task: TaskID = progress.add_task("", total=budget_usd, completed=spent)
         progress.update(task, completed=spent)
         renderables.append(progress)
+
+    stage_bars = _build_stage_bars()
+    if stage_bars:
+        renderables.extend(stage_bars)
 
     table = Table(box=None, show_header=True, header_style="dim", pad_edge=False, padding=(0, 2))
     table.add_column("model")
@@ -436,6 +495,7 @@ def llm_activity_panel(
     bus.subscribe(EventType.HUNTER_REASONING, _on_reasoning)
     bus.subscribe(EventType.TOOL_RESULT, _on_result)
     bus.subscribe(EventType.TRACE_STEP, _on_trace)
+    bus.subscribe(EventType.SOURCEHUNT_STAGE, _on_stage_event)
 
     console = console or Console(stderr=True)
 
@@ -460,11 +520,14 @@ def llm_activity_panel(
         bus.unsubscribe(EventType.HUNTER_REASONING, _on_reasoning)
         bus.unsubscribe(EventType.TOOL_RESULT, _on_result)
         bus.unsubscribe(EventType.TRACE_STEP, _on_trace)
+        bus.unsubscribe(EventType.SOURCEHUNT_STAGE, _on_stage_event)
         _recent_reads.clear()
         _recent_status.clear()
         _recent_traces.clear()
         _recent_execs.clear()
         _latest_reasoning.clear()
         _latest_result.clear()
+        _stage_progress.clear()
+        _stage_order.clear()
         root.handlers = saved_handlers
         root.setLevel(saved_level)
