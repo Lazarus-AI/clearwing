@@ -311,12 +311,26 @@ class Preprocessor:
         """Execute the full preprocess pipeline. See class docstring."""
         repo_path = self._clone_or_use_local()
 
+        # Keep the analyzer that owns any TemporaryDirectory from clone().
+        # Replacing it here drops the temp-dir owner, GC deletes the clone,
+        # and _iter_source_files then sees root exists=False → 0 files.
+        if self._analyzer is None:
+            self._analyzer = SourceAnalyzer(
+                repo_path=repo_path,
+                max_file_size=self._max_file_size_bytes,
+                max_depth=self._traversal_depth,
+                respect_gitignore=self.respect_gitignore,
+            )
+        else:
+            self._analyzer.repo_path = repo_path
+            self._analyzer.respect_gitignore = self.respect_gitignore
+            if self._max_file_size_bytes is not None:
+                self._analyzer.MAX_FILE_SIZE = self._max_file_size_bytes
+            if self._traversal_depth is not None:
+                self._analyzer.MAX_DEPTH = self._traversal_depth
+
         # Pre-scan for static findings — also gives us the file iterator
         logger.info("Preprocessor: running static analyzer")
-        self._analyzer = SourceAnalyzer(
-            repo_path=repo_path,
-            respect_gitignore=self.respect_gitignore,
-        )
         gitignore = _GitignoreMatcher.from_repo(repo_path) if self.respect_gitignore else None
         analysis_result = self._analyzer.analyze()
         static_findings = analysis_result.findings
@@ -521,8 +535,8 @@ class Preprocessor:
         by_language: dict[str, list[int]] = {}
         for abs_path, language in targets:
             counts[abs_path] = 0
-            basename = _os.path.basename(abs_path)
-            stem = _os.path.splitext(basename)[0]
+            basename = os.path.basename(abs_path)
+            stem = os.path.splitext(basename)[0]
             pattern = _imports_by_pattern(language, basename, stem)
             if pattern is None:
                 continue
@@ -534,19 +548,19 @@ class Preprocessor:
             return counts
 
         # ONE repo walk; each file's head is read at most once.
-        for dirpath, dirnames, filenames in _os.walk(repo_path):
+        for dirpath, dirnames, filenames in os.walk(repo_path):
             dirnames[:] = [
                 d
                 for d in dirnames
                 if d not in SourceAnalyzer.SKIP_DIRS
-                and not (gitignore and gitignore.matches_dir(_os.path.join(dirpath, d)))
+                and not (gitignore and gitignore.matches_dir(os.path.join(dirpath, d)))
             ]
             for fname in filenames:
-                other = _os.path.join(dirpath, fname)
+                other = os.path.join(dirpath, fname)
                 if gitignore and gitignore.matches_file(other):
                     continue
                 try:
-                    if _os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
+                    if os.path.getsize(other) > SourceAnalyzer.MAX_FILE_SIZE:
                         continue
                     with open(other, encoding="utf-8", errors="ignore") as f:
                         head = f.read(64 * 1024)  # only scan the first 64 KB

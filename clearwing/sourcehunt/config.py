@@ -160,6 +160,9 @@ class SourceHuntCoverageRuntimeTuning:
 class SourceHuntThroughputBudgetRuntimeTuning:
     hunt_parallelism: int = 8
     ranker_max_inflight_chunks: int = 8
+    # Hexis-governed AsyncLLMClient semaphore. 0 = derive from hunt_parallelism
+    # (unblocks the historical hardcoded 8-conn client cap). >0 = explicit override.
+    llm_max_concurrency: int = 0
     default_depth: str = "deep"
     # 0 = unlimited. Hexis injects CLEARWING_RUNTIME_TUNING_JSON; a non-zero
     # default here silently capped hunts that omitted --budget.
@@ -375,13 +378,19 @@ def parse_runtime_tuning_policy(payload: Any) -> ClearWingRuntimeTuningPolicy:
                     throughput.get("hunt_parallelism"),
                     default=8,
                     minimum=1,
-                    maximum=32,
+                    maximum=96,
                 ),
                 ranker_max_inflight_chunks=_coerce_int(
                     throughput.get("ranker_max_inflight_chunks"),
                     default=8,
                     minimum=1,
-                    maximum=32,
+                    maximum=96,
+                ),
+                llm_max_concurrency=_coerce_int(
+                    throughput.get("llm_max_concurrency"),
+                    default=0,
+                    minimum=0,
+                    maximum=96,
                 ),
                 default_depth=_coerce_enum(
                     throughput.get("default_depth"),

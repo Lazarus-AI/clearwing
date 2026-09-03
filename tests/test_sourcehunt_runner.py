@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from genai_pyo3 import ChatResponse
 
+from clearwing.findings.types import Finding
 from clearwing.sourcehunt.pool import assign_tier
-from clearwing.sourcehunt.preprocessor import Preprocessor
+from clearwing.sourcehunt.preprocessor import Preprocessor, PreprocessResult
 from clearwing.sourcehunt.ranker import Ranker
 from clearwing.sourcehunt.runner import SourceHuntResult, SourceHuntRunner
 from clearwing.sourcehunt.state import StageOutcome
@@ -330,6 +332,108 @@ class TestNoVerify:
             for finding in result.findings
         )
         assert result.exit_code == 2
+
+
+# --- mixed finding telemetry ------------------------------------------------
+
+
+class TestMixedFindingTelemetry:
+    def test_exploit_and_report_callsites_accept_object_and_dict_findings(
+        self, tmp_path, monkeypatch
+    ):
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_PY_SQLI),
+            local_path=str(FIXTURE_PY_SQLI),
+            depth="standard",
+            output_dir=str(tmp_path),
+            no_rank=True,
+            no_per_file_hunt=True,
+            no_verify=True,
+            no_exploit=True,
+            enable_behavior_monitor=False,
+            enable_findings_pool=False,
+            enable_knowledge_graph=False,
+            enable_mechanism_memory=False,
+            enable_patch_oracle=False,
+            enable_stability_verification=False,
+            enable_variant_loop=False,
+        )
+        findings = [
+            Finding(
+                id="finding-object",
+                file="src/object.py",
+                description="object finding",
+                vulnerability_trace={
+                    "steps": [
+                        {"function": "object_sink"},
+                        SimpleNamespace(function="shared_sink"),
+                    ]
+                },
+            ),
+            {
+                "id": "finding-dict",
+                "file": "src/dict.py",
+                "description": "dict finding",
+                "vulnerability_trace": {
+                    "steps": [
+                        {"function": "dict_sink"},
+                        SimpleNamespace(function="shared_sink"),
+                    ]
+                },
+            },
+            {
+                "id": None,
+                "file": None,
+                "description": "optional telemetry omitted",
+                "vulnerability_trace": None,
+            },
+        ]
+        preprocess_result = PreprocessResult(
+            repo_path=str(FIXTURE_PY_SQLI),
+            file_targets=[],
+            static_findings=[],
+        )
+        stage_events = []
+        finding_files = MagicMock(wraps=runner._finding_files)
+        finding_ids = MagicMock(wraps=runner._finding_ids)
+        finding_symbols = MagicMock(wraps=runner._finding_symbols)
+
+        monkeypatch.setattr(runner, "_preprocess", lambda: preprocess_result)
+        monkeypatch.setattr(runner, "_ensure_sandbox_factory", lambda *args: None)
+        monkeypatch.setattr(runner, "_initialize_checkpoint_store", lambda **kwargs: None)
+        monkeypatch.setattr(runner, "_merge_static_findings", lambda existing, result: findings)
+        monkeypatch.setattr(runner, "_write_report", lambda **kwargs: {})
+        monkeypatch.setattr(runner, "_finding_files", finding_files)
+        monkeypatch.setattr(runner, "_finding_ids", finding_ids)
+        monkeypatch.setattr(runner, "_finding_symbols", finding_symbols)
+        monkeypatch.setattr(
+            runner,
+            "_emit_stage",
+            lambda stage, status, **data: stage_events.append((stage, status, data)),
+        )
+
+        result = runner.run()
+
+        expected_metadata = {
+            "findings_so_far": 3,
+            "files": ["src/object.py", "src/dict.py", ""],
+            "symbols": ["dict_sink", "object_sink", "shared_sink"],
+            "finding_ids": ["finding-object", "finding-dict", ""],
+        }
+        actual = {
+            (stage, status): {
+                key: data[key] for key in expected_metadata
+            }
+            for stage, status, data in stage_events
+            if (stage, status) in {("exploit", "skipped"), ("report", "started")}
+        }
+        assert actual == {
+            ("exploit", "skipped"): expected_metadata,
+            ("report", "started"): expected_metadata,
+        }
+        assert result.findings == findings
+        for extractor in (finding_files, finding_ids, finding_symbols):
+            assert any(call.args == (findings,) for call in extractor.call_args_list)
 
 
 # --- evidence_level on findings ---------------------------------------------

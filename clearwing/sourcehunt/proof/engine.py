@@ -132,6 +132,11 @@ class ProofFlowRunner:
         self.command_runner = command_runner
         self.model_client_factory = model_client_factory
         self._sandbox: HunterSandbox | None = None
+        # Keep Preprocessor (and its clone TemporaryDirectory) alive for the
+        # whole proof run. Returning only the path string lets GC delete
+        # /tmp/clearwing-src-* before capture_snapshot → "Repository path does
+        # not exist".
+        self._preprocessor: Preprocessor | None = None
 
     async def arun(self) -> ProofFlowResult:  # noqa: C901
         started = time.monotonic()
@@ -745,6 +750,12 @@ class ProofFlowRunner:
         finally:
             if self._sandbox is not None:
                 self._sandbox.cleanup()
+            if self._preprocessor is not None:
+                try:
+                    self._preprocessor.cleanup()
+                except Exception:
+                    logger.debug("ProofFlowRunner preprocessor cleanup failed", exc_info=True)
+                self._preprocessor = None
 
     async def _investigate_candidates(
         self,
@@ -984,7 +995,9 @@ class ProofFlowRunner:
             run_semgrep=False,
             tag_files=False,
         )
-        return str(preprocessor._clone_or_use_local())
+        repo_path = str(preprocessor._clone_or_use_local())
+        self._preprocessor = preprocessor
+        return repo_path
 
     def _compile_commands_path(self, repo_path: Path) -> Path:
         if self.config.compile_commands:
@@ -1007,9 +1020,13 @@ class ProofFlowRunner:
                 default_cpus=self.config.sandbox_cpus,
             )
             self._sandbox.build_image()
+            # DinD/Colima: bind-mounting repo_path treats it as a *host* path via
+            # docker.sock. Sidecar-local trees (e.g. /tmp/nginx-proof-src) are
+            # invisible to nested sandboxes. Copy-in keeps the runner's view.
             container = self._sandbox.spawn(
                 session_id=self.config.session_id or None,
                 runtime=self.config.gvisor_runtime,
+                writable_workspace=True,
             )
         except Exception as exc:
             raise ProofPreflightError(

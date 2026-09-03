@@ -120,12 +120,18 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         # downstream validators independently re-verify the assembled trace.
         if ctx.agent_mode != "deep" and file not in ctx.files_read:
             return f"ERROR: file '{file}' has not been read yet. Call read_source_file first."
+        try:
+            line_i = int(line) if line not in (None, "") else 0
+        except (TypeError, ValueError):
+            line_i = 0
+        if line_i < 0:
+            line_i = 0
         step = TraceStep(
             file=file,
-            line=line,
-            function=function,
-            code_snippet=code_snippet,
-            note=note,
+            line=line_i,
+            function=function or "",
+            code_snippet=code_snippet or "",
+            note=note or "",
         )
         ctx.trace_steps.append(step)
         n = len(ctx.trace_steps)
@@ -203,7 +209,24 @@ def build_reporting_tools(ctx: HunterContext) -> list:
             trace: Optional compatibility trace or summary. Streamed trace
                 steps take precedence when present.
         """
-        explicit_steps = trace.get("steps", []) if trace else []
+        # Models often pass a bare list of steps instead of {steps, summary}.
+        # Treat that as a compatibility trace so record_finding does not die with
+        # "'list' object has no attribute 'get'" (drops real closes mid-hunt).
+        trace_obj: dict | None
+        if trace is None:
+            trace_obj = None
+        elif isinstance(trace, list):
+            trace_obj = {"steps": trace, "summary": ""}
+        elif isinstance(trace, dict):
+            trace_obj = trace
+        else:
+            return (
+                "ERROR: invalid trace type "
+                f"{type(trace).__name__}; expected object or list of steps."
+            )
+        explicit_steps = trace_obj.get("steps", []) if trace_obj else []
+        if not isinstance(explicit_steps, list):
+            explicit_steps = []
         try:
             authoritative_steps = (
                 list(ctx.trace_steps)
@@ -218,7 +241,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 )
             vuln_trace = VulnerabilityTrace(
                 steps=authoritative_steps,
-                summary=(trace or {}).get("summary", ""),
+                summary=(trace_obj or {}).get("summary", ""),
             )
         except Exception as exc:
             return (

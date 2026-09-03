@@ -45,9 +45,83 @@ logger = logging.getLogger(__name__)
 # left unset. connect_timeout_seconds is kept short-ish since establishing the
 # TCP/TLS connection itself should never take long, even over a flaky
 # link-local hop; it's only widened a bit for headroom.
-_LLM_CONNECT_TIMEOUT_SECONDS: float = 60.0
-_LLM_READ_TIMEOUT_SECONDS: float = 86_400.0  # 24h
-_LLM_TOTAL_TIMEOUT_SECONDS: float = 90_000.0  # 25h, headroom over read timeout
+#
+# Operators can shrink via CLEARWING_LLM_READ_TIMEOUT_SECONDS so a wedged
+# provider cannot park an exploit stage for a full day (run 600 hung ~45m+
+# on an oversize Laguna request under the 24h default).
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_float_opt(name: str) -> float | None:
+    """Parse an optional float env var. Unset/blank/invalid → ``None``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _env_int_opt(name: str) -> int | None:
+    """Parse an optional int env var. Unset/blank/invalid → ``None``."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+_LLM_CONNECT_TIMEOUT_SECONDS: float = _env_float("CLEARWING_LLM_CONNECT_TIMEOUT_SECONDS", 60.0)
+_LLM_READ_TIMEOUT_SECONDS: float = _env_float("CLEARWING_LLM_READ_TIMEOUT_SECONDS", 86_400.0)
+_LLM_TOTAL_TIMEOUT_SECONDS: float = _env_float(
+    "CLEARWING_LLM_TOTAL_TIMEOUT_SECONDS",
+    max(_LLM_READ_TIMEOUT_SECONDS + 3_600.0, 90_000.0),
+)
+
+
+class ContextWindowExceededError(RuntimeError):
+    """Raised when a request would exceed CLEARWING_MAX_MODEL_LEN before dispatch."""
+
+
+def _configured_max_model_len() -> int | None:
+    raw = os.environ.get("CLEARWING_MAX_MODEL_LEN", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _approx_prompt_tokens(
+    *,
+    messages: list[ChatMessage],
+    system: str,
+    tools: list[NativeToolSpec] | None,
+) -> int:
+    """Cheap chars/4 estimate for compaction / reject (not spend reservation)."""
+    total_chars = len(system or "")
+    for message in messages:
+        total_chars += len(message.content or "")
+        if message.tool_calls:
+            for call in message.tool_calls:
+                total_chars += len(call.fn_name or "")
+                total_chars += len(json.dumps(call.fn_arguments or {}, default=str))
+    for tool in tools or []:
+        total_chars += len(tool.name or "") + len(tool.description or "")
+        total_chars += len(json.dumps(tool.schema or {}, default=str))
+    return max(1, total_chars // 4)
 
 
 class ToolInputModel(BaseModel):
@@ -363,6 +437,37 @@ class AsyncLLMClient:
             self.reasoning_effort = self._auto_resolve_reasoning_effort(model_name)
         else:
             self.reasoning_effort = reasoning_effort
+        # Bake-off / serving-check overlay. Unset is a no-op so production
+        # hunts keep auto→medium. Valid Qwen 3.8 levels only (never "high").
+        _effort_override = os.environ.get("CLEARWING_REASONING_EFFORT", "").strip().lower()
+        if _effort_override in {"xhigh", "medium", "low"}:
+            logger.info(
+                "CLEARWING_REASONING_EFFORT=%s overriding resolved effort for model %r",
+                _effort_override,
+                model_name,
+            )
+            self.reasoning_effort = _effort_override
+        # Bake-off / serving-check sampling overlay. Unset → no-op so
+        # production hunts keep provider defaults. When set, these pin the
+        # sampling knobs on the *actual request wire* (native ChatOptions plus
+        # the aiohttp OpenAI fallback body), so a matrix config cannot merely
+        # document a sampling profile it never sends. ``top_k`` is not a native
+        # ChatOptions field, so it rides ``extra_body`` (vLLM / OpenAI extra
+        # body) and is serialized into the request JSON.
+        self._wire_temperature = _env_float_opt("CLEARWING_TEMPERATURE")
+        self._wire_top_p = _env_float_opt("CLEARWING_TOP_P")
+        self._wire_top_k = _env_int_opt("CLEARWING_TOP_K")
+        if any(
+            v is not None
+            for v in (self._wire_temperature, self._wire_top_p, self._wire_top_k)
+        ):
+            logger.info(
+                "wire sampling overlay for model %r: temperature=%s top_p=%s top_k=%s",
+                model_name,
+                self._wire_temperature,
+                self._wire_top_p,
+                self._wire_top_k,
+            )
         # Whether to request reasoning-content capture in ChatOptions. On for
         # every model except the blacklisted ones (see
         # _REASONING_CAPTURE_UNSUPPORTED_PATTERNS), which error if it's set.
@@ -417,6 +522,8 @@ class AsyncLLMClient:
     ) -> BudgetReservation | None:
         if self._spend_ledger is None:
             return None
+        metadata = current_spend_metadata()
+        metadata.setdefault("timeout_seconds", _LLM_TOTAL_TIMEOUT_SECONDS)
         return self._spend_ledger.reserve_call(
             model=self.model_name,
             provider=self.provider_name,
@@ -428,7 +535,7 @@ class AsyncLLMClient:
             ),
             requested_max_output_tokens=max_tokens,
             supports_output_limit=self.provider_name != "openai_codex",
-            metadata=current_spend_metadata(),
+            metadata=metadata,
         )
 
     @staticmethod
@@ -577,6 +684,25 @@ class AsyncLLMClient:
             tools=request_tools,
         )
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
+        temperature, wire_top_p, wire_extra_body = self._wire_sampling(temperature)
+
+        # Fail fast when prompt would exceed the provider context window.
+        # Prevents multi-hour hangs on oversize Laguna requests (run 600).
+        max_model_len = _configured_max_model_len()
+        if max_model_len is not None:
+            approx_tokens = _approx_prompt_tokens(
+                messages=messages,
+                system=system_prompt,
+                tools=tools,
+            )
+            hard_limit = max(1024, int(max_model_len * 0.92))
+            if approx_tokens > hard_limit:
+                raise ContextWindowExceededError(
+                    f"prompt ~{approx_tokens} tokens exceeds "
+                    f"CLEARWING_MAX_MODEL_LEN={max_model_len} "
+                    f"(hard_limit={hard_limit}); compact history or shrink tools"
+                )
+
         reservation = self._reserve_spend_call(
             messages=messages,
             system=system_prompt,
@@ -592,6 +718,8 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
+                top_p=wire_top_p,
+                extra_body=wire_extra_body,
                 max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
@@ -735,6 +863,7 @@ class AsyncLLMClient:
             tools=request_tools,
         )
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
+        temperature, wire_top_p, wire_extra_body = self._wire_sampling(temperature)
         reservation = self._reserve_spend_call(
             messages=messages,
             system=system_prompt,
@@ -750,6 +879,8 @@ class AsyncLLMClient:
         try:
             options = ChatOptions(
                 temperature=temperature,
+                top_p=wire_top_p,
+                extra_body=wire_extra_body,
                 max_tokens=None if self._omit_max_tokens else max_tokens,
                 capture_content=True,
                 capture_usage=True,
@@ -922,6 +1053,25 @@ class AsyncLLMClient:
         if expect == "array":
             return extract_json_array(text), response
         return extract_json_object(text), response
+
+    def _wire_sampling(
+        self, temperature: float | None
+    ) -> tuple[float | None, float | None, dict[str, Any] | None]:
+        """Overlay bake-off sampling pins onto the outgoing request.
+
+        Returns ``(temperature, top_p, extra_body)`` to pass to
+        :class:`ChatOptions`. Any pin left unset stays ``None`` (a no-op that
+        preserves today's provider-default behavior). The ChatGPT Codex backend
+        rejects sampling params, so it is deliberately left untouched.
+        """
+        if self.provider_name == "openai_codex":
+            return temperature, None, None
+        if self._wire_temperature is not None:
+            temperature = self._wire_temperature
+        extra_body = (
+            {"top_k": self._wire_top_k} if self._wire_top_k is not None else None
+        )
+        return temperature, self._wire_top_p, extra_body
 
     def _codex_safe_params(
         self, temperature: float | None, max_tokens: int | None
@@ -1165,6 +1315,16 @@ class AsyncLLMClient:
             body["response_format"] = self._openai_response_format(options.response_json_spec)
         elif options.response_json_mode:
             body["response_format"] = {"type": options.response_json_mode}
+        # Non-standard sampling knobs (e.g. top_k for vLLM) ride extra_body so
+        # the pinned bake-off profile also survives the aiohttp fallback path.
+        if options.extra_body_json:
+            try:
+                extra = json.loads(options.extra_body_json)
+            except json.JSONDecodeError:
+                extra = None
+            if isinstance(extra, dict):
+                for key, value in extra.items():
+                    body.setdefault(key, value)
         return body
 
     def _openai_message_body(self, message: ChatMessage) -> dict[str, Any]:
@@ -1522,6 +1682,8 @@ class AsyncLLMClient:
         """
         return ChatOptions(
             temperature=options.temperature,
+            top_p=options.top_p,
+            extra_body=options.extra_body_json,
             max_tokens=options.max_tokens,
             capture_content=options.capture_content,
             capture_usage=options.capture_usage,
@@ -1538,6 +1700,8 @@ class AsyncLLMClient:
 
         return ChatOptions(
             temperature=options.temperature,
+            top_p=options.top_p,
+            extra_body=options.extra_body_json,
             max_tokens=None,
             capture_content=options.capture_content,
             capture_usage=options.capture_usage,

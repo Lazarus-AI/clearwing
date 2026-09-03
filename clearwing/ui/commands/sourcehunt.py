@@ -1262,7 +1262,19 @@ def handle(cli, args):
         bus.unsubscribe(EventType.TOOL_START, _on_tool_start)
 
     # Summary
-    if result.status == "budget_exhausted":
+    if result.status == "invalid_harness":
+        cli.console.print(
+            "\n[bold red]Sourcehunt refused: invalid_harness (no executable sandbox)[/bold red]"
+        )
+        cli.console.print("  Status: aborted rather than hunting blind")
+    elif result.status == "empty_subsystem_selector":
+        cli.console.print(
+            "\n[bold red]Sourcehunt refused: empty_subsystem_selector[/bold red]"
+        )
+        cli.console.print(
+            "  Status: an intended --subsystem pin matched zero files (check the pin path)"
+        )
+    elif result.status == "budget_exhausted":
         cli.console.print("\n[bold yellow]Sourcehunt stopped at budget[/bold yellow]")
         cli.console.print("  Status: partial (budget exhausted)")
     else:

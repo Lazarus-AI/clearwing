@@ -20,7 +20,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -60,10 +60,11 @@ from .mechanism_memory import (
 )
 from .patcher import AutoPatcher, apply_patch_attempt
 from .poc_runner import build_rerun_poc_callback
-from .pool import HunterPool, HuntPoolConfig, TierBudget
+from .pool import BandBudget, HunterPool, HuntPoolConfig, TierBudget
 from .preprocessor import Preprocessor, PreprocessResult
 from .ranker import Ranker, RankerConfig
 from .state import (
+    Axes,
     AxisResult,
     EvidenceLevel,
     FileTarget,
@@ -88,7 +89,8 @@ logger = logging.getLogger(__name__)
 class SourceHuntResult:
     """Result of a complete sourcehunt run."""
 
-    exit_code: int  # 0=clean, 1=medium, 2=critical/high, 3=incomplete/budget
+    # 0=clean, 1=medium, 2=critical/high, 3=incomplete/budget, 4=hollow/incomplete pipeline
+    exit_code: int
     repo_url: str
     repo_path: str
     findings: list[Finding]
@@ -559,6 +561,11 @@ class SourceHuntRunner:
         self.exploiter_llm = exploiter_llm
         self.sandbox_factory = sandbox_factory
         self._sandbox_manager: HunterSandbox | None = None
+        self._sandbox_host_fallback_error: str | None = None
+        self._hunt_skip_reason: str | None = None
+        # Keep Preprocessor (and its clone TemporaryDirectory) alive for the
+        # whole run. Returning only repo_path from _preprocess() lets GC delete
+        # /tmp/clearwing-src-* mid-hunt → sandbox tar "Cannot open" failures.
         self._preprocessor: Preprocessor | None = None
         self._session_id = parent_session_id or f"sh-{uuid.uuid4().hex[:8]}"
         self._agent_mode_override = agent_mode
@@ -949,9 +956,12 @@ class SourceHuntRunner:
 
     def _serialize_validator_verdict(self, verdict: ValidatorVerdict) -> dict[str, Any]:
         axes_payload: dict[str, Any] = {}
+        # Axis identity is the Axes field name (real/triggerable/...), not a
+        # field on AxisResult — using axis_result.axis raises AttributeError and
+        # aborts verify before apply_validator_verdict (3 HIGH / 0 verified class).
         for axis_name, axis_result in verdict.axes.items():
             axes_payload[str(axis_name)] = {
-                "axis": axis_result.axis,
+                "axis": str(axis_name),
                 "passed": bool(axis_result.passed),
                 "confidence": axis_result.confidence,
                 "rationale": axis_result.rationale,
@@ -976,19 +986,36 @@ class SourceHuntRunner:
 
     def _deserialize_validator_verdict(self, payload: dict[str, Any]) -> ValidatorVerdict:
         axes_payload = payload.get("axes")
-        axes: dict[str, AxisResult] = {}
+        axis_fields: dict[str, AxisResult | None] = {
+            "real": None,
+            "triggerable": None,
+            "impactful": None,
+            "general": None,
+        }
         if isinstance(axes_payload, dict):
             for axis_name, axis_value in axes_payload.items():
-                if not isinstance(axis_value, dict):
+                if str(axis_name) not in axis_fields or not isinstance(axis_value, dict):
                     continue
-                axis = AxisResult(
-                    axis=str(axis_value.get("axis", axis_name)),
+                confidence = str(axis_value.get("confidence", "low")).strip().lower()
+                if confidence not in {"high", "medium", "low"}:
+                    confidence = "low"
+                boundary = str(axis_value.get("boundary_crossed", "none") or "none")
+                if boundary not in {
+                    "privilege",
+                    "tenant",
+                    "origin",
+                    "user",
+                    "kernel",
+                    "sandbox",
+                    "none",
+                }:
+                    boundary = "none"
+                axis_fields[str(axis_name)] = AxisResult(
                     passed=bool(axis_value.get("passed", False)),
-                    confidence=str(axis_value.get("confidence", "low")),
+                    confidence=confidence,  # type: ignore[arg-type]
                     rationale=str(axis_value.get("rationale", "")),
-                    boundary_crossed=str(axis_value.get("boundary_crossed", "")),
+                    boundary_crossed=boundary,  # type: ignore[arg-type]
                 )
-                axes[str(axis_name)] = axis
         level = str(payload.get("evidence_level", "suspicion")).strip().lower()
         if level not in {
             "suspicion",
@@ -1001,7 +1028,12 @@ class SourceHuntRunner:
             level = "suspicion"
         return ValidatorVerdict(
             finding_id=str(payload.get("finding_id", "")),
-            axes=axes,
+            axes=Axes(
+                real=axis_fields["real"],
+                triggerable=axis_fields["triggerable"],
+                impactful=axis_fields["impactful"],
+                general=axis_fields["general"],
+            ),
             advance=bool(payload.get("advance", False)),
             severity_validated=(
                 str(payload.get("severity_validated"))
@@ -1083,6 +1115,44 @@ class SourceHuntRunner:
             )
         except Exception:
             logger.debug("Sourcehunt instrumentation write failed", exc_info=True)
+        if self._spend_ledger is not None:
+            try:
+                self._spend_ledger.record_progress(
+                    stage=stage,
+                    stage_status=status,
+                    findings_pool=findings_so_far,
+                    report_present=stage == "report" and status == "completed",
+                )
+            except Exception:
+                logger.debug("Sourcehunt progress contract write failed", exc_info=True)
+
+    def _record_progress_contract(
+        self,
+        *,
+        stage: str,
+        stage_status: str,
+        findings_pool: int,
+        verify_advance: int | None = None,
+        verify_reject: int | None = None,
+        exploit_success: int | None = None,
+        exploit_code_execution: int | None = None,
+        report_present: bool | None = None,
+    ) -> None:
+        if self._spend_ledger is None:
+            return
+        try:
+            self._spend_ledger.record_progress(
+                stage=stage,
+                stage_status=stage_status,
+                findings_pool=findings_pool,
+                verify_advance=verify_advance,
+                verify_reject=verify_reject,
+                exploit_success=exploit_success,
+                exploit_code_execution=exploit_code_execution,
+                report_present=report_present,
+            )
+        except Exception:
+            logger.debug("Sourcehunt progress contract detail write failed", exc_info=True)
 
     def _finalize_instrumentation(self, status: str) -> None:
         if self._instrumentation_finalized:
@@ -1265,8 +1335,8 @@ class SourceHuntRunner:
                 "proof",
                 "incomplete",
                 findings_so_far=len(findings),
-                files=[str(finding.file or "") for finding in findings],
-                finding_ids=[finding.id for finding in findings],
+                files=self._finding_files(findings),
+                finding_ids=self._finding_ids(findings),
             )
         else:
             pipeline_status.record_succeeded("proof")
@@ -1274,8 +1344,8 @@ class SourceHuntRunner:
                 "proof",
                 "completed",
                 findings_so_far=len(findings),
-                files=[str(finding.file or "") for finding in findings],
-                finding_ids=[finding.id for finding in findings],
+                files=self._finding_files(findings),
+                finding_ids=self._finding_ids(findings),
             )
 
         has_high = any(finding.severity in {"critical", "high"} for finding in findings)
@@ -1410,7 +1480,7 @@ class SourceHuntRunner:
                 detail=f"Enumerated {files_ranked} files",
                 files=stage_files,
             )
-            self._ensure_sandbox_factory(repo_path, files)
+            self._ensure_sandbox_factory(repo_path, files, pipeline_status)
             self._initialize_checkpoint_store(
                 repo_path=repo_path,
                 preprocess_result=preprocess_result,
@@ -1511,7 +1581,19 @@ class SourceHuntRunner:
                         files=stage_files,
                     )
             else:
-                logger.info("Ranker skipped; no LLM available")
+                if ranker_llm is None and not files:
+                    rank_skip = "no_files_and_no_llm"
+                    rank_detail = "No source files and no ranker model available"
+                elif not files:
+                    rank_skip = "no_files"
+                    rank_detail = "No source files were available to rank"
+                elif ranker_llm is None:
+                    rank_skip = "no_llm"
+                    rank_detail = "No ranker model available; default priority scores used"
+                else:
+                    rank_skip = "unknown"
+                    rank_detail = "Ranker skipped"
+                logger.info("Ranker skipped; reason=%s", rank_skip)
                 pipeline_status.record_degraded(
                     "ranker",
                     "All files assigned default priority scores (surface=3, influence=2)",
@@ -1527,7 +1609,7 @@ class SourceHuntRunner:
                 self._emit_stage(
                     "rank",
                     "degraded",
-                    detail="No ranker model available; default priority scores used",
+                    detail=rank_detail,
                     files=stage_files,
                 )
 
@@ -1784,9 +1866,9 @@ class SourceHuntRunner:
                             findings_so_far=len(all_findings),
                             cost_usd=pool.total_spent,
                             detail=f"{len(all_findings)} partial findings",
-                            files=[str(finding.file or "") for finding in all_findings],
+                            files=self._finding_files(all_findings),
                             symbols=self._finding_symbols(all_findings),
-                            finding_ids=[finding.id for finding in all_findings],
+                            finding_ids=self._finding_ids(all_findings),
                         )
                     else:
                         pipeline_status.record_succeeded("hunter_pool")
@@ -1796,9 +1878,9 @@ class SourceHuntRunner:
                             findings_so_far=len(all_findings),
                             cost_usd=pool.total_spent,
                             detail=f"{len(all_findings)} findings",
-                            files=[str(finding.file or "") for finding in all_findings],
+                            files=self._finding_files(all_findings),
                             symbols=self._finding_symbols(all_findings),
-                            finding_ids=[finding.id for finding in all_findings],
+                            finding_ids=self._finding_ids(all_findings),
                         )
                 except BudgetExceeded:
                     logger.info("HunterPool stopped because the run budget is exhausted")
@@ -1813,7 +1895,7 @@ class SourceHuntRunner:
                         findings_so_far=len(all_findings),
                         files=stage_files,
                         symbols=hunt_symbols,
-                        finding_ids=[finding.id for finding in all_findings],
+                        finding_ids=self._finding_ids(all_findings),
                     )
                 except Exception as exc:
                     logger.warning("HunterPool run failed", exc_info=True)
@@ -1827,7 +1909,7 @@ class SourceHuntRunner:
                         findings_so_far=len(all_findings),
                         files=stage_files,
                         symbols=hunt_symbols,
-                        finding_ids=[finding.id for finding in all_findings],
+                        finding_ids=self._finding_ids(all_findings),
                         error={"type": type(exc).__name__, "message": str(exc)},
                     )
                 spent_per_tier = pool.spent_per_tier
@@ -1842,16 +1924,24 @@ class SourceHuntRunner:
                 }
                 files_hunted = pool.completed_target_count
             else:
-                logger.info("HunterPool skipped; no LLM available")
                 if not files:
                     hunt_status = "skipped"
+                    hunt_skip_reason = "no_files"
                     hunt_detail = "No source files were available"
                 elif self._budget_exhausted():
                     hunt_status = "budget_exhausted"
+                    hunt_skip_reason = "budget_exhausted"
                     hunt_detail = "Run budget was exhausted before hunting"
+                elif hunter_llm is None:
+                    hunt_status = "degraded"
+                    hunt_skip_reason = "no_llm"
+                    hunt_detail = "No hunter model was available"
                 else:
                     hunt_status = "degraded"
-                    hunt_detail = "No hunter model was available"
+                    hunt_skip_reason = "unknown"
+                    hunt_detail = "HunterPool skipped"
+                logger.info("HunterPool skipped; reason=%s", hunt_skip_reason)
+                self._hunt_skip_reason = hunt_skip_reason
                 self._emit_stage(
                     "hunt",
                     hunt_status,
@@ -1909,11 +1999,36 @@ class SourceHuntRunner:
                     self.budget_usd,
                     self._run_spent_usd(),
                 )
+            elif (
+                self._needs_executable_sandbox()
+                and self._enable_subsystem_hunt
+                and hunter_llm is not None
+                and self.sandbox_factory is None
+            ):
+                self._hunt_skip_reason = "invalid_harness"
+                logger.error(
+                    "invalid_harness: subsystem hunt refused — no sandbox "
+                    "(Docker build failed and host fallback could not be installed)"
+                )
+                pipeline_status.record(
+                    "subsystem_hunt",
+                    StageOutcome.FAILED,
+                    fallback_description=(
+                        "No executable sandbox; hunt aborted rather than running blind"
+                    ),
+                )
+                self._emit_stage(
+                    "subsystem_hunt",
+                    "failed",
+                    detail="invalid_harness: no sandbox",
+                )
             elif self._enable_subsystem_hunt and hunter_llm is not None:
                 from .subsystem import (
+                    EmptySubsystemSelectorError,
+                    InvalidHarnessError,
                     SubsystemHuntConfig,
                     identify_subsystems_auto,
-                    subsystem_from_path,
+                    resolve_subsystem_targets,
                 )
                 from .subsystem import (
                     SubsystemHuntRunner as SubsysRunner,
@@ -1926,18 +2041,19 @@ class SourceHuntRunner:
                 )
 
                 subsystem_targets: list = []
+                empty_selector_error: EmptySubsystemSelectorError | None = None
                 if self._subsystem_paths:
-                    for sp in self._subsystem_paths:
-                        try:
-                            st = subsystem_from_path(
-                                sp,
-                                files,
-                                callgraph=preprocess_result.callgraph,
-                                entry_points_by_file=entry_points_by_file,
-                            )
-                            subsystem_targets.append(st)
-                        except ValueError:
-                            logger.warning("No files match subsystem path: %s", sp)
+                    try:
+                        subsystem_targets = resolve_subsystem_targets(
+                            self._subsystem_paths,
+                            files,
+                            callgraph=preprocess_result.callgraph,
+                            entry_points_by_file=entry_points_by_file,
+                            repo_path=repo_path,
+                            no_rank=self._no_rank,
+                        )
+                    except EmptySubsystemSelectorError as exc:
+                        empty_selector_error = exc
                 else:
                     subsystem_targets = identify_subsystems_auto(
                         files,
@@ -1945,7 +2061,35 @@ class SourceHuntRunner:
                         entry_points_by_file=entry_points_by_file,
                     )
 
-                if subsystem_targets:
+                if empty_selector_error is not None:
+                    # An intended --subsystem pin matched zero files. Fail
+                    # visibly (failed stage + non-zero exit) instead of
+                    # silently proceeding to a hollow "0 findings" success.
+                    self._hunt_skip_reason = "empty_subsystem_selector"
+                    logger.error("%s", empty_selector_error)
+                    pipeline_status.record(
+                        "subsystem_hunt",
+                        StageOutcome.FAILED,
+                        fallback_description=(
+                            "Intended --subsystem selector matched zero files; "
+                            "hunt aborted rather than reporting a hollow success"
+                        ),
+                        error=str(empty_selector_error),
+                    )
+                    self._emit_stage(
+                        "subsystem_hunt",
+                        "failed",
+                        detail=(
+                            "empty_subsystem_selector: "
+                            + ", ".join(empty_selector_error.unmatched)
+                        ),
+                        error={
+                            "type": "EmptySubsystemSelectorError",
+                            "message": str(empty_selector_error),
+                            "unmatched": empty_selector_error.unmatched,
+                        },
+                    )
+                elif subsystem_targets:
                     subsystem_files = sorted(
                         {
                             str(file_target.get("path") or "")
@@ -2032,7 +2176,25 @@ class SourceHuntRunner:
                             cost_usd=subsystem_spent,
                             files=subsystem_files,
                             symbols=subsystem_symbols,
-                            finding_ids=[finding.id for finding in subsys_findings],
+                            finding_ids=self._finding_ids(subsys_findings),
+                        )
+                    except InvalidHarnessError as exc:
+                        self._hunt_skip_reason = "invalid_harness"
+                        logger.error("%s", exc)
+                        pipeline_status.record(
+                            "subsystem_hunt",
+                            StageOutcome.FAILED,
+                            fallback_description=(
+                                "No executable sandbox; hunt aborted rather than running blind"
+                            ),
+                            error=str(exc),
+                        )
+                        self._emit_stage(
+                            "subsystem_hunt",
+                            "failed",
+                            files=subsystem_files,
+                            symbols=subsystem_symbols,
+                            error={"type": "InvalidHarnessError", "message": str(exc)},
                         )
                     except Exception as exc:
                         logger.warning("Subsystem hunt failed", exc_info=True)
@@ -2057,9 +2219,9 @@ class SourceHuntRunner:
                 "started",
                 findings_so_far=len(all_findings),
                 detail=f"{len(all_findings)} findings to verify",
-                files=[str(finding.file or "") for finding in all_findings],
+                files=self._finding_files(all_findings),
                 symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+                finding_ids=self._finding_ids(all_findings),
             )
             if not self.no_verify:
                 if self._budget_exhausted():
@@ -2117,9 +2279,16 @@ class SourceHuntRunner:
                 verify_status,
                 findings_so_far=len(all_findings),
                 detail=verify_detail,
-                files=[str(finding.file or "") for finding in all_findings],
+                files=self._finding_files(all_findings),
                 symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+                finding_ids=self._finding_ids(all_findings),
+            )
+            self._record_progress_contract(
+                stage="verify",
+                stage_status=verify_status,
+                findings_pool=len(all_findings),
+                verify_advance=len(verified),
+                verify_reject=len(rejected),
             )
             if rejected:
                 self._write_rejected_findings(rejected)
@@ -2304,9 +2473,9 @@ class SourceHuntRunner:
                 "exploit",
                 "started",
                 findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in verified],
+                files=self._finding_files(verified),
                 symbols=self._finding_symbols(verified),
-                finding_ids=[finding.id for finding in verified],
+                finding_ids=self._finding_ids(verified),
             )
             exploited: list[Finding] = []
             # 5.5 v0.3: Auto-patch (opt-in) — runs after exploiter on verified
@@ -2359,15 +2528,30 @@ class SourceHuntRunner:
                             try:
                                 exploit_result = await agentic.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
-                                self._checkpoint_append(
-                                    "exploit_outcomes",
-                                    checkpoint_key,
-                                    {
-                                        "finding": dict(finding),
-                                        "success": bool(exploit_result.success),
-                                        "partial": bool(exploit_result.partial),
-                                    },
-                                )
+                                # Checkpoint serialize is best-effort: a Finding→dict
+                                # footgun must not skip exploited.append (same pattern
+                                # as verify_outcomes above).
+                                try:
+                                    finding_payload = (
+                                        asdict(finding)
+                                        if hasattr(finding, "__dataclass_fields__")
+                                        else dict(finding)
+                                    )
+                                    self._checkpoint_append(
+                                        "exploit_outcomes",
+                                        checkpoint_key,
+                                        {
+                                            "finding": finding_payload,
+                                            "success": bool(exploit_result.success),
+                                            "partial": bool(exploit_result.partial),
+                                        },
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "exploit_outcomes checkpoint serialize failed for %s",
+                                        finding.get("id"),
+                                        exc_info=True,
+                                    )
                                 if exploit_result.success:
                                     exploited.append(finding)
                                 if exploit_result.partial and findings_pool is not None:
@@ -2403,15 +2587,27 @@ class SourceHuntRunner:
                             try:
                                 exploit_result = await e.aattempt(finding)
                                 apply_exploiter_result(finding, exploit_result)
-                                self._checkpoint_append(
-                                    "exploit_outcomes",
-                                    checkpoint_key,
-                                    {
-                                        "finding": dict(finding),
-                                        "success": bool(exploit_result.success),
-                                        "partial": bool(exploit_result.partial),
-                                    },
-                                )
+                                try:
+                                    finding_payload = (
+                                        asdict(finding)
+                                        if hasattr(finding, "__dataclass_fields__")
+                                        else dict(finding)
+                                    )
+                                    self._checkpoint_append(
+                                        "exploit_outcomes",
+                                        checkpoint_key,
+                                        {
+                                            "finding": finding_payload,
+                                            "success": bool(exploit_result.success),
+                                            "partial": bool(exploit_result.partial),
+                                        },
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "exploit_outcomes checkpoint serialize failed for %s",
+                                        finding.get("id"),
+                                        exc_info=True,
+                                    )
                                 if exploit_result.success:
                                     exploited.append(finding)
                             except BudgetExceeded:
@@ -2605,9 +2801,30 @@ class SourceHuntRunner:
                 ),
                 findings_so_far=len(all_findings),
                 detail=f"{len(exploited)} exploited",
-                files=[str(finding.file or "") for finding in all_findings],
+                files=self._finding_files(all_findings),
                 symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+                finding_ids=self._finding_ids(all_findings),
+            )
+            self._record_progress_contract(
+                stage="exploit",
+                stage_status=(
+                    "skipped"
+                    if self.no_exploit
+                    else "budget_exhausted"
+                    if self._budget_exhausted()
+                    else "completed"
+                ),
+                findings_pool=len(all_findings),
+                exploit_success=sum(1 for finding in all_findings if finding.get("exploit_success")),
+                exploit_code_execution=sum(
+                    1
+                    for finding in all_findings
+                    if finding.get("exploit_success")
+                    and (
+                        finding.get("exploit_impact") in {"code_execution", "remote_code_execution"}
+                        or finding.get("impact") in {"code_execution", "remote_code_execution"}
+                    )
+                ),
             )
 
             # 6. Report
@@ -2615,9 +2832,9 @@ class SourceHuntRunner:
                 "report",
                 "started",
                 findings_so_far=len(all_findings),
-                files=[str(finding.file or "") for finding in all_findings],
+                files=self._finding_files(all_findings),
                 symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+                finding_ids=self._finding_ids(all_findings),
             )
             assert self._spend_ledger is not None
             ledger_tier_spend = self._spend_ledger.spent_by("tier", stage="hunt")
@@ -2634,6 +2851,10 @@ class SourceHuntRunner:
                 subsystem_spent = ledger_subsystem_spend
 
             run_status = "budget_exhausted" if self._budget_exhausted() else "completed"
+            if self._hunt_skip_reason == "invalid_harness":
+                run_status = "invalid_harness"
+            if self._hunt_skip_reason == "empty_subsystem_selector":
+                run_status = "empty_subsystem_selector"
             if run_status == "budget_exhausted":
                 pipeline_status.record(
                     "budget",
@@ -2659,14 +2880,34 @@ class SourceHuntRunner:
             )
 
             report_status = "degraded" if self._last_reporting_error else "completed"
+            self._record_progress_contract(
+                stage="report",
+                stage_status=report_status,
+                findings_pool=len(all_findings),
+                verify_advance=len(verified),
+                verify_reject=len(rejected),
+                exploit_success=sum(
+                    1 for finding in all_findings if finding.get("exploit_success")
+                ),
+                exploit_code_execution=sum(
+                    1
+                    for finding in all_findings
+                    if finding.get("exploit_success")
+                    and (
+                        finding.get("exploit_impact") in {"code_execution", "remote_code_execution"}
+                        or finding.get("impact") in {"code_execution", "remote_code_execution"}
+                    )
+                ),
+                report_present=True,
+            )
             self._emit_stage(
                 "report",
                 report_status,
                 findings_so_far=len(all_findings),
                 cost_usd=budget_summary["total_spent"],
-                files=[str(finding.file or "") for finding in all_findings],
+                files=self._finding_files(all_findings),
                 symbols=self._finding_symbols(all_findings),
-                finding_ids=[finding.id for finding in all_findings],
+                finding_ids=self._finding_ids(all_findings),
                 error=self._last_reporting_error,
             )
             self._finalize_instrumentation(run_status)
@@ -2680,8 +2921,10 @@ class SourceHuntRunner:
             duration = time.monotonic() - start_time
             exit_findings = all_findings if self.no_verify else verified
             return SourceHuntResult(
-                exit_code=(
-                    3 if run_status == "budget_exhausted" else self._exit_code(exit_findings)
+                exit_code=self._completion_exit_code(
+                    findings=exit_findings,
+                    files_ranked=files_ranked,
+                    run_status=run_status,
                 ),
                 repo_url=self.repo_url,
                 repo_path=repo_path,
@@ -2712,7 +2955,10 @@ class SourceHuntRunner:
                 except Exception:
                     logger.debug("HunterSandbox cleanup failed", exc_info=True)
             if self._preprocessor is not None:
-                self._preprocessor.cleanup()
+                try:
+                    self._preprocessor.cleanup()
+                except Exception:
+                    logger.debug("Preprocessor cleanup failed", exc_info=True)
                 self._preprocessor = None
 
     @property
@@ -2931,14 +3177,24 @@ class SourceHuntRunner:
                             repo_path,
                             verdict,
                         )
-                    self._checkpoint_append(
-                        "verify_outcomes",
-                        checkpoint_key,
-                        {
-                            "mode": "v2",
-                            "verdict": self._serialize_validator_verdict(verdict),
-                        },
-                    )
+                    # Checkpoint serialize is best-effort: a serializer bug must
+                    # not skip apply_validator_verdict (otherwise every finding
+                    # stays unverified while the hunt looks successful).
+                    try:
+                        self._checkpoint_append(
+                            "verify_outcomes",
+                            checkpoint_key,
+                            {
+                                "mode": "v2",
+                                "verdict": self._serialize_validator_verdict(verdict),
+                            },
+                        )
+                    except Exception:
+                        logger.warning(
+                            "verify_outcomes checkpoint serialize failed for %s",
+                            finding.get("id"),
+                            exc_info=True,
+                        )
                 apply_validator_verdict(
                     finding,
                     verdict,
@@ -3122,15 +3378,22 @@ class SourceHuntRunner:
         # standard/deep depths. Quick depth stays cheap — just enumerate
         # and tag files.
         runtime_coverage = self._runtime_tuning.sourcehunt.coverage
+        pinned = bool(self._subsystem_paths)
+        if pinned:
+            logger.info(
+                "Pinned --subsystem hunt: skipping callgraph/semgrep/taint "
+                "(whole-repo preprocess is not needed to honor the pin)"
+            )
+        heavy = self.depth != "quick" and self._preprocessing and not pinned
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
             local_path=self.local_path,
             tag_files=True,
-            build_callgraph=(self.depth != "quick" and self._preprocessing),
-            propagate_reachability=(self.depth != "quick" and self._preprocessing),
-            run_semgrep=(self.depth != "quick" and self._preprocessing),
-            run_taint=(self.depth != "quick" and self._preprocessing),
+            build_callgraph=heavy,
+            propagate_reachability=heavy,
+            run_semgrep=heavy,
+            run_taint=heavy,
             max_imports_by_files=runtime_coverage.imports_by_file_cap,
             max_file_size_bytes=runtime_coverage.max_file_size_bytes,
             traversal_depth=runtime_coverage.traversal_depth,
@@ -3139,7 +3402,34 @@ class SourceHuntRunner:
         )
         return self._preprocessor.run()
 
-    def _ensure_sandbox_factory(self, repo_path: str, files: list[FileTarget]) -> None:
+    def _needs_executable_sandbox(self) -> bool:
+        """True when a hunt stage will call execute/read_file against a sandbox."""
+        if self.depth == "quick":
+            return False
+        if self._enable_subsystem_hunt:
+            return True
+        return self._agent_mode == "deep"
+
+    def _install_host_sandbox_factory(self, repo_path: str) -> bool:
+        """Install a host-exec factory that implements /workspace → repo_path."""
+        root = Path(repo_path)
+        if not root.is_dir():
+            logger.error(
+                "invalid_harness: cannot install host sandbox; %s is not a directory",
+                repo_path,
+            )
+            return False
+        from clearwing.sandbox.host import host_sandbox_factory
+
+        self.sandbox_factory = host_sandbox_factory(str(root.resolve()))
+        return True
+
+    def _ensure_sandbox_factory(
+        self,
+        repo_path: str,
+        files: list[FileTarget],
+        pipeline_status: PipelineStatus | None = None,
+    ) -> None:
         if self.depth == "quick":
             return
         if self.sandbox_factory is not None:
@@ -3174,12 +3464,27 @@ class SourceHuntRunner:
             )
             image_tag = manager.build_image()
         except Exception as exc:
+            detail = f"Host fallback after sandbox build failure: {exc}"
+            self._sandbox_host_fallback_error = str(exc)
             logger.warning(
-                "HunterSandbox unavailable (%s); falling back to host mode. "
-                "Start Docker to enable sanitizer-backed containers.",
+                "HunterSandbox unavailable (%s); installing HostSandboxContainer "
+                "at %s (maps /workspace → host tree). No sanitizers, no network isolation.",
                 exc,
+                repo_path,
             )
             logger.debug("HunterSandbox initialization failed", exc_info=True)
+            self._sandbox_host_fallback_error = str(exc)
+            installed = self._install_host_sandbox_factory(repo_path)
+            if pipeline_status is not None:
+                pipeline_status.record_degraded(
+                    "sandbox",
+                    detail if installed else f"{detail}; host sandbox install failed",
+                )
+            if not installed:
+                logger.error(
+                    "invalid_harness: host sandbox could not be installed for %s",
+                    repo_path,
+                )
             return
 
         cpu_limit = manager.default_cpu_limit
@@ -3202,6 +3507,7 @@ class SourceHuntRunner:
                 available_cpus,
             )
         self._sandbox_manager = manager
+        self._sandbox_host_fallback_error = None
         gvisor_rt = self._gvisor_runtime
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(
@@ -3231,9 +3537,9 @@ class SourceHuntRunner:
         """depth=quick exit — only static findings, no LLM hunters."""
         all_findings = self._merge_static_findings([], preprocess_result)
         target_files = [str(item.get("path") or "") for item in preprocess_result.file_targets]
-        finding_files = [str(finding.file or "") for finding in all_findings]
+        finding_files = self._finding_files(all_findings)
         finding_symbols = self._finding_symbols(all_findings)
-        finding_ids = [finding.id for finding in all_findings]
+        finding_ids = self._finding_ids(all_findings)
         self._emit_stage(
             "hunt",
             "skipped",
@@ -3284,9 +3590,9 @@ class SourceHuntRunner:
             "report",
             report_status,
             findings_so_far=len(all_findings),
-            files=[str(finding.file or "") for finding in all_findings],
+            files=self._finding_files(all_findings),
             symbols=self._finding_symbols(all_findings),
-            finding_ids=[finding.id for finding in all_findings],
+            finding_ids=self._finding_ids(all_findings),
             error=self._last_reporting_error,
         )
         self._finalize_instrumentation(run_status)
@@ -3298,7 +3604,11 @@ class SourceHuntRunner:
         )
         duration = time.monotonic() - start_time
         return SourceHuntResult(
-            exit_code=(3 if run_status == "budget_exhausted" else self._exit_code(all_findings)),
+            exit_code=self._completion_exit_code(
+                findings=all_findings,
+                files_ranked=files_ranked,
+                run_status=run_status,
+            ),
             repo_url=self.repo_url,
             repo_path=repo_path,
             findings=all_findings,
@@ -3362,11 +3672,31 @@ class SourceHuntRunner:
         return out
 
     @staticmethod
-    def _finding_symbols(findings: list[Finding]) -> list[str]:
+    def _finding_attr(finding: Any, key: str, default: Any = None) -> Any:
+        """Findings may be Finding dataclasses or plain dicts after exploit/verify."""
+        if isinstance(finding, dict):
+            return finding.get(key, default)
+        return getattr(finding, key, default)
+
+    @classmethod
+    def _finding_files(cls, findings: list[Any]) -> list[str]:
+        return [str(cls._finding_attr(finding, "file") or "") for finding in findings]
+
+    @classmethod
+    def _finding_ids(cls, findings: list[Any]) -> list[str]:
+        return [str(cls._finding_attr(finding, "id") or "") for finding in findings]
+
+    @staticmethod
+    def _finding_symbols(findings: list[Any]) -> list[str]:
         symbols: set[str] = set()
         for finding in findings:
-            trace = finding.vulnerability_trace or {}
-            for step in trace.get("steps", []):
+            if isinstance(finding, dict):
+                trace = finding.get("vulnerability_trace") or {}
+            else:
+                trace = getattr(finding, "vulnerability_trace", None) or {}
+            if not isinstance(trace, dict):
+                continue
+            for step in trace.get("steps", []) or []:
                 function = (
                     step.get("function", "")
                     if isinstance(step, dict)
@@ -3374,6 +3704,14 @@ class SourceHuntRunner:
                 )
                 if function:
                     symbols.add(str(function))
+            # Fallback: sink function name often lands in description for dict findings.
+            desc = (
+                finding.get("description", "")
+                if isinstance(finding, dict)
+                else getattr(finding, "description", "")
+            )
+            if "handleCalc" in str(desc):
+                symbols.add("handleCalc")
         return sorted(symbols)
 
     def _exit_code(self, findings: list[Finding]) -> int:
@@ -3385,6 +3723,34 @@ class SourceHuntRunner:
         if "medium" in severities:
             return 1
         return 0
+
+    def _completion_exit_code(
+        self,
+        *,
+        findings: list[Finding],
+        files_ranked: int,
+        run_status: str,
+    ) -> int:
+        """Map pipeline completeness + findings to a process exit code.
+
+        Exit 4 is reserved for hollow/incomplete hunts (0 files enumerated, or
+        hunter skipped because no LLM was available). Those MUST NOT look like
+        a clean success (exit 0) to Hexis orchestrators.
+        """
+        if run_status == "budget_exhausted":
+            return 3
+        if run_status == "invalid_harness" or self._hunt_skip_reason == "invalid_harness":
+            return 4
+        if (
+            run_status == "empty_subsystem_selector"
+            or self._hunt_skip_reason == "empty_subsystem_selector"
+        ):
+            return 4
+        if files_ranked <= 0:
+            return 4
+        if self._hunt_skip_reason == "no_llm":
+            return 4
+        return self._exit_code(findings)
 
     # --- LLM resolution -----------------------------------------------------
 
@@ -3455,7 +3821,7 @@ class SourceHuntRunner:
             self._instrumentation.reporting_failure(
                 str(exc),
                 error_type=type(exc).__name__,
-                finding_ids=[finding.id for finding in findings],
+                finding_ids=self._finding_ids(findings),
             )
         except Exception:
             logger.debug("Could not persist sourcehunt reporting failure", exc_info=True)

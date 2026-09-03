@@ -28,15 +28,86 @@ from clearwing.providers import (
     ProviderManager,
     resolve_llm_endpoint,
 )
+from clearwing.providers.manager import _native_concurrency_for_task
+import json
 
 
 @pytest.fixture
 def clean_env(monkeypatch):
     """Wipe every provider-related env var so tests start from a known
     zero state regardless of the operator's shell."""
-    for name in (ENV_BASE_URL, ENV_API_KEY, ENV_MODEL, ENV_ANTHROPIC_KEY, "OPENAI_API_KEY"):
+    for name in (
+        ENV_BASE_URL,
+        ENV_API_KEY,
+        ENV_MODEL,
+        ENV_ANTHROPIC_KEY,
+        "OPENAI_API_KEY",
+        "CLEARWING_RUNTIME_TUNING_JSON",
+    ):
         monkeypatch.delenv(name, raising=False)
     yield
+
+
+class TestGovernedLlmMaxConcurrency:
+    def test_legacy_defaults_without_runtime_tuning(self, clean_env):
+        assert _native_concurrency_for_task("hunter", "openai") == 8
+        assert _native_concurrency_for_task("ranker", "openai") == 4
+
+    def test_derives_from_hunt_parallelism_when_llm_max_is_zero(self, clean_env, monkeypatch):
+        monkeypatch.setenv(
+            "CLEARWING_RUNTIME_TUNING_JSON",
+            json.dumps(
+                {
+                    "policy": {
+                        "sourcehunt": {
+                            "throughput_budget": {
+                                "hunt_parallelism": 64,
+                                "llm_max_concurrency": 0,
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        assert _native_concurrency_for_task("hunter", "openai") == 64
+        assert _native_concurrency_for_task("ranker", "openai") == 64
+
+    def test_explicit_llm_max_concurrency_wins(self, clean_env, monkeypatch):
+        monkeypatch.setenv(
+            "CLEARWING_RUNTIME_TUNING_JSON",
+            json.dumps(
+                {
+                    "policy": {
+                        "sourcehunt": {
+                            "throughput_budget": {
+                                "hunt_parallelism": 64,
+                                "llm_max_concurrency": 80,
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        assert _native_concurrency_for_task("hunter", "openai") == 80
+
+    def test_openai_resp_still_capped_under_governance(self, clean_env, monkeypatch):
+        monkeypatch.setenv(
+            "CLEARWING_RUNTIME_TUNING_JSON",
+            json.dumps(
+                {
+                    "policy": {
+                        "sourcehunt": {
+                            "throughput_budget": {
+                                "hunt_parallelism": 64,
+                                "llm_max_concurrency": 0,
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        assert _native_concurrency_for_task("hunter", "openai_resp") == 15
+        assert _native_concurrency_for_task("ranker", "openai_resp") == 1
 
 
 # --- Precedence: CLI flags win over everything ----------------------------

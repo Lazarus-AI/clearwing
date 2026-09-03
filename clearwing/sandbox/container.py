@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -269,13 +270,23 @@ class SandboxContainer:
         if self._container is None:
             raise RuntimeError("SandboxContainer.write_file called before start()")
 
+        # Docker put_archive resolves paths from container root, not shell cwd.
+        # Relative paths like app/routes/foo.js 404 unless normalized.
+        if not container_path.startswith("/"):
+            container_path = "/workspace/" + container_path.lstrip("./")
+
+        target_dir = os.path.dirname(container_path) or "/"
+        try:
+            self.exec(f"mkdir -p {shlex.quote(target_dir)}", timeout=10)
+        except Exception:
+            logger.debug("sandbox mkdir before write_file failed for %s", target_dir, exc_info=True)
+
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             info = tarfile.TarInfo(name=os.path.basename(container_path))
             info.size = len(content)
             tar.addfile(info, io.BytesIO(content))
         buf.seek(0)
-        target_dir = os.path.dirname(container_path) or "/"
         self._container.put_archive(target_dir, buf.read())
 
     def read_file(self, container_path: str) -> bytes:

@@ -380,17 +380,39 @@ class HunterSandbox:
         )
 
         sb = SandboxContainer(cfg)
-        sb.start()
+        try:
+            sb.start()
 
-        if writable_workspace:
-            sb.copy_tree_into(self.repo_path, "/workspace")
-            try:
-                sb.exec(
-                    "cd /workspace && git init -q && git add -A && git commit -m initial -q",
-                    timeout=120,
+            if writable_workspace:
+                if not os.path.isdir(self.repo_path):
+                    raise FileNotFoundError(
+                        f"sandbox repo_path missing (clone GC'd?): {self.repo_path}"
+                    )
+                sb.copy_tree_into(self.repo_path, "/workspace")
+                try:
+                    sb.exec(
+                        "cd /workspace && git init -q && git add -A && git commit -m initial -q",
+                        timeout=120,
+                    )
+                except Exception:
+                    logger.warning("git init in writable workspace failed", exc_info=True)
+            elif not os.path.isdir(self.repo_path):
+                raise FileNotFoundError(
+                    f"sandbox repo_path missing (clone GC'd?): {self.repo_path}"
                 )
+        except Exception:
+            # Avoid "SandboxContainer was not stopped before garbage collection"
+            # when start/copy fails before we append to _spawned.
+            try:
+                sb.stop()
             except Exception:
-                logger.warning("git init in writable workspace failed", exc_info=True)
+                logger.debug("sandbox spawn failure cleanup failed", exc_info=True)
+            if scratch_host_dir:
+                try:
+                    shutil.rmtree(scratch_host_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            raise
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir

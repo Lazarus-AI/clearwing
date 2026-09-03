@@ -92,7 +92,7 @@ class TraceStep(BaseModel):
     """
 
     file: str  # repo-relative path
-    line: int  # 1-indexed line number
+    line: int = 0  # 1-indexed; 0 = unknown/coerced (models sometimes omit)
     function: str = ""  # enclosing function name
     code_snippet: str = ""  # MUST be from read_source_file
     note: str = ""  # free-form: role, taint state, assumptions, reasoning
@@ -285,6 +285,18 @@ class Finding:
 
     def __contains__(self, key: object) -> bool:
         return isinstance(key, str) and (key in self.__dataclass_fields__ or key in self.extra)
+
+    def keys(self) -> list[str]:
+        """Mapping protocol so ``dict(finding)`` does not fall through to index 0.
+
+        Without ``keys()``, ``dict(Finding)`` uses the sequence protocol and
+        calls ``__getitem__(0)`` → ``KeyError: 0``, which previously discarded
+        successful exploit results after ``apply_exploiter_result``.
+        """
+        return list(self.__dataclass_fields__) + list(self.extra.keys())
+
+    def items(self) -> list[tuple[str, Any]]:
+        return [(key, self[key]) for key in self.keys()]
 
     def get(self, key: str, default: Any = None) -> Any:
         """Mimic dict.get() semantics against Finding attributes.

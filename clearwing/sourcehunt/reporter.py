@@ -119,6 +119,7 @@ def write_sourcehunt_report(
             "finding_count": len(findings),
             "verified_count": len(verified_findings),
             "spent_per_tier": spent_per_tier,
+            "report_present": "markdown" in paths,
             "total_spent": (
                 budget_summary["total_spent"]
                 if budget_summary is not None

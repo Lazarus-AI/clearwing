@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -99,36 +100,195 @@ def identify_subsystems_auto(
     return subsystems[:max_subsystems]
 
 
+def _normalize_repo_rel(path: str) -> str:
+    """POSIX-ish repo-relative path: strip ``./``, trailing slash, backslashes."""
+    text = (path or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/")
+
+
+def file_matches_subsystem_pin(file_path: str, pin: str) -> bool:
+    """True when *file_path* is the pin or lives under it (glob-aware)."""
+    fp = _normalize_repo_rel(file_path)
+    pin_n = _normalize_repo_rel(pin)
+    if not fp or not pin_n:
+        return False
+    if "*" in pin_n or "?" in pin_n:
+        return fnmatch.fnmatch(fp, pin_n) or fnmatch.fnmatch(fp, pin_n + "/*")
+    return fp == pin_n or fp.startswith(pin_n + "/")
+
+
+def files_for_prompt_listing(
+    subsystem: SubsystemTarget,
+    limit: int = 50,
+) -> list[FileTarget]:
+    """File listing for the hunter prompt: exact ``--subsystem`` pin first.
+
+    Under ``--no-rank`` dummy scores, a 50-file cap used to drop the pinned
+    file when tag-boosted neighbors sorted first. Exact pin paths always
+    survive the listing window.
+    """
+    files = list(subsystem.files or [])
+    pin = _normalize_repo_rel(subsystem.root_path)
+    exact: list[FileTarget] = []
+    rest: list[FileTarget] = []
+    for ft in files:
+        fp = _normalize_repo_rel(str(ft.get("path") or ""))
+        if fp == pin:
+            exact.append(ft)
+        else:
+            rest.append(ft)
+    ordered = exact + rest
+    if limit is None or limit <= 0:
+        return ordered
+    kept = list(ordered[:limit])
+    kept_paths = {_normalize_repo_rel(str(ft.get("path") or "")) for ft in kept}
+    for ft in exact:
+        fp = _normalize_repo_rel(str(ft.get("path") or ""))
+        if fp and fp not in kept_paths:
+            kept.insert(0, ft)
+            kept_paths.add(fp)
+    return kept[: max(limit, len(exact))] or kept
+
+
+def _file_target_from_disk(rel_path: str, abs_path: Path) -> FileTarget:
+    from clearwing.sourcehunt.preprocessor import _SOURCE_EXTS_TO_LANG
+
+    ext = abs_path.suffix.lower()
+    language = _SOURCE_EXTS_TO_LANG.get(ext, "unknown")
+    try:
+        loc = sum(1 for _ in abs_path.read_text(encoding="utf-8", errors="ignore").splitlines())
+    except OSError:
+        loc = 0
+    return FileTarget(
+        path=rel_path,
+        absolute_path=str(abs_path),
+        language=language,
+        loc=loc,
+        tags=[],
+        priority=2.8,
+        surface=3,
+        influence=2,
+        reachability=3,
+        tier="C",
+        surface_rationale="",
+        influence_rationale="",
+        reachability_rationale="",
+        static_hint=0,
+        semgrep_hint=0,
+        taint_hits=0,
+        imports_by=0,
+        transitive_callers=0,
+        defines_constants=False,
+        has_fuzz_entry_point=False,
+        fuzz_harness_path=None,
+    )
+
+
+def _pin_file_targets_from_disk(repo_path: str, pin: str) -> list[FileTarget]:
+    """Enumerate the pin on disk when the preprocessor walk missed it.
+
+    Covers MAX_DEPTH / language-filter / gitignore holes for ``--subsystem``.
+    """
+    from clearwing.sourcehunt.preprocessor import _SOURCE_EXTS_TO_LANG
+
+    root = Path(repo_path)
+    if not root.is_dir():
+        return []
+    pin_n = _normalize_repo_rel(pin)
+    if not pin_n:
+        return []
+    target = root / pin_n
+    candidates: list[Path] = []
+    if target.is_file():
+        candidates = [target]
+    elif target.is_dir():
+        candidates = [p for p in target.rglob("*") if p.is_file()]
+    else:
+        candidates = [p for p in root.glob(pin_n) if p.is_file()]
+
+    matched: list[FileTarget] = []
+    for abs_path in candidates:
+        ext = abs_path.suffix.lower()
+        if ext not in _SOURCE_EXTS_TO_LANG:
+            continue
+        try:
+            rel = Path(os.path.relpath(abs_path, root)).as_posix()
+        except ValueError:
+            continue
+        matched.append(_file_target_from_disk(_normalize_repo_rel(rel), abs_path))
+    return matched
+
+
 def subsystem_from_path(
     path: str,
     file_targets: list[FileTarget],
     callgraph: Any = None,
     entry_points_by_file: dict | None = None,
     max_files: int = 50,
+    repo_path: str | None = None,
+    no_rank: bool = False,
 ) -> SubsystemTarget:
-    """Build a SubsystemTarget from a directory path or glob pattern.
+    """Build a SubsystemTarget from a directory path, file path, or glob.
 
-    Raises ValueError if no files match.
+    Raises ValueError if no files match. When *repo_path* is set and the
+    preprocessor list is empty for this pin, files are collected from disk
+    so ``--subsystem`` still hunts. Under *no_rank*, dummy scores do not
+    shuffle the exact pin out of the cap window.
     """
-    normalized = path.rstrip("/")
-    is_glob = "*" in normalized or "?" in normalized
-
+    normalized = _normalize_repo_rel(path)
     matched: list[FileTarget] = []
+    seen: set[str] = set()
     for ft in file_targets:
-        fp = ft.get("path", "")
-        if is_glob:
-            if fnmatch.fnmatch(fp, normalized) or fnmatch.fnmatch(fp, normalized + "/*"):
+        fp = _normalize_repo_rel(str(ft.get("path") or ""))
+        if not fp or fp in seen:
+            continue
+        if file_matches_subsystem_pin(fp, normalized):
+            matched.append(ft)
+            seen.add(fp)
+
+    if not matched and repo_path:
+        for ft in _pin_file_targets_from_disk(repo_path, normalized):
+            fp = _normalize_repo_rel(str(ft.get("path") or ""))
+            if fp and fp not in seen:
                 matched.append(ft)
-        else:
-            if fp.startswith(normalized + "/") or fp == normalized:
-                matched.append(ft)
+                seen.add(fp)
+        if matched:
+            logger.info(
+                "subsystem pin %s: preprocessor missed it; loaded %d files from disk",
+                normalized,
+                len(matched),
+            )
 
     if not matched:
         raise ValueError(f"No files match subsystem path: {path}")
 
-    matched.sort(key=lambda f: f.get("priority", 0.0), reverse=True)
-    capped = matched[:max_files]
-    priority = max(f.get("priority", 0.0) for f in capped)
+    def _sort_key(ft: FileTarget) -> tuple:
+        fp = _normalize_repo_rel(str(ft.get("path") or ""))
+        exact = 0 if fp == normalized else 1
+        if no_rank:
+            return (exact, fp)
+        return (exact, -float(ft.get("priority") or 0.0), fp)
+
+    matched.sort(key=_sort_key)
+    exact = [
+        ft
+        for ft in matched
+        if _normalize_repo_rel(str(ft.get("path") or "")) == normalized
+    ]
+    cap = max_files if max_files and max_files > 0 else len(matched)
+    capped = matched[:cap]
+    kept_paths = {_normalize_repo_rel(str(ft.get("path") or "")) for ft in capped}
+    for ft in exact:
+        fp = _normalize_repo_rel(str(ft.get("path") or ""))
+        if fp and fp not in kept_paths:
+            capped.insert(0, ft)
+            kept_paths.add(fp)
+    if exact:
+        capped = capped[: max(cap, len(exact))]
+
+    priority = max((float(f.get("priority") or 0.0) for f in capped), default=0.0)
 
     eps: list = []
     if entry_points_by_file:
@@ -147,9 +307,74 @@ def subsystem_from_path(
     )
 
 
+class EmptySubsystemSelectorError(ValueError):
+    """One or more intended ``--subsystem`` pins resolved to zero files.
+
+    An explicit selector that matches nothing is a harness/config error
+    (wrong pin path, wrong repo checkout), not a legitimately empty result.
+    Raising instead of silently proceeding keeps a mis-pinned hunt from
+    reporting a clean "0 findings" success.
+    """
+
+    def __init__(self, unmatched: list[str]):
+        self.unmatched = list(unmatched)
+        joined = ", ".join(self.unmatched) or "(none)"
+        super().__init__(
+            "subsystem selector(s) matched zero files: "
+            f"{joined} — check the pin path against the repo tree "
+            "(a zero-match intended selector is a harness/config error, "
+            "not an empty result)"
+        )
+
+
+def resolve_subsystem_targets(
+    subsystem_paths: list[str],
+    file_targets: list[FileTarget],
+    *,
+    callgraph: Any = None,
+    entry_points_by_file: dict | None = None,
+    repo_path: str | None = None,
+    no_rank: bool = False,
+    max_files: int = 50,
+) -> list[SubsystemTarget]:
+    """Resolve every intended ``--subsystem`` pin or fail visibly.
+
+    Each pin is resolved via :func:`subsystem_from_path` (which already falls
+    back to a disk walk when the preprocessor missed the pin). Any pin that
+    still resolves to zero files is collected and raised together as an
+    :class:`EmptySubsystemSelectorError`, so the caller can surface a visible
+    failure rather than dropping the pin with a log line and proceeding.
+    """
+    targets: list[SubsystemTarget] = []
+    unmatched: list[str] = []
+    for sp in subsystem_paths:
+        try:
+            targets.append(
+                subsystem_from_path(
+                    sp,
+                    file_targets,
+                    callgraph=callgraph,
+                    entry_points_by_file=entry_points_by_file,
+                    repo_path=repo_path,
+                    no_rank=no_rank,
+                    max_files=max_files,
+                )
+            )
+        except ValueError:
+            logger.error("No files match subsystem path: %s", sp)
+            unmatched.append(sp)
+    if unmatched:
+        raise EmptySubsystemSelectorError(unmatched)
+    return targets
+
+
 # ---------------------------------------------------------------------------
 # SubsystemHuntRunner
 # ---------------------------------------------------------------------------
+
+
+class InvalidHarnessError(RuntimeError):
+    """Hunt refused because execute/read_file cannot access the source tree."""
 
 
 @dataclass
@@ -254,6 +479,12 @@ class SubsystemHuntRunner:
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 break
+            except InvalidHarnessError:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
             except Exception:
                 logger.warning("Subsystem hunt task failed", exc_info=True)
 
@@ -279,6 +510,13 @@ class SubsystemHuntRunner:
                     subsystem.name,
                     e,
                 )
+
+        if sandbox is None:
+            raise InvalidHarnessError(
+                f"invalid_harness: subsystem {subsystem.name} has no sandbox; "
+                "refusing to hunt blind (execute/read_file would return "
+                "'no sandbox available' while the prompt claims /workspace)"
+            )
 
         session_id = f"{self.config.session_id_prefix}-{uuid.uuid4().hex[:8]}"
         files = [str(item.get("path") or "") for item in subsystem.files]

@@ -202,6 +202,80 @@ def test_subsystem_from_path_max_files():
     assert len(result.files) == 50
 
 
+def test_subsystem_prompt_skips_source_analyzer_pool_rows():
+    from clearwing.sourcehunt.findings_pool import FindingsPool
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+    from clearwing.findings.types import Finding
+
+    pool = FindingsPool()
+    pool._findings["static"] = Finding(
+        id="static",
+        file="net/ipv4/tcp.c",
+        line_number=1,
+        cwe="CWE-89",
+        severity="high",
+        description="regex dump that is not a hunter hit",
+        primitive_type="sql_injection",
+        cluster_id="c-static",
+        discovered_by="source_analyzer",
+    )
+    subsystem = SubsystemTarget(
+        name="net_ipv4",
+        root_path="net/ipv4",
+        files=[_ft("net/ipv4/tcp.c", 4.0)],
+    )
+    prompt = _build_subsystem_prompt(subsystem, "linux", findings_pool=pool)
+    assert "regex dump that is not a hunter hit" not in prompt
+    assert "Per-file hunters already found" not in prompt
+    assert "Prior hunter findings" not in prompt
+
+
+def test_subsystem_from_path_no_rank_keeps_exact_file_pin():
+    decoys = [_ft(f"src/decoy_{i}.c", 3.4) for i in range(60)]
+    pin = _ft("src/access.rs", 2.8)
+    result = subsystem_from_path(
+        "src/access.rs",
+        decoys + [pin],
+        max_files=50,
+        no_rank=True,
+    )
+    paths = [ft["path"] for ft in result.files]
+    assert "src/access.rs" in paths
+    assert paths[0] == "src/access.rs"
+
+
+def test_prompt_listing_keeps_exact_pin_inside_cap():
+    from clearwing.sourcehunt.hunter import _build_subsystem_prompt
+    from clearwing.sourcehunt.subsystem import files_for_prompt_listing
+
+    files = [_ft(f"pkg/n{i}.c", 3.4) for i in range(80)]
+    pin = _ft("pkg/target.c", 2.8)
+    subsystem = SubsystemTarget(
+        name="pkg_target_c",
+        root_path="pkg/target.c",
+        files=files + [pin],
+    )
+    listing = files_for_prompt_listing(subsystem, limit=50)
+    assert listing[0]["path"] == "pkg/target.c"
+    prompt = _build_subsystem_prompt(subsystem, "demo")
+    assert "pkg/target.c" in prompt
+
+
+def test_subsystem_from_path_disk_fallback(tmp_path):
+    root = tmp_path / "repo"
+    pin_dir = root / "filter" / "source" / "graphicfilter" / "idxf"
+    pin_dir.mkdir(parents=True)
+    (pin_dir / "dxf2gdi.cxx").write_text("int w = width * height;\n")
+    result = subsystem_from_path(
+        "filter/source/graphicfilter/idxf",
+        [],
+        repo_path=str(root),
+        no_rank=True,
+    )
+    assert result.files
+    assert any(ft["path"].endswith("dxf2gdi.cxx") for ft in result.files)
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
@@ -261,7 +335,8 @@ def test_subsystem_prompt_existing_findings():
     )
     prompt = _build_subsystem_prompt(subsystem, "linux", findings_pool=pool)
     assert "heap overflow in tcp" in prompt
-    assert "already found" in prompt
+    assert "Prior hunter findings" in prompt
+    assert "Per-file hunters already found" not in prompt
 
 
 def test_subsystem_prompt_entry_points():

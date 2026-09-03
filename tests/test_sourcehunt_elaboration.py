@@ -411,6 +411,7 @@ class TestRunnerElaboration:
 
     def test_apply_elaboration_creates_new_finding(self):
         from clearwing.sourcehunt.runner import _apply_elaboration
+        from clearwing.sourcehunt.state import Finding
 
         finding = _make_finding(id="original-123")
         elab_result = ElaborationResult(
@@ -423,6 +424,7 @@ class TestRunnerElaboration:
         )
         new_finding = _apply_elaboration(finding, elab_result)
         repeated = _apply_elaboration(finding, elab_result)
+        assert isinstance(new_finding, Finding)
         assert new_finding["id"].startswith("elab-")
         assert len(new_finding["id"]) == len("elab-") + 8
         assert repeated["id"] != new_finding["id"]

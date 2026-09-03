@@ -16,6 +16,7 @@ from .messages import (
 )
 from .native import (
     AsyncLLMClient,
+    ContextWindowExceededError,
     NativeToolSpec,
     ToolInputModel,
     extract_json_array,
@@ -26,6 +27,7 @@ __all__ = [
     "AsyncLLMClient",
     "BudgetConfigurationError",
     "BudgetExceeded",
+    "ContextWindowExceededError",
     "BaseMessage",
     "HumanMessage",
     "SystemMessage",

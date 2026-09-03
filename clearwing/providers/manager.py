@@ -575,9 +575,49 @@ def _adapter_for_base_url(base_url: str | None, model: str) -> str:
     return "openai"
 
 
+def _governed_llm_max_concurrency() -> int | None:
+    """Resolve Hexis-governed LLM HTTP concurrency from runtime tuning.
+
+    Reads ``CLEARWING_RUNTIME_TUNING_JSON`` (injected by Hexis per run):
+
+    * ``llm_max_concurrency > 0`` → explicit Hexis override (clamped 1..96)
+    * ``llm_max_concurrency == 0`` → derive from ``hunt_parallelism`` (unblocks
+      the historical hardcoded 8-conn client semaphore whenever Hexis raises
+      hunt parallelism)
+    * missing env / unreadable tuning → ``None`` (legacy task defaults below)
+    """
+    raw = str(os.getenv("CLEARWING_RUNTIME_TUNING_JSON") or "").strip()
+    if not raw:
+        return None
+
+    try:
+        from clearwing.sourcehunt.config import load_runtime_tuning_policy_from_env
+
+        throughput = load_runtime_tuning_policy_from_env().sourcehunt.throughput_budget
+    except Exception:
+        return None
+
+    explicit = int(throughput.llm_max_concurrency)
+    if explicit > 0:
+        return max(1, min(96, explicit))
+    return max(1, min(96, int(throughput.hunt_parallelism)))
+
+
 def _native_concurrency_for_task(task: str, provider_name: str) -> int:
     normalized_task = task.strip().lower()
     normalized_provider = provider_name.strip().lower()
+
+    governed = _governed_llm_max_concurrency()
+    if governed is not None:
+        # Keep openai_resp on its tighter historical caps — cloud Responses
+        # backends do not tolerate Nemotron-scale fanout.
+        if normalized_provider == "openai_resp":
+            if normalized_task == "ranker":
+                return 1
+            if normalized_task in {"hunter", "verifier", "sourcehunt_exploit", "default"}:
+                return min(governed, 15)
+            return min(governed, 15)
+        return governed
 
     if normalized_provider == "openai_resp":
         if normalized_task == "ranker":

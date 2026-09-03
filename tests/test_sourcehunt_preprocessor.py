@@ -281,6 +281,40 @@ class TestImportsByBatched:
     behavior, the max_imports_by_files cap, and self-exclusion).
     """
 
+    def test_incident_196_real_batch_helper_counts_c_include(self, tmp_path):
+        """Run 564 regression: execute the real batch helper on C files."""
+        target = tmp_path / "target.h"
+        target.write_text("#define TARGET 1\n", encoding="utf-8")
+        (tmp_path / "user.c").write_text(
+            '#include "target.h"\n',
+            encoding="utf-8",
+        )
+
+        result = Preprocessor._compute_imports_by_batch(
+            str(tmp_path),
+            [(str(target), "c")],
+            None,
+        )
+
+        assert result == {str(target): 1}
+
+    def test_batch_helper_excludes_target_self_reference(self, tmp_path):
+        """A target's matching content must not count as its own importer."""
+        target = tmp_path / "target.h"
+        target.write_text('#include "target.h"\n', encoding="utf-8")
+        (tmp_path / "user.c").write_text(
+            '#include "target.h"\n',
+            encoding="utf-8",
+        )
+
+        result = Preprocessor._compute_imports_by_batch(
+            str(tmp_path),
+            [(str(target), "c")],
+            None,
+        )
+
+        assert result == {str(target): 1}
+
     def test_imports_by_walks_repo_once_and_reads_each_file_once(self, tmp_path, monkeypatch):
         """Scaling regression: instrument os.walk and open to prove the
         batched pass does NOT walk/read once per source target.

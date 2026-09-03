@@ -1,0 +1,128 @@
+{
+  "cell": "ab1-prompt-medium",
+  "model": "Qwen3.8-27B-NVFP4",
+  "prompt_mode": "truthful",
+  "reasoning_effort": "medium",
+  "slots": {"b60": 3, "b70": 3},
+  "cves": [
+    {
+      "id": "40033",
+      "family": "integer_dual",
+      "clone_url": "https://github.com/FreeRDP/FreeRDP.git",
+      "commit": "1d67eeb902638ecf1ed6e30e01f4e02e68e396c4",
+      "subsystems": ["libfreerdp/gdi/gfx.c"]
+    },
+    {
+      "id": "32316",
+      "family": "integer_dual",
+      "clone_url": "https://github.com/jqlang/jq.git",
+      "commit": "985abe534fdd48186015e169da7786c05fd7f868",
+      "subsystems": ["src"]
+    },
+    {
+      "id": "6039",
+      "family": "integer_dual",
+      "clone_url": "https://github.com/LibreOffice/core.git",
+      "commit": "1f77d10d6938fd34972958f64b2bcfa54f8b1ba5",
+      "subsystems": ["filter/source/graphicfilter/idxf"]
+    },
+    {
+      "id": "6045",
+      "family": "integer_dual",
+      "clone_url": "https://github.com/LibreOffice/core.git",
+      "commit": "1f77d10d6938fd34972958f64b2bcfa54f8b1ba5",
+      "subsystems": ["emfio/source/reader"]
+    },
+    {
+      "id": "15170",
+      "family": "integer_dual",
+      "clone_url": "https://github.com/wireshark/wireshark.git",
+      "commit": "3a22c3ef473d3f9c556d1fb13e3088c693d4fa96",
+      "subsystems": ["epan/dissectors/packet-z3950.c"]
+    },
+    {
+      "id": "40034",
+      "family": "policy",
+      "clone_url": "https://github.com/GitoxideLabs/gitoxide.git",
+      "commit": "95b0399abca3e040686591388991b08c794050cd",
+      "subsystems": ["gix-submodule/src/access.rs"]
+    },
+    {
+      "id": "44420",
+      "family": "policy",
+      "clone_url": "https://github.com/FreeRDP/FreeRDP.git",
+      "commit": "d7508ebcd82842a691ae4941e5104d14240a89ae",
+      "subsystems": ["channels/cliprdr/server/cliprdr_main.c"]
+    },
+    {
+      "id": "47732",
+      "family": "policy",
+      "clone_url": "https://github.com/twigphp/Twig.git",
+      "commit": "7f3056a28e51f628ef2d97453c08df62186dfedf",
+      "subsystems": ["src/NodeVisitor/SandboxNodeVisitor.php", "src/Extension/SandboxExtension.php"]
+    },
+    {
+      "id": "5588",
+      "family": "policy",
+      "clone_url": "https://github.com/bcgit/bc-java.git",
+      "commit": "8a471e58cf7f63bbc78862e44e42494d793e2e12",
+      "subsystems": ["pkix/src/main/java/org/bouncycastle/operator/jcajce/JcaContentVerifierProviderBuilder.java"]
+    },
+    {
+      "id": "45445",
+      "family": "crypto",
+      "clone_url": "https://github.com/openssl/openssl.git",
+      "commit": "ffce42f4807d879586bd3bba8fa93caf13a7b8e4",
+      "subsystems": ["providers/implementations/ciphers"]
+    },
+    {
+      "id": "42769",
+      "family": "crypto",
+      "clone_url": "https://github.com/openssl/openssl.git",
+      "commit": "a2ca7b2d73e0ffc1eae183fe6e1741dac767cb4f",
+      "subsystems": ["crypto/cmp/cmp_genm.c"]
+    },
+    {
+      "id": "34181",
+      "family": "crypto",
+      "clone_url": "https://github.com/openssl/openssl.git",
+      "commit": "da5d62af75f69d6fbf7803743d7c56ac75461e43",
+      "subsystems": ["crypto/pkcs12/p12_mutl.c"]
+    },
+    {
+      "id": "28208",
+      "family": "split_repr",
+      "clone_url": "https://github.com/junrar/junrar.git",
+      "commit": "c7041fc07df2cc397ea46ba516933ee9725af250",
+      "subsystems": ["src/main/java/com/github/junrar"]
+    },
+    {
+      "id": "45796",
+      "family": "split_repr",
+      "clone_url": "https://github.com/coder/coder.git",
+      "commit": "d622e86fa0b3a9c5d3014480e926217ebed20a43",
+      "subsystems": ["coderd"]
+    },
+    {
+      "id": "47429",
+      "family": "split_repr",
+      "clone_url": "https://github.com/vitest-dev/vitest.git",
+      "commit": "dd54e944ec0d7b2730933341f3b940e92b186fb6",
+      "subsystems": ["packages/vitest"]
+    },
+    {
+      "id": "8462",
+      "family": "split_repr",
+      "clone_url": "https://github.com/openmeterio/openmeter.git",
+      "commit": "85646c441fe8c9e591a3ca2c54594d0d7c74080d",
+      "subsystems": ["openmeter/streaming/clickhouse/utils_query.go"]
+    },
+    {
+      "id": "6040",
+      "family": "split_repr",
+      "clone_url": "https://github.com/LibreOffice/core.git",
+      "commit": "1f77d10d6938fd34972958f64b2bcfa54f8b1ba5",
+      "subsystems": ["svl/source/numbers"]
+    }
+  ]
+}

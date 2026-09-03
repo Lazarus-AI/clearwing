@@ -101,6 +101,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:
     def write_file(path: str, contents: str, **_: object) -> str:
         if ctx.sandbox is None:
             return "error: no sandbox available"
+        # Match SandboxContainer.write_file: Docker archive API is root-absolute.
+        if path and not path.startswith("/"):
+            path = "/workspace/" + path.lstrip("./")
         ctx.sandbox.exec(f"mkdir -p $(dirname {shlex.quote(path)})", timeout=10)
         ctx.sandbox.write_file(path, contents.encode("utf-8"))
         return f"Wrote {len(contents)} bytes to {path}"

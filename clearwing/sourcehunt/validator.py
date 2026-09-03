@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from itertools import islice
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from clearwing.core.event_payloads import ValidationResultPayload
 from clearwing.core.events import EventBus
@@ -38,6 +39,68 @@ logger = logging.getLogger(__name__)
 _LINE_REF_RE = re.compile(r"\blines?\s+(\d+)(?:\s*-\s*(\d+))?")
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+_DEFAULT_VALIDATOR_MAX_TOKENS = 8192
+
+
+def _strip_markdown_fence(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _close_truncated_json(fragment: str) -> str:
+    """Best-effort close of truncated JSON objects/arrays/strings."""
+    in_str = False
+    escape = False
+    stack: list[str] = []
+    for ch in fragment:
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    out = fragment
+    if in_str:
+        out += '"'
+    while stack:
+        out += stack.pop()
+    return out
+
+
+def _parse_verdict_schema(text: str) -> _VerdictSchema:
+    """Parse validator JSON with fence strip + truncated-JSON repair."""
+    cleaned = _strip_markdown_fence(text or "")
+    if not cleaned:
+        raise ValueError("validator returned empty response")
+
+    try:
+        return _VerdictSchema.model_validate_json(cleaned)
+    except (ValidationError, ValueError, json.JSONDecodeError):
+        pass
+
+    start = cleaned.find("{")
+    if start < 0:
+        raise ValueError("validator response contained no JSON object")
+    candidate = cleaned[start:]
+    try:
+        return _VerdictSchema.model_validate(json.loads(candidate))
+    except (ValidationError, json.JSONDecodeError):
+        repaired = _close_truncated_json(candidate)
+        return _VerdictSchema.model_validate(json.loads(repaired))
 
 
 # --- Prompts -----------------------------------------------------------------
@@ -281,27 +344,61 @@ class Validator:
     ) -> ValidatorVerdict:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
+        base_max_tokens = int(
+            os.environ.get(
+                "CLEARWING_VALIDATOR_MAX_TOKENS",
+                str(_DEFAULT_VALIDATOR_MAX_TOKENS),
+            )
+        )
+        base_max_tokens = max(1024, base_max_tokens)
 
         # Enforced structured output. response_schema becomes a genai-pyo3
-        # response_json_spec (constrained decoding), so the model emits a JSON
-        # object matching _VerdictSchema — even reasoning models that would
-        # otherwise return empty text under free-form prompting. We validate to
-        # the typed wire object and map it to the domain verdict directly (no
-        # dict round-trip). Requires a model/gateway with constrained decoding.
-        try:
-            response = await self.llm.aask_text(
-                system=system_prompt,
-                user=user_msg,
-                response_schema=_VerdictSchema,
-                response_schema_name="ValidatorVerdict",
+        # response_json_spec (constrained decoding). Truncated JSON was a real
+        # reject path on Laguna (EOF mid-string) — retry once with higher
+        # max_tokens + compact-rationale hint, and repair truncated objects.
+        verdict: ValidatorVerdict | None = None
+        last_error: Exception | None = None
+        for attempt in range(2):
+            max_tokens = base_max_tokens if attempt == 0 else min(base_max_tokens * 2, 16384)
+            attempt_user = user_msg
+            if attempt == 1:
+                attempt_user = (
+                    user_msg
+                    + "\n\nIMPORTANT: Prior response was truncated/invalid JSON. "
+                    "Re-emit COMPLETE valid JSON only. Keep rationales ≤2 sentences."
+                )
+            try:
+                response = await self.llm.aask_text(
+                    system=system_prompt,
+                    user=attempt_user,
+                    max_tokens=max_tokens,
+                    response_schema=_VerdictSchema,
+                    response_schema_name="ValidatorVerdict",
+                )
+                schema = _parse_verdict_schema(response_text(response))
+                verdict = schema.to_verdict(finding.get("id", "unknown"))
+                if attempt > 0:
+                    logger.info(
+                        "Validator recovered on retry for finding %s",
+                        finding.get("id", "unknown"),
+                    )
+                break
+            except BudgetExceeded:
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Validator LLM/parse failed (attempt %d/2): %s",
+                    attempt + 1,
+                    e,
+                    exc_info=attempt == 1,
+                )
+
+        if verdict is None:
+            verdict = self._error_verdict(
+                finding,
+                f"validator error: {last_error}",
             )
-            schema = _VerdictSchema.model_validate_json(response_text(response))
-            verdict = schema.to_verdict(finding.get("id", "unknown"))
-        except BudgetExceeded:
-            raise
-        except Exception as e:
-            logger.warning("Validator LLM call failed", exc_info=True)
-            verdict = self._error_verdict(finding, f"validator error: {e}")
 
         EventBus().emit_validation_result(ValidationResultPayload(
             finding_id=verdict.finding_id,

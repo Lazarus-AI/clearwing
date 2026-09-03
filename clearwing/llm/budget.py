@@ -10,6 +10,7 @@ the reserve/check operation atomic across asyncio tasks and worker threads.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
@@ -18,7 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,8 @@ from clearwing.observability.telemetry import CostTracker
 
 if TYPE_CHECKING:
     from clearwing.providers.env import LLMEndpoint
+
+logger = logging.getLogger(__name__)
 
 
 class BudgetExceeded(RuntimeError):
@@ -182,18 +185,35 @@ class SpendLedger:
         self._exhausted = False
         self._status = "running"
         self._finalized = False
+        self._progress_seq = 0
+        self._last_progress_at: str | None = None
+        self._stage: str | None = None
+        self._stage_status: str | None = None
+        self._active_calls: dict[str, dict[str, Any]] = {}
+        self._active_call_id: str | None = None
+        self._active_call_reserved_at: str | None = None
+        self._active_call_deadline_at: str | None = None
+        self._call_reserved_total = 0
+        self._call_settled_total = 0
+        self._findings_pool = 0
+        self._verify_advance = 0
+        self._verify_reject = 0
+        self._exploit_success = 0
+        self._exploit_code_execution = 0
+        self._report_present = False
 
         session_dir = Path(output_dir) / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = session_dir / "spend-ledger.jsonl"
         self.manifest_path = session_dir / manifest_filename
         with self._lock:
+            started_at = self._touch_progress_locked()
             self._persist_event_locked(
                 {
                     "event": "run_started",
                     "session_id": self.session_id,
                     "budget_usd": self.limit_usd,
-                    "timestamp": self._timestamp(),
+                    "timestamp": started_at,
                 }
             )
             self._persist_snapshot_locked()
@@ -341,6 +361,14 @@ class SpendLedger:
                 created_at=self._timestamp(),
             )
             self._reserved_usd += reserved_usd
+            self._call_reserved_total += 1
+            deadline_at = self._reservation_deadline_locked(reservation)
+            self._active_calls[reservation.call_id] = {
+                "reserved_at": reservation.created_at,
+                "deadline_at": deadline_at,
+            }
+            self._set_active_call_locked()
+            self._touch_progress_locked(timestamp=reservation.created_at)
             self._persist_event_locked(
                 {
                     "event": "call_reserved",
@@ -350,6 +378,7 @@ class SpendLedger:
                     "model": model,
                     "provider": provider,
                     "reserved_usd": reserved_usd,
+                    "deadline_at": deadline_at,
                     "input_token_upper_bound": input_token_upper_bound,
                     "max_output_tokens": effective_max_tokens,
                     "metadata": metadata,
@@ -473,6 +502,56 @@ class SpendLedger:
         with self._lock:
             return self._snapshot_locked()
 
+    def record_progress(
+        self,
+        *,
+        stage: str | None = None,
+        stage_status: str | None = None,
+        findings_pool: int | None = None,
+        verify_advance: int | None = None,
+        verify_reject: int | None = None,
+        exploit_success: int | None = None,
+        exploit_code_execution: int | None = None,
+        report_present: bool | None = None,
+    ) -> dict[str, Any]:
+        """Persist additive progress metadata into the durable manifest."""
+
+        with self._lock:
+            if stage is not None:
+                self._stage = str(stage or "").strip() or None
+            if stage_status is not None:
+                self._stage_status = str(stage_status or "").strip() or None
+            if findings_pool is not None:
+                self._findings_pool = max(0, int(findings_pool))
+            if verify_advance is not None:
+                self._verify_advance = max(0, int(verify_advance))
+            if verify_reject is not None:
+                self._verify_reject = max(0, int(verify_reject))
+            if exploit_success is not None:
+                self._exploit_success = max(0, int(exploit_success))
+            if exploit_code_execution is not None:
+                self._exploit_code_execution = max(0, int(exploit_code_execution))
+            if report_present is not None:
+                self._report_present = bool(report_present)
+            touched_at = self._touch_progress_locked()
+            self._persist_event_locked(
+                {
+                    "event": "progress_updated",
+                    "timestamp": touched_at,
+                    "stage": self._stage,
+                    "stage_status": self._stage_status,
+                    "progress_seq": self._progress_seq,
+                    "findings_pool": self._findings_pool,
+                    "verify_advance": self._verify_advance,
+                    "verify_reject": self._verify_reject,
+                    "exploit_success": self._exploit_success,
+                    "exploit_code_execution": self._exploit_code_execution,
+                    "report_present": self._report_present,
+                }
+            )
+            self._persist_snapshot_locked()
+            return self._snapshot_locked()
+
     def finalize(self, status: str | None = None) -> dict[str, Any]:
         """Mark the run complete and persist its final ledger snapshot."""
 
@@ -512,6 +591,11 @@ class SpendLedger:
         self._input_tokens += input_tokens
         self._output_tokens += output_tokens
         self._cached_input_tokens += cached_input_tokens
+        self._call_settled_total += 1
+        self._active_calls.pop(reservation.call_id, None)
+        settled_at = self._timestamp()
+        self._set_active_call_locked()
+        self._touch_progress_locked(timestamp=settled_at)
         if self.enforcing and self._spent_usd > self.limit_usd + self._EPSILON:
             # This indicates provider usage exceeded the conservative preflight
             # bound.  Never hide it by clamping the recorded cost.
@@ -520,7 +604,7 @@ class SpendLedger:
         record: dict[str, Any] = {
             "event": "call_settled",
             "call_id": reservation.call_id,
-            "timestamp": self._timestamp(),
+            "timestamp": settled_at,
             "stage": reservation.stage,
             "model": reservation.model,
             "provider": reservation.provider,
@@ -571,6 +655,21 @@ class SpendLedger:
             "repo_url": self.repo_url,
             "status": self._status,
             "complete": self._finalized and self._status == "completed",
+            "stage": self._stage,
+            "stage_status": self._stage_status,
+            "progress_seq": self._progress_seq,
+            "last_progress_at": self._last_progress_at,
+            "active_call_id": self._active_call_id,
+            "active_call_reserved_at": self._active_call_reserved_at,
+            "active_call_deadline_at": self._active_call_deadline_at,
+            "call_reserved_total": self._call_reserved_total,
+            "call_settled_total": self._call_settled_total,
+            "findings_pool": self._findings_pool,
+            "verify_advance": self._verify_advance,
+            "verify_reject": self._verify_reject,
+            "exploit_success": self._exploit_success,
+            "exploit_code_execution": self._exploit_code_execution,
+            "report_present": self._report_present,
             "budget_usd": self.limit_usd,
             "total_spent": self._spent_usd,
             "reserved_usd": self._reserved_usd,
@@ -584,20 +683,61 @@ class SpendLedger:
             "spend_summary_path": str(self.manifest_path),
         }
 
+    def _touch_progress_locked(self, *, timestamp: str | None = None) -> str:
+        stamped = timestamp or self._timestamp()
+        self._progress_seq += 1
+        self._last_progress_at = stamped
+        return stamped
+
+    def _reservation_deadline_locked(self, reservation: BudgetReservation) -> str | None:
+        raw_timeout = reservation.metadata.get("timeout_seconds")
+        if raw_timeout is None:
+            raw_timeout = reservation.metadata.get("declared_timeout_seconds")
+        try:
+            timeout_seconds = float(raw_timeout)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            return None
+        try:
+            reserved_at = datetime.fromisoformat(reservation.created_at)
+        except ValueError:
+            reserved_at = datetime.now(timezone.utc)
+        return (reserved_at + timedelta(seconds=timeout_seconds)).isoformat()
+
+    def _set_active_call_locked(self) -> None:
+        if not self._active_calls:
+            self._active_call_id = None
+            self._active_call_reserved_at = None
+            self._active_call_deadline_at = None
+            return
+        active_call_id = next(reversed(self._active_calls))
+        active = self._active_calls[active_call_id]
+        self._active_call_id = active_call_id
+        self._active_call_reserved_at = str(active.get("reserved_at") or "") or None
+        self._active_call_deadline_at = str(active.get("deadline_at") or "") or None
+
     def _persist_snapshot_locked(self) -> None:
         snapshot = self._snapshot_locked()
         tmp_path = self.manifest_path.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(snapshot, handle, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, self.manifest_path)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self.manifest_path)
+        except OSError as exc:
+            # Virtiofs / ownership races must not kill hunters mid-flight.
+            logger.warning("spend snapshot persist failed (fail-open): %s", exc)
 
     def _persist_event_locked(self, event: dict[str, Any]) -> None:
-        with open(self.ledger_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            with open(self.ledger_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            logger.warning("spend ledger append failed (fail-open): %s", exc)
 
     def _resolve_pricing(
         self,

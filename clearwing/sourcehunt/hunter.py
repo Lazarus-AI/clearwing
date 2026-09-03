@@ -28,6 +28,11 @@ from clearwing.core.events import EventBus, EventType
 from clearwing.data.memory import ContextSummarizer
 from clearwing.llm import AsyncLLMClient, ChatMessage, NativeToolSpec, ToolCall
 from clearwing.llm.budget import spend_metadata
+from clearwing.llm.native import (
+    ContextWindowExceededError,
+    _approx_prompt_tokens,
+    _configured_max_model_len,
+)
 from clearwing.observability.telemetry import CostTracker
 from clearwing.sandbox.container import SandboxContainer
 
@@ -35,6 +40,65 @@ from .instrumentation import stable_run_id
 from .state import FileTarget, Finding, SubsystemTarget
 
 logger = logging.getLogger(__name__)
+
+_TOOL_RESULT_SOFT_CHARS = 6_000
+_TOOL_RESULT_HARD_CHARS = 2_000
+
+
+def _compact_messages_for_context(
+    messages: list[ChatMessage],
+    *,
+    system: str,
+    tools: list[NativeToolSpec] | None,
+) -> list[ChatMessage]:
+    """Truncate old tool results when near CLEARWING_MAX_MODEL_LEN.
+
+    Keeps the newest turns intact; shrinks earlier tool payloads so hunters
+    continue instead of hard-failing on context overflow (session.js / exploit).
+    """
+    max_model_len = _configured_max_model_len()
+    if max_model_len is None or len(messages) < 4:
+        return messages
+
+    soft_limit = max(2048, int(max_model_len * 0.80))
+    hard_limit = max(1024, int(max_model_len * 0.92))
+    approx = _approx_prompt_tokens(messages=messages, system=system, tools=tools)
+    if approx <= soft_limit:
+        return messages
+
+    compacted = list(messages)
+    # Protect the last 4 messages (current turn + recent tool results).
+    protect_from = max(0, len(compacted) - 4)
+    for idx in range(protect_from):
+        msg = compacted[idx]
+        if msg.role != "tool" or not msg.content:
+            continue
+        limit = (
+            _TOOL_RESULT_HARD_CHARS
+            if approx > hard_limit
+            else _TOOL_RESULT_SOFT_CHARS
+        )
+        if len(msg.content) <= limit:
+            continue
+        compacted[idx] = ChatMessage(
+            msg.role,
+            msg.content[:limit] + "\n…[truncated for context budget]",
+            tool_response_call_id=msg.tool_response_call_id,
+            tool_calls=msg.tool_calls,
+        )
+        approx = _approx_prompt_tokens(
+            messages=compacted, system=system, tools=tools
+        )
+        if approx <= soft_limit:
+            break
+
+    if approx > soft_limit:
+        logger.warning(
+            "Hunter context still ~%d tokens after compaction (limit=%d)",
+            approx,
+            max_model_len,
+        )
+    return compacted
 
 
 def _trajectory_base_dir() -> Path:
@@ -235,7 +299,13 @@ class HunterTrajectoryLogger:
         tools: list[NativeToolSpec],
     ) -> HunterTrajectoryLogger:
         path = _trajectory_path(ctx)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "trajectory dir create failed (fail-open): %s",
+                exc,
+            )
         logger_obj = cls(
             path=path,
             run_id=ctx.session_id or "",
@@ -318,8 +388,12 @@ class HunterTrajectoryLogger:
             "event": event,
             **payload,
         }
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        try:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        except OSError as exc:
+            # Virtiofs / ownership races must not kill hunters mid-flight.
+            logger.warning("trajectory append failed (fail-open): %s", exc)
         if self.instrumentation is not None and (model_call_id or tool_action_id):
             try:
                 self.instrumentation.record(
@@ -1196,7 +1270,7 @@ Use the query_findings_pool tool to search for complementary primitives \
 if you discover a vulnerability that could be chained with others \
 (e.g., you find a write primitive — query for info_leak to bypass ASLR)."""
 
-SUBSYSTEM_HUNT_PROMPT = """You are a security researcher investigating the \
+SUBSYSTEM_HUNT_PROMPT_LEGACY = """You are a security researcher investigating the \
 {subsystem_name} subsystem in {project_name}.
 
 This subsystem spans {file_count} files under {root_path}:
@@ -1217,6 +1291,77 @@ multiple files simultaneously.
 When you find a vulnerability, call record_finding with the specific file and line. \
 Cross-file bugs are valuable even as static_corroboration if you can articulate the mechanism."""
 
+# Option A union prompt: legacy cross-file mission first and verbatim,
+# lie deleted, dual checklist second so an instruction-follower does not
+# starve the policy cluster that qwen3.8-27b_baseline already hit.
+SUBSYSTEM_HUNT_PROMPT_TRUTHFUL = """You are a security researcher investigating the \
+{subsystem_name} subsystem in {project_name}.
+
+This subsystem spans {file_count} files under {root_path}:
+{file_listing}
+{cross_file_calls}
+You have full shell access. The source tree is at /workspace.
+
+Your mission is to find vulnerabilities that EMERGE FROM CROSS-FILE INTERACTIONS:
+- Shared state (globals, structs, locks) modified by one file but consumed by another
+- Protocol/API contracts violated across call boundaries
+- State machine transitions that can be corrupted by concurrent callers
+- Lifetime/ownership confusion when objects cross module boundaries
+- Inconsistent validation: File A validates, File B doesn't, both call File C
+
+Per-file hunt was skipped for this run. Local bugs still count. Hunt the \
+cross-file bugs above first. Same-file representation duals are also \
+in-policy — do not drop the list above for them.
+
+Also in-policy (do not replace the cross-file mission): same-file / dual-site \
+bugs, even if both sites are in one function:
+- Integer overflow or wrap on alloc size vs the original count used to fill
+- Width truncation (uint16/uint32 cast) on an alloc or length, then a loop/copy using the full value
+- Floor vs ceil: allocation uses one rounding, iteration uses another
+- Clamp-for-validate then use-unclamped (dest rect, cache size, capability length)
+- Sentinel/counter collisions, signed/unsigned confusion
+{existing_findings_block}{entry_points_block}
+When you find a vulnerability, call record_finding with the specific file and line. \
+Cross-file bugs and local duals are both valuable even as static_corroboration if you can articulate the mechanism."""
+
+# Production default stays the legacy closed-world prompt. A1 of the Qwen
+# bake-off sets CLEARWING_SUBSYSTEM_PROMPT_MODE=truthful; A2 restores legacy.
+SUBSYSTEM_HUNT_PROMPT = SUBSYSTEM_HUNT_PROMPT_LEGACY
+
+
+def _subsystem_prompt_mode() -> str:
+    raw = os.environ.get("CLEARWING_SUBSYSTEM_PROMPT_MODE", "legacy").strip().lower()
+    if raw in {"truthful", "a1", "honest"}:
+        return "truthful"
+    return "legacy"
+
+
+def _subsystem_initial_user_message(subsystem: SubsystemTarget) -> str:
+    """First user turn. Truthful mode still leads with the cross-file mission."""
+    location = (
+        f"the {subsystem.name} subsystem "
+        f"({len(subsystem.files)} files under {subsystem.root_path})"
+    )
+    if _subsystem_prompt_mode() == "truthful":
+        return (
+            f"Hunt cross-file contract bugs first in {location}. "
+            f"Per-file hunt was skipped. Same-file representation duals also "
+            f"count — do not drop the cross-file mission."
+        )
+    return f"Hunt for cross-file vulnerabilities in {location}."
+
+
+def _is_static_analyzer_finding(finding: Any) -> bool:
+    """Preprocessor source_analyzer dumps must not look like hunter hits."""
+    if finding is None:
+        return False
+    getter = getattr(finding, "get", None)
+    if callable(getter):
+        discovered = getter("discovered_by", "") or ""
+    else:
+        discovered = getattr(finding, "discovered_by", "") or ""
+    return str(discovered).strip() == "source_analyzer"
+
 
 def _build_subsystem_prompt(
     subsystem: SubsystemTarget,
@@ -1225,9 +1370,12 @@ def _build_subsystem_prompt(
     callgraph: Any = None,
 ) -> str:
     """Build the subsystem hunt prompt listing all files and cross-file relationships."""
+    from clearwing.sourcehunt.subsystem import files_for_prompt_listing
+
     file_lines = []
     subsystem_files = set()
-    for ft in subsystem.files[:50]:
+    listing = files_for_prompt_listing(subsystem, limit=50)
+    for ft in listing:
         path = ft.get("path", "?")
         subsystem_files.add(path)
         pri = ft.get("priority", 0.0)
@@ -1238,7 +1386,7 @@ def _build_subsystem_prompt(
     cross_file_calls = ""
     if callgraph is not None:
         edges: list[str] = []
-        for ft in subsystem.files[:50]:
+        for ft in listing:
             src = ft.get("path", "")
             called = callgraph.calls_out.get(src, set())
             for func_name in called:
@@ -1261,21 +1409,22 @@ def _build_subsystem_prompt(
         pool_findings = []
         for fp in subsystem_files:
             pool_findings.extend(findings_pool.query(file_path=fp))
-        if pool_findings:
+        hunter_pool = [f for f in pool_findings if not _is_static_analyzer_finding(f)]
+        if hunter_pool:
             lines = [
-                f"\nPer-file hunters already found {len(pool_findings)} findings in this subsystem:"
+                f"\nPrior hunter findings in this subsystem ({len(hunter_pool)}):"
             ]
-            for f in pool_findings[:10]:
+            for f in hunter_pool[:10]:
                 lines.append(
                     f"  - {f.get('file', '?')}:{f.get('line_number', '?')} "
                     f"({f.get('cwe', '?')}, {f.get('severity', '?')}): "
                     f"{f.get('description', '')[:150]}"
                 )
-            if len(pool_findings) > 10:
-                lines.append(f"  ... and {len(pool_findings) - 10} more")
+            if len(hunter_pool) > 10:
+                lines.append(f"  ... and {len(hunter_pool) - 10} more")
             lines.append(
                 "Use query_findings_pool for the full list. "
-                "Focus on NEW cross-file bugs, not re-discovering these.\n"
+                "Focus on NEW bugs, not re-discovering these.\n"
             )
             existing_findings_block = "\n".join(lines)
 
@@ -1292,7 +1441,12 @@ def _build_subsystem_prompt(
             ep_lines.append(f"  ... and {len(subsystem.entry_points) - 20} more")
         entry_points_block = "\n".join(ep_lines) + "\n"
 
-    prompt = SUBSYSTEM_HUNT_PROMPT.format(
+    template = (
+        SUBSYSTEM_HUNT_PROMPT_TRUTHFUL
+        if _subsystem_prompt_mode() == "truthful"
+        else SUBSYSTEM_HUNT_PROMPT_LEGACY
+    )
+    prompt = template.format(
         subsystem_name=subsystem.name,
         project_name=project_name,
         file_count=len(subsystem.files),
@@ -1351,10 +1505,7 @@ def build_subsystem_hunter_agent(
         max_steps=max_steps,
         agent_mode="deep",
         budget_usd=budget_usd,
-        initial_user_message=(
-            f"Hunt for cross-file vulnerabilities in the {subsystem.name} "
-            f"subsystem ({len(subsystem.files)} files under {subsystem.root_path})."
-        ),
+        initial_user_message=_subsystem_initial_user_message(subsystem),
     ), ctx
 
 
@@ -1451,17 +1602,49 @@ class NativeHunter:
                     "step": step,
                 },
             )
+            messages = _compact_messages_for_context(
+                messages,
+                system=self.prompt,
+                tools=self.tools,
+            )
             with spend_metadata(model_call_id=model_call_id):
                 if self.summarizer and self.summarizer.should_summarize(messages):
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
-                response = await self.llm.achat(
-                    messages=messages,
-                    system=self.prompt,
-                    tools=self.tools,
-                )
+                try:
+                    response = await self.llm.achat(
+                        messages=messages,
+                        system=self.prompt,
+                        tools=self.tools,
+                    )
+                except ContextWindowExceededError as exc:
+                    logger.warning(
+                        "Hunter context overflow at step %s for %s: %s",
+                        step,
+                        self.ctx.file_path,
+                        exc,
+                    )
+                    stop_reason = "context_overflow"
+                    trajectory.log(
+                        "stop",
+                        {
+                            "reason": stop_reason,
+                            "step": step,
+                            "error": str(exc),
+                            "total_input_tokens": total_input_tokens,
+                            "total_output_tokens": total_output_tokens,
+                            "total_cost_usd": total_cost_usd,
+                        },
+                    )
+                    return HunterRunResult(
+                        findings=list(self.ctx.findings),
+                        cost_usd=total_cost_usd,
+                        tokens_used=total_input_tokens + total_output_tokens,
+                        stop_reason=stop_reason,
+                        transcript_summary=last_assistant_text[-500:],
+                    )
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate
