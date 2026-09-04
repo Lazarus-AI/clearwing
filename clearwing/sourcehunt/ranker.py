@@ -95,6 +95,8 @@ class RankerConfig:
     llm_timeout_seconds: int | None = None
     large_repo_file_threshold: int = 2000
     large_repo_llm_file_limit: int = 600
+    large_repo_band_min: int = 0
+    large_repo_bands: int = 4
     include_static_hints: bool = True
     include_imports_by: bool = True
     static_hint_surface_floor: int = 3  # files with static_hint > 0 → min surface 3
@@ -281,14 +283,15 @@ class Ranker:
             )
             return []
 
-        candidates = [
+        ordered = [
             ft
             for _, ft in sorted(
                 enumerate(files),
                 key=lambda item: self._candidate_sort_key(item[0], item[1]),
                 reverse=True,
-            )[:limit]
+            )
         ]
+        candidates = self._reserve_band_minimum(ordered, limit)
         logger.info(
             "Large repo detected for ranker; heuristics applied to %d files, "
             "LLM reranking top %d files",
@@ -296,6 +299,77 @@ class Ranker:
             len(candidates),
         )
         return candidates
+
+    def _reserve_band_minimum(
+        self, ordered: list[FileTarget], limit: int
+    ) -> list[FileTarget]:
+        """Take ``limit`` files from ``ordered`` (already sorted best-first),
+        but reserve ``large_repo_band_min`` slots for each priority band first.
+
+        A plain head cut keeps only the front of a single global ordering, so a
+        file whose heuristic ``priority`` sits in a lower band never reaches the
+        LLM reranker even when it is the only file in its band. Reserving a
+        per-band minimum keeps at least one representative of each populated
+        band; the remaining slots are filled globally, so the head of the
+        ordering is unchanged apart from the reserved lower-band files. The
+        reservation never exceeds ``limit``: when it cannot honour every band it
+        prefers the higher (stronger-priority) bands.
+        """
+        if not ordered:
+            return []
+        band_min = max(0, self.config.large_repo_band_min)
+        bands = max(1, self.config.large_repo_bands)
+        if band_min == 0 or bands == 1:
+            return ordered[:limit]
+        if band_min * bands > limit:
+            logger.warning(
+                "band-reservation exceeds candidate limit; falling back to head cut "
+                "(band_min=%d, bands=%d, limit=%d)",
+                band_min,
+                bands,
+                limit,
+            )
+            return ordered[:limit]
+
+        hi = ordered[0].get("priority", 0.0)
+        lo = ordered[-1].get("priority", 0.0)
+        span = hi - lo
+        if span <= 0:
+            # Every file shares one priority (e.g. --no-rank): no bands to
+            # protect, so the plain head cut is already correct.
+            return ordered[:limit]
+
+        def band_of(ft: FileTarget) -> int:
+            # Higher priority → lower band index. Clamp the bottom edge: a
+            # file at exactly ``lo`` gives frac=1 → int(1*bands)=bands, which
+            # is one past the last valid index, so cap it at ``bands-1``.
+            frac = (hi - ft.get("priority", 0.0)) / span
+            return min(bands - 1, int(frac * bands))
+
+        by_band: dict[int, list[int]] = {}
+        for idx, ft in enumerate(ordered):
+            by_band.setdefault(band_of(ft), []).append(idx)
+
+        reserved: set[int] = set()
+        # Round-robin the reservation: the r-th file of each band in ascending
+        # band order (strongest band first), so a tight ``limit`` still gives the
+        # low bands representation while favouring stronger bands on overflow.
+        for rank in range(band_min):
+            if len(reserved) >= limit:
+                break
+            for band in sorted(by_band):
+                if len(reserved) >= limit:
+                    break
+                members = by_band[band]
+                if rank < len(members):
+                    reserved.add(members[rank])
+        # Fill any remaining slots globally in best-first order.
+        for idx in range(len(ordered)):
+            if len(reserved) >= limit:
+                break
+            reserved.add(idx)
+        # Preserve the global ordering of the final set.
+        return [ft for idx, ft in enumerate(ordered) if idx in reserved][:limit]
 
     @staticmethod
     def _candidate_sort_key(index: int, ft: FileTarget) -> tuple:
