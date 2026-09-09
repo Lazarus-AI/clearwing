@@ -998,6 +998,12 @@ class SourceHuntRunner:
                 cost_usd=cost_usd,
                 detail=detail,
                 progress=progress,
+                type=prog.type,
+                file_count=len(files),
+                symbol_count=len(symbols),
+                finding_id_count=len(finding_ids),
+                error_code=(error.get("code") or error.get("type")) if error else None,
+                error_message=error.get("message") if error else None,
             )
         )
         if self._on_progress is not None:

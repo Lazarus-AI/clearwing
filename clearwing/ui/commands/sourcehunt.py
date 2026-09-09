@@ -1457,9 +1457,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "branch": _bounded_text(value.get("branch", "main"), "branch", 256),
         "depth": depth,
         "budget_usd": _bounded_number(value.get("budget_usd", 0.0), "budget_usd", 0, 10000),
-        "max_parallel": _bounded_integer(
-            value.get("max_parallel", 8), "max_parallel", 1, 64
-        ),
+        "max_parallel": _bounded_integer(value.get("max_parallel", 8), "max_parallel", 1, 64),
         "verify": _boolean(value.get("verify", True), "verify"),
         "exploit": _boolean(value.get("exploit", True), "exploit"),
         "flow": flow,
@@ -1529,8 +1527,7 @@ def _public_progress(progress: Any) -> dict[str, Any]:
         if isinstance(item.get("cost_usd"), (int, float))
         else None,
         "progress": item.get("progress")
-        if isinstance(item.get("progress"), (int, float))
-        and 0.0 <= item["progress"] <= 1.0
+        if isinstance(item.get("progress"), (int, float)) and 0.0 <= item["progress"] <= 1.0
         else None,
     }
     for source, count in (
@@ -1538,17 +1535,23 @@ def _public_progress(progress: Any) -> dict[str, Any]:
         ("symbols", "symbol_count"),
         ("finding_ids", "finding_id_count"),
     ):
+        bounded_count = item.get(count)
+        if isinstance(bounded_count, int) and bounded_count >= 0:
+            public[count] = bounded_count
+            continue
         values = item.get(source)
         if isinstance(values, (list, tuple, set)):
             public[count] = len(values)
+    for key in ("error_code", "error_message"):
+        value = text(key, 1024)
+        if value is not None:
+            public[key] = value
     error = item.get("error")
     if isinstance(error, dict):
         for source, target in (("code", "error_code"), ("message", "error_message")):
             value = error.get(source)
             if isinstance(value, str) and value:
-                public[target] = value.encode("utf-8")[:1024].decode(
-                    "utf-8", errors="ignore"
-                )
+                public[target] = value.encode("utf-8")[:1024].decode("utf-8", errors="ignore")
     return {key: value for key, value in public.items() if value is not None and value != ""}
 
 

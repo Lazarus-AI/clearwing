@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from clearwing.agent.operator import OperatorResult
+from clearwing.core.events import EventBus, EventType
 from clearwing.providers import (
     ProviderManager,
     install_runtime_routing,
@@ -105,13 +106,9 @@ def test_channel_accepts_host_selected_workspace_paths():
 
 def test_operate_request_rejects_provider_and_transport_fields():
     with pytest.raises(ValueError, match="unknown request field.*api_key"):
-        operate._machine_request(
-            {"target": "host", "goals": ["scan"], "api_key": "guest-secret"}
-        )
+        operate._machine_request({"target": "host", "goals": ["scan"], "api_key": "guest-secret"})
     with pytest.raises(ValueError, match="unknown request field.*model"):
-        operate._machine_request(
-            {"target": "host", "goals": ["scan"], "model": "guest-model"}
-        )
+        operate._machine_request({"target": "host", "goals": ["scan"], "model": "guest-model"})
 
 
 def test_operate_request_accepts_bounded_callback_route():
@@ -127,16 +124,12 @@ def test_operate_request_accepts_bounded_callback_route():
     assert parsed["lport"] == 8989
 
     with pytest.raises(ValueError, match="lport"):
-        operate._machine_request(
-            {"target": "host", "goals": ["prove RCE"], "lport": 80}
-        )
+        operate._machine_request({"target": "host", "goals": ["prove RCE"], "lport": 80})
 
 
 def test_sourcehunt_request_rejects_paths_credentials_and_provider_fields():
     with pytest.raises(ValueError, match="credentials"):
-        sourcehunt._machine_request(
-            {"repo_url": "https://user:secret@example.test/repo"}
-        )
+        sourcehunt._machine_request({"repo_url": "https://user:secret@example.test/repo"})
     with pytest.raises(ValueError, match="unknown request field.*local_path"):
         sourcehunt._machine_request(
             {"repo_url": "https://example.test/repo", "local_path": "/host"}
@@ -169,17 +162,17 @@ def test_sourcehunt_machine_request_accepts_checkpoint_object():
 
 
 def test_sourcehunt_machine_request_semgrep_is_strict_and_default_off():
-    assert sourcehunt._machine_request({"repo_url": "https://example.test/repo"})["semgrep"] is False
     assert (
-        sourcehunt._machine_request(
-            {"repo_url": "https://example.test/repo", "semgrep": True}
-        )["semgrep"]
+        sourcehunt._machine_request({"repo_url": "https://example.test/repo"})["semgrep"] is False
+    )
+    assert (
+        sourcehunt._machine_request({"repo_url": "https://example.test/repo", "semgrep": True})[
+            "semgrep"
+        ]
         is True
     )
     with pytest.raises(ValueError, match="semgrep must be a boolean"):
-        sourcehunt._machine_request(
-            {"repo_url": "https://example.test/repo", "semgrep": "true"}
-        )
+        sourcehunt._machine_request({"repo_url": "https://example.test/repo", "semgrep": "true"})
 
 
 def test_sourcehunt_machine_handler_propagates_semgrep(monkeypatch):
@@ -311,9 +304,7 @@ def test_operate_machine_uses_host_routing_and_emits_typed_records():
     assert "host-secret" not in repr(parsed)
 
     channel.emit("progress", {"role": "agent", "content": "working"})
-    channel.result(
-        OperatorResult(goals=["scan"], target="host", status="completed", turns=1)
-    )
+    channel.result(OperatorResult(goals=["scan"], target="host", status="completed", turns=1))
     channel.close()
     records = _records(parent)
     assert [record["type"] for record in records] == [
@@ -507,10 +498,55 @@ def test_sourcehunt_public_progress_keeps_counts_out_of_bulk_event_state():
     }
 
 
-def test_sourcehunt_machine_request_preserves_deep_depth():
-    result = sourcehunt._machine_request(
-        {"repo_url": "https://example.test/repo", "depth": "deep"}
+def test_sourcehunt_runner_event_reaches_bounded_machine_progress():
+    from clearwing.sourcehunt.runner import SourceHuntRunner
+
+    EventBus._instance = None
+    bus = EventBus()
+    projected = []
+    bus.subscribe(
+        EventType.SOURCEHUNT_STAGE,
+        lambda payload: projected.append(sourcehunt._public_progress(payload)),
     )
+    runner = SourceHuntRunner(repo_url="https://example.test/repo")
+
+    runner._emit_stage(
+        "hunt",
+        "failed",
+        detail="Hunter failed",
+        files=["one.py", "two.py"],
+        symbols=["parse", "render", "write"],
+        finding_ids=["finding-1"],
+        error={"type": "HunterError", "message": "bounded failure"},
+        progress=0.35,
+    )
+
+    assert projected == [
+        {
+            "type": "stage",
+            "stage": "hunt",
+            "status": "failed",
+            "detail": "Hunter failed",
+            "findings_so_far": 0,
+            "cost_usd": 0.0,
+            "progress": 0.35,
+            "file_count": 2,
+            "symbol_count": 3,
+            "finding_id_count": 1,
+            "error_code": "HunterError",
+            "error_message": "bounded failure",
+        }
+    ]
+    EventBus._instance = None
+
+
+def test_sourcehunt_public_progress_rejects_out_of_range_progress():
+    assert "progress" not in sourcehunt._public_progress({"progress": 1.01})
+    assert "progress" not in sourcehunt._public_progress({"progress": -0.01})
+
+
+def test_sourcehunt_machine_request_preserves_deep_depth():
+    result = sourcehunt._machine_request({"repo_url": "https://example.test/repo", "depth": "deep"})
 
     assert result["depth"] == "deep"
 

@@ -27,6 +27,12 @@ class SourcehuntStagePayload:
     cost_usd: float
     detail: str
     progress: float | None = None
+    type: str | None = None
+    file_count: int | None = None
+    symbol_count: int | None = None
+    finding_id_count: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
