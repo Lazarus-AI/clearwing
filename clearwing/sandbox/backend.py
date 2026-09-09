@@ -138,7 +138,7 @@ class SandboxBackend(Protocol):
 # These implementation details belong to the zero-configuration Docker
 # adapter. They never appear in SandboxEnvironmentSpec or on the RPC wire.
 _DOCKER_PROFILE_IMAGES: dict[str, str] = {
-    "c-cpp": "gcc:12-bullseye",
+    "c-cpp": "gcc:12-bookworm",
     "rust": "rust:1-slim",
     "go": "golang:1.22",
     "python": "python:3.12-slim",

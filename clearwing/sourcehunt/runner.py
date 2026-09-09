@@ -166,6 +166,7 @@ class SourceHuntProgress:
     symbols: tuple[str, ...] = ()
     finding_ids: tuple[str, ...] = ()
     error: dict[str, Any] | None = None
+    progress: float | None = None
     type: Literal["stage"] = "stage"
 
 
@@ -985,6 +986,7 @@ class SourceHuntRunner:
             symbols=tuple(symbols),
             finding_ids=tuple(finding_ids),
             error=error,
+            progress=progress,
         )
         EventBus().emit_sourcehunt_stage(
             SourcehuntStagePayload(

@@ -1356,11 +1356,18 @@ def handle(cli, args):
 
 
 def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
+    from ...core.events import EventBus, EventType
     from ...providers import ProviderManager, install_runtime_routing
     from ...sourcehunt.runner import SourceHuntRunner
     from ..machine import MachineChannel
 
     channel = MachineChannel(descriptor, "sourcehunt")
+    bus = EventBus()
+
+    def emit_stage(progress: Any) -> None:
+        channel.emit("progress", _public_progress(progress))
+
+    bus.subscribe(EventType.SOURCEHUNT_STAGE, emit_stage)
     try:
         request, routing = channel.read_start()
         print(f"sourcehunt machine-fd request fields: {sorted(request)}", file=sys.stderr)
@@ -1398,9 +1405,6 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 stop_after=parsed.get("stop_after"),
                 enable_semgrep=enable_semgrep or parsed["semgrep"],
                 provider_manager=provider_manager,
-                on_progress=lambda progress: channel.emit(
-                    "progress", _public_progress(progress)
-                ),
             ).arun()
         )
         channel.result(_public_result(result))
@@ -1409,6 +1413,7 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
         channel.error(exc)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
     finally:
+        bus.unsubscribe(EventType.SOURCEHUNT_STAGE, emit_stage)
         channel.close()
 
 
@@ -1522,6 +1527,10 @@ def _public_progress(progress: Any) -> dict[str, Any]:
         else None,
         "cost_usd": item.get("cost_usd")
         if isinstance(item.get("cost_usd"), (int, float))
+        else None,
+        "progress": item.get("progress")
+        if isinstance(item.get("progress"), (int, float))
+        and 0.0 <= item["progress"] <= 1.0
         else None,
     }
     for source, count in (
