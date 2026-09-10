@@ -1063,7 +1063,10 @@ class AsyncLLMClient:
                                 return self._chat_response_from_stream_end(event.end)
                         raise RuntimeError("LLM stream ended without a terminal usage event")
                     except Exception as exc:
-                        if not received_event and self._is_native_http_rejection(exc):
+                        if not received_event and (
+                            self._is_native_http_rejection(exc)
+                            or self._is_definitely_unbilled_transport_error(exc)
+                        ):
                             raise
                         raise _AcceptedStreamError(str(exc)) from exc
 
