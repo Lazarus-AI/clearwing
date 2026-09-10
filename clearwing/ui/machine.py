@@ -76,9 +76,11 @@ class MachineChannel:
         """Emit an operation-specific non-terminal record."""
         self._write(kind, {"data": _jsonable(data)}, terminal=False)
 
-    def result(self, data: Any) -> None:
-        """Emit the command's terminal result."""
-        self._write("result", {"data": _jsonable(data)}, terminal=True)
+    def result(self, data: Any, *, allow_truncation: bool = True) -> None:
+        """Emit the terminal result, optionally requiring complete delivery."""
+        self._write(
+            "result", {"data": _jsonable(data)}, terminal=True, allow_truncation=allow_truncation
+        )
 
     def error(self, error: BaseException | str) -> None:
         """Emit the command's terminal error."""
@@ -89,7 +91,9 @@ class MachineChannel:
         self._reader.close()
         self._writer.close()
 
-    def _write(self, kind: str, payload: dict[str, Any], *, terminal: bool) -> None:
+    def _write(
+        self, kind: str, payload: dict[str, Any], *, terminal: bool, allow_truncation: bool = True
+    ) -> None:
         if self._terminal:
             raise MachineProtocolError("terminal record already emitted")
         self._sequence += 1
@@ -101,15 +105,17 @@ class MachineChannel:
         }
         encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
         original_bytes = len(encoded)
+        if len(encoded) >= MAX_RECORD_BYTES and not allow_truncation:
+            raise MachineProtocolError(
+                "result exceeds the machine record limit; refusing to return incomplete findings"
+            )
         if len(encoded) >= MAX_RECORD_BYTES:
             record = (
                 self._compact_terminal(record, original_bytes)
                 if terminal
                 else self._compact_progress(record, original_bytes)
             )
-            encoded = json.dumps(
-                record, separators=(",", ":"), ensure_ascii=False
-            ).encode()
+            encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
         if len(encoded) >= MAX_RECORD_BYTES:
             record = {
                 "v": record["v"],
@@ -120,17 +126,13 @@ class MachineChannel:
                     "original_bytes": original_bytes,
                 },
             }
-            encoded = json.dumps(
-                record, separators=(",", ":"), ensure_ascii=False
-            ).encode()
+            encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
         self._writer.write(encoded + b"\n")
         if terminal:
             self._terminal = True
 
     @staticmethod
-    def _compact_progress(
-        record: dict[str, Any], original_bytes: int
-    ) -> dict[str, Any]:
+    def _compact_progress(record: dict[str, Any], original_bytes: int) -> dict[str, Any]:
         """Keep routing fields from an oversized progress event."""
         data = record.get("data")
         summary: dict[str, Any] = {
@@ -155,9 +157,7 @@ class MachineChannel:
         return record
 
     @staticmethod
-    def _compact_terminal(
-        record: dict[str, Any], original_bytes: int
-    ) -> dict[str, Any]:
+    def _compact_terminal(record: dict[str, Any], original_bytes: int) -> dict[str, Any]:
         """Project an oversized result onto a bounded workflow-safe summary.
 
         Large checkpoint objects are intentionally omitted here. Managed
@@ -190,9 +190,7 @@ class MachineChannel:
             elif isinstance(value, list):
                 summary[f"{key}_count"] = len(value)
             elif isinstance(value, dict):
-                nested = json.dumps(
-                    value, separators=(",", ":"), ensure_ascii=False
-                ).encode()
+                nested = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
                 if len(nested) < 4096:
                     summary[key] = value
                 else:
