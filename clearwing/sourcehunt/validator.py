@@ -43,6 +43,26 @@ _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 _DEFAULT_VALIDATOR_MAX_TOKENS = 8192
 
 
+def _configured_validator_max_tokens() -> int:
+    try:
+        from clearwing.sourcehunt.config import load_runtime_tuning_policy_from_env
+
+        tuned = int(load_runtime_tuning_policy_from_env().llm.validator_max_tokens)
+        if tuned > 0:
+            return tuned
+    except Exception:
+        pass
+    raw = str(os.environ.get("CLEARWING_VALIDATOR_MAX_TOKENS") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return _DEFAULT_VALIDATOR_MAX_TOKENS
+
+
 def _strip_markdown_fence(text: str) -> str:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -344,12 +364,7 @@ class Validator:
     ) -> ValidatorVerdict:
         user_msg = self._build_user_message(finding, file_content)
         system_prompt = self._prompt_for_finding(finding)
-        base_max_tokens = int(
-            os.environ.get(
-                "CLEARWING_VALIDATOR_MAX_TOKENS",
-                str(_DEFAULT_VALIDATOR_MAX_TOKENS),
-            )
-        )
+        base_max_tokens = _configured_validator_max_tokens()
         base_max_tokens = max(1024, base_max_tokens)
 
         # Enforced structured output. response_schema becomes a genai-pyo3
@@ -359,7 +374,11 @@ class Validator:
         verdict: ValidatorVerdict | None = None
         last_error: Exception | None = None
         for attempt in range(2):
-            max_tokens = base_max_tokens if attempt == 0 else min(base_max_tokens * 2, 16384)
+            max_tokens = (
+                base_max_tokens
+                if attempt == 0
+                else min(base_max_tokens * 2, max(base_max_tokens, 65_536))
+            )
             attempt_user = user_msg
             if attempt == 1:
                 attempt_user = (
