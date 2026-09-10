@@ -312,8 +312,8 @@ class Ranker:
         per-band minimum keeps at least one representative of each populated
         band; the remaining slots are filled globally, so the head of the
         ordering is unchanged apart from the reserved lower-band files. The
-        reservation never exceeds ``limit``: when it cannot honour every band it
-        prefers the higher (stronger-priority) bands.
+        reservation never exceeds ``limit``: when the requested minimum across
+        all configured bands exceeds it, log a warning and use a plain head cut.
         """
         if not ordered:
             return []
@@ -351,9 +351,8 @@ class Ranker:
             by_band.setdefault(band_of(ft), []).append(idx)
 
         reserved: set[int] = set()
-        # Round-robin the reservation: the r-th file of each band in ascending
-        # band order (strongest band first), so a tight ``limit`` still gives the
-        # low bands representation while favouring stronger bands on overflow.
+        # Round-robin the reservation: the r-th file of each populated band in
+        # ascending band order (strongest band first).
         for rank in range(band_min):
             if len(reserved) >= limit:
                 break

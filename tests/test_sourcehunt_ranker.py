@@ -820,15 +820,17 @@ class TestLargeRepoBandMinimum:
         ranker = Ranker(AsyncMock(), config)
         assert ranker._reserve_band_minimum([], limit=10) == []
 
-    def test_uniform_priority_is_plain_head_cut(self):
+    def test_uniform_priority_is_plain_head_cut(self, caplog):
         # --no-rank leaves every priority equal: no bands to protect.
         config = RankerConfig(
             large_repo_file_threshold=3,
             large_repo_llm_file_limit=2,
             large_repo_band_min=1,
-            large_repo_bands=4,
+            large_repo_bands=2,
         )
         ranker = Ranker(AsyncMock(), config)
         files = self._files_with_priorities([5.0, 5.0, 5.0, 5.0])
-        out = ranker._select_llm_candidates(files)
+        with caplog.at_level("WARNING", logger="clearwing.sourcehunt.ranker"):
+            out = ranker._select_llm_candidates(files)
         assert [ft["path"] for ft in out] == ["f0.c", "f1.c"]
+        assert not caplog.records
