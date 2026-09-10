@@ -202,7 +202,8 @@ def test_sourcehunt_machine_handler_propagates_semgrep(monkeypatch):
         def emit(self, *_args):
             pass
 
-        def result(self, value):
+        def result(self, value, *, allow_truncation=True):
+            assert allow_truncation is False
             captured["result"] = value
 
         def error(self, error):
@@ -264,8 +265,8 @@ def test_sourcehunt_machine_handler_honors_visible_cli_semgrep(monkeypatch):
         def emit(self, *_args):
             pass
 
-        def result(self, _value):
-            pass
+        def result(self, _value, *, allow_truncation=True):
+            assert allow_truncation is False
 
         def error(self, error):
             raise AssertionError(f"unexpected machine error: {error}")
@@ -429,12 +430,11 @@ def test_sourcehunt_public_result_is_bounded_and_removes_workspace_state():
     )
     result = sourcehunt._public_result(source)
 
-    # Every finding bucket is capped, but its true total is preserved alongside.
-    assert len(result["findings"]) == 16
+    assert len(result["findings"]) == 20
     assert result["finding_count"] == 20
-    assert len(result["verified_findings"]) == 16
+    assert len(result["verified_findings"]) == 30
     assert result["verified_finding_count"] == 30
-    assert len(result["exploited_findings"]) == 16
+    assert len(result["exploited_findings"]) == 18
     assert result["exploited_finding_count"] == 18
 
     assert result["findings"][0]["file"] == "file-0.py"

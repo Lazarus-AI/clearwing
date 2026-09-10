@@ -1407,7 +1407,7 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 provider_manager=provider_manager,
             ).arun()
         )
-        channel.result(_public_result(result))
+        channel.result(_public_result(result), allow_truncation=False)
         return 0
     except BaseException as exc:  # noqa: BLE001
         channel.error(exc)
@@ -1556,8 +1556,6 @@ def _public_progress(progress: Any) -> dict[str, Any]:
 
 
 def _public_result(result: Any) -> dict[str, Any]:
-    max_findings_per_bucket = 16
-
     def text(value: Any, maximum_bytes: int) -> str | None:
         if not isinstance(value, str) or not value:
             return None
@@ -1590,7 +1588,7 @@ def _public_result(result: Any) -> dict[str, Any]:
         return {key: value for key, value in public.items() if value is not None and value != ""}
 
     def findings_bucket(values: list[Any]) -> list[dict[str, Any]]:
-        return [finding(item) for item in values[:max_findings_per_bucket]]
+        return [finding(item) for item in values]
 
     findings = list(result.findings)
     verified_findings = list(result.verified_findings)
