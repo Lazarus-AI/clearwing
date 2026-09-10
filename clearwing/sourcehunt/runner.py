@@ -1612,7 +1612,7 @@ class SourceHuntRunner:
             subsystems_hunted = hunt_result.subsystems_hunted
             subsystem_spent = hunt_result.subsystem_spent_usd
 
-            if self._target_files and not hunt_result.target_plan_completed:
+            if not hunt_result.target_plan_completed:
                 self._target_plan_incomplete = True
                 if historical_db is not None:
                     historical_db.close()
@@ -1621,7 +1621,7 @@ class SourceHuntRunner:
                         stage,
                         "skipped",
                         findings_so_far=len(all_findings),
-                        detail="Explicit target window plan was incomplete",
+                        detail="Hunter work was incomplete",
                         files=stage_files,
                         finding_ids=[finding.id for finding in all_findings],
                     )
@@ -3058,16 +3058,16 @@ class SourceHuntRunner:
                         symbols=self._finding_symbols(result.findings),
                         finding_ids=[finding.id for finding in result.findings],
                     )
-                elif self._target_files and not target_plan_completed:
+                elif not target_plan_completed:
                     pipeline_status.record_degraded(
-                        "hunter_pool", "Explicit target plan did not complete every window"
+                        "hunter_pool", "Hunter work did not complete every target"
                     )
                     self._emit_stage(
                         "hunt",
                         "degraded",
                         findings_so_far=len(result.findings),
                         cost_usd=pool.total_spent,
-                        detail="Explicit target plan was incomplete",
+                        detail="Hunter work was incomplete",
                         files=stage_files,
                         finding_ids=[finding.id for finding in result.findings],
                     )
@@ -3103,7 +3103,9 @@ class SourceHuntRunner:
                 target_plan_completed = False
                 logger.warning("HunterPool run failed", exc_info=True)
                 pipeline_status.record_degraded(
-                    "hunter_pool", "Hunter phase produced no findings due to error"
+                    "hunter_pool",
+                    "Hunter work was incomplete due to error",
+                    error=f"{type(exc).__name__}: {exc}",
                 )
                 self._emit_stage(
                     "hunt",
@@ -3126,6 +3128,9 @@ class SourceHuntRunner:
             }
             result.files_hunted = pool.completed_target_count
         else:
+            target_plan_completed = not files
+            if files:
+                pipeline_status.record_degraded("hunter_pool", "Hunter work did not run")
             logger.info("HunterPool skipped; no LLM available")
             if not files:
                 hunt_status = "skipped"
@@ -3156,10 +3161,7 @@ class SourceHuntRunner:
 
         if self._checkpoint is None:
             raise RuntimeError("hunting requires a preprocessing checkpoint")
-        if self._target_files and not target_plan_completed:
-            # Target coverage is all-or-nothing at the stage-checkpoint level.
-            # A later resume must rerun the explicit window plan rather than
-            # treating partial coverage as complete.
+        if not target_plan_completed:
             self._checkpoint.hunt = None
             self._checkpoint.verification = None
             self._checkpoint.exploitation = None
