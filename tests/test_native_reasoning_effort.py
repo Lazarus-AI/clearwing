@@ -193,7 +193,7 @@ class TestIsUnsupportedReasoningEffortError:
 
 
 class TestTimeoutRetryPolicy:
-    def test_timeout_retries_once_then_raises(self):
+    def test_ambiguous_timeout_is_not_retried(self):
         client = AsyncLLMClient(
             model_name="test-model",
             provider_name="openai_compat",
@@ -209,13 +209,13 @@ class TestTimeoutRetryPolicy:
             raise RuntimeError("request timeout")
 
         async def no_sleep(_delay):
-            return None
+            raise AssertionError("ambiguous timeout must not schedule a retry")
 
         with patch("clearwing.llm.native.asyncio.sleep", new=no_sleep):
             with pytest.raises(RuntimeError, match="request timeout"):
                 asyncio.run(client._with_retries(always_times_out))
 
-        assert calls == 2
+        assert calls == 1
 
 
 class TestRebuildOptionsWithoutReasoning:
