@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
 
 
+class _AcceptedStreamError(RuntimeError):
+    """A failed accepted stream must not be replayed or treated as unbilled."""
+
+
 def _trace_llm_output(response: ChatResponse) -> dict[str, Any]:
     """Serialize a native response and add Phoenix/OpenInference usage fields."""
     serialized = response.to_dict() if hasattr(response, "to_dict") else repr(response)
@@ -791,6 +795,10 @@ class AsyncLLMClient:
     def _is_definitely_unbilled_error(self, exc: BaseException) -> bool:
         """Return true only for provider rejections that precede generation."""
 
+        if isinstance(exc, _AcceptedStreamError):
+            return False
+        if self._is_native_http_rejection(exc):
+            return True
         if isinstance(exc, Exception) and self._is_rate_limit_error(exc):
             return True
         if self._is_unsupported_reasoning_effort_error(exc):
@@ -1036,22 +1044,35 @@ class AsyncLLMClient:
             async with self._semaphore:
                 client = self._build_client(Client)
 
-                async def _consume(opts: ChatOptions) -> ChatResponse | None:
+                async def _consume(opts: ChatOptions) -> ChatResponse:
                     nonlocal dispatched
                     dispatched = True
                     stream = await client.astream_chat(self.model_name, request, opts)
-                    async for event in stream:
-                        if event.content:
-                            on_text_delta(event.content)
-                        if event.end is not None:
-                            return self._chat_response_from_stream_end(event.end)
-                    return None
+                    received_event = False
+                    try:
+                        async for event in stream:
+                            if (
+                                getattr(event, "kind", None) != "start"
+                                or event.content
+                                or event.end is not None
+                            ):
+                                received_event = True
+                            if event.content:
+                                on_text_delta(event.content)
+                            if event.end is not None:
+                                return self._chat_response_from_stream_end(event.end)
+                        raise RuntimeError("LLM stream ended without a terminal usage event")
+                    except Exception as exc:
+                        if not received_event and self._is_native_http_rejection(exc):
+                            raise
+                        raise _AcceptedStreamError(str(exc)) from exc
 
                 try:
                     response = await self._with_retries(lambda: _consume(options))
                 except Exception as exc:
                     if (
-                        options.reasoning_effort is not None
+                        not isinstance(exc, _AcceptedStreamError)
+                        and options.reasoning_effort is not None
                         and self._is_unsupported_reasoning_effort_error(exc)
                     ):
                         logger.warning(
@@ -1063,10 +1084,7 @@ class AsyncLLMClient:
                         self.reasoning_effort = None
                         options = self._rebuild_options_without_reasoning(options)
                         response = await _consume(options)
-                    elif self._should_try_openai_http_fallback(exc) and (
-                        not (self._spend_ledger is not None and self._spend_ledger.enforcing)
-                        or self._is_definitely_unbilled_transport_error(exc)
-                    ):
+                    elif self._should_try_openai_http_fallback(exc):
                         logger.debug(
                             "Native OpenAI async stream failed for model=%s "
                             "base_url=%s; falling back to aiohttp "
@@ -1082,8 +1100,6 @@ class AsyncLLMClient:
                         )
                     else:
                         raise
-                if response is None:
-                    raise RuntimeError("LLM stream ended without a terminal usage event")
         except BaseException as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self._fail_spend_call(reservation, exc, dispatched=dispatched)
@@ -1095,18 +1111,6 @@ class AsyncLLMClient:
                 self._format_exc_chain(exc),
             )
             _record_call(self.model_name, elapsed_ms, None, None, 0, ok=False)
-            if "without a terminal usage event" in str(exc) and not (
-                self._spend_ledger is not None and self._spend_ledger.enforcing
-            ):
-                return await self.achat(
-                    messages=messages,
-                    system=system,
-                    tools=tools,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    cache_prefix=cache_prefix,
-                    prompt_cache_key=prompt_cache_key,
-                )
             raise
 
         self._settle_spend_call(reservation, response)
@@ -1320,18 +1324,6 @@ class AsyncLLMClient:
         except Exception as exc:
             if not self._should_try_openai_http_fallback(exc):
                 raise
-            if (
-                self._spend_ledger is not None
-                and self._spend_ledger.enforcing
-                and not self._is_definitely_unbilled_transport_error(exc)
-            ):
-                # The failed transport may already have reached the provider.
-                # Retrying through another transport could incur a second bill;
-                # let the ledger conservatively charge this reservation instead.
-                # Exception: pre-response transport errors (connection refused,
-                # DNS, TLS, "error sending request") never generated, so the
-                # aiohttp fallback is safe even under enforcement.
-                raise
             logger.debug(
                 "Native OpenAI streaming transport failed for model=%s base_url=%s; "
                 "falling back to aiohttp chat/completions: %s",
@@ -1344,17 +1336,7 @@ class AsyncLLMClient:
     def _should_try_openai_http_fallback(self, exc: Exception) -> bool:
         if self.provider_name != "openai" or not self.base_url:
             return False
-
-        text = str(exc).lower()
-        return (
-            "web stream error" in text
-            or "web call failed" in text
-            or "error sending request" in text
-            or "http2" in text
-            or "http/2" in text
-            or "stream" in text
-            or "reqwest error" in text
-        )
+        return self._is_definitely_unbilled_transport_error(exc)
 
     async def _openai_chat_http_fallback(
         self,
@@ -1400,11 +1382,8 @@ class AsyncLLMClient:
                         )
                     try:
                         return await self._collect_openai_sse_response(resp, on_text_delta)
-                    except Exception:
-                        logger.debug(
-                            "OpenAI-compatible SSE fallback failed; retrying without streaming",
-                            exc_info=True,
-                        )
+                    except Exception as exc:
+                        raise _AcceptedStreamError(str(exc)) from exc
 
         body = self._openai_chat_request_body(request, options, stream=False)
         headers["accept"] = "application/json"
@@ -1528,6 +1507,7 @@ class AsyncLLMClient:
         # Chat/Completions SSE emits finish_reason on the terminating chunk only;
         # capture the last non-null value so we can surface it after the loop.
         stream_finish_reason: str | None = None
+        received_done = False
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1535,6 +1515,7 @@ class AsyncLLMClient:
                 continue
             data = line[5:].strip()
             if data == "[DONE]":
+                received_done = True
                 break
             try:
                 chunk = json.loads(data)
@@ -1592,6 +1573,9 @@ class AsyncLLMClient:
                 self._merge_openai_tool_call_deltas(tool_call_parts, delta.get("tool_calls"))
                 if choice.get("finish_reason"):
                     stream_finish_reason = choice["finish_reason"]
+
+        if not (received_done or final_response or stream_finish_reason):
+            raise RuntimeError("LLM stream ended without a terminal event")
 
         if is_responses_api:
             if final_response:
@@ -1805,28 +1789,22 @@ class AsyncLLMClient:
         )
 
     async def _with_retries(self, op) -> ChatResponse:
-        """Retry *op* on rate-limit AND transient transport errors.
-
-        Transport errors (reqwest connection/send failures) never reached a
-        response, so retrying them can't double-bill — see
-        ``_is_transient_transport_error``. Both share the same backoff schedule
-        and ``rate_limit_max_retries`` cap.
-        """
+        """Retry only rate limits and definitely unbilled transport failures."""
         attempt = 0
         while True:
             try:
                 return await op()
             except Exception as exc:
+                if isinstance(exc, _AcceptedStreamError):
+                    raise
                 is_rate_limit = self._is_rate_limit_error(exc)
-                is_transport = self._is_transient_transport_error(exc)
+                is_transport = self._is_definitely_unbilled_transport_error(exc)
                 retry_limit = (
                     min(self.rate_limit_max_retries, self.timeout_max_retries)
                     if self._is_timeout_error(exc)
                     else self.rate_limit_max_retries
                 )
-                if (
-                    not is_rate_limit and not is_transport
-                ) or attempt >= retry_limit:
+                if (not is_rate_limit and not is_transport) or attempt >= retry_limit:
                     raise
 
                 delay = self._retry_delay_seconds(exc, attempt)
@@ -1878,6 +1856,17 @@ class AsyncLLMClient:
             return False
         return "400" in text or "unsupported" in text
 
+    @staticmethod
+    def _is_native_http_rejection(exc: BaseException) -> bool:
+        """Recognize genai HTTP rejections deferred until the first stream poll."""
+        return bool(
+            re.match(
+                r"^Web stream error for model '[^\n]+'\.\n"
+                r"Cause: HTTP error\.\nStatus: (?:400|401|403|404|422|429)\b",
+                str(exc),
+            )
+        )
+
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return (
@@ -1889,35 +1878,6 @@ class AsyncLLMClient:
             or "ratelimit" in text
         )
 
-    # Transport failures where the request never completed a round-trip, so the
-    # provider never generated (and never billed) — safe to retry. These come
-    # from genai-pyo3's reqwest layer ("Web call failed ... Cause: Reqwest
-    # error: error sending request ...") or a stalled/aborted stream. We match
-    # on connection-establishment / send-side phrases only; we deliberately do
-    # NOT retry generic 5xx here (those may have partially generated).
-    _TRANSPORT_ERROR_MARKERS = (
-        "error sending request",
-        "connection refused",
-        "connection reset",
-        "connection closed",
-        "connection error",
-        "broken pipe",
-        "timed out",
-        "timeout",
-        "dns error",
-        "tls",
-        "handshake",
-        "web call failed",
-        "web stream error",
-        "reqwest error",
-        "transport error",
-        "without a terminal usage event",
-    )
-
-    def _is_transient_transport_error(self, exc: Exception) -> bool:
-        text = str(exc).lower()
-        return any(marker in text for marker in self._TRANSPORT_ERROR_MARKERS)
-
     @staticmethod
     def _is_timeout_error(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -1928,15 +1888,15 @@ class AsyncLLMClient:
     # the aiohttp fallback even while the spend ledger is enforcing (unlike a
     # mid-response drop, which may have already produced billable tokens).
     _PRE_RESPONSE_TRANSPORT_MARKERS = (
-        "error sending request",
         "connection refused",
-        "connection error",
         "dns error",
-        "tls",
-        "handshake",
+        "certificate verify failed",
+        "certificate verification failed",
     )
 
     def _is_definitely_unbilled_transport_error(self, exc: Exception) -> bool:
+        if isinstance(exc, _AcceptedStreamError):
+            return False
         text = str(exc).lower()
         return any(marker in text for marker in self._PRE_RESPONSE_TRANSPORT_MARKERS)
 
