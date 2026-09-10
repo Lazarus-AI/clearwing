@@ -157,6 +157,13 @@ class SourceHuntCoverageRuntimeTuning:
 
 
 @dataclass(frozen=True)
+class SourceHuntRankerRuntimeTuning:
+    """Ranker request-shape knobs. Default thinking off (Qwen JSON reliability)."""
+
+    enable_thinking: bool = False
+
+
+@dataclass(frozen=True)
 class SourceHuntThroughputBudgetRuntimeTuning:
     hunt_parallelism: int = 8
     ranker_max_inflight_chunks: int = 8
@@ -266,6 +273,17 @@ class SourceHuntRuntimeTuning:
     throughput_budget: SourceHuntThroughputBudgetRuntimeTuning = field(
         default_factory=SourceHuntThroughputBudgetRuntimeTuning
     )
+    ranker: SourceHuntRankerRuntimeTuning = field(
+        default_factory=SourceHuntRankerRuntimeTuning
+    )
+
+
+@dataclass(frozen=True)
+class LlmRuntimeTuning:
+    """Serve-window envelope injected by Hexis (QuadB60 measured 1,048,576)."""
+
+    max_model_len: int = 1_048_576
+    validator_max_tokens: int = 32_768
 
 
 @dataclass(frozen=True)
@@ -280,6 +298,7 @@ class ClearWingRuntimeTuningPolicy:
     repair: SourceHuntRepairRuntimeTuning = field(
         default_factory=SourceHuntRepairRuntimeTuning
     )
+    llm: LlmRuntimeTuning = field(default_factory=LlmRuntimeTuning)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -328,6 +347,21 @@ def _coerce_enum(
     return default
 
 
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def parse_runtime_tuning_policy(payload: Any) -> ClearWingRuntimeTuningPolicy:
     root = _as_dict(payload)
     policy_root = _as_dict(root.get("policy")) if "policy" in root else root
@@ -335,9 +369,11 @@ def parse_runtime_tuning_policy(payload: Any) -> ClearWingRuntimeTuningPolicy:
     sourcehunt = _as_dict(policy_root.get("sourcehunt"))
     coverage = _as_dict(sourcehunt.get("coverage"))
     throughput = _as_dict(sourcehunt.get("throughput_budget"))
+    ranker = _as_dict(sourcehunt.get("ranker"))
     verification = _as_dict(policy_root.get("verification"))
     exploit = _as_dict(policy_root.get("exploit"))
     repair = _as_dict(policy_root.get("repair"))
+    llm = _as_dict(policy_root.get("llm")) or _as_dict(root.get("llm"))
 
     return ClearWingRuntimeTuningPolicy(
         sourcehunt=SourceHuntRuntimeTuning(
@@ -371,6 +407,12 @@ def parse_runtime_tuning_policy(payload: Any) -> ClearWingRuntimeTuningPolicy:
                     default=1_200,
                     minimum=0,
                     maximum=10_000,
+                ),
+            ),
+            ranker=SourceHuntRankerRuntimeTuning(
+                enable_thinking=_coerce_bool(
+                    ranker.get("enable_thinking"),
+                    default=False,
                 ),
             ),
             throughput_budget=SourceHuntThroughputBudgetRuntimeTuning(
@@ -678,6 +720,20 @@ def parse_runtime_tuning_policy(payload: Any) -> ClearWingRuntimeTuningPolicy:
                 default=240,
                 minimum=30,
                 maximum=1_800,
+            ),
+        ),
+        llm=LlmRuntimeTuning(
+            max_model_len=_coerce_int(
+                llm.get("max_model_len"),
+                default=1_048_576,
+                minimum=262_144,
+                maximum=1_048_576,
+            ),
+            validator_max_tokens=_coerce_int(
+                llm.get("validator_max_tokens"),
+                default=32_768,
+                minimum=1_024,
+                maximum=131_072,
             ),
         ),
     )

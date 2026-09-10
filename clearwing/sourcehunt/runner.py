@@ -640,6 +640,9 @@ class SourceHuntRunner:
         self._runtime_ranker_large_repo_llm_limit = (
             runtime_coverage.ranker_llm_file_limit
         )
+        self._runtime_ranker_enable_thinking = (
+            self._runtime_tuning.sourcehunt.ranker.enable_thinking
+        )
         self._runtime_hunter_max_steps_constrained = (
             runtime_verification.hunter_max_steps_constrained
         )
@@ -1522,7 +1525,11 @@ class SourceHuntRunner:
                     files=stage_files,
                 )
             elif ranker_llm is not None and files:
-                logger.info("Ranker starting on %d files", len(files))
+                logger.info(
+                    "Ranker starting on %d files (enable_thinking=%s)",
+                    len(files),
+                    self._runtime_ranker_enable_thinking,
+                )
                 try:
                     ranker_config = RankerConfig()
                     ranker_config.max_inflight_chunks = (
@@ -1530,6 +1537,9 @@ class SourceHuntRunner:
                     )
                     ranker_config.large_repo_llm_file_limit = (
                         self._runtime_ranker_large_repo_llm_limit
+                    )
+                    ranker_config.enable_thinking = (
+                        self._runtime_ranker_enable_thinking
                     )
                     if not self._preprocessing:
                         ranker_config.include_static_hints = False

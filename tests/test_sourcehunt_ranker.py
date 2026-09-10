@@ -245,6 +245,11 @@ class TestChunking:
         files = [_make_file(f"f{i}.c") for i in range(250)]
         Ranker(llm, RankerConfig(chunk_size=100)).rank(files)
         assert llm.aask_json.call_count == 3
+        assert all(
+            call.kwargs["extra_body"]
+            == {"chat_template_kwargs": {"enable_thinking": False}}
+            for call in llm.aask_json.call_args_list
+        )
 
     def test_large_repo_reranks_only_top_heuristic_candidates(self):
         llm = _mock_llm_returning([])

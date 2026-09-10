@@ -94,14 +94,28 @@ class ContextWindowExceededError(RuntimeError):
 
 
 def _configured_max_model_len() -> int | None:
+    """Resolve the serve-window clamp.
+
+    Precedence: Hexis ``CLEARWING_RUNTIME_TUNING_JSON.policy.llm.max_model_len``
+    (defaults to the QuadB60 measured 1,048,576 when the llm block is absent),
+    then ``CLEARWING_MAX_MODEL_LEN``, then the QuadB60 window.
+    """
+    try:
+        from clearwing.sourcehunt.config import load_runtime_tuning_policy_from_env
+
+        tuned = int(load_runtime_tuning_policy_from_env().llm.max_model_len)
+        if tuned > 0:
+            return tuned
+    except Exception:
+        pass
     raw = os.environ.get("CLEARWING_MAX_MODEL_LEN", "").strip()
     if not raw:
-        return None
+        return 1_048_576
     try:
         value = int(raw)
     except ValueError:
-        return None
-    return value if value > 0 else None
+        return 1_048_576
+    return value if value > 0 else 1_048_576
 
 
 def _approx_prompt_tokens(
@@ -240,6 +254,26 @@ def _model_supports_reasoning_capture(model_name: str) -> bool:
     """False when *model_name* rejects reasoning-content capture (blacklist)."""
     lower = model_name.lower()
     return not any(pattern in lower for pattern in _REASONING_CAPTURE_UNSUPPORTED_PATTERNS)
+
+
+def _merge_extra_body(
+    base: dict[str, Any] | None,
+    overlay: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Shallow-merge request extra_body; deep-merge ``chat_template_kwargs``."""
+    if not base and not overlay:
+        return None
+    merged: dict[str, Any] = dict(base or {})
+    for key, value in (overlay or {}).items():
+        if (
+            key == "chat_template_kwargs"
+            and isinstance(value, dict)
+            and isinstance(merged.get(key), dict)
+        ):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged or None
 
 
 def _run_coro_sync(coro):
@@ -665,6 +699,7 @@ class AsyncLLMClient:
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
         request_tools = None
         if tools:
@@ -685,6 +720,7 @@ class AsyncLLMClient:
         )
         temperature, max_tokens = self._codex_safe_params(temperature, max_tokens)
         temperature, wire_top_p, wire_extra_body = self._wire_sampling(temperature)
+        wire_extra_body = _merge_extra_body(wire_extra_body, extra_body)
 
         # Fail fast when prompt would exceed the provider context window.
         # Prevents multi-hour hangs on oversize Laguna requests (run 600).
@@ -1012,6 +1048,7 @@ class AsyncLLMClient:
         response_schema: type[BaseModel] | None = None,
         response_schema_name: str | None = None,
         response_schema_description: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatResponse:
         return await self.achat(
             messages=[ChatMessage("user", user)],
@@ -1021,6 +1058,7 @@ class AsyncLLMClient:
             response_schema=response_schema,
             response_schema_name=response_schema_name,
             response_schema_description=response_schema_description,
+            extra_body=extra_body,
         )
 
     async def aask_json(
@@ -1034,6 +1072,7 @@ class AsyncLLMClient:
         schema_model: type[BaseModel] | None = None,
         schema_name: str | None = None,
         schema_description: str | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> tuple[Any, ChatResponse]:
         response = await self.aask_text(
             system=system,
@@ -1043,6 +1082,7 @@ class AsyncLLMClient:
             response_schema=schema_model,
             response_schema_name=schema_name,
             response_schema_description=schema_description,
+            extra_body=extra_body,
         )
         text = response_text(response)
         if schema_model is not None:

@@ -110,6 +110,17 @@ class RankerConfig:
     # immediately; AsyncLLMClient already handles provider rate-limit retries.
     chunk_max_retries: int = 2
     chunk_retry_backoff_seconds: float = 3.0
+    # Qwen3.8 thinks by default. Ranker is structured JSON classification;
+    # thinking empties message.content and trips heuristic fallback. Hunter
+    # does not read this flag. Hexis can flip it via runtime tuning.
+    enable_thinking: bool = False
+
+    def llm_extra_body(self) -> dict[str, Any]:
+        return {
+            "chat_template_kwargs": {
+                "enable_thinking": bool(self.enable_thinking),
+            }
+        }
 
 
 # --- Ranker ------------------------------------------------------------------
@@ -380,25 +391,22 @@ class Ranker:
         )
 
         last_exc: Exception | None = None
+        ask_kwargs = {
+            "system": RANKER_SYSTEM_PROMPT,
+            "user": user_msg,
+            "schema_model": RankedFileScoreResponse,
+            "schema_name": "ranked_file_score_response",
+            "extra_body": self.config.llm_extra_body(),
+        }
         for attempt in range(max_attempts):
             try:
                 if self.config.llm_timeout_seconds and self.config.llm_timeout_seconds > 0:
                     scores, response = await asyncio.wait_for(
-                        self.llm.aask_json(
-                            system=RANKER_SYSTEM_PROMPT,
-                            user=user_msg,
-                            schema_model=RankedFileScoreResponse,
-                            schema_name="ranked_file_score_response",
-                        ),
+                        self.llm.aask_json(**ask_kwargs),
                         timeout=self.config.llm_timeout_seconds,
                     )
                 else:
-                    scores, response = await self.llm.aask_json(
-                        system=RANKER_SYSTEM_PROMPT,
-                        user=user_msg,
-                        schema_model=RankedFileScoreResponse,
-                        schema_name="ranked_file_score_response",
-                    )
+                    scores, response = await self.llm.aask_json(**ask_kwargs)
                 elapsed = asyncio.get_running_loop().time() - started_at
                 logger.info(
                     "Ranker chunk %d/%d completed in %.1fs",
