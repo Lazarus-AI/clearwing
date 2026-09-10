@@ -860,3 +860,183 @@ def test_exploitation_checkpoint_rejects_different_options():
         ExploitationResult(verified=[], exploited=[]), options={"no_exploit": False}
     )
     assert checkpoint.restore(options={"no_exploit": True}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["worker", "pool", "no_model"])
+async def test_incomplete_ordinary_hunt_is_not_a_success_checkpoint(tmp_path, monkeypatch, failure):
+    from unittest.mock import AsyncMock
+
+    from clearwing.sourcehunt.pool import HunterPool
+
+    runner = SourceHuntRunner(
+        repo_url="fixture-only", output_dir=str(tmp_path),
+        enable_mechanism_memory=False, enable_subsystem_hunt=False,
+    )
+    preprocess = PreprocessCheckpoint(commit_sha=None, options={}, result={})
+    rank = RankCheckpoint(options={}, ranked_file_targets=[])
+    runner._checkpoint = SourceHuntCheckpoint(
+        preprocess=preprocess,
+        rank=rank,
+        verification=VerificationCheckpoint.from_result(
+            VerificationResult(verified=[], rejected=[]), options={}
+        ),
+        exploitation=ExploitationCheckpoint.from_result(
+            ExploitationResult(verified=[], exploited=[]), options={}
+        ),
+    )
+    monkeypatch.setattr(runner, "_get_native_client", lambda *a, **k: None if failure == "no_model" else object())
+    monkeypatch.setattr(runner, "_budget_exhausted", lambda: False)
+    monkeypatch.setattr(runner, "_hunt_subsystems", AsyncMock())
+    saved_checkpoints = []
+    monkeypatch.setattr(
+        runner, "_dump_checkpoint",
+        lambda: saved_checkpoints.append(runner._checkpoint.model_dump(mode="json")),
+    )
+    events = []
+    monkeypatch.setattr(runner, "_emit_stage", lambda *a, **k: events.append(a))
+    monkeypatch.setattr(
+        HunterPool, "arun" if failure == "pool" else "_run_file_task",
+        AsyncMock(side_effect=RuntimeError("fixture worker failed")),
+    )
+    pipeline_status = PipelineStatus()
+    result = await runner._hunt(
+        files=[{"path": "fixture.txt", "tier": "A"}], repo_path=str(tmp_path),
+        pipeline_status=pipeline_status, stage_files=["fixture.txt"],
+        seeded_by_file={}, semgrep_hints_by_file={}, entry_points_by_file={},
+        seed_corpus_by_file={}, findings_pool=None, callgraph=None,
+    )
+    assert result.target_plan_completed is False
+    assert result.files_hunted == 0
+    assert ("hunt", "completed") not in events
+    assert ("hunt", "degraded") in events
+    assert pipeline_status.stages["hunter_pool"].outcome.value == "degraded"
+    if failure == "pool":
+        assert pipeline_status.stages["hunter_pool"].error == "RuntimeError: fixture worker failed"
+    assert runner._checkpoint.preprocess is preprocess
+    assert runner._checkpoint.rank is rank
+    assert runner._checkpoint.hunt is None
+    assert runner._checkpoint.verification is None
+    assert runner._checkpoint.exploitation is None
+    assert len(saved_checkpoints) == 1
+    assert saved_checkpoints[0]["preprocess"] is not None
+    assert saved_checkpoints[0]["rank"] is not None
+    for stage in ("hunt", "verification", "exploitation"):
+        assert saved_checkpoints[0][stage] is None
+
+
+@pytest.mark.parametrize("with_findings", [False, True])
+def test_ordinary_incomplete_hunt_returns_incomplete_not_clean(tmp_path, monkeypatch, with_findings):
+    from unittest.mock import AsyncMock, Mock
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    runner = SourceHuntRunner(
+        repo_url=str(repo), local_path=str(repo), output_dir=str(tmp_path / "results"),
+        no_rank=True, no_verify=False, no_exploit=False,
+        enable_mechanism_memory=False, enable_calibration=False,
+        enable_knowledge_graph=False, enable_subsystem_hunt=False,
+        enable_findings_pool=False,
+    )
+    monkeypatch.setattr(runner, "_ensure_sandbox_factory", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_preflight_budget_clients", lambda: None)
+    monkeypatch.setattr(runner, "_get_native_client", Mock(side_effect=AssertionError("No providers")))
+    runner._preprocess_restored = False
+    monkeypatch.setattr(runner, "_preprocess", lambda: PreprocessResult(
+        repo_path=str(repo), file_targets=[{"path": "sample.c"}], static_findings=[],
+    ))
+    monkeypatch.setattr(runner, "_write_report", lambda **kwargs: {})
+    verify = AsyncMock(side_effect=AssertionError("Verification must not run"))
+    exploit = AsyncMock(side_effect=AssertionError("Exploitation must not run"))
+    monkeypatch.setattr(runner, "_verify", verify)
+    monkeypatch.setattr(runner, "_exploit", exploit)
+    events = []
+    monkeypatch.setattr(runner, "_emit_stage", lambda *args, **kwargs: events.append(args))
+    findings = [Finding(id="synthetic", file="sample.c", severity="high")] if with_findings else []
+
+    async def incomplete_hunt(**kwargs):
+        return HuntResult(
+            findings=findings, files_hunted=int(with_findings), spent_per_tier={},
+            target_plan_completed=False,
+        )
+
+    monkeypatch.setattr(runner, "_hunt", incomplete_hunt)
+    result = runner.run()
+    assert result.status == "incomplete"
+    assert result.exit_code == 3
+    assert result.findings == findings
+    assert result.files_hunted == int(with_findings)
+    verify.assert_not_awaited()
+    exploit.assert_not_awaited()
+    assert ("verify", "skipped") in events
+    assert ("exploit", "skipped") in events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["partial", "complete", "empty", "disabled", "budget"])
+async def test_synthetic_hunt_checkpoint_classification(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    runner = SourceHuntRunner(
+        repo_url="fixture-only",
+        output_dir=str(tmp_path),
+        enable_mechanism_memory=False,
+        enable_subsystem_hunt=False,
+    )
+    runner._no_per_file_hunt = outcome == "disabled"
+    runner._checkpoint = SourceHuntCheckpoint()
+    findings = [Finding(id="synthetic", file="fixture.txt", severity="high")] if outcome == "partial" else []
+    pool = SimpleNamespace(
+        arun=AsyncMock(return_value=findings),
+        all_targets_completed=outcome == "complete",
+        budget_exhausted=False,
+        total_spent=0.0,
+        spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+        runs_per_band={},
+        spent_per_band={},
+        promotion_counts={},
+        completed_target_count=1,
+    )
+    pool_factory = Mock(return_value=pool)
+    monkeypatch.setattr("clearwing.sourcehunt.runner.HunterPool", pool_factory)
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runner, "_budget_exhausted", lambda: outcome == "budget")
+    monkeypatch.setattr(runner, "_hunt_subsystems", AsyncMock())
+    snapshots = []
+    monkeypatch.setattr(
+        runner, "_dump_checkpoint",
+        lambda: snapshots.append(runner._checkpoint.model_dump(mode="json")),
+    )
+    events = []
+    monkeypatch.setattr(runner, "_emit_stage", lambda *args, **kwargs: events.append(args))
+    pipeline_status = PipelineStatus()
+    files = [] if outcome == "empty" else [{"path": "fixture.txt", "tier": "A"}]
+    result = await runner._hunt(
+        files=files, repo_path=str(tmp_path), pipeline_status=pipeline_status,
+        stage_files=[file["path"] for file in files], seeded_by_file={},
+        semgrep_hints_by_file={}, entry_points_by_file={}, seed_corpus_by_file={},
+        findings_pool=None, callgraph=None,
+    )
+    complete = outcome in {"complete", "empty", "disabled"}
+    assert result.target_plan_completed is complete
+    assert result.findings == findings
+    assert (runner._checkpoint.hunt is not None) is complete
+    assert len(snapshots) == 1
+    assert (snapshots[0]["hunt"] is not None) is complete
+    if outcome in {"partial", "complete"}:
+        pool.arun.assert_awaited_once()
+        assert result.files_hunted == 1
+        expected = "degraded" if outcome == "partial" else "succeeded"
+        assert pipeline_status.stages["hunter_pool"].outcome.value == expected
+    else:
+        pool_factory.assert_not_called()
+        assert result.files_hunted == 0
+    expected_event = {
+        "partial": "degraded", "complete": "completed", "empty": "skipped",
+        "disabled": "skipped", "budget": "budget_exhausted",
+    }[outcome]
+    assert ("hunt", expected_event) in events
+    if outcome != "complete":
+        assert ("hunt", "completed") not in events
