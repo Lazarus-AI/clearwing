@@ -293,6 +293,8 @@ async def test_accepted_native_stream_never_replays(
     async def events():
         if partial:
             yield SimpleNamespace(content="partial", end=None)
+        else:
+            yield SimpleNamespace(kind="chunk", content=None, end=None)
         if error != "eof":
             raise RuntimeError(error)
 
@@ -361,6 +363,63 @@ async def test_dispatch_failure_retry_and_accounting(
     with pytest.raises(RuntimeError, match=error):
         await call(messages=[ChatMessage("user", "hello")], max_tokens=2, **kwargs)
     assert operation.await_count == (2 if unbilled else 1)
+    assert ledger.spent_usd == (2.0 if enforcing and not unbilled else 0.0)
+    assert ledger.snapshot()["reserved_usd"] == 0
+    assert ledger._records[-1]["status"] == ("rejected" if unbilled else "ambiguous_failure")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforcing", [False, True])
+@pytest.mark.parametrize("phase", ["no_event", "start", "accepted", "content"])
+@pytest.mark.parametrize(
+    "error,preconnection",
+    [
+        ("connection refused", True),
+        ("dns error", True),
+        ("certificate verify failed", True),
+        ("certificate verification failed", True),
+        ("TLS handshake failed", False),
+        ("error sending request", False),
+        ("connection reset", False),
+        ("timeout", False),
+    ],
+)
+async def test_deferred_native_transport_failure_accounting(
+    monkeypatch, tmp_path, enforcing, phase, error, preconnection
+):
+    async def events():
+        if phase != "no_event":
+            yield SimpleNamespace(
+                kind="start" if phase == "start" else "chunk",
+                content="partial" if phase == "content" else None,
+                end=None,
+            )
+        raise RuntimeError(error)
+
+    operation = AsyncMock(side_effect=lambda *_: events())
+    monkeypatch.setattr(
+        AsyncLLMClient, "_build_client", lambda *_: SimpleNamespace(astream_chat=operation)
+    )
+    fallback = AsyncMock(side_effect=RuntimeError(error))
+    monkeypatch.setattr(AsyncLLMClient, "_openai_chat_http_fallback", fallback)
+    ledger = make_ledger(tmp_path, enforcing)
+    client = AsyncLLMClient(
+        model_name="fixture-model",
+        provider_name="openai",
+        api_key="dummy",
+        base_url="https://example.test/v1",
+        rate_limit_max_retries=1,
+    ).with_spend_ledger(ledger, stage="test")
+    monkeypatch.setattr(client, "_retry_delay_seconds", lambda *_: 0)
+    deltas = []
+    with pytest.raises(RuntimeError, match=error):
+        await client.achat_stream(
+            messages=[ChatMessage("user", "hello")], max_tokens=2, on_text_delta=deltas.append
+        )
+    unbilled = preconnection and phase in ("no_event", "start")
+    assert operation.await_count == (2 if unbilled else 1)
+    assert fallback.await_count == (1 if unbilled else 0)
+    assert deltas == (["partial"] if phase == "content" else [])
     assert ledger.spent_usd == (2.0 if enforcing and not unbilled else 0.0)
     assert ledger.snapshot()["reserved_usd"] == 0
     assert ledger._records[-1]["status"] == ("rejected" if unbilled else "ambiguous_failure")

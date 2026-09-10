@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
-from genai_pyo3 import ChatMessage
+from genai_pyo3 import ChatMessage, Client
 
 from clearwing.llm.budget import SpendLedger
 from clearwing.llm.native import AsyncLLMClient
@@ -207,3 +207,47 @@ async def test_completed_loopback_stream_settles_usage(monkeypatch, tmp_path, tr
     assert ledger.spent_usd == 1.0
     assert ledger.snapshot()["reserved_usd"] == 0
     assert ledger._records[-1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforcing", [False, True])
+async def test_native_closed_loopback_port_respects_error_evidence(
+    monkeypatch, tmp_path, enforcing
+):
+    """Native versions omitting the refusal cause must still fail conservatively."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as closed_port:
+        closed_port.bind(("127.0.0.1", 0))
+        port = closed_port.getsockname()[1]
+        closed_port.close()
+        client, ledger = loopback_client(
+            f"http://127.0.0.1:{port}/v1/", tmp_path, enforcing, "native", monkeypatch
+        )
+        native = client._build_client(Client)
+        operation = AsyncMock(wraps=native.astream_chat)
+        monkeypatch.setattr(native, "astream_chat", operation)
+        monkeypatch.setattr(client, "_build_client", lambda *_: native)
+        monkeypatch.setattr(client, "_should_try_openai_http_fallback", lambda *_: False)
+        deltas = []
+        with pytest.raises(
+            RuntimeError, match="(?i)connection refused|error sending request"
+        ) as failure:
+            await asyncio.wait_for(
+                client.achat_stream(
+                    messages=[ChatMessage("user", "hello")],
+                    max_tokens=2,
+                    on_text_delta=deltas.append,
+                ),
+                timeout=10,
+            )
+
+    explicit_refusal = "connection refused" in str(failure.value).lower()
+    assert operation.await_count == (2 if explicit_refusal else 1)
+    assert (
+        AsyncLLMClient._should_try_openai_http_fallback(client, failure.value) == explicit_refusal
+    )
+    assert deltas == []
+    assert ledger.spent_usd == (2.0 if enforcing and not explicit_refusal else 0.0)
+    assert ledger.snapshot()["reserved_usd"] == 0
+    assert ledger._records[-1]["status"] == (
+        "rejected" if explicit_refusal else "ambiguous_failure"
+    )
