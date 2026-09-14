@@ -19,6 +19,7 @@ from clearwing.runners.parallel.executor import TargetResult
 from clearwing.sourcehunt.entry_points import EntryPoint
 from clearwing.sourcehunt.findings_pool import FindingsPool
 from clearwing.sourcehunt.hunt_work_cache import HuntWorkCache
+from clearwing.sourcehunt.instrumentation import stable_run_id
 from clearwing.sourcehunt.pool import HunterPool, HuntPoolConfig, WorkItem, _extract_transcript
 
 
@@ -101,7 +102,10 @@ def test_completed_work_round_trips_and_corruption_is_a_cache_miss(tmp_path):
 
     # Zero-finding completed work is still cached (it is real, finished work).
     zero_id = "work-" + "b" * 16
-    cache.save(zero_id, TargetResult(target="app.py", status="completed", findings=[], tier="A", band="fast"))
+    cache.save(
+        zero_id,
+        TargetResult(target="app.py", status="completed", findings=[], tier="A", band="fast"),
+    )
     assert cache.load(zero_id) is not None
 
     # A torn file is a cache miss, not a crash — the work simply re-runs.
@@ -112,7 +116,9 @@ def test_completed_work_round_trips_and_corruption_is_a_cache_miss(tmp_path):
 def test_only_completed_work_is_cached(tmp_path):
     cache = HuntWorkCache(tmp_path / "hunt-work")
     work_id = "work-" + "c" * 16
-    cache.save(work_id, TargetResult(target="app.py", status="error", findings=[], tier="A", band="fast"))
+    cache.save(
+        work_id, TargetResult(target="app.py", status="error", findings=[], tier="A", band="fast")
+    )
     assert cache.load(work_id) is None
     assert not (cache.work_dir / f"{work_id}.json").exists()
     # A malformed id is never written or read.
@@ -122,8 +128,12 @@ def test_only_completed_work_is_cached(tmp_path):
 def test_save_is_write_once(tmp_path):
     cache = HuntWorkCache(tmp_path / "hunt-work")
     work_id = "work-" + "d" * 16
-    first = TargetResult(target="app.py", status="completed", findings=[], cost_usd=1.0, tier="A", band="fast")
-    second = TargetResult(target="app.py", status="completed", findings=[], cost_usd=9.0, tier="A", band="fast")
+    first = TargetResult(
+        target="app.py", status="completed", findings=[], cost_usd=1.0, tier="A", band="fast"
+    )
+    second = TargetResult(
+        target="app.py", status="completed", findings=[], cost_usd=9.0, tier="A", band="fast"
+    )
     cache.save(work_id, first)
     cache.save(work_id, second)  # ignored — first result is authoritative
     assert cache.load(work_id).cost_usd == 1.0
@@ -157,8 +167,8 @@ async def test_cached_work_is_reused_and_promotions_follow_normal_path(tmp_path)
     promoted = WorkItem(target, "standard", seed_transcript=_extract_transcript(base_result))
     work_cache = _MemoryWorkCache(
         {
-            base.stable_identifier("sh-test", "A"): base_result,
-            promoted.stable_identifier("sh-test", "A"): TargetResult(
+            base.cache_identifier("sh-test", "A"): base_result,
+            promoted.cache_identifier("sh-test", "A"): TargetResult(
                 target="app.py", status="completed", findings=[], tier="A", band="standard"
             ),
         }
@@ -223,7 +233,7 @@ async def test_mismatched_cached_work_is_a_cache_miss(tmp_path):
     item = WorkItem(target, "fast")
     work_cache = _MemoryWorkCache(
         {
-            item.stable_identifier("sh-test", "A"): TargetResult(
+            item.cache_identifier("sh-test", "A"): TargetResult(
                 target="other.py", status="completed", findings=[], tier="A", band="fast"
             )
         }
@@ -288,8 +298,12 @@ async def test_findings_pool_add_is_idempotent(tmp_path):
 
 def test_work_ids_distinguish_overloaded_entry_points(tmp_path):
     target = _target(tmp_path)
-    first = WorkItem(target, "fast", entry_point=EntryPoint("app.py", "parse", 1, 10, "parser", "first"))
-    second = WorkItem(target, "fast", entry_point=EntryPoint("app.py", "parse", 20, 30, "parser", "second"))
+    first = WorkItem(
+        target, "fast", entry_point=EntryPoint("app.py", "parse", 1, 10, "parser", "first")
+    )
+    second = WorkItem(
+        target, "fast", entry_point=EntryPoint("app.py", "parse", 20, 30, "parser", "second")
+    )
     assert first.stable_identifier("sh-test", "A") != second.stable_identifier("sh-test", "A")
 
 
@@ -299,6 +313,38 @@ def test_work_ids_vary_with_tier_and_context(tmp_path):
     assert item.stable_identifier("sh-test", "A") != item.stable_identifier("sh-test", "B")
     with_context = WorkItem(target, "fast", context_id="ctx-1")
     assert item.stable_identifier("sh-test", "A") != with_context.stable_identifier("sh-test", "A")
+
+
+def test_cache_ids_are_cap_specific_while_semantic_id_stays_legacy(tmp_path):
+    item = WorkItem(_target(tmp_path), "fast")
+    legacy_id = stable_run_id(
+        "work",
+        {
+            "run_id": "sh-test",
+            "file": "app.py",
+            "tier": "A",
+            "target_start_line": None,
+            "target_end_line": None,
+            "target_sha256": None,
+            "band": "fast",
+            "attempt": 0,
+            "entry_point": None,
+            "seed_context": None,
+            "seed_transcript": None,
+            "context_id": "",
+        },
+    )
+
+    assert item.stable_identifier("sh-test", "A") == legacy_id
+    cache_ids = {
+        item.cache_identifier("sh-test", "A", trace_step_max_chars=cap)
+        for cap in (0, 2048, 4096, 8192)
+    }
+    assert legacy_id not in cache_ids
+    assert len(cache_ids) == 4
+    assert item.cache_identifier("sh-test", "A", trace_step_max_chars=-1) == item.cache_identifier(
+        "sh-test", "A", trace_step_max_chars=0
+    )
 
 
 # --- Spend ledger lifetime-budget resume ------------------------------------
@@ -371,9 +417,7 @@ def test_runner_resume_requires_an_existing_session(tmp_path):
     from clearwing.sourcehunt.runner import SourceHuntRunner
 
     with pytest.raises(ValueError, match="does not exist"):
-        SourceHuntRunner(
-            repo_url="x", output_dir=str(tmp_path), resume_session_id="sh-nope"
-        )
+        SourceHuntRunner(repo_url="x", output_dir=str(tmp_path), resume_session_id="sh-nope")
 
 
 def test_runner_resume_conflicts_with_parent_session(tmp_path):

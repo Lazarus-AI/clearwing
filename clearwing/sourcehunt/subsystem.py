@@ -327,6 +327,9 @@ class SubsystemHuntConfig:
     project_name: str = "target"
     trajectory_root: str | Path | None = None
     instrumentation: Any = None
+    # Per-field character cap for trace-step code_snippet and note strings.
+    # 0 or negative disables the cap (full trace retained).
+    trace_step_max_chars: int = 4096
     # Max files enumerated in each subsystem hunt prompt. None = list every file
     # (correct for an explicit scope so the ground-truth file is never hidden).
     max_files_in_prompt: int | None = None
@@ -485,6 +488,7 @@ class SubsystemHuntRunner:
                 callgraph=self.config.callgraph,
                 max_files_in_prompt=self.config.max_files_in_prompt,
                 max_steps_without_progress=self.config.max_steps_without_progress,
+                trace_step_max_chars=self.config.trace_step_max_chars,
             )
             ctx.work_item_id = work_item_id
             ctx.instrumentation = instrumentation

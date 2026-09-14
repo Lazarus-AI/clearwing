@@ -322,7 +322,7 @@ class SourceHuntRunner:
         falsify: bool = True,
         stop_after: str | None = None,
         on_progress: SourceHuntProgressCallback | None = None,
-        trace_step_max_chars: int = 4096,
+        trace_step_max_chars: int | None = None,
     ):
         # --- Resolve from SourceHuntConfig when provided ----------------------
         if config is not None:
@@ -442,7 +442,7 @@ class SourceHuntRunner:
             gvisor_runtime = gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
             trace_step_max_chars = (
-                trace_step_max_chars if trace_step_max_chars != 4096 else h.trace_step_max_chars
+                h.trace_step_max_chars if trace_step_max_chars is None else trace_step_max_chars
             )
             p = config.proof
             flow = flow if flow != "legacy" else p.flow
@@ -505,6 +505,11 @@ class SourceHuntRunner:
                 "repo_url is required — pass it directly or via "
                 "config=SourceHuntConfig(target=TargetConfig(repo_url=...))"
             )
+        if trace_step_max_chars is None:
+            trace_step_max_chars = 4096
+        if not isinstance(trace_step_max_chars, int) or isinstance(trace_step_max_chars, bool):
+            raise ValueError("trace_step_max_chars must be an integer")
+        trace_step_max_chars = max(0, trace_step_max_chars)
         if sandbox_cpus is not None and (not math.isfinite(sandbox_cpus) or sandbox_cpus < 0):
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
         normalized_target_files = self._normalize_target_files(target_files or ())
@@ -2895,6 +2900,7 @@ class SourceHuntRunner:
             "subsystem_paths": sorted(self._subsystem_paths or []),
             "subsystem_budget_usd": self._subsystem_budget_usd,
             "subsystem_max_parallel": self._subsystem_max_parallel,
+            "trace_step_max_chars": self._trace_step_max_chars,
         }
         if self._target_files:
             options.update(
@@ -3289,6 +3295,7 @@ class SourceHuntRunner:
                 max_steps_without_progress=self._max_steps_without_progress,
                 trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
                 instrumentation=self._instrumentation,
+                trace_step_max_chars=self._trace_step_max_chars,
             )
         )
         try:

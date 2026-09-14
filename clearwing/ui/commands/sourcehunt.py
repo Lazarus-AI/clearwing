@@ -356,8 +356,8 @@ def add_parser(subparsers):
         default=False,
         dest="full_trace",
         help=(
-            "Retain the full trace-step snippets attached to record_finding "
-            "instead of capping each step at 4096 characters."
+            "Retain full record_finding trace text instead of capping each "
+            "code_snippet and note field at 4096 characters."
         ),
     )
     parser.add_argument(

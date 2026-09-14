@@ -619,6 +619,54 @@ async def test_runner_checkpoints_and_restores_hunt(tmp_path: Path, monkeypatch)
     assert restored.subsystems_hunted == 1
 
 
+@pytest.mark.asyncio
+async def test_runner_rejects_hunt_checkpoint_from_different_trace_cap(tmp_path: Path, monkeypatch):
+    first = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path / "first"),
+        enable_mechanism_memory=False,
+        enable_subsystem_hunt=False,
+    )
+    first._checkpoint = SourceHuntCheckpoint()
+    monkeypatch.setattr(first, "_get_native_client", lambda *args, **kwargs: None)
+    await first._hunt(
+        files=[],
+        repo_path=str(tmp_path),
+        pipeline_status=PipelineStatus(),
+        stage_files=[],
+        seeded_by_file={},
+        semgrep_hints_by_file={},
+        entry_points_by_file={},
+        seed_corpus_by_file={},
+        findings_pool=None,
+        callgraph=None,
+    )
+    assert first._checkpoint.hunt is not None
+    assert first._checkpoint.hunt.options["trace_step_max_chars"] == 4096
+
+    resumed = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path / "resumed"),
+        checkpoint=first._checkpoint.model_dump(mode="json"),
+        enable_mechanism_memory=False,
+        enable_subsystem_hunt=False,
+        trace_step_max_chars=0,
+    )
+    with pytest.raises(ValueError, match="hunt checkpoint is invalid or incompatible"):
+        await resumed._hunt(
+            files=[],
+            repo_path=str(tmp_path),
+            pipeline_status=PipelineStatus(),
+            stage_files=[],
+            seeded_by_file={},
+            semgrep_hints_by_file={},
+            entry_points_by_file={},
+            seed_corpus_by_file={},
+            findings_pool=None,
+            callgraph=None,
+        )
+
+
 def test_hunt_checkpoint_rejects_different_options():
     checkpoint = HuntCheckpoint.from_result(
         HuntResult(findings=[], spent_per_tier={}), options={"agent_mode": "auto"}

@@ -31,9 +31,9 @@ class HunterContext:
     sandbox: SandboxInstance | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
     trace_steps: list = field(default_factory=list)  # accumulator for TraceStep dicts
-    # Per-step string cap for `code_snippet` and `note`. Trace steps flow into
-    # finding evidence and artifacts; unbounded snippets blow up on large repos.
-    # 0 or negative disables truncation.
+    # Per-field character cap for the trace step's `code_snippet` and `note`.
+    # Trace steps flow into finding evidence and artifacts; unbounded strings
+    # blow up on large repos. 0 or negative disables truncation.
     trace_step_max_chars: int = 4096
     files_read: set = field(default_factory=set)  # files accessed via read_source_file
     read_ranges: dict[str, list[tuple[int, int]]] = field(default_factory=dict)

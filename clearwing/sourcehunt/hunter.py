@@ -1454,6 +1454,7 @@ def build_subsystem_hunter_agent(
     callgraph: Any = None,
     max_files_in_prompt: int | None = None,
     max_steps_without_progress: int = 8,
+    trace_step_max_chars: int = 4096,
 ) -> tuple[NativeHunter, HunterContext]:
     """Build a subsystem-level hunter agent (spec 006).
 
@@ -1470,6 +1471,7 @@ def build_subsystem_hunter_agent(
         callgraph=callgraph,
         subsystem=subsystem,
         require_invariant_map=True,
+        trace_step_max_chars=trace_step_max_chars,
     )
 
     tools = build_deep_agent_tools(ctx)
