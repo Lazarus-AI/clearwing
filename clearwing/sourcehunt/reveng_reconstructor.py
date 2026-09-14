@@ -77,8 +77,8 @@ class RevengReconstructor:
     def __init__(self, llm: Any, batch_size: int | None = None):
         self._llm = llm
         resolved = batch_size if batch_size is not None else self.BATCH_SIZE
-        if resolved <= 0:
-            raise ValueError(f"batch_size must be >= 1, got {resolved}")
+        if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved < 1:
+            raise ValueError(f"batch_size must be >= 1 and an integer, got {resolved!r}")
         self._batch_size = resolved
 
     async def areconstruct(
@@ -103,7 +103,7 @@ class RevengReconstructor:
         context = self._build_context(static_info)
 
         for i in range(0, len(prioritized), self._batch_size):
-            batch = prioritized[i:i + self._batch_size]
+            batch = prioritized[i : i + self._batch_size]
             reconstructed = await self._reconstruct_batch(batch, context)
             result.sources.extend(reconstructed)
 
@@ -130,7 +130,8 @@ class RevengReconstructor:
 
         try:
             response = await self._llm.aask_text(
-                system=RECONSTRUCTION_SYSTEM_PROMPT, user=user_msg,
+                system=RECONSTRUCTION_SYSTEM_PROMPT,
+                user=user_msg,
             )
             text = response.first_text if hasattr(response, "first_text") else str(response)
             return self._parse_response(text, batch)
@@ -153,13 +154,15 @@ class RevengReconstructor:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            results.append(ReconstructedSource(
-                original_name=item.get("original_name", ""),
-                reconstructed_name=item.get("reconstructed_name", ""),
-                source_code=item.get("source_code", ""),
-                confidence=float(item.get("confidence", 0.0)),
-                notes=item.get("notes", ""),
-            ))
+            results.append(
+                ReconstructedSource(
+                    original_name=item.get("original_name", ""),
+                    reconstructed_name=item.get("reconstructed_name", ""),
+                    source_code=item.get("source_code", ""),
+                    confidence=float(item.get("confidence", 0.0)),
+                    notes=item.get("notes", ""),
+                )
+            )
         return results
 
     def _fallback_reconstruction(
@@ -187,10 +190,7 @@ class RevengReconstructor:
         if static_info.imports:
             parts.append(f"Imported functions: {', '.join(static_info.imports[:50])}")
         if static_info.strings_sample:
-            interesting = [
-                s for s in static_info.strings_sample.splitlines()[:100]
-                if len(s) > 4
-            ]
+            interesting = [s for s in static_info.strings_sample.splitlines()[:100] if len(s) > 4]
             if interesting:
                 parts.append("Notable strings:\n" + "\n".join(interesting[:30]))
         return "\n".join(parts) if parts else "(no static analysis context)"
