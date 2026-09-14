@@ -174,7 +174,7 @@ class RecordFindingInput(ToolInputModel):
 
 
 def _cap_trace_strings(code_snippet: str, note: str, cap: int) -> tuple[str, str, bool, int]:
-    """Cap trace-step strings. Returns (snippet, note, truncated, original_chars)."""
+    """Cap each trace-step text field. Return values include combined original size."""
     if not cap or cap <= 0:
         return code_snippet, note, False, 0
     orig_chars = len(code_snippet) + len(note)

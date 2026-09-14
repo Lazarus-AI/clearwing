@@ -16,7 +16,7 @@ import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,16 @@ class TraceStep(BaseModel):
     note: str = ""  # free-form: role, taint state, assumptions, reasoning
     truncated: bool = False  # set when code_snippet or note was capped at record time
     original_chars: int = 0  # pre-truncation combined char count of code_snippet + note
+
+    @model_serializer(mode="wrap")
+    def _serialize_truncation_metadata(self, handler: Any) -> dict[str, Any]:
+        """Keep the legacy trace-step payload unchanged unless truncation occurred."""
+
+        data = handler(self)
+        if not self.truncated:
+            data.pop("truncated", None)
+            data.pop("original_chars", None)
+        return data
 
 
 class VulnerabilityTrace(BaseModel):

@@ -8,6 +8,7 @@ import pytest
 
 from clearwing.agent.tools.hunt.reporting import build_reporting_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
+from clearwing.sourcehunt.instrumentation import stable_run_id
 
 
 @pytest.fixture
@@ -152,6 +153,45 @@ def test_record_trace_step_below_cap_preserves_strings(tools, ctx):
     assert step.original_chars == 0
 
 
+def test_untruncated_trace_preserves_legacy_payload_and_stable_id(tools, ctx):
+    ctx.work_item_id = "work-legacy-semantic"
+    tools["record_trace_step"](
+        file="app.py",
+        line=42,
+        code_snippet="query = user_input",
+        note="ENTRY/SINK: input reaches query",
+    )
+
+    assert "Finding recorded" in _record_finding(tools)
+    trace = {
+        "steps": [
+            {
+                "file": "app.py",
+                "line": 42,
+                "function": "",
+                "code_snippet": "query = user_input",
+                "note": "ENTRY/SINK: input reaches query",
+            }
+        ],
+        "summary": "",
+    }
+    finding = ctx.findings[0]
+    assert finding.vulnerability_trace == trace
+    assert finding.extra["stable_finding_id"] == stable_run_id(
+        "hunter",
+        {
+            "run_id": "",
+            "work_item_id": "work-legacy-semantic",
+            "file": "app.py",
+            "line": 42,
+            "type": "sql_injection",
+            "cwe": "CWE-89",
+            "description": "SQL built via string concatenation.",
+            "trace": trace,
+        },
+    )
+
+
 def test_record_trace_step_truncates_above_cap(ctx):
     ctx.trace_step_max_chars = 32
     tools = {t.name: t.handler for t in build_reporting_tools(ctx)}
@@ -163,6 +203,16 @@ def test_record_trace_step_truncates_above_cap(ctx):
     assert step.note == "b" * 32
     assert step.truncated is True
     assert step.original_chars == 150
+    assert step.model_dump() == {
+        "file": "app.py",
+        "line": 1,
+        "function": "",
+        "code_snippet": "a" * 32,
+        "note": "b" * 32,
+        "truncated": True,
+        "original_chars": 150,
+    }
+    assert len(step.code_snippet) + len(step.note) == 64
 
 
 def test_record_finding_inline_trace_step_is_capped(tools, ctx):

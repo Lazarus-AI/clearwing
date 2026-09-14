@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from clearwing.llm import NativeToolSpec
 from clearwing.sourcehunt.callgraph import CallGraph
+from clearwing.sourcehunt.checkpoints import HuntResult
 from clearwing.sourcehunt.runner import SourceHuntRunner
-from clearwing.sourcehunt.state import FileTarget, StageOutcome, SubsystemTarget
+from clearwing.sourcehunt.state import FileTarget, PipelineStatus, StageOutcome, SubsystemTarget
 from clearwing.sourcehunt.subsystem import (
     SubsystemHuntConfig,
     SubsystemHuntRunner,
@@ -226,9 +228,9 @@ def _callgraph_seed_with_neighbors():
 def test_subsystem_from_path_single_file_expands_neighborhood():
     files = [
         _ft("crypto/aes/aes_core.c", 4.0),
-        _ft("crypto/aes/aes_asm.c", 3.0),   # callee
-        _ft("crypto/modes/cbc.c", 3.5),     # caller
-        _ft("fs/ext4/inode.c", 2.0),        # unrelated
+        _ft("crypto/aes/aes_asm.c", 3.0),  # callee
+        _ft("crypto/modes/cbc.c", 3.5),  # caller
+        _ft("fs/ext4/inode.c", 2.0),  # unrelated
     ]
     result = subsystem_from_path(
         "crypto/aes/aes_core.c", files, callgraph=_callgraph_seed_with_neighbors()
@@ -255,9 +257,7 @@ def test_subsystem_from_path_single_file_no_callgraph():
 def test_subsystem_from_path_single_file_no_neighbors():
     # Callgraph present but the file has no edges -> hunt it alone.
     files = [_ft("crypto/aes/aes_core.c", 4.0), _ft("crypto/aes/aes_asm.c", 3.0)]
-    result = subsystem_from_path(
-        "crypto/aes/aes_core.c", files, callgraph=CallGraph()
-    )
+    result = subsystem_from_path("crypto/aes/aes_core.c", files, callgraph=CallGraph())
     assert len(result.files) == 1
 
 
@@ -278,9 +278,7 @@ def test_subsystem_from_path_single_file_cap_keeps_seed():
     cg.calls_out[seed] = {f"f{i}" for i in range(10)}
     for i in range(10):
         cg.defined_in[f"f{i}"] = {f"crypto/aes/callee_{i}.c"}
-    files = [_ft(seed, 1.0)] + [
-        _ft(f"crypto/aes/callee_{i}.c", float(i)) for i in range(10)
-    ]
+    files = [_ft(seed, 1.0)] + [_ft(f"crypto/aes/callee_{i}.c", float(i)) for i in range(10)]
     result = subsystem_from_path(seed, files, callgraph=cg, max_files=3)
     paths = {f.get("path") for f in result.files}
     assert len(result.files) == 3
@@ -295,9 +293,7 @@ def test_subsystem_from_path_directory_not_expanded():
         _ft("crypto/aes/aes_asm.c", 3.0),
         _ft("crypto/modes/cbc.c", 3.5),
     ]
-    result = subsystem_from_path(
-        "crypto/aes", files, callgraph=_callgraph_seed_with_neighbors()
-    )
+    result = subsystem_from_path("crypto/aes", files, callgraph=_callgraph_seed_with_neighbors())
     paths = {f.get("path") for f in result.files}
     assert paths == {"crypto/aes/aes_core.c", "crypto/aes/aes_asm.c"}
 
@@ -353,9 +349,14 @@ def test_subsystem_prompt_existing_findings():
     from clearwing.findings.types import Finding
 
     f = Finding(
-        id="f1", file="net/ipv4/tcp.c", line_number=42,
-        cwe="CWE-787", severity="high", description="heap overflow in tcp",
-        primitive_type="bounded_write", cluster_id="c1",
+        id="f1",
+        file="net/ipv4/tcp.c",
+        line_number=42,
+        cwe="CWE-787",
+        severity="high",
+        description="heap overflow in tcp",
+        primitive_type="bounded_write",
+        cluster_id="c1",
     )
     pool._findings["f1"] = f
 
@@ -451,6 +452,89 @@ def test_build_subsystem_hunter_agent_tools():
     assert "execute" in tool_names
     assert "read_file" in tool_names
     assert "record_finding" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_subsystem_runner_threads_trace_cap_to_hunter_context(monkeypatch, tmp_path):
+    from clearwing.sourcehunt import hunter as hunter_module
+
+    subsystem = SubsystemTarget(
+        name="test_sub",
+        root_path="src/parser",
+        files=[_ft("src/parser/main.c", 4.0)],
+    )
+    actual_builder = hunter_module.build_subsystem_hunter_agent
+    captured = {}
+
+    def build_and_capture(**kwargs):
+        hunter, ctx = actual_builder(**kwargs)
+        captured["ctx"] = ctx
+        hunter.arun = AsyncMock(
+            return_value=SimpleNamespace(
+                findings=[],
+                cost_usd=0.0,
+                tokens_used=0,
+                stop_reason="completed",
+                potentials=[],
+            )
+        )
+        return hunter, ctx
+
+    monkeypatch.setattr(hunter_module, "build_subsystem_hunter_agent", build_and_capture)
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[subsystem],
+            repo_path=str(tmp_path),
+            llm=MagicMock(),
+            trace_step_max_chars=0,
+        )
+    )
+
+    await runner._run_one_subsystem(subsystem, 1.0, work_item_id="work-test")
+
+    assert captured["ctx"].trace_step_max_chars == 0
+
+
+@pytest.mark.asyncio
+async def test_sourcehunt_runner_threads_trace_cap_to_subsystem_config(monkeypatch, tmp_path):
+    captured = {}
+
+    class CapturingSubsystemRunner:
+        def __init__(self, config):
+            captured["config"] = config
+            self.all_potentials = []
+            self.total_spent = 0.0
+            self.budget_exhausted = False
+
+        async def arun(self):
+            return []
+
+    monkeypatch.setattr(
+        "clearwing.sourcehunt.subsystem.SubsystemHuntRunner",
+        CapturingSubsystemRunner,
+    )
+    runner = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        enable_mechanism_memory=False,
+        enable_subsystem_hunt=True,
+        subsystem_paths=["src/parser"],
+        hunter_llm=MagicMock(),
+        trace_step_max_chars=0,
+    )
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: MagicMock())
+
+    await runner._hunt_subsystems(
+        HuntResult(findings=[], spent_per_tier={}),
+        files=[_ft("src/parser/main.c", 4.0)],
+        repo_path=str(tmp_path),
+        callgraph=None,
+        entry_points_by_file={},
+        findings_pool=None,
+        pipeline_status=PipelineStatus(),
+    )
+
+    assert captured["config"].trace_step_max_chars == 0
 
 
 def test_build_subsystem_hunter_agent_keeps_callgraph_navigation(
@@ -621,22 +705,26 @@ def test_native_hunter_default_message():
 
 @pytest.mark.asyncio
 async def test_subsystem_hunt_runner_no_llm():
-    runner = SubsystemHuntRunner(SubsystemHuntConfig(
-        subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
-        repo_path="/tmp",
-        llm=None,
-    ))
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[SubsystemTarget(name="test", root_path="src", files=[])],
+            repo_path="/tmp",
+            llm=None,
+        )
+    )
     result = await runner.arun()
     assert result == []
 
 
 @pytest.mark.asyncio
 async def test_subsystem_hunt_runner_no_subsystems():
-    runner = SubsystemHuntRunner(SubsystemHuntConfig(
-        subsystems=[],
-        repo_path="/tmp",
-        llm=MagicMock(),
-    ))
+    runner = SubsystemHuntRunner(
+        SubsystemHuntConfig(
+            subsystems=[],
+            repo_path="/tmp",
+            llm=MagicMock(),
+        )
+    )
     result = await runner.arun()
     assert result == []
 
@@ -838,9 +926,7 @@ def test_subsystem_prompt_uncapped_by_default_lists_all_files():
 
     files = [_ft(f"transport/pci/f{i:03d}.c", priority=1.0) for i in range(85)]
     files.append(_ft("transport/pci/common_config.c", priority=1.0))
-    subsystem = SubsystemTarget(
-        name="transport_pci", root_path="transport/pci", files=files
-    )
+    subsystem = SubsystemTarget(name="transport_pci", root_path="transport/pci", files=files)
     prompt = _build_subsystem_prompt(subsystem, "target")
     assert "transport/pci/common_config.c" in prompt
     assert "transport/pci/f000.c" in prompt

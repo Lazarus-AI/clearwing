@@ -50,6 +50,13 @@ TierBudget = _ExecutorTierBudget
 # --- Band promotion (spec 003) ---------------------------------------------
 
 BAND_ORDER = ("fast", "standard", "deep")
+DEFAULT_TRACE_STEP_MAX_CHARS = 4096
+
+
+def _normalized_trace_cap(trace_step_max_chars: int) -> int:
+    """Return the canonical trace retention policy used in compatibility IDs."""
+
+    return max(0, trace_step_max_chars)
 
 
 @dataclass
@@ -76,9 +83,7 @@ class WorkItem:
     seed_context: str | None = None  # spec 004 seed corpus
     context_id: str = ""  # hash of per-file seeded-crash/static prompt inputs
 
-    def stable_identifier(self, run_id: str, tier: str = "") -> str:
-        # The id must vary with everything that changes the hunt result, so the
-        # work cache never returns a result computed under different inputs.
+    def _identity_payload(self, run_id: str, tier: str) -> dict[str, Any]:
         entry_point = self.entry_point
         entry_point_id = (
             {
@@ -91,23 +96,38 @@ class WorkItem:
             if entry_point is not None
             else None
         )
-        return stable_run_id(
-            "work",
-            {
-                "run_id": run_id,
-                "file": self.file_target.get("path", ""),
-                "tier": tier,
-                "target_start_line": self.file_target.get("target_start_line"),
-                "target_end_line": self.file_target.get("target_end_line"),
-                "target_sha256": self.file_target.get("target_sha256"),
-                "band": self.band,
-                "attempt": self.attempt,
-                "entry_point": entry_point_id,
-                "seed_context": self.seed_context,
-                "seed_transcript": self.seed_transcript,
-                "context_id": self.context_id,
-            },
-        )
+        return {
+            "run_id": run_id,
+            "file": self.file_target.get("path", ""),
+            "tier": tier,
+            "target_start_line": self.file_target.get("target_start_line"),
+            "target_end_line": self.file_target.get("target_end_line"),
+            "target_sha256": self.file_target.get("target_sha256"),
+            "band": self.band,
+            "attempt": self.attempt,
+            "entry_point": entry_point_id,
+            "seed_context": self.seed_context,
+            "seed_transcript": self.seed_transcript,
+            "context_id": self.context_id,
+        }
+
+    def stable_identifier(self, run_id: str, tier: str = "") -> str:
+        """Return the legacy semantic ID used by instrumentation and findings."""
+
+        return stable_run_id("work", self._identity_payload(run_id, tier))
+
+    def cache_identifier(
+        self,
+        run_id: str,
+        tier: str = "",
+        *,
+        trace_step_max_chars: int = DEFAULT_TRACE_STEP_MAX_CHARS,
+    ) -> str:
+        """Return a retention-policy-specific ID for persisted hunter work."""
+
+        payload = self._identity_payload(run_id, tier)
+        payload["trace_step_max_chars"] = _normalized_trace_cap(trace_step_max_chars)
+        return stable_run_id("work", payload)
 
 
 def _target_label(file_target: FileTarget) -> str:
@@ -248,9 +268,9 @@ class HuntPoolConfig:
     work_cache: Any = None  # HuntWorkCache | None — work-item-granular hunt resume
     explicit_target_windows: bool = False
     callgraph: Any = None
-    # Per-step character cap for trace snippets attached to record_finding.
+    # Per-field character cap for trace-step code_snippet and note strings.
     # 0 or negative disables the cap (full trace retained).
-    trace_step_max_chars: int = 4096
+    trace_step_max_chars: int = DEFAULT_TRACE_STEP_MAX_CHARS
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -581,14 +601,19 @@ class HunterPool:
                 return False
             band_cost = self.config.band_budget.for_band(wi.band)
             work_item_id = wi.stable_identifier(self.config.session_id_prefix, tier)
-            cached = self.config.work_cache.load(work_item_id) if self.config.work_cache else None
+            cache_id = wi.cache_identifier(
+                self.config.session_id_prefix,
+                tier,
+                trace_step_max_chars=self.config.trace_step_max_chars,
+            )
+            cached = self.config.work_cache.load(cache_id) if self.config.work_cache else None
             if cached is not None and (
                 cached.target != _target_label(wi.file_target)
                 or cached.tier != tier
                 or cached.band != wi.band
                 or (self.config.explicit_target_windows and cached.stop_reason != "completed")
             ):
-                logger.warning("Ignoring mismatched cached hunter work %s", work_item_id)
+                logger.warning("Ignoring mismatched cached hunter work %s", cache_id)
                 cached = None
             if cached is not None:
                 logger.info("Reusing completed hunter work for %s", wi.file_target.get("path", ""))
@@ -609,7 +634,7 @@ class HunterPool:
                     )
                 )
                 from_cache = False
-            in_flight[task] = (wi, work_item_id, from_cache)
+            in_flight[task] = (wi, cache_id, from_cache)
             return True
 
         for _ in range(max(1, self.config.max_parallel)):
@@ -629,7 +654,7 @@ class HunterPool:
                     timeout,
                     len(in_flight),
                 )
-                for task, (wi, _work_item_id, _from_cache) in list(in_flight.items()):
+                for task, (wi, _cache_id, _from_cache) in list(in_flight.items()):
                     task.cancel()
                     key = _target_label(wi.file_target)
                     async with self._state_lock:
@@ -644,7 +669,7 @@ class HunterPool:
                 return spent
 
             for task in done:
-                wi, work_item_id, from_cache = in_flight.pop(task)
+                wi, cache_id, from_cache = in_flight.pop(task)
                 key = _target_label(wi.file_target)
                 try:
                     result = await task
@@ -681,11 +706,9 @@ class HunterPool:
                     and self.config.work_cache is not None
                 ):
                     try:
-                        self.config.work_cache.save(work_item_id, result)
+                        self.config.work_cache.save(cache_id, result)
                     except Exception:
-                        logger.warning(
-                            "Could not cache completed work %s", work_item_id, exc_info=True
-                        )
+                        logger.warning("Could not cache completed work %s", cache_id, exc_info=True)
                 ep_suffix = f":{wi.entry_point.function_name}" if wi.entry_point else ""
                 async with self._state_lock:
                     self._results[f"{key}{ep_suffix}:{wi.band}:{wi.attempt}"] = result

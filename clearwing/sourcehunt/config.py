@@ -104,8 +104,9 @@ class HuntTuning:
     sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
     nday_filter_batch_size: int = 10
     reveng_batch_size: int = 8
-    # Per-step character cap for trace snippets attached to record_finding
-    # (combined code_snippet + note). 0 or negative disables the cap.
+    # Per-field character cap for trace-step code_snippet and note strings.
+    # A persisted step therefore retains at most twice this many characters
+    # across those fields. 0 or negative disables the cap.
     trace_step_max_chars: int = 4096
 
 
