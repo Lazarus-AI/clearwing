@@ -34,6 +34,16 @@ def _parse_fraction(value: str) -> float:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
 def add_parser(subparsers):
     parser = subparsers.add_parser(
         "sourcehunt",
@@ -698,7 +708,7 @@ def add_parser(subparsers):
     )
     parser.add_argument(
         "--nday-filter-batch-size",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Candidates per LLM call in the --nday filter stage "
         "(default: 10). Shrink for smaller local models whose output "
@@ -706,7 +716,7 @@ def add_parser(subparsers):
     )
     parser.add_argument(
         "--reveng-batch-size",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Functions per LLM call in the --reveng reconstruction stage "
         "(default: 8). Shrink for smaller local models whose output "

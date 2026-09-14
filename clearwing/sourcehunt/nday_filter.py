@@ -13,6 +13,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from clearwing.llm import extract_json_array
 
@@ -71,11 +72,13 @@ def parse_cve_list(path: str) -> list[NdayCandidate]:
         cve_id = parts[0]
         patch_source = parts[1] if len(parts) > 1 else ""
         description = parts[2] if len(parts) > 2 else ""
-        candidates.append(NdayCandidate(
-            cve_id=cve_id,
-            patch_source=patch_source,
-            description=description,
-        ))
+        candidates.append(
+            NdayCandidate(
+                cve_id=cve_id,
+                patch_source=patch_source,
+                description=description,
+            )
+        )
     return candidates
 
 
@@ -86,12 +89,20 @@ def fetch_recent_cves(repo_path: str, days: int = 90) -> list[NdayCandidate]:
     try:
         proc = subprocess.run(
             [
-                "git", "-C", repo_path, "log",
+                "git",
+                "-C",
+                repo_path,
+                "log",
                 f"--since={days} days ago",
-                "--all", "--oneline", "--grep=CVE-",
+                "--all",
+                "--oneline",
+                "--grep=CVE-",
                 "--format=%H %s",
             ],
-            capture_output=True, text=True, check=False, timeout=30,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
         )
         if proc.returncode != 0:
             return []
@@ -113,21 +124,23 @@ def fetch_recent_cves(repo_path: str, days: int = 90) -> list[NdayCandidate]:
             if cve_id in seen:
                 continue
             seen.add(cve_id)
-            candidates.append(NdayCandidate(
-                cve_id=cve_id,
-                patch_source=commit_sha,
-                description=message,
-            ))
+            candidates.append(
+                NdayCandidate(
+                    cve_id=cve_id,
+                    patch_source=commit_sha,
+                    description=message,
+                )
+            )
     return candidates
 
 
 class NdayFilter:
     """Cheap LLM-based triage to filter CVEs for exploitability."""
 
-    def __init__(self, llm, batch_size: int = FILTER_BATCH_SIZE):
+    def __init__(self, llm: Any, batch_size: int = FILTER_BATCH_SIZE):
         self._llm = llm
-        if batch_size <= 0:
-            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1 and an integer, got {batch_size!r}")
         self._batch_size = batch_size
 
     async def afilter(self, candidates: list[NdayCandidate]) -> list[NdayCandidate]:
@@ -135,11 +148,12 @@ class NdayFilter:
             return []
 
         for i in range(0, len(candidates), self._batch_size):
-            batch = candidates[i:i + self._batch_size]
+            batch = candidates[i : i + self._batch_size]
             await self._filter_batch(batch)
 
         return [
-            c for c in candidates
+            c
+            for c in candidates
             if c.exploitability in ("LIKELY_EXPLOITABLE", "POSSIBLY_EXPLOITABLE")
         ]
 
@@ -156,7 +170,8 @@ class NdayFilter:
 
         try:
             response = await self._llm.aask_text(
-                system=FILTER_SYSTEM_PROMPT, user=user_msg,
+                system=FILTER_SYSTEM_PROMPT,
+                user=user_msg,
             )
             text = response.first_text if hasattr(response, "first_text") else str(response)
             results = self._parse_response(text)

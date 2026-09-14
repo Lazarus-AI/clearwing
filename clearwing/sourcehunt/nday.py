@@ -6,15 +6,15 @@ Glasswing reference's N-day methodology.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .exploiter import EXPLOIT_BUDGET_BANDS, AgenticExploiter, ExploiterResult
+from .config import HuntTuning
+from .exploiter import AgenticExploiter, ExploiterResult
 from .nday_builder import NdayBuild, NdayBuilder
-from .nday_filter import NdayCandidate, NdayFilter
+from .nday_filter import FILTER_BATCH_SIZE, NdayCandidate, NdayFilter
 from .retro_hunt import fetch_patch_diff
 from .state import Finding
 
@@ -79,6 +79,7 @@ class NdayPipeline:
         project: str = "",
         output_dir: str | None = None,
         filter_batch_size: int | None = None,
+        tuning: HuntTuning | None = None,
     ):
         self._llm = llm
         self._repo_path = repo_path
@@ -86,13 +87,15 @@ class NdayPipeline:
         self._sandbox_factory = sandbox_factory
         self._budget_band = budget_band
         self._project = project
-        from .config import HuntTuning
-
-        self._filter_batch_size = (
-            filter_batch_size
-            if filter_batch_size is not None
-            else HuntTuning().nday_filter_batch_size
-        )
+        if filter_batch_size is not None:
+            self._filter_batch_size = filter_batch_size
+        elif tuning is not None:
+            self._filter_batch_size = tuning.nday_filter_batch_size
+        else:
+            self._filter_batch_size = FILTER_BATCH_SIZE
+        # Construct the filter at the pipeline boundary so invalid tuning is
+        # rejected before patch fetching or sandbox work begins.
+        self._nday_filter = NdayFilter(llm, batch_size=self._filter_batch_size)
         if output_dir is None:
             from clearwing.core.config import default_results_dir
 
@@ -110,15 +113,17 @@ class NdayPipeline:
                 except Exception:
                     logger.debug("Patch fetch failed for %s", c.cve_id, exc_info=True)
 
-        nday_filter = NdayFilter(self._llm, batch_size=self._filter_batch_size)
-        filtered = await nday_filter.afilter(candidates)
+        filtered = await self._nday_filter.afilter(candidates)
         pipeline_result.filtered_cves = len(filtered)
 
         for c in candidates:
             if c not in filtered:
-                pipeline_result.results.append(NdayResult(
-                    cve_id=c.cve_id, status="filtered",
-                ))
+                pipeline_result.results.append(
+                    NdayResult(
+                        cve_id=c.cve_id,
+                        status="filtered",
+                    )
+                )
 
         builder = NdayBuilder(
             sandbox_manager=self._sandbox_manager,
@@ -154,7 +159,8 @@ class NdayPipeline:
 
                 if exploit_result.success:
                     vuln_ok, patch_ok = await self._validate_exploit(
-                        exploit_result, build,
+                        exploit_result,
+                        build,
                     )
                     result.validated_vulnerable = vuln_ok
                     result.validated_patched = patch_ok
@@ -172,7 +178,9 @@ class NdayPipeline:
                     pipeline_result.failed += 1
             except Exception:
                 logger.warning(
-                    "N-day exploit failed for %s", candidate.cve_id, exc_info=True,
+                    "N-day exploit failed for %s",
+                    candidate.cve_id,
+                    exc_info=True,
                 )
                 result.status = "failed"
                 pipeline_result.failed += 1

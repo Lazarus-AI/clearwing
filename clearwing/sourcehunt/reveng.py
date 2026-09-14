@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .config import HuntTuning
 from .exploiter import EXPLOIT_BUDGET_BANDS, AgenticExploiter, ExploiterResult
 from .reveng_decompiler import (
     DecompilationResult,
@@ -96,6 +97,7 @@ class RevengPipeline:
         project_name: str = "",
         sandbox_factory: Any = None,
         reconstruction_batch_size: int | None = None,
+        tuning: HuntTuning | None = None,
     ):
         self._llm = llm
         self._binary_path = binary_path
@@ -108,12 +110,17 @@ class RevengPipeline:
         self._output_dir = output_dir
         self._project_name = project_name or os.path.basename(binary_path)
         self._sandbox_factory = sandbox_factory
-        from .config import HuntTuning
-
-        self._reconstruction_batch_size = (
-            reconstruction_batch_size
-            if reconstruction_batch_size is not None
-            else HuntTuning().reveng_batch_size
+        if reconstruction_batch_size is not None:
+            self._reconstruction_batch_size = reconstruction_batch_size
+        elif tuning is not None:
+            self._reconstruction_batch_size = tuning.reveng_batch_size
+        else:
+            self._reconstruction_batch_size = RevengReconstructor.BATCH_SIZE
+        # Construct the reconstructor at the pipeline boundary so invalid
+        # tuning is rejected before sandbox, static-analysis, or Ghidra work.
+        self._reconstructor = RevengReconstructor(
+            llm,
+            batch_size=self._reconstruction_batch_size,
         )
 
     async def arun(self) -> RevengResult:
@@ -166,7 +173,9 @@ class RevengPipeline:
 
             # 4. Ghidra decompilation
             result.decompilation = run_ghidra_decompilation(
-                container, binary_name, timeout=600,
+                container,
+                binary_name,
+                timeout=600,
             )
             if result.decompilation.total_functions == 0:
                 logger.warning("No functions decompiled for %s", binary_name)
@@ -176,11 +185,9 @@ class RevengPipeline:
             result.status = "decompiled"
 
             # 5. LLM source reconstruction
-            reconstructor = RevengReconstructor(
-                self._llm, batch_size=self._reconstruction_batch_size,
-            )
-            result.reconstruction = await reconstructor.areconstruct(
-                result.decompilation, result.static_analysis,
+            result.reconstruction = await self._reconstructor.areconstruct(
+                result.decompilation,
+                result.static_analysis,
             )
 
             # Write reconstructed source into container
@@ -204,7 +211,9 @@ class RevengPipeline:
 
             # 6. Hybrid hunt
             findings = await self._hybrid_hunt(
-                container, binary_name, static_summary,
+                container,
+                binary_name,
+                static_summary,
             )
             result.findings = findings
             result.status = "hunted"
@@ -212,11 +221,16 @@ class RevengPipeline:
             # 7. Exploit development for confirmed findings
             for finding in findings:
                 evidence = finding.get("evidence_level", "suspicion")
-                if evidence in ("crash_reproduced", "root_cause_explained",
-                                "exploit_demonstrated", "patch_validated"):
+                if evidence in (
+                    "crash_reproduced",
+                    "root_cause_explained",
+                    "exploit_demonstrated",
+                    "patch_validated",
+                ):
                     try:
                         exploit_result = await self._attempt_exploit(
-                            finding, container,
+                            finding,
+                            container,
                         )
                         result.exploit_results.append(exploit_result)
                         result.total_cost_usd += exploit_result.cost_usd
