@@ -299,6 +299,7 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
 # name. Add new offenders here as they surface.
 _REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = ("gpt-5.3-codex-spark",)
 
+
 def _model_supports_reasoning_capture(model_name: str) -> bool:
     """False when *model_name* rejects reasoning-content capture (blacklist)."""
     lower = model_name.lower()
@@ -339,8 +340,7 @@ def effective_reasoning_effort(model_name: str, requested: str | None) -> str | 
         return "none" if _model_supports_reasoning_effort(model_name) else None
     if not _model_supports_reasoning_effort(model_name):
         logger.info(
-            "reasoning_effort downgraded to None: model %r rejects the parameter "
-            "(requested %r)",
+            "reasoning_effort downgraded to None: model %r rejects the parameter (requested %r)",
             model_name,
             requested,
         )
@@ -356,9 +356,7 @@ def _run_coro_sync(coro):
     raise RuntimeError("Synchronous wrapper called from a running event loop")
 
 
-def _mark_cache_prefix(
-    messages: list[ChatMessage], cache_prefix: bool
-) -> list[ChatMessage]:
+def _mark_cache_prefix(messages: list[ChatMessage], cache_prefix: bool) -> list[ChatMessage]:
     """Return the request's message list, optionally with a caching breakpoint.
 
     When *cache_prefix* is False this is the previous behaviour verbatim —
@@ -451,9 +449,7 @@ class NativeToolSpec:
         # again before invoking a stateful handler.
         normalized_arguments = arguments
         properties = self.schema.get("properties")
-        if self.schema.get("additionalProperties") is False and isinstance(
-            properties, dict
-        ):
+        if self.schema.get("additionalProperties") is False and isinstance(properties, dict):
             # Tool-call adapters sometimes add explanatory annotations even
             # when the advertised schema forbids them. Preserve the existing
             # tolerant invocation contract while still validating declared
@@ -1728,17 +1724,51 @@ class AsyncLLMClient:
             for _, part in sorted(tool_call_parts.items())
         ]
 
-    def _parse_openai_tool_arguments(self, value: Any) -> Any:
-        if value is None:
-            return {}
+    def _parse_openai_tool_arguments(self, value: Any) -> dict[str, Any]:
+        """Parse tool-call arguments into a JSON object (mapping).
+
+        The tool-call protocol requires ``arguments`` to be a JSON object
+        keyed by parameter name. Some providers — notably qwen3 served via
+        vLLM, and more deterministically at low temperature — occasionally
+        emit a non-object payload: a JSON array, a scalar, a bare string, or
+        truncated/invalid JSON. If such a value were stored and later replayed
+        in the conversation history, the qwen chat template evaluates
+        ``arguments.items()`` on it and the server rejects the *entire* request
+        with HTTP 400 ("Can only get item pairs from a mapping"), which aborts
+        the whole run on a later iteration rather than just the one bad call.
+        Always normalise to a mapping so a single malformed tool call cannot
+        poison every subsequent turn; a coerced ``{}`` instead surfaces through
+        the tool's own schema validation, which the agent loop can recover from.
+
+        ツール呼び出しの ``arguments`` は本来「パラメータ名→値」の JSON
+        オブジェクトである必要がある。qwen3（vLLM 提供、特に低温度で決定論的）
+        は稀に非オブジェクト（配列・スカラー・素の文字列・途中で切れた不正
+        JSON）を返すことがある。この値を会話履歴に格納して次イテレーションで
+        再送すると、qwen のチャットテンプレートが ``arguments.items()`` を評価
+        して HTTP 400（"Can only get item pairs from a mapping"）となり、その
+        一件の不正呼び出しだけでなくラン全体が後続イテレーションで異常終了
+        する。ここで常にマッピングへ正規化し、不正な単一呼び出しが以降の全
+        ターンを汚染しないようにする。``{}`` へ丸めた場合はツール自身のスキーマ
+        検証で顕在化し、エージェントループが回復できる。
+        """
+        parsed: Any = value
         if isinstance(value, str):
-            if not value:
+            if not value.strip():
                 return {}
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except json.JSONDecodeError:
-                return value
-        return value
+                return {}
+        # Unwrap a doubly-encoded object (a JSON string that itself holds one).
+        # 二重エンコード（オブジェクトを表す JSON 文字列）を展開する。
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except json.JSONDecodeError:
+                return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
 
     def _chat_response_from_stream_end(self, end: StreamEnd) -> ChatResponse:
         """Adapt a genai-pyo3 ``StreamEnd`` into a ``ChatResponse``.

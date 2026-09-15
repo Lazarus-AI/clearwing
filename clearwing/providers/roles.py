@@ -101,7 +101,14 @@ ROLES: dict[str, Role] = {
     "utility": Role(
         "utility",
         Tier.SMALL,
-        InferenceProfile(reasoning="none", max_output_tokens=8192),
+        # temperature=0 makes the bounded transforms deterministic. Ranking is
+        # the load-bearing one: it decides which files fit the per-run budget,
+        # so a non-deterministic ranker (the previous provider-default temp) is
+        # the dominant source of run-to-run variance in what gets hunted — and
+        # thus whether a budget-limited run reaches the critical file at all.
+        # Greedy decoding pins the ranking (and dedup/classification) run over
+        # run without any frontier model.
+        InferenceProfile(reasoning="none", max_output_tokens=8192, temperature=0.0),
         summary="Bounded transforms, ranking, classification, dedup",
     ),
     "coordinator": Role(

@@ -396,8 +396,22 @@ class NativeAgentGraph:
             if not isinstance(content, str):
                 content = json.dumps(content)
 
+            # Cap the copy that enters the model conversation so a single huge
+            # tool result (a full port scan, HTTP body, or shell dump) cannot
+            # blow past the model context window before the summarizer can
+            # compact older turns. Flag detection / parsing below keep the full
+            # `content`.
+            _MAX_TOOL_RESULT_CHARS = 24000
+            convo_content = content
+            if len(convo_content) > _MAX_TOOL_RESULT_CHARS:
+                convo_content = (
+                    convo_content[:_MAX_TOOL_RESULT_CHARS]
+                    + f"\n\n[... tool result truncated: {len(content)} chars total, "
+                    f"showing first {_MAX_TOOL_RESULT_CHARS} ...]"
+                )
+
             message = ToolMessage(
-                content=content,
+                content=convo_content,
                 name=tool_name,
                 tool_call_id=tool_call_id,
             )
@@ -595,7 +609,9 @@ def populate_knowledge_graph(
                 kg.add_algorithm(algo)
             if algo and iterations and target:
                 kg.add_kdf_config(
-                    algo, iterations, target,
+                    algo,
+                    iterations,
+                    target,
                     risk_level=data.get("risk_level", ""),
                     iterations_compliant=data.get("iterations_compliant"),
                 )
@@ -657,7 +673,9 @@ def populate_knowledge_graph(
             if data.get("extractable_keys") and target:
                 for ek in data["extractable_keys"]:
                     algo = ek.get("algorithm", "unknown")
-                    km = kg.add_key_material(f"extractable_{ek.get('step', 0)}", target, extractable=True)
+                    km = kg.add_key_material(
+                        f"extractable_{ek.get('step', 0)}", target, extractable=True
+                    )
                     if algo:
                         kg.add_algorithm(algo)
 
@@ -784,7 +802,11 @@ def populate_knowledge_graph(
                 pat = match.get("pattern", "")
                 if pat in ("hardcoded_secret", "private_key", "aws_key", "flag_format"):
                     eid = f"vuln:bundle_leak:{pat}"
-                    kg.add_entity("exploit", eid, description=f"JS bundle contains {pat}: {match.get('match', '')[:100]}")
+                    kg.add_entity(
+                        "exploit",
+                        eid,
+                        description=f"JS bundle contains {pat}: {match.get('match', '')[:100]}",
+                    )
                     if target:
                         kg.add_relationship(target, eid, "VULNERABLE_TO")
 
