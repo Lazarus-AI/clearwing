@@ -164,11 +164,17 @@ class RecordFindingInput(ToolInputModel):
     algorithm: str = ""
     crypto_attack_class: str = ""
     key_material_exposed: str = ""
-    trace: CompatibilityTraceInput | str | None = Field(
+    trace: (
+        CompatibilityTraceInput
+        | list[CompatibilityTraceStepInput]
+        | str
+        | None
+    ) = Field(
         default=None,
         description=(
-            "Optional compatibility dataflow trace. Steps streamed via "
-            "record_trace_step are authoritative and automatically persisted on the finding."
+            "Optional compatibility dataflow trace, as {\"steps\": [...]} or a "
+            "bare list of steps. Steps streamed via record_trace_step are "
+            "authoritative and automatically persisted on the finding."
         ),
     )
 
@@ -302,7 +308,7 @@ def build_reporting_tools(ctx: HunterContext) -> list:
         algorithm: str = "",
         crypto_attack_class: str = "",
         key_material_exposed: str = "",
-        trace: dict | str | None = None,
+        trace: dict | list | str | None = None,
         **_: object,
     ) -> str:
         """Record a finding into the hunter's state.
@@ -346,6 +352,10 @@ def build_reporting_tools(ctx: HunterContext) -> list:
                 return _tool_error("INVALID_TRACE_JSON", f"Invalid trace JSON ({exc}).")
         else:
             normalized_trace = trace
+        # Some models emit the trace as a bare list of steps instead of the
+        # documented {"steps": [...]} object. Accept that shape too.
+        if isinstance(normalized_trace, list):
+            normalized_trace = {"steps": normalized_trace}
         explicit_steps = normalized_trace.get("steps", []) if normalized_trace else []
         try:
             authoritative_steps = (
