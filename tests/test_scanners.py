@@ -177,3 +177,37 @@ class TestOSScanner:
         """Test synchronous detect method."""
         result = scanner.detect_sync("127.0.0.1")
         assert isinstance(result, str)
+
+
+class TestRecordFindingEvidence:
+    """record_finding must carry the concrete detection evidence (url / request /
+    response / raw output) so a finding is not a bare CVE without proof of how it
+    was detected — this is what the DefectDojo export renders."""
+
+    @pytest.mark.asyncio
+    async def test_carries_http_evidence(self):
+        from clearwing.agent.tools.scan.scanner_tools import record_finding
+
+        finding = await record_finding.func(
+            description="Reflected XSS",
+            severity="high",
+            cve="CVE-2026-0001",
+            url="http://target/search?q=<script>",
+            request="GET /search?q=%3Cscript%3E HTTP/1.1\nHost: target",
+            response="HTTP/1.1 200 OK\n\n<script>alert(1)</script>",
+        )
+        assert finding["url"] == "http://target/search?q=<script>"
+        assert "GET /search" in finding["request"]
+        assert "200 OK" in finding["response"]
+        assert finding["cve"] == "CVE-2026-0001"
+        assert finding["severity"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_omits_empty_evidence_fields(self):
+        from clearwing.agent.tools.scan.scanner_tools import record_finding
+
+        finding = await record_finding.func(description="Open port", severity="low")
+        for absent in ("url", "request", "response", "evidence"):
+            assert absent not in finding
+        assert finding["description"] == "Open port"
+        assert finding["severity"] == "low"

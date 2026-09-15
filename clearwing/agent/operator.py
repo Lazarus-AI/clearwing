@@ -116,11 +116,17 @@ class OperatorAgent:
         result = operator.run()
     """
 
+    # How many times to push back on a GOALS_COMPLETE that no real recon backs
+    # before giving up and accepting it (avoids an infinite nudge loop against a
+    # model that will not emit a scan tool call).
+    _SCAN_GATE_MAX_NUDGES = 2
+
     def __init__(self, config: OperatorConfig):
         self.config = config
         self._turns = 0
         self._progress: list[str] = []
         self._escalated = False
+        self._scan_gate_nudges = 0
 
     def run(self) -> OperatorResult:
         """Run the operator loop to completion (sync wrapper over :meth:`arun`)."""
@@ -231,6 +237,26 @@ class OperatorAgent:
                 decision = await self._adecide_next(operator_llm, agent_response)
 
                 if decision.startswith("GOALS_COMPLETE"):
+                    # Scan gate: a local model sometimes narrates scan results it
+                    # never obtained (it describes nmap output without emitting the
+                    # kali_execute/scan tool call), then declares completion with an
+                    # empty state. Refuse an unbacked GOALS_COMPLETE a bounded number
+                    # of times and force a real scan-tool call first.
+                    if (
+                        not self._has_real_recon(graph, config)
+                        and self._scan_gate_nudges < self._SCAN_GATE_MAX_NUDGES
+                    ):
+                        self._scan_gate_nudges += 1
+                        nudge = (
+                            "You reported GOALS_COMPLETE, but no scan tool has actually run "
+                            "— there are no ports, services, or findings in state. Do NOT "
+                            "describe results you did not obtain. Call the real scan tool now "
+                            "(e.g. kali_execute with an nmap command, or scan_ports) and wait "
+                            "for its actual output before concluding."
+                        )
+                        self._emit("operator", nudge)
+                        input_msg = {"messages": [{"role": "user", "content": nudge}]}
+                        continue
                     return self._build_result(graph, config, start, "completed")
 
                 if decision.startswith("ESCALATE:"):
@@ -380,6 +406,30 @@ class OperatorAgent:
         except Exception as e:
             logger.error("Operator LLM error: %s", e)
             return "Continue with the next goal."
+
+    def _has_real_recon(self, graph, config: dict) -> bool:
+        """True if graph state shows a real scan/recon tool actually produced output.
+
+        These keys are populated only by genuine tool results: open_ports
+        (scan_ports), services (detect_services), vulnerabilities
+        (scan_vulnerabilities / record_finding / parsed kali nmap output),
+        exploit_results, or os_info (detect_os). All empty means nothing real was
+        executed and a GOALS_COMPLETE is narration, not a backed conclusion. Fails
+        open (returns True) if state can't be read, so the gate never stalls a run
+        on an introspection error.
+        """
+        try:
+            state = graph.get_state(config)
+            sv = state.values if hasattr(state, "values") else {}
+        except Exception:
+            return True
+        return bool(
+            sv.get("open_ports")
+            or sv.get("services")
+            or sv.get("vulnerabilities")
+            or sv.get("exploit_results")
+            or sv.get("os_info")
+        )
 
     def _build_result(
         self,
