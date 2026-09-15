@@ -694,9 +694,7 @@ class ProviderManager:
         role = ROLES.get(role_name)
         available = [c for c in candidates if _provider_available(c["provider"])]
         if role is not None and role.independent:
-            independent = [
-                c for c in available if model_family(c["model"]) != generator_family
-            ]
+            independent = [c for c in available if model_family(c["model"]) != generator_family]
             if independent:
                 return independent[0], {
                     "independent_satisfied": True,

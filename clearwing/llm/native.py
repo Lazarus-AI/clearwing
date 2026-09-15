@@ -299,6 +299,7 @@ _REASONING_EFFORT_LOW_DEFAULT_PATTERNS: tuple[str, ...] = (
 # name. Add new offenders here as they surface.
 _REASONING_CAPTURE_UNSUPPORTED_PATTERNS: tuple[str, ...] = ("gpt-5.3-codex-spark",)
 
+
 def _model_supports_reasoning_capture(model_name: str) -> bool:
     """False when *model_name* rejects reasoning-content capture (blacklist)."""
     lower = model_name.lower()
@@ -339,8 +340,7 @@ def effective_reasoning_effort(model_name: str, requested: str | None) -> str | 
         return "none" if _model_supports_reasoning_effort(model_name) else None
     if not _model_supports_reasoning_effort(model_name):
         logger.info(
-            "reasoning_effort downgraded to None: model %r rejects the parameter "
-            "(requested %r)",
+            "reasoning_effort downgraded to None: model %r rejects the parameter (requested %r)",
             model_name,
             requested,
         )
@@ -356,9 +356,7 @@ def _run_coro_sync(coro):
     raise RuntimeError("Synchronous wrapper called from a running event loop")
 
 
-def _mark_cache_prefix(
-    messages: list[ChatMessage], cache_prefix: bool
-) -> list[ChatMessage]:
+def _mark_cache_prefix(messages: list[ChatMessage], cache_prefix: bool) -> list[ChatMessage]:
     """Return the request's message list, optionally with a caching breakpoint.
 
     When *cache_prefix* is False this is the previous behaviour verbatim —
@@ -451,9 +449,7 @@ class NativeToolSpec:
         # again before invoking a stateful handler.
         normalized_arguments = arguments
         properties = self.schema.get("properties")
-        if self.schema.get("additionalProperties") is False and isinstance(
-            properties, dict
-        ):
+        if self.schema.get("additionalProperties") is False and isinstance(properties, dict):
             # Tool-call adapters sometimes add explanatory annotations even
             # when the advertised schema forbids them. Preserve the existing
             # tolerant invocation contract while still validating declared

@@ -304,9 +304,7 @@ class TestLLMEndpointHelpers:
 
 
 class TestProviderManagerForEndpoint:
-    def test_for_endpoint_pins_one_model_with_per_role_inference(
-        self, clean_env, monkeypatch
-    ):
+    def test_for_endpoint_pins_one_model_with_per_role_inference(self, clean_env, monkeypatch):
         """for_endpoint pins the endpoint's single model/provider for every task,
         but applies each task's role inference (utility ranking is deterministic,
         researcher/reviewer think harder). A task therefore gets its own
