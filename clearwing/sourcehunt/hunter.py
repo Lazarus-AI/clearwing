@@ -1475,11 +1475,7 @@ def build_subsystem_hunter_agent(
     if callgraph is not None:
         n_funcs = sum(len(v) for v in callgraph.functions.values())
         n_edges = sum(len(v) for v in callgraph.calls_out.values())
-        cg_tool_names = [
-            t.name
-            for t in tools
-            if t.name in _CALLGRAPH_NAVIGATION_TOOL_NAMES
-        ]
+        cg_tool_names = [t.name for t in tools if t.name in _CALLGRAPH_NAVIGATION_TOOL_NAMES]
         logger.info(
             "[%s] callgraph active: functions=%d edges=%d tools=%s",
             subsystem.root_path,
@@ -1744,9 +1740,7 @@ class NativeHunter:
                         "defer_potential",
                     }
                     active_tools = [
-                        tool
-                        for tool in active_tools
-                        if tool.name not in inactive_potential_tools
+                        tool for tool in active_tools if tool.name not in inactive_potential_tools
                     ]
                 response = await self.llm.achat(
                     messages=messages,
@@ -1760,9 +1754,7 @@ class NativeHunter:
                     # providers without caching. The key is stable per hunt so
                     # OpenAI-style routing keeps hitting the same prefix cache.
                     cache_prefix=True,
-                    prompt_cache_key=(
-                        f"{self.ctx.session_id or ''}:{self.ctx.work_item_id or ''}"
-                    ),
+                    prompt_cache_key=(f"{self.ctx.session_id or ''}:{self.ctx.work_item_id or ''}"),
                 )
                 input_tokens = response.usage.prompt_tokens or 0
                 output_tokens = response.usage.completion_tokens or 0
@@ -2102,9 +2094,7 @@ class NativeHunter:
                             and str(tool_output).startswith("Deferred potential")
                         ):
                             active_potential_id = (
-                                self.ctx.potentials[0].get("id")
-                                if self.ctx.potentials
-                                else None
+                                self.ctx.potentials[0].get("id") if self.ctx.potentials else None
                             )
                         elif (
                             active_potential_id is None
@@ -2468,7 +2458,9 @@ def _requested_read_range(arguments: dict[str, Any]) -> tuple[int, int]:
     if start_line is not None:
         start = max(1, int(start_line))
         end_line = arguments.get("end_line")
-        end = int(end_line) if end_line is not None else start + int(arguments.get("limit", 2000)) - 1
+        end = (
+            int(end_line) if end_line is not None else start + int(arguments.get("limit", 2000)) - 1
+        )
         return start, max(start, end)
     offset = max(0, int(arguments.get("offset", 0)))
     limit = max(1, int(arguments.get("limit", 2000)))
@@ -2527,9 +2519,7 @@ _READ_FILE_METADATA = re.compile(r"\n?\[CLEARWING_READ_METADATA total_lines=(\d+
 def _format_line_ranges(ranges: list[tuple[int, int]]) -> str:
     if not ranges:
         return "None"
-    return ", ".join(
-        f"{start}-{end}" if start != end else str(start) for start, end in ranges
-    )
+    return ", ".join(f"{start}-{end}" if start != end else str(start) for start, end in ranges)
 
 
 def _read_file_tool_response(
@@ -2550,17 +2540,12 @@ def _read_file_tool_response(
         if (match := re.match(r"\s*(\d+)\t", line))
     ]
     returned = (numbered[0], numbered[-1]) if numbered else None
-    coverage = (
-        _range_coverage_fraction(returned, visible_ranges) if returned is not None else 0.0
-    )
-    uncovered = (
-        _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
-    )
+    coverage = _range_coverage_fraction(returned, visible_ranges) if returned is not None else 0.0
+    uncovered = _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
     eof = total_lines is not None and requested[1] >= total_lines
-    truncated = (
-        bool(re.search(r"\[(?:file )?truncated at \d+ characters\]", content))
-        or len(content) > len(rendered_content)
-    )
+    truncated = bool(re.search(r"\[(?:file )?truncated at \d+ characters\]", content)) or len(
+        content
+    ) > len(rendered_content)
 
     header = "\n".join(
         [
@@ -2680,6 +2665,7 @@ _DYNAMIC_VERIFICATION_COMMAND = re.compile(
     r")",
     re.IGNORECASE,
 )
+
 
 def _tool_requires_active_potential(tool_name: str, arguments: dict[str, Any]) -> bool:
     """Return whether a tool call performs dynamic verification rather than exploration."""

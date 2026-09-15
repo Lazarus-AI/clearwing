@@ -278,9 +278,7 @@ def _count_imports_by(
             if gitignore and gitignore.matches_file(other):
                 continue
             try:
-                safe_other = resolve_repo_file(
-                    repo_path, os.path.relpath(other, repo_path)
-                )
+                safe_other = resolve_repo_file(repo_path, os.path.relpath(other, repo_path))
                 if safe_other is None:
                     continue
                 if safe_other.stat().st_size > SourceAnalyzer.MAX_FILE_SIZE:
@@ -394,9 +392,7 @@ class Preprocessor:
                 )
             if run_taint:
                 if self.subsystem_paths:
-                    taint_seed_files = self._expand_subsystem_files(
-                        repo_path, self.subsystem_paths
-                    )
+                    taint_seed_files = self._expand_subsystem_files(repo_path, self.subsystem_paths)
                 if taint_seed_files:
                     logger.info(
                         "Large repo (%d files); seeding taint analysis from %d subsystem files",
@@ -418,10 +414,13 @@ class Preprocessor:
             if (_i + 1) % _update_every == 0 and (_i + 1) < _total:
                 logger.info(
                     "Preprocessor: enumerating  %d/%d files  found=%d",
-                    _i + 1, _total, len(file_targets),
+                    _i + 1,
+                    _total,
+                    len(file_targets),
                 )
                 _emit_preprocess_progress(
-                    repo_path, 0.2 + 0.4 * (_i + 1) / _total,
+                    repo_path,
+                    0.2 + 0.4 * (_i + 1) / _total,
                     f"enumerating {_i + 1}/{_total} files",
                 )
             ext = Path(abs_path).suffix.lower()
@@ -533,9 +532,7 @@ class Preprocessor:
             try:
                 analyzer = TaintAnalyzer()
                 if analyzer.available:
-                    taint_result = analyzer.analyze_repo(
-                        repo_path, files=taint_seed_files
-                    )
+                    taint_result = analyzer.analyze_repo(repo_path, files=taint_seed_files)
                     taint_paths = taint_result.paths
                     self._apply_taint_signals(file_targets, taint_paths)
                 else:
@@ -603,6 +600,7 @@ class Preprocessor:
     def _expand_subsystem_files(self, repo_path: str, subsystem_paths: list[str]) -> list[str]:
         """Return absolute paths to source files under the given subsystem paths."""
         from clearwing.sourcehunt.callgraph import _LANG_EXT_MAP
+
         result: list[str] = []
         for sp in subsystem_paths:
             requested = os.path.relpath(sp, repo_path) if os.path.isabs(sp) else sp

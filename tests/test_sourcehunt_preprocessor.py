@@ -37,6 +37,7 @@ def test_preprocessor_does_not_read_checked_in_symlink_outside_repository(tmp_pa
     assert "leak.py" not in paths
     assert all("outside.py" not in finding.file_path for finding in result.static_findings)
 
+
 FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c_propagation"
 FIXTURE_PY_SQLI = Path(__file__).parent / "fixtures" / "vuln_samples" / "py_sqli"
 
@@ -379,9 +380,8 @@ class TestPreprocessorClonePath:
             p.cleanup()
 
         assert result.file_targets, (
-            "file_targets is empty — the clone tempdir was GC'd before "
-            "the file walk ran."
+            "file_targets is empty — the clone tempdir was GC'd before the file walk ran."
         )
-        assert any(
-            ft.get("path") == "pkg/mod.py" for ft in result.file_targets
-        ), f"expected pkg/mod.py in file_targets, got {[ft.get('path') for ft in result.file_targets]}"
+        assert any(ft.get("path") == "pkg/mod.py" for ft in result.file_targets), (
+            f"expected pkg/mod.py in file_targets, got {[ft.get('path') for ft in result.file_targets]}"
+        )

@@ -45,10 +45,20 @@ class ExecuteInput(ToolInputModel):
 
 class ReadFileInput(ToolInputModel):
     path: str = Field(description="Absolute path in the container.")
-    offset: int = Field(default=0, description="Line offset (0-based, default 0). Or use start_line (1-based).")
-    limit: int = Field(default=2000, description="Max lines to return (default 2000). Or use end_line with start_line.")
-    start_line: int | None = Field(default=None, description="Alias — 1-based line number to start at. Overrides offset if set.")
-    end_line: int | None = Field(default=None, description="Alias — 1-based inclusive end line. Requires start_line.")
+    offset: int = Field(
+        default=0, description="Line offset (0-based, default 0). Or use start_line (1-based)."
+    )
+    limit: int = Field(
+        default=2000,
+        description="Max lines to return (default 2000). Or use end_line with start_line.",
+    )
+    start_line: int | None = Field(
+        default=None,
+        description="Alias — 1-based line number to start at. Overrides offset if set.",
+    )
+    end_line: int | None = Field(
+        default=None, description="Alias — 1-based inclusive end line. Requires start_line."
+    )
 
 
 class WriteFileInput(ToolInputModel):
@@ -78,9 +88,7 @@ class ListFunctionsInput(ToolInputModel):
 
 
 class ReadFunctionInput(ToolInputModel):
-    name: str = Field(
-        description="Exact function name to read (e.g. 'foo_bar_baz')."
-    )
+    name: str = Field(description="Exact function name to read (e.g. 'foo_bar_baz').")
 
 
 def _cap_output(text: str, label: str = "output") -> str:
@@ -102,7 +110,6 @@ def _tokenize(s: str) -> list[str]:
 def _matches(name: str, tokens: list[str]) -> bool:
     low = name.lower()
     return all(t in low for t in tokens)
-
 
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: C901
@@ -153,8 +160,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         # with NR directly so the emitted line numbers match the file.
         cmd = (
             f"awk -v s={start} -v e={end} "
-            "'NR>=s && NR<=e { printf \"%6d\\t%s\\n\", NR, $0 } "
-            "END { printf \"__CLEARWING_TOTAL_LINES__=%d\\n\", NR > \"/dev/stderr\" }' "
+            '\'NR>=s && NR<=e { printf "%6d\\t%s\\n", NR, $0 } '
+            'END { printf "__CLEARWING_TOTAL_LINES__=%d\\n", NR > "/dev/stderr" }\' '
             f"{shlex.quote(path)}"
         )
         result = ctx.sandbox.exec(cmd, timeout=30)
@@ -188,8 +195,11 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         return {
             "callers": {
                 f: [
-                    {"func": fn, "start_line": line_index[f].get(fn, (None, None))[0],
-                     "end_line": line_index[f].get(fn, (None, None))[1]}
+                    {
+                        "func": fn,
+                        "start_line": line_index[f].get(fn, (None, None))[0],
+                        "end_line": line_index[f].get(fn, (None, None))[1],
+                    }
                     for fn in sorted(callers)
                 ]
                 for f, callers in sorted(result.items())
@@ -235,12 +245,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         cg = ctx.callgraph
         if cg is None:
             return {"error": "callgraph not available"}
-        hits = [
-            (f, fi)
-            for f, infos in cg.function_info.items()
-            for fi in infos
-            if fi.name == name
-        ]
+        hits = [(f, fi) for f, infos in cg.function_info.items() for fi in infos if fi.name == name]
         if not hits:
             all_names = {fi.name for infos in cg.function_info.values() for fi in infos}
             near = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
@@ -256,7 +261,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
                 ],
             }
         f, fi = uniq[0]
-        body = read_file(f"/workspace/{f}", offset=fi.start_line - 1, limit=fi.end_line - fi.start_line + 1)
+        body = read_file(
+            f"/workspace/{f}", offset=fi.start_line - 1, limit=fi.end_line - fi.start_line + 1
+        )
         return {"file": f, "start_line": fi.start_line, "end_line": fi.end_line, "body": body}
 
     reporting_tools = build_reporting_tools(ctx)
