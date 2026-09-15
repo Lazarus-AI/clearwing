@@ -164,15 +164,10 @@ class RecordFindingInput(ToolInputModel):
     algorithm: str = ""
     crypto_attack_class: str = ""
     key_material_exposed: str = ""
-    trace: (
-        CompatibilityTraceInput
-        | list[CompatibilityTraceStepInput]
-        | str
-        | None
-    ) = Field(
+    trace: CompatibilityTraceInput | list[CompatibilityTraceStepInput] | str | None = Field(
         default=None,
         description=(
-            "Optional compatibility dataflow trace, as {\"steps\": [...]} or a "
+            'Optional compatibility dataflow trace, as {"steps": [...]} or a '
             "bare list of steps. Steps streamed via record_trace_step are "
             "authoritative and automatically persisted on the finding."
         ),
