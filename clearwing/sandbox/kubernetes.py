@@ -173,7 +173,7 @@ class KubernetesSandbox:
         requests: dict[str, str] = {
             "memory": f"{min(self._config.memory_mb, 512)}Mi"
         }
-        if self._config.cpus > 0:
+        if self._config.cpus is not None and self._config.cpus > 0:
             resources["cpu"] = str(self._config.cpus)
             requests["cpu"] = str(min(self._config.cpus, 0.5))
         security_context = client.V1SecurityContext(
