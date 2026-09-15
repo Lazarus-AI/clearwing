@@ -88,9 +88,7 @@ def test_prestage_reuses_present_digest_without_pulling():
 def test_offline_fails_when_not_staged():
     m = _manifest()
     d = _FakeDocker()  # nothing present, offline
-    res = prestage_images(
-        m, process=d, env={}, now=lambda: 1.0, offline=True, profiles=["go"]
-    )
+    res = prestage_images(m, process=d, env={}, now=lambda: 1.0, offline=True, profiles=["go"])
     assert "go" in res.failed and d.pull_count() == 0
 
 
@@ -98,9 +96,7 @@ def test_offline_reuses_local_tag_and_captures_digest():
     m = _manifest()
     tag = DEFAULT_BASE_IMAGE_TAGS["node"]
     d = _FakeDocker(present={tag}, digests={tag: "node@sha256:" + "c" * 64})
-    res = prestage_images(
-        m, process=d, env={}, now=lambda: 5.0, offline=True, profiles=["node"]
-    )
+    res = prestage_images(m, process=d, env={}, now=lambda: 5.0, offline=True, profiles=["node"])
     assert res.reused == ["node"] and d.pull_count() == 0
     assert m.pins["node"].repo_digest == "node@sha256:" + "c" * 64
 

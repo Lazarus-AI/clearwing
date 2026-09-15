@@ -47,7 +47,9 @@ _MEMSET_SENTINEL = re.compile(r"memset\s*\([^,;\n]+,\s*(?:-\s*1|0x[fF]{2,}|255|6
 _ID_FROM_INCR = re.compile(r"(\w+)\s*=\s*\+\+\s*\w+")
 _INDEXED_WRITE = re.compile(r"\w+\s*\[[^\]\n]{1,80}\]\s*=\s*[^=]")
 _MEM_WRITE_CALL = re.compile(r"\b(?:memcpy|memmove|memset|strcpy|strcat|sprintf)\s*\(")
-_FREE_CALL = re.compile(r"\b(?:free|kfree|av_free|av_freep|release|Release|Destroy|delete)\s*\(\s*(\w+)")
+_FREE_CALL = re.compile(
+    r"\b(?:free|kfree|av_free|av_freep|release|Release|Destroy|delete)\s*\(\s*(\w+)"
+)
 
 
 def _incr_id_used_as_index(text: str) -> tuple[bool, list[str]]:

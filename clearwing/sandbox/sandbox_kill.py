@@ -92,7 +92,5 @@ def kill_by_label(
         result.errors.append((removed.stderr or "docker rm -f failed").strip())
         return result
 
-    result.removed = [
-        line.strip() for line in (removed.stdout or "").splitlines() if line.strip()
-    ]
+    result.removed = [line.strip() for line in (removed.stdout or "").splitlines() if line.strip()]
     return result

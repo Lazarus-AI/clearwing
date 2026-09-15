@@ -243,8 +243,16 @@ class RecursiveOrchestrator:
     ) -> None:
         assert self.checkpoint_store is not None
         queue = [
-            (neg_pri, seq, {"artifact_id": u.artifact_id, "source_digest": u.source_digest,
-                            "file_path": u.file_path, "symbol": u.symbol})
+            (
+                neg_pri,
+                seq,
+                {
+                    "artifact_id": u.artifact_id,
+                    "source_digest": u.source_digest,
+                    "file_path": u.file_path,
+                    "symbol": u.symbol,
+                },
+            )
             for (neg_pri, seq, u) in heap
         ]
         self.checkpoint_store.save(
@@ -331,7 +339,5 @@ class SqliteCheckpointStore:
 
     def delete(self, run_id: str) -> None:
         with self._lock:
-            self._db.execute(
-                "DELETE FROM recursion_checkpoint WHERE run_id=?", (run_id,)
-            )
+            self._db.execute("DELETE FROM recursion_checkpoint WHERE run_id=?", (run_id,))
             self._db.commit()

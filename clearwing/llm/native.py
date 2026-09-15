@@ -691,9 +691,7 @@ class AsyncLLMClient:
         # configured extra_body (from the model registry) deep-merges on top and
         # wins. This is the single place model-specific request-body knobs are
         # applied — keeping operate / sourcehunt / ranker / hunter consistent.
-        self.extra_body = _merge_extra_body(
-            _model_thinking_extra_body(model_name), extra_body
-        )
+        self.extra_body = _merge_extra_body(_model_thinking_extra_body(model_name), extra_body)
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.timeout_max_retries = max(0, timeout_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)

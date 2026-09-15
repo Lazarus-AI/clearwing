@@ -115,9 +115,7 @@ class MachineChannel:
                 if terminal
                 else self._compact_progress(record, original_bytes)
             )
-            encoded = json.dumps(
-                record, separators=(",", ":"), ensure_ascii=False
-            ).encode()
+            encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
         if len(encoded) >= MAX_RECORD_BYTES:
             record = {
                 "v": record["v"],
@@ -128,17 +126,13 @@ class MachineChannel:
                     "original_bytes": original_bytes,
                 },
             }
-            encoded = json.dumps(
-                record, separators=(",", ":"), ensure_ascii=False
-            ).encode()
+            encoded = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode()
         self._writer.write(encoded + b"\n")
         if terminal:
             self._terminal = True
 
     @staticmethod
-    def _compact_progress(
-        record: dict[str, Any], original_bytes: int
-    ) -> dict[str, Any]:
+    def _compact_progress(record: dict[str, Any], original_bytes: int) -> dict[str, Any]:
         """Keep routing fields from an oversized progress event."""
         data = record.get("data")
         summary: dict[str, Any] = {
@@ -163,9 +157,7 @@ class MachineChannel:
         return record
 
     @staticmethod
-    def _compact_terminal(
-        record: dict[str, Any], original_bytes: int
-    ) -> dict[str, Any]:
+    def _compact_terminal(record: dict[str, Any], original_bytes: int) -> dict[str, Any]:
         """Project an oversized result onto a bounded workflow-safe summary.
 
         Large checkpoint objects are intentionally omitted here. Managed
@@ -198,9 +190,7 @@ class MachineChannel:
             elif isinstance(value, list):
                 summary[f"{key}_count"] = len(value)
             elif isinstance(value, dict):
-                nested = json.dumps(
-                    value, separators=(",", ":"), ensure_ascii=False
-                ).encode()
+                nested = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
                 if len(nested) < 4096:
                     summary[key] = value
                 else:

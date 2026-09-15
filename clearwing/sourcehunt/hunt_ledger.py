@@ -60,9 +60,7 @@ class HuntUnit:
     symbol: Optional[str] = None
 
     def key(self) -> str:
-        return "|".join(
-            [self.artifact_id, self.source_digest, self.file_path, self.symbol or ""]
-        )
+        return "|".join([self.artifact_id, self.source_digest, self.file_path, self.symbol or ""])
 
 
 @dataclass
@@ -164,7 +162,9 @@ class HuntLedger:
         self.store.put(rec)
         return rec
 
-    def record_benign(self, unit: HuntUnit, context: VerdictContext, *, now: float | None = None) -> None:
+    def record_benign(
+        self, unit: HuntUnit, context: VerdictContext, *, now: float | None = None
+    ) -> None:
         now = time.time() if now is None else now
         rec = self.store.get(unit.key()) or HuntRecord(unit=unit)
         rec.state = HuntState.BENIGN
@@ -174,7 +174,14 @@ class HuntLedger:
         rec.cooldown_until = now + self.policy.cooldown_seconds
         self.store.put(rec)
 
-    def record_finding(self, unit: HuntUnit, context: VerdictContext, finding_ids: list[str], *, now: float | None = None) -> None:
+    def record_finding(
+        self,
+        unit: HuntUnit,
+        context: VerdictContext,
+        finding_ids: list[str],
+        *,
+        now: float | None = None,
+    ) -> None:
         now = time.time() if now is None else now
         rec = self.store.get(unit.key()) or HuntRecord(unit=unit)
         rec.state = HuntState.FINDING
@@ -218,9 +225,7 @@ class SqliteHuntLedgerStore:
 
     def get(self, key: str) -> Optional[HuntRecord]:
         with self._lock:
-            row = self._db.execute(
-                "SELECT json FROM hunt_ledger WHERE key=?", (key,)
-            ).fetchone()
+            row = self._db.execute("SELECT json FROM hunt_ledger WHERE key=?", (key,)).fetchone()
         return _record_from_json(row[0]) if row else None
 
     def put(self, record: HuntRecord) -> None:

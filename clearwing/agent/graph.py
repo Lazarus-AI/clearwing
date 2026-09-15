@@ -16,9 +16,7 @@ from .tools import get_all_tools, get_custom_tools
 
 # Matches an nmap "open port" line, e.g.
 #   22/tcp   open  ssh     OpenSSH 4.7p1 Debian 8ubuntu1 (protocol 2.0)
-_NMAP_OPEN_LINE = re.compile(
-    r"^\s*(\d{1,5})/(tcp|udp)\s+open\s+(\S+)\s*(.*)$", re.IGNORECASE
-)
+_NMAP_OPEN_LINE = re.compile(r"^\s*(\d{1,5})/(tcp|udp)\s+open\s+(\S+)\s*(.*)$", re.IGNORECASE)
 
 
 def _findings_from_nmap(output: str) -> list[dict]:
@@ -70,11 +68,7 @@ def _default_pentest_state_updater(tool_name: str, data: Any, state: dict) -> di
             parsed = _findings_from_nmap(output)
             if parsed:
                 existing = state.get("vulnerabilities", [])
-                seen = {
-                    (v.get("port"), v.get("service"))
-                    for v in existing
-                    if isinstance(v, dict)
-                }
+                seen = {(v.get("port"), v.get("service")) for v in existing if isinstance(v, dict)}
                 fresh = [f for f in parsed if (f["port"], f["service"]) not in seen]
                 if fresh:
                     return {"vulnerabilities": existing + fresh}

@@ -1455,9 +1455,7 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 proof_build_configuration=parsed.get("build_configuration", "default"),
                 enable_semgrep=enable_semgrep or parsed["semgrep"],
                 provider_manager=provider_manager,
-                on_progress=lambda progress: channel.emit(
-                    "progress", _public_progress(progress)
-                ),
+                on_progress=lambda progress: channel.emit("progress", _public_progress(progress)),
             ).arun()
         )
         channel.result(_public_result(result), allow_truncation=False)
@@ -1511,9 +1509,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "branch": _bounded_text(value.get("branch", "main"), "branch", 256),
         "depth": depth,
         "budget_usd": _bounded_number(value.get("budget_usd", 0.0), "budget_usd", 0, 10000),
-        "max_parallel": _bounded_integer(
-            value.get("max_parallel", 8), "max_parallel", 1, 64
-        ),
+        "max_parallel": _bounded_integer(value.get("max_parallel", 8), "max_parallel", 1, 64),
         "verify": _boolean(value.get("verify", True), "verify"),
         "exploit": _boolean(value.get("exploit", True), "exploit"),
         "flow": flow,
@@ -1615,9 +1611,7 @@ def _public_progress(progress: Any) -> dict[str, Any]:
         for source, target in (("code", "error_code"), ("message", "error_message")):
             value = error.get(source)
             if isinstance(value, str) and value:
-                public[target] = value.encode("utf-8")[:1024].decode(
-                    "utf-8", errors="ignore"
-                )
+                public[target] = value.encode("utf-8")[:1024].decode("utf-8", errors="ignore")
     return {key: value for key, value in public.items() if value is not None and value != ""}
 
 

@@ -442,7 +442,10 @@ class OperatorAgent:
         # list/quote markup and trailed by punctuation or prose; prefer the last
         # such line and guard against explicit negations ("not GOALS_COMPLETE").
         for ln in reversed(lines):
-            if re.match(r"^[\*\-\s>`]*GOALS_COMPLETE\b", ln) and "not goals_complete" not in ln.lower():
+            if (
+                re.match(r"^[\*\-\s>`]*GOALS_COMPLETE\b", ln)
+                and "not goals_complete" not in ln.lower()
+            ):
                 return "GOALS_COMPLETE"
         return stripped
 

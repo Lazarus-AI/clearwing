@@ -421,9 +421,7 @@ def test_docker_enhanced_isolation_honors_configured_runtime():
     assert default.config.runtime is None
 
     # Unset -> the zero-config default remains runsc.
-    fallback = DockerSandboxBackend().create(
-        "image:test", SandboxRunConfig(isolation="enhanced")
-    )
+    fallback = DockerSandboxBackend().create("image:test", SandboxRunConfig(isolation="enhanced"))
     assert fallback.config.runtime == "runsc"
 
 

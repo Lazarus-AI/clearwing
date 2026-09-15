@@ -266,10 +266,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
     goals_value = value.get("goals")
     if not isinstance(goals_value, list) or not 1 <= len(goals_value) <= 64:
         raise ValueError("goals must contain between 1 and 64 strings")
-    goals = [
-        _bounded_text(goal, f"goals[{index}]", 4096)
-        for index, goal in enumerate(goals_value)
-    ]
+    goals = [_bounded_text(goal, f"goals[{index}]", 4096) for index, goal in enumerate(goals_value)]
     return {
         "target": target,
         "goals": goals,
@@ -278,9 +275,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
             value.get("timeout_minutes", 60), "timeout_minutes", 1, 1440
         ),
         "cost_limit": _bounded_number(value.get("cost_limit", 0.0), "cost_limit", 0, 10000),
-        "auto_approve_scans": _boolean(
-            value.get("auto_approve_scans", True), "auto_approve_scans"
-        ),
+        "auto_approve_scans": _boolean(value.get("auto_approve_scans", True), "auto_approve_scans"),
         "auto_approve_exploits": _boolean(
             value.get("auto_approve_exploits", False), "auto_approve_exploits"
         ),

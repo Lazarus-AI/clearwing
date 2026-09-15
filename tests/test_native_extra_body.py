@@ -44,9 +44,7 @@ def test_non_qwen_models_send_no_extra_body() -> None:
 def test_configured_extra_body_deep_merges_over_family_default() -> None:
     client = _client("qwen3.8-27b", extra_body={"chat_template_kwargs": {"top_k": 20}})
     # family default (enable_thinking) preserved AND the configured key added
-    assert client.extra_body == {
-        "chat_template_kwargs": {"enable_thinking": False, "top_k": 20}
-    }
+    assert client.extra_body == {"chat_template_kwargs": {"enable_thinking": False, "top_k": 20}}
 
 
 def test_merge_helper_edges() -> None:

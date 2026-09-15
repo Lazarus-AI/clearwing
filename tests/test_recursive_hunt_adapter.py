@@ -77,9 +77,7 @@ def test_finding_expands_to_callgraph_neighbors():
 def test_finding_uses_finding_files_when_present():
     cg = _FakeCallGraph(file_callers={"other.c": {"seed.c"}})
     fn = RecursiveHuntFn(
-        hunt_and_verify=lambda u: UnitHuntResult(
-            "finding", 0.9, ["F"], finding_files=["other.c"]
-        ),
+        hunt_and_verify=lambda u: UnitHuntResult("finding", 0.9, ["F"], finding_files=["other.c"]),
         unit_for_file=_unit,
         callgraph=cg,
     )

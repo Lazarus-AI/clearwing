@@ -178,17 +178,14 @@ class AxisResult(BaseModel):
     guidance reaches the model inline, not only via the prose prompt.
     """
 
-    passed: bool = Field(
-        description="True if this axis is satisfied, false if it fails."
-    )
+    passed: bool = Field(description="True if this axis is satisfied, false if it fails.")
     confidence: Literal["high", "medium", "low"] = Field(
         description="Confidence in this axis's pass/fail judgment."
     )
     rationale: str = Field(
         default="",
         description=(
-            "One to three sentences justifying the decision; keep it under 500 "
-            "characters."
+            "One to three sentences justifying the decision; keep it under 500 characters."
         ),
     )
     boundary_crossed: Literal[
@@ -326,7 +323,10 @@ class PipelineStatus:
         self.stages[name] = StageStatus(name=name, outcome=outcome, **kwargs)
 
     def record_degraded(
-        self, name: str, fallback: str, error: str = "",
+        self,
+        name: str,
+        fallback: str,
+        error: str = "",
     ) -> None:
         self.stages[name] = StageStatus(
             name=name,

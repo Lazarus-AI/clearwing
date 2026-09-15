@@ -177,9 +177,7 @@ def export_bundle(
     (out / BUNDLE_MANIFEST_NAME).write_text(
         json.dumps(manifest.to_dict(), indent=2), encoding="utf-8"
     )
-    (out / BUNDLE_CHECKSUM_NAME).write_text(
-        "\n".join(checksum_lines) + "\n", encoding="utf-8"
-    )
+    (out / BUNDLE_CHECKSUM_NAME).write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
     return manifest
 
 

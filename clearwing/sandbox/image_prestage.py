@@ -66,6 +66,7 @@ OFFLINE_IMAGE_PREFIX = "clearwing-sandbox-offline"
 def offline_image_tag(profile: str) -> str:
     return f"{OFFLINE_IMAGE_PREFIX}:{profile}"
 
+
 # Docker Hub base tags are multi-arch; a sandbox builds for one platform. Pull
 # the platform the build will use (mirrors DockerSandboxBackend._target_platform).
 def default_platform_for(profile: str) -> str:
@@ -127,9 +128,7 @@ class PinManifest:
         """profile → build reference, for DockerSandboxBackend(profile_images=…)."""
         return {p: pin.build_ref() for p, pin in self.pins.items()}
 
-    def ensure_defaults(
-        self, tags: Mapping[str, str] = DEFAULT_BASE_IMAGE_TAGS
-    ) -> None:
+    def ensure_defaults(self, tags: Mapping[str, str] = DEFAULT_BASE_IMAGE_TAGS) -> None:
         """Add a pin for any default profile not yet present (idempotent)."""
         for profile, tag in tags.items():
             if profile not in self.pins:
@@ -144,9 +143,7 @@ class PinManifest:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PinManifest":
-        pins = {
-            p: BaseImagePin.from_dict(pd) for p, pd in (d.get("pins") or {}).items()
-        }
+        pins = {p: BaseImagePin.from_dict(pd) for p, pd in (d.get("pins") or {}).items()}
         return cls(pins=pins, last_prestage_at=d.get("last_prestage_at"))
 
 
@@ -354,9 +351,7 @@ def run_prestage(
     manifest.ensure_defaults(tags)
 
     t = now()
-    if not force and not should_prestage(
-        manifest, now=t, interval_seconds=interval_seconds
-    ):
+    if not force and not should_prestage(manifest, now=t, interval_seconds=interval_seconds):
         return PreStageResult(skipped_daily=True)
 
     result = prestage_images(

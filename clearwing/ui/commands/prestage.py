@@ -163,9 +163,7 @@ def _handle_export(console, store, args) -> None:
 
     # 1. Pin base digests (online). Force, since export is an explicit action.
     console.print("[bold]Pinning base image digests…[/]")
-    result = run_prestage(
-        store, offline=bool(args.offline), force=True, profiles=args.profiles
-    )
+    result = run_prestage(store, offline=bool(args.offline), force=True, profiles=args.profiles)
     if result.failed:
         console.print(f"[red]Base pinning failed:[/] {result.failed}")
         raise SystemExit(1)

@@ -24,7 +24,9 @@ def _unit(f: str) -> HuntUnit:
 
 
 def _ledger() -> HuntLedger:
-    return HuntLedger(SqliteHuntLedgerStore(), SalvagePolicy(cooldown_seconds=1000.0, max_retries=1))
+    return HuntLedger(
+        SqliteHuntLedgerStore(), SalvagePolicy(cooldown_seconds=1000.0, max_retries=1)
+    )
 
 
 def _benign(_u):
