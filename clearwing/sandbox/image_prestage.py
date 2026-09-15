@@ -32,10 +32,10 @@ import os
 import platform as _platform_mod
 import subprocess
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Callable, Mapping, Optional
 
 # Single source of truth for logical profile → base image tag. The Docker
 # backend imports this so the supported profiles and the pre-staged images
@@ -88,7 +88,7 @@ class BaseImagePin:
     profile: str
     tag_ref: str
     repo_digest: str = ""
-    staged_at: Optional[float] = None
+    staged_at: float | None = None
     platform: str = ""
 
     def build_ref(self) -> str:
@@ -107,7 +107,7 @@ class BaseImagePin:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "BaseImagePin":
+    def from_dict(cls, d: dict) -> BaseImagePin:
         return cls(
             profile=d["profile"],
             tag_ref=d["tag_ref"],
@@ -122,7 +122,7 @@ class PinManifest:
     """Persisted set of base-image pins plus the last daily-stage timestamp."""
 
     pins: dict[str, BaseImagePin] = field(default_factory=dict)
-    last_prestage_at: Optional[float] = None
+    last_prestage_at: float | None = None
 
     def build_image_map(self) -> dict[str, str]:
         """profile → build reference, for DockerSandboxBackend(profile_images=…)."""
@@ -142,7 +142,7 @@ class PinManifest:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "PinManifest":
+    def from_dict(cls, d: dict) -> PinManifest:
         pins = {p: BaseImagePin.from_dict(pd) for p, pd in (d.get("pins") or {}).items()}
         return cls(pins=pins, last_prestage_at=d.get("last_prestage_at"))
 
@@ -158,7 +158,7 @@ def default_pin_path() -> Path:
 class ImagePinStore:
     """JSON-backed persistence for the pin manifest."""
 
-    def __init__(self, path: Optional[Path | str] = None):
+    def __init__(self, path: Path | str | None = None):
         self.path = Path(path) if path is not None else default_pin_path()
 
     def load(self) -> PinManifest:
@@ -252,10 +252,10 @@ def prestage_images(
     manifest: PinManifest,
     *,
     process: ModuleType = subprocess,
-    env: Optional[dict] = None,
+    env: dict | None = None,
     now: Callable[[], float] = time.time,
     offline: bool = False,
-    profiles: Optional[list[str]] = None,
+    profiles: list[str] | None = None,
     platform_for: Callable[[str], str] = default_platform_for,
 ) -> PreStageResult:
     """Ensure each profile's base image is present locally and digest-pinned.
@@ -330,14 +330,14 @@ def prestage_images(
 
 
 def run_prestage(
-    store: Optional[ImagePinStore] = None,
+    store: ImagePinStore | None = None,
     *,
     process: ModuleType = subprocess,
-    env: Optional[dict] = None,
+    env: dict | None = None,
     now: Callable[[], float] = time.time,
     offline: bool = False,
     force: bool = False,
-    profiles: Optional[list[str]] = None,
+    profiles: list[str] | None = None,
     interval_seconds: float = DAILY_INTERVAL_SECONDS,
     tags: Mapping[str, str] = DEFAULT_BASE_IMAGE_TAGS,
 ) -> PreStageResult:

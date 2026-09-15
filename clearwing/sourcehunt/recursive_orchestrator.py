@@ -27,9 +27,11 @@ import json
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol
+from typing import Protocol
 
 from .hunt_ledger import HuntLedger, HuntUnit, VerdictContext
 
@@ -66,7 +68,7 @@ class RecursionCheckpoint:
 
 class CheckpointStore(Protocol):
     def save(self, ckpt: RecursionCheckpoint) -> None: ...
-    def load(self, run_id: str) -> Optional[RecursionCheckpoint]: ...
+    def load(self, run_id: str) -> RecursionCheckpoint | None: ...
     def delete(self, run_id: str) -> None: ...
 
 
@@ -88,9 +90,9 @@ class RecursiveOrchestrator:
         hunt_fn: HuntFn,
         context: VerdictContext,
         *,
-        checkpoint_store: Optional["CheckpointStore"] = None,
+        checkpoint_store: CheckpointStore | None = None,
         config: RecursiveConfig | None = None,
-        kill_fn: Optional[KillFn] = None,
+        kill_fn: KillFn | None = None,
         now: Callable[[], float] = time.time,
         sample_draw: Callable[[], float] = lambda: 1.0,
     ):
@@ -110,7 +112,7 @@ class RecursiveOrchestrator:
             return False
         return self.checkpoint_store.load(run_id) is not None
 
-    def run(
+    def run(  # noqa: C901 - one loop keeps checkpoint transitions atomic
         self,
         run_id: str,
         seed_units: list[tuple[float, HuntUnit]] | None = None,
@@ -275,7 +277,7 @@ class InMemoryCheckpointStore:
     def save(self, ckpt: RecursionCheckpoint) -> None:
         self._by_run[ckpt.run_id] = ckpt
 
-    def load(self, run_id: str) -> Optional[RecursionCheckpoint]:
+    def load(self, run_id: str) -> RecursionCheckpoint | None:
         return self._by_run.get(run_id)
 
     def delete(self, run_id: str) -> None:
@@ -318,7 +320,7 @@ class SqliteCheckpointStore:
             )
             self._db.commit()
 
-    def load(self, run_id: str) -> Optional[RecursionCheckpoint]:
+    def load(self, run_id: str) -> RecursionCheckpoint | None:
         with self._lock:
             row = self._db.execute(
                 "SELECT json FROM recursion_checkpoint WHERE run_id=?", (run_id,)

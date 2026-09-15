@@ -23,8 +23,9 @@ import json
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Protocol
+from typing import Any, Protocol
 
 PREPROCESS_SCHEMA_VERSION = "1"
 
@@ -62,17 +63,17 @@ class PrepareCacheEntry:
 
 
 class PrepareCacheStore(Protocol):
-    def get(self, key: str) -> Optional[PrepareCacheEntry]: ...
+    def get(self, key: str) -> PrepareCacheEntry | None: ...
     def put(self, entry: PrepareCacheEntry) -> None: ...
 
 
 class PrepareCache:
     """Policy layer: lookup/store preprocess results by source artifact."""
 
-    def __init__(self, store: "PrepareCacheStore"):
+    def __init__(self, store: PrepareCacheStore):
         self.store = store
 
-    def get(self, artifact_id: str, source_digest: str) -> Optional[dict[str, Any]]:
+    def get(self, artifact_id: str, source_digest: str) -> dict[str, Any] | None:
         key = PrepareCacheKey(artifact_id, source_digest)
         entry = self.store.get(key.as_str())
         return entry.payload if entry else None
@@ -101,7 +102,7 @@ class SqlitePrepareCacheStore:
         )
         self._db.commit()
 
-    def get(self, key: str) -> Optional[PrepareCacheEntry]:
+    def get(self, key: str) -> PrepareCacheEntry | None:
         with self._lock:
             row = self._db.execute(
                 "SELECT key, payload, created_at FROM prepare_cache WHERE key=?", (key,)

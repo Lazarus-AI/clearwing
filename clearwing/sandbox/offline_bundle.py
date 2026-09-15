@@ -31,12 +31,12 @@ import hashlib
 import json
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Callable, Optional
 
-from .image_prestage import PinManifest, offline_image_tag
+from .image_prestage import PinManifest
 
 BUNDLE_MANIFEST_NAME = "bundle_manifest.json"
 BUNDLE_IMAGES_DIR = "images"
@@ -64,7 +64,7 @@ class BundleEntry:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "BundleEntry":
+    def from_dict(cls, d: dict) -> BundleEntry:
         return cls(
             profile=d["profile"],
             base_repo_digest=d.get("base_repo_digest", ""),
@@ -78,7 +78,7 @@ class BundleEntry:
 class BundleManifest:
     entries: list[BundleEntry] = field(default_factory=list)
     feature_packages: list[str] = field(default_factory=list)
-    created_at: Optional[float] = None
+    created_at: float | None = None
     schema_version: int = 2
 
     def fat_tags(self) -> list[str]:
@@ -93,7 +93,7 @@ class BundleManifest:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "BundleManifest":
+    def from_dict(cls, d: dict) -> BundleManifest:
         return cls(
             entries=[BundleEntry.from_dict(e) for e in d.get("entries", [])],
             feature_packages=list(d.get("feature_packages", [])),
@@ -117,10 +117,10 @@ def export_bundle(
     build_fn: BuildFn,
     feature_packages: list[str],
     process: ModuleType = subprocess,
-    env: Optional[dict] = None,
+    env: dict | None = None,
     now: Callable[[], float] = time.time,
-    profiles: Optional[list[str]] = None,
-    on_output: Optional[Callable[[str], None]] = None,
+    profiles: list[str] | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> BundleManifest:
     """Build fat images and ``docker save`` one tar per profile into a bundle.
 
@@ -185,7 +185,7 @@ def import_bundle(
     bundle_dir: Path | str,
     *,
     process: ModuleType = subprocess,
-    env: Optional[dict] = None,
+    env: dict | None = None,
     verify: bool = True,
     pin_store=None,
 ) -> BundleManifest:
@@ -225,7 +225,8 @@ def import_bundle(
     # Install the pin manifest so build_image_map() resolves to digests and the
     # offline backend finds the fat images by profile.
     if pin_store is not None:
-        from .image_prestage import BaseImagePin, PinManifest as _PM
+        from .image_prestage import BaseImagePin
+        from .image_prestage import PinManifest as _PM
 
         pm = _PM()
         for e in manifest.entries:

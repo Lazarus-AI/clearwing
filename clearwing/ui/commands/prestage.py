@@ -205,7 +205,7 @@ def _handle_import(console, store, args) -> None:
         manifest = import_bundle(args.import_dir, pin_store=store)
     except (RuntimeError, FileNotFoundError) as e:
         console.print(f"[red]Import failed:[/] {e}")
-        raise SystemExit(1)
+        raise SystemExit(1) from e
     if args.json:
         import json
 

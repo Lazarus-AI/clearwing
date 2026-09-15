@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from clearwing.sandbox.image_prestage import (
     DEFAULT_BASE_IMAGE_TAGS,
-    BaseImagePin,
     ImagePinStore,
     PinManifest,
     _repo_of,

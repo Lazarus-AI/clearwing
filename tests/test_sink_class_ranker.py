@@ -5,11 +5,7 @@ from clearwing.sourcehunt.sink_class_detectors import (
     detect_sink_classes,
     sink_class_tags,
 )
-from clearwing.sourcehunt.tag_ranker import (
-    RankWeights,
-    retuned_surface,
-    tag_driven_priority,
-)
+from clearwing.sourcehunt.tag_ranker import retuned_surface, tag_driven_priority
 
 # Mimics the real libavcodec/h264_slice.c representation-domain-collision:
 # slice_table memset to -1 (=0xFFFF sentinel), slice_num = ++current_slice,
@@ -79,7 +75,6 @@ def test_tag_driven_priority_breaks_tie_and_lifts_target():
 
 
 def test_reachability_contributes_when_real():
-    w = RankWeights()
     low = tag_driven_priority(base_surface=3, influence=3, reachability=1, sink_hits=[])
     high = tag_driven_priority(base_surface=3, influence=3, reachability=5, sink_hits=[])
     assert high > low  # revived reachability axis is no longer a dead constant

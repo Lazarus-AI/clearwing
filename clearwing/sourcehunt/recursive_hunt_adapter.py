@@ -17,8 +17,9 @@ verifier and calling ``_hunt`` + ``_verify`` for a single file) is passed in as
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 from clearwing.sourcehunt.hunt_ledger import HuntUnit
 from clearwing.sourcehunt.recursive_orchestrator import Verdict
@@ -88,7 +89,7 @@ class RecursiveHuntFn:
     """
 
     hunt_and_verify: HuntAndVerify
-    unit_for_file: Callable[[str], Optional[HuntUnit]]
+    unit_for_file: Callable[[str], HuntUnit | None]
     callgraph: Any = None
     neighbor_priority: float = 3.0
 

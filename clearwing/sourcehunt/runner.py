@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import trace as otel_trace
 
@@ -94,6 +94,9 @@ from .variant_loop import (
     VariantPatternGenerator,
 )
 from .verifier import Verifier, apply_verifier_result
+
+if TYPE_CHECKING:
+    from .recursive_hunt_adapter import UnitHuntResult
 
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
@@ -1311,13 +1314,13 @@ class SourceHuntRunner:
         self,
         unit: Any,
         *,
-        file_target: "FileTarget",
+        file_target: FileTarget,
         repo_path: str,
         hunter_llm: Any,
         findings_pool: Any,
         callgraph: Any,
         pipeline_status: PipelineStatus,
-    ) -> "UnitHuntResult":
+    ) -> UnitHuntResult:
         """Hunt + adversarially verify a single unit (file).
 
         Reuses the exact HunterPool construction (via ``_build_hunter_pool``)
@@ -3268,7 +3271,7 @@ class SourceHuntRunner:
         seed_corpus_by_file: dict,
         findings_pool: Any,
         callgraph: Any,
-    ) -> "HunterPool":
+    ) -> HunterPool:
         """Construct a HunterPool for the given file set.
 
         Single construction site shared by the staged hunt (whole ranked set)

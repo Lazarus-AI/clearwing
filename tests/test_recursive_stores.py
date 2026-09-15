@@ -45,7 +45,6 @@ def test_env_supplies_namespace():
 
 
 def test_namespace_sanitization_prevents_traversal():
-    import os
 
     # Separators / hostile chars collapse into ONE safe segment (no "/").
     assert "/" not in sanitize_namespace("../../etc")

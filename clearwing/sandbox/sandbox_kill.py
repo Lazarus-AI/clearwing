@@ -17,7 +17,6 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Optional
 
 
 def format_label(key: str, value: str) -> str:
@@ -41,7 +40,7 @@ def kill_by_label(
     label_selector: str,
     *,
     process: ModuleType = subprocess,
-    env: Optional[dict] = None,
+    env: dict | None = None,
     timeout: int = 30,
 ) -> KillResult:
     """Force-remove every container carrying ``label_selector`` (``key=value``).

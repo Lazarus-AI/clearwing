@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Optional, Protocol
+from typing import Protocol
 
 
 class HuntState(str, Enum):
@@ -57,7 +57,7 @@ class HuntUnit:
     artifact_id: str
     source_digest: str
     file_path: str
-    symbol: Optional[str] = None
+    symbol: str | None = None
 
     def key(self) -> str:
         return "|".join([self.artifact_id, self.source_digest, self.file_path, self.symbol or ""])
@@ -67,13 +67,13 @@ class HuntUnit:
 class HuntRecord:
     unit: HuntUnit
     state: HuntState = HuntState.NOT_HUNTED
-    last_hunted_at: Optional[float] = None  # None => never hunted
+    last_hunted_at: float | None = None  # None => never hunted
     hunt_count: int = 0
     context: VerdictContext = field(default_factory=VerdictContext)
     finding_ids: list[str] = field(default_factory=list)
     retry_count: int = 0
-    cooldown_until: Optional[float] = None
-    variance_sampled_at: Optional[float] = None
+    cooldown_until: float | None = None
+    variance_sampled_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ class EligibilityDecision:
 
 
 class HuntLedgerStore(Protocol):
-    def get(self, key: str) -> Optional[HuntRecord]: ...
+    def get(self, key: str) -> HuntRecord | None: ...
     def put(self, record: HuntRecord) -> None: ...
     def list_by_state(self, state: HuntState) -> list[HuntRecord]: ...
 
@@ -104,7 +104,7 @@ class HuntLedger:
     and for centralized per-run sampling-quota control).
     """
 
-    def __init__(self, store: "HuntLedgerStore", policy: SalvagePolicy | None = None):
+    def __init__(self, store: HuntLedgerStore, policy: SalvagePolicy | None = None):
         self.store = store
         self.policy = policy or SalvagePolicy()
 
@@ -223,7 +223,7 @@ class SqliteHuntLedgerStore:
         )
         self._db.commit()
 
-    def get(self, key: str) -> Optional[HuntRecord]:
+    def get(self, key: str) -> HuntRecord | None:
         with self._lock:
             row = self._db.execute("SELECT json FROM hunt_ledger WHERE key=?", (key,)).fetchone()
         return _record_from_json(row[0]) if row else None
