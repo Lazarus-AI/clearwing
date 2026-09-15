@@ -20,7 +20,9 @@ def test_disabled_notifier_subscribes_to_nothing(posts):
     n = Notifier()  # no urls
     assert n.enabled is False
     n.subscribe()
-    EventBus().emit_asset_discovered(AssetDiscoveredPayload("acme", "subdomain", "a.acme.com", "crt.sh", None))
+    EventBus().emit_asset_discovered(
+        AssetDiscoveredPayload("acme", "subdomain", "a.acme.com", "crt.sh", None)
+    )
     assert posts == []
 
 
@@ -30,7 +32,9 @@ def test_notifies_on_new_asset_and_finding(posts):
         EventBus().emit_asset_discovered(
             AssetDiscoveredPayload("acme", "subdomain", "api.acme.com", "crt.sh", None)
         )
-        EventBus().emit(EventType.FINDING_RECORDED, {"severity": "high", "finding_type": "sqli", "file": "x.py"})
+        EventBus().emit(
+            EventType.FINDING_RECORDED, {"severity": "high", "finding_type": "sqli", "file": "x.py"}
+        )
     assert len(posts) == 2
     assert "api.acme.com" in posts[0][1]["text"]
     assert "sqli" in posts[1][1]["text"]
@@ -40,13 +44,17 @@ def test_unsubscribe_stops_notifications(posts):
     n = Notifier(webhook_url="http://sink/hook")
     n.subscribe()
     n.unsubscribe()
-    EventBus().emit_asset_discovered(AssetDiscoveredPayload("acme", "subdomain", "a.acme.com", "crt.sh", None))
+    EventBus().emit_asset_discovered(
+        AssetDiscoveredPayload("acme", "subdomain", "a.acme.com", "crt.sh", None)
+    )
     assert posts == []
 
 
 def test_from_config_prefers_env(monkeypatch):
     monkeypatch.setenv("CLEARWING_SLACK_WEBHOOK", "http://env/slack")
-    n = Notifier.from_config({"slack_webhook_env": "CLEARWING_SLACK_WEBHOOK", "slack_webhook_url": "http://literal"})
+    n = Notifier.from_config(
+        {"slack_webhook_env": "CLEARWING_SLACK_WEBHOOK", "slack_webhook_url": "http://literal"}
+    )
     assert n.slack_url == "http://env/slack"
 
 

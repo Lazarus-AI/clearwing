@@ -56,7 +56,12 @@ def _make_verdict(**kwargs) -> ValidatorVerdict:
         axes=Axes(
             real=AxisResult(passed=True, confidence="high", rationale="confirmed"),
             triggerable=AxisResult(passed=True, confidence="high", rationale="reachable"),
-            impactful=AxisResult(passed=True, confidence="high", rationale="crosses boundary", boundary_crossed="user"),
+            impactful=AxisResult(
+                passed=True,
+                confidence="high",
+                rationale="crosses boundary",
+                boundary_crossed="user",
+            ),
             general=AxisResult(passed=True, confidence="high", rationale="default config"),
         ),
         advance=True,
@@ -77,9 +82,14 @@ def _make_verdict(**kwargs) -> ValidatorVerdict:
 class TestValidatorVerdict:
     def test_defaults(self):
         v = ValidatorVerdict(
-            finding_id="x", axes=Axes(), advance=False,
-            severity_validated=None, evidence_level="suspicion",
-            pro_argument="", counter_argument="", tie_breaker="",
+            finding_id="x",
+            axes=Axes(),
+            advance=False,
+            severity_validated=None,
+            evidence_level="suspicion",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="",
             duplicate_cve=None,
         )
         assert v.raw_response == ""
@@ -157,20 +167,31 @@ class TestIndependentContext:
 
 class TestResponseParsing:
     def test_full_4axis_maps_to_verdict(self):
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": True, "confidence": "high", "rationale": "confirmed"},
-                "triggerable": {"passed": True, "confidence": "medium", "rationale": "likely"},
-                "impactful": {"passed": True, "confidence": "high", "rationale": "boundary crossed", "boundary_crossed": "user"},
-                "general": {"passed": True, "confidence": "high", "rationale": "default config"},
-            },
-            "advance": True,
-            "severity": "high",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "strong case",
-            "counter_argument": "weak counter",
-            "tie_breaker": "crash log",
-        })
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": True, "confidence": "high", "rationale": "confirmed"},
+                    "triggerable": {"passed": True, "confidence": "medium", "rationale": "likely"},
+                    "impactful": {
+                        "passed": True,
+                        "confidence": "high",
+                        "rationale": "boundary crossed",
+                        "boundary_crossed": "user",
+                    },
+                    "general": {
+                        "passed": True,
+                        "confidence": "high",
+                        "rationale": "default config",
+                    },
+                },
+                "advance": True,
+                "severity": "high",
+                "evidence_level": "crash_reproduced",
+                "pro_argument": "strong case",
+                "counter_argument": "weak counter",
+                "tie_breaker": "crash log",
+            }
+        )
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is True
         assert verdict.finding_id == "hunter-abc"
@@ -180,19 +201,21 @@ class TestResponseParsing:
         assert verdict.severity_validated == "high"
 
     def test_partial_pass_clears_severity(self):
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": True, "confidence": "high", "rationale": "confirmed"},
-                "triggerable": {"passed": False, "confidence": "low", "rationale": "dead code"},
-                "impactful": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "general": {"passed": True, "confidence": "medium", "rationale": "yes"},
-            },
-            "advance": False,
-            "severity": "high",
-            "evidence_level": "static_corroboration",
-            "tie_breaker_file": "src/parse.c",
-            "tie_breaker_line": 42,
-        })
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": True, "confidence": "high", "rationale": "confirmed"},
+                    "triggerable": {"passed": False, "confidence": "low", "rationale": "dead code"},
+                    "impactful": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    "general": {"passed": True, "confidence": "medium", "rationale": "yes"},
+                },
+                "advance": False,
+                "severity": "high",
+                "evidence_level": "static_corroboration",
+                "tie_breaker_file": "src/parse.c",
+                "tie_breaker_line": 42,
+            }
+        )
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is False
         assert verdict.axes.triggerable.passed is False
@@ -202,18 +225,20 @@ class TestResponseParsing:
         # A rejection may cite the source location it rests on; to_verdict and
         # apply_validator_verdict carry it through. The fields default to None
         # when the model omits them, so existing verdicts are unaffected.
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
-                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-            },
-            "advance": False,
-            "severity": "info",
-            "evidence_level": "static_corroboration",
-            "tie_breaker": "length is checked before the copy",
-            "tie_breaker_file": "src/parse.c",
-            "tie_breaker_line": 142,
-        })
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": False,
+                "severity": "info",
+                "evidence_level": "static_corroboration",
+                "tie_breaker": "length is checked before the copy",
+                "tie_breaker_file": "src/parse.c",
+                "tie_breaker_line": 142,
+            }
+        )
         verdict = schema.to_verdict("hunter-xyz")
         assert verdict.tie_breaker_file == "src/parse.c"
         assert verdict.tie_breaker_line == 142
@@ -224,15 +249,17 @@ class TestResponseParsing:
         assert finding["verifier_tie_breaker_line"] == 142
 
     def test_tie_breaker_location_defaults_to_none(self):
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-            },
-            "advance": True,
-            "severity": "low",
-            "evidence_level": "static_corroboration",
-        })
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": True,
+                "severity": "low",
+                "evidence_level": "static_corroboration",
+            }
+        )
         verdict = schema.to_verdict("hunter-xyz")
         assert verdict.tie_breaker_file is None
         assert verdict.tie_breaker_line is None
@@ -240,15 +267,17 @@ class TestResponseParsing:
     def test_quick_pass_two_axes_only(self):
         # impactful/general are optional (quick-pass prompt); to_verdict maps
         # only the axes that are present.
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-            },
-            "advance": True,
-            "severity": "critical",
-            "evidence_level": "crash_reproduced",
-        })
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": True,
+                "severity": "critical",
+                "evidence_level": "crash_reproduced",
+            }
+        )
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.advance is True
         assert {name for name, _ in verdict.axes.items()} == {"real", "triggerable"}
@@ -256,22 +285,56 @@ class TestResponseParsing:
 
     def test_reject_without_tie_breaker_file_is_rejected(self):
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
-            _VerdictSchema.model_validate({
-                "axes": {
-                    "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
-                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-                },
-                "advance": False,
-                "severity": "info",
-                "evidence_level": "static_corroboration",
-                "tie_breaker_line": 42,
-            })
+            _VerdictSchema.model_validate(
+                {
+                    "axes": {
+                        "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                        "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    },
+                    "advance": False,
+                    "severity": "info",
+                    "evidence_level": "static_corroboration",
+                    "tie_breaker_line": 42,
+                }
+            )
 
     def test_reject_without_tie_breaker_line_is_rejected(self):
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
-            _VerdictSchema.model_validate({
+            _VerdictSchema.model_validate(
+                {
+                    "axes": {
+                        "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                        "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    },
+                    "advance": False,
+                    "severity": "info",
+                    "evidence_level": "static_corroboration",
+                    "tie_breaker_file": "src/parse.c",
+                }
+            )
+
+    def test_advance_true_needs_no_tie_breaker(self):
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": True,
+                "severity": "low",
+                "evidence_level": "static_corroboration",
+            }
+        )
+        assert schema.tie_breaker_file is None
+        assert schema.tie_breaker_line is None
+
+    def test_reject_with_both_fields_succeeds(self):
+        schema = _VerdictSchema.model_validate(
+            {
                 "axes": {
                     "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
                     "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
@@ -280,59 +343,43 @@ class TestResponseParsing:
                 "severity": "info",
                 "evidence_level": "static_corroboration",
                 "tie_breaker_file": "src/parse.c",
-            })
-
-    def test_advance_true_needs_no_tie_breaker(self):
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-            },
-            "advance": True,
-            "severity": "low",
-            "evidence_level": "static_corroboration",
-        })
-        assert schema.tie_breaker_file is None
-        assert schema.tie_breaker_line is None
-
-    def test_reject_with_both_fields_succeeds(self):
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
-                "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-            },
-            "advance": False,
-            "severity": "info",
-            "evidence_level": "static_corroboration",
-            "tie_breaker_file": "src/parse.c",
-            "tie_breaker_line": 142,
-        })
+                "tie_breaker_line": 142,
+            }
+        )
         assert schema.tie_breaker_file == "src/parse.c"
         assert schema.tie_breaker_line == 142
 
     def test_tie_breaker_line_zero_rejected(self):
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
-            _VerdictSchema.model_validate({
-                "axes": {
-                    "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
-                    "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
-                },
-                "advance": False,
-                "severity": "info",
-                "evidence_level": "static_corroboration",
-                "tie_breaker_file": "src/parse.c",
-                "tie_breaker_line": 0,
-            })
+            _VerdictSchema.model_validate(
+                {
+                    "axes": {
+                        "real": {"passed": False, "confidence": "high", "rationale": "guarded"},
+                        "triggerable": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    },
+                    "advance": False,
+                    "severity": "info",
+                    "evidence_level": "static_corroboration",
+                    "tie_breaker_file": "src/parse.c",
+                    "tie_breaker_line": 0,
+                }
+            )
 
     def test_legacy_verdict_without_tie_breaker_still_loads(self):
         # Legacy checkpoints read back via ValidatorVerdict (dataclass) bypass
         # the wire-schema validator, so old rejections with no source anchor
         # still load.
         v = ValidatorVerdict(
-            finding_id="legacy", axes=Axes(), advance=False,
-            severity_validated=None, evidence_level="suspicion",
-            pro_argument="", counter_argument="", tie_breaker="legacy",
+            finding_id="legacy",
+            axes=Axes(),
+            advance=False,
+            severity_validated=None,
+            evidence_level="suspicion",
+            pro_argument="",
+            counter_argument="",
+            tie_breaker="legacy",
             duplicate_cve=None,
         )
         assert v.tie_breaker_file is None
@@ -342,22 +389,31 @@ class TestResponseParsing:
         # Constrained decoding can't emit these; assert the schema enforces them
         # (so we never have to defensively re-validate downstream).
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
-            _VerdictSchema.model_validate({
-                "axes": {
-                    "real": {"passed": True, "confidence": "high", "rationale": "y"},
-                    "triggerable": {"passed": True, "confidence": "high", "rationale": "y"},
-                },
-                "advance": True, "severity": "apocalyptic", "evidence_level": "crash_reproduced",
-            })
+            _VerdictSchema.model_validate(
+                {
+                    "axes": {
+                        "real": {"passed": True, "confidence": "high", "rationale": "y"},
+                        "triggerable": {"passed": True, "confidence": "high", "rationale": "y"},
+                    },
+                    "advance": True,
+                    "severity": "apocalyptic",
+                    "evidence_level": "crash_reproduced",
+                }
+            )
         with pytest.raises(ValidationError):
-            _VerdictSchema.model_validate({
-                "axes": {
-                    "real": {"passed": True, "confidence": "ultra_high", "rationale": "y"},
-                    "triggerable": {"passed": True, "confidence": "high", "rationale": "y"},
-                },
-                "advance": True, "severity": "high", "evidence_level": "crash_reproduced",
-            })
+            _VerdictSchema.model_validate(
+                {
+                    "axes": {
+                        "real": {"passed": True, "confidence": "ultra_high", "rationale": "y"},
+                        "triggerable": {"passed": True, "confidence": "high", "rationale": "y"},
+                    },
+                    "advance": True,
+                    "severity": "high",
+                    "evidence_level": "crash_reproduced",
+                }
+            )
 
 
 # --- apply_validator_verdict tests -------------------------------------------
@@ -454,17 +510,19 @@ class TestRejectedFindings:
         assert set(finding["rejected_axes"]) == {"triggerable", "general"}
 
     def test_rejected_finding_severity_cleared(self):
-        schema = _VerdictSchema.model_validate({
-            "axes": {
-                "real": {"passed": False, "confidence": "high", "rationale": "not real"},
-                "triggerable": {"passed": False, "confidence": "low", "rationale": "n/a"},
-            },
-            "advance": False,
-            "severity": "high",
-            "evidence_level": "static_corroboration",
-            "tie_breaker_file": "src/parse.c",
-            "tie_breaker_line": 7,
-        })
+        schema = _VerdictSchema.model_validate(
+            {
+                "axes": {
+                    "real": {"passed": False, "confidence": "high", "rationale": "not real"},
+                    "triggerable": {"passed": False, "confidence": "low", "rationale": "n/a"},
+                },
+                "advance": False,
+                "severity": "high",
+                "evidence_level": "static_corroboration",
+                "tie_breaker_file": "src/parse.c",
+                "tie_breaker_line": 7,
+            }
+        )
         verdict = schema.to_verdict("hunter-abc")
         assert verdict.severity_validated is None
 
@@ -475,7 +533,9 @@ class TestRejectedFindings:
 class TestCalibration:
     def test_calibration_record_defaults(self):
         r = CalibrationRecord(
-            finding_id="x", session_id="s", cwe="CWE-787",
+            finding_id="x",
+            session_id="s",
+            cwe="CWE-787",
             discoverer_severity="high",
         )
         assert r.validator_severity is None
@@ -487,14 +547,24 @@ class TestCalibration:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cal.jsonl"
             store = CalibrationStore(path)
-            store.append(CalibrationRecord(
-                finding_id="f1", session_id="s1", cwe="CWE-787",
-                discoverer_severity="high", validator_severity="high",
-            ))
-            store.append(CalibrationRecord(
-                finding_id="f2", session_id="s1", cwe="CWE-416",
-                discoverer_severity="critical", validator_severity="high",
-            ))
+            store.append(
+                CalibrationRecord(
+                    finding_id="f1",
+                    session_id="s1",
+                    cwe="CWE-787",
+                    discoverer_severity="high",
+                    validator_severity="high",
+                )
+            )
+            store.append(
+                CalibrationRecord(
+                    finding_id="f2",
+                    session_id="s1",
+                    cwe="CWE-416",
+                    discoverer_severity="critical",
+                    validator_severity="high",
+                )
+            )
             records = store.load_all()
             assert len(records) == 2
             assert records[0].finding_id == "f1"
@@ -503,10 +573,15 @@ class TestCalibration:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cal.jsonl"
             store = CalibrationStore(path)
-            store.append(CalibrationRecord(
-                finding_id="f1", session_id="s1", cwe="CWE-787",
-                discoverer_severity="high", validator_severity="high",
-            ))
+            store.append(
+                CalibrationRecord(
+                    finding_id="f1",
+                    session_id="s1",
+                    cwe="CWE-787",
+                    discoverer_severity="high",
+                    validator_severity="high",
+                )
+            )
             store.record_human_verdict("f1", "s1", "high")
             records = store.load_all()
             assert records[0].human_severity == "high"
@@ -517,14 +592,24 @@ class TestCalibration:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "cal.jsonl"
             store = CalibrationStore(path)
-            store.append(CalibrationRecord(
-                finding_id="f1", session_id="s1", cwe="CWE-787",
-                discoverer_severity="high", validator_severity="high",
-            ))
-            store.append(CalibrationRecord(
-                finding_id="f2", session_id="s1", cwe="CWE-416",
-                discoverer_severity="critical", validator_severity="medium",
-            ))
+            store.append(
+                CalibrationRecord(
+                    finding_id="f1",
+                    session_id="s1",
+                    cwe="CWE-787",
+                    discoverer_severity="high",
+                    validator_severity="high",
+                )
+            )
+            store.append(
+                CalibrationRecord(
+                    finding_id="f2",
+                    session_id="s1",
+                    cwe="CWE-416",
+                    discoverer_severity="critical",
+                    validator_severity="medium",
+                )
+            )
             store.record_human_verdict("f1", "s1", "high")
             store.record_human_verdict("f2", "s1", "critical")
             stats = store.stats()
@@ -540,20 +625,27 @@ class TestAvalidate:
     @pytest.mark.asyncio
     async def test_avalidate_parses_response(self):
         mock_llm = AsyncMock()
-        verdict_json = json.dumps({
-            "axes": {
-                "real": {"passed": True, "confidence": "high", "rationale": "yes"},
-                "triggerable": {"passed": True, "confidence": "medium", "rationale": "likely"},
-                "impactful": {"passed": True, "confidence": "high", "rationale": "yes", "boundary_crossed": "privilege"},
-                "general": {"passed": True, "confidence": "high", "rationale": "yes"},
-            },
-            "advance": True,
-            "severity": "high",
-            "evidence_level": "crash_reproduced",
-            "pro_argument": "strong",
-            "counter_argument": "weak",
-            "tie_breaker": "crash",
-        })
+        verdict_json = json.dumps(
+            {
+                "axes": {
+                    "real": {"passed": True, "confidence": "high", "rationale": "yes"},
+                    "triggerable": {"passed": True, "confidence": "medium", "rationale": "likely"},
+                    "impactful": {
+                        "passed": True,
+                        "confidence": "high",
+                        "rationale": "yes",
+                        "boundary_crossed": "privilege",
+                    },
+                    "general": {"passed": True, "confidence": "high", "rationale": "yes"},
+                },
+                "advance": True,
+                "severity": "high",
+                "evidence_level": "crash_reproduced",
+                "pro_argument": "strong",
+                "counter_argument": "weak",
+                "tie_breaker": "crash",
+            }
+        )
         mock_response = MagicMock()
         mock_response.first_text = verdict_json
         mock_llm.aask_text = AsyncMock(return_value=mock_response)
@@ -607,24 +699,32 @@ class TestFileContext:
 class TestRunnerIntegration:
     def test_validator_mode_v2_default(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         r = SourceHuntRunner(repo_url="test", depth="standard")
         assert r.validator_mode == "v2"
 
     def test_validator_mode_v1_legacy(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         r = SourceHuntRunner(
-            repo_url="test", depth="standard", validator_mode="v1",
+            repo_url="test",
+            depth="standard",
+            validator_mode="v1",
         )
         assert r.validator_mode == "v1"
 
     def test_calibration_store_created_by_default(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         r = SourceHuntRunner(repo_url="test", depth="standard")
         assert r._calibration_store is not None
 
     def test_calibration_disabled(self):
         from clearwing.sourcehunt.runner import SourceHuntRunner
+
         r = SourceHuntRunner(
-            repo_url="test", depth="standard", enable_calibration=False,
+            repo_url="test",
+            depth="standard",
+            enable_calibration=False,
         )
         assert r._calibration_store is None

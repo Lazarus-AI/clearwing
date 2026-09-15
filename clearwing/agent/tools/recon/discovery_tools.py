@@ -43,9 +43,7 @@ _MAX_BYTES = 8_000_000
 
 def _http_get(url: str, *, timeout: int = _HTTP_TIMEOUT, accept: str = "*/*") -> str:
     """GET *url* and return the (size-capped) body text, or "" on any failure."""
-    request = urllib.request.Request(
-        url, headers={"User-Agent": _USER_AGENT, "Accept": accept}
-    )
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": accept})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             return response.read(_MAX_BYTES).decode("utf-8", errors="replace")
@@ -330,7 +328,14 @@ def screenshot_surface(urls: list[str], out_dir: str = "/tmp/asm-screenshots") -
             shots.append({"url": url, "ok": False, "error": nav.get("error", "navigation failed")})
             continue
         shot = browser_screenshot(path=path)
-        shots.append({"url": url, "ok": bool(shot.get("success")), "path": path, "title": nav.get("title", "")})
+        shots.append(
+            {
+                "url": url,
+                "ok": bool(shot.get("success")),
+                "path": path,
+                "title": nav.get("title", ""),
+            }
+        )
     gallery = out / "gallery.html"
     gallery.write_text(_render_gallery(shots), encoding="utf-8")
     return {"gallery": str(gallery), "screenshots": shots, "count": len(shots)}

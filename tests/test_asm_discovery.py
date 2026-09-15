@@ -29,7 +29,9 @@ def _mock_http(monkeypatch):
 
     monkeypatch.setattr(dt, "_http_get_json", fake_json)
     monkeypatch.setattr(dt, "github_subdomains", lambda d, env_var="GITHUB_API_KEY": [])
-    monkeypatch.setattr(dt, "resolve_name", lambda n: ["93.184.216.34"] if "example.com" in n else [])
+    monkeypatch.setattr(
+        dt, "resolve_name", lambda n: ["93.184.216.34"] if "example.com" in n else []
+    )
     monkeypatch.setattr(
         dt,
         "probe_url",
@@ -55,7 +57,9 @@ def test_wayback_dedupes_and_skips_header():
 
 
 def test_fingerprint_from_headers_and_body():
-    techs = dt._fingerprint({"x-powered-by": "PHP/8.1", "server": "nginx/1.18"}, "<div>wp-content</div>")
+    techs = dt._fingerprint(
+        {"x-powered-by": "PHP/8.1", "server": "nginx/1.18"}, "<div>wp-content</div>"
+    )
     assert set(techs) == {"PHP", "nginx", "WordPress"}
 
 
@@ -101,7 +105,9 @@ def test_project_to_graph_mirrors_assets():
 
 
 def test_discovery_never_raises_when_a_source_fails(monkeypatch):
-    monkeypatch.setattr(dt, "crtsh_subdomains", lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        dt, "crtsh_subdomains", lambda d: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
     scope = Scope.from_domain("example.com", name="acme")
     # a failing source contributes nothing but does not crash the run
     result = discovery.run_discovery(scope)

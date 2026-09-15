@@ -289,7 +289,9 @@ class KnowledgeGraph:
     def _query_crypto(self, q: str, original: str) -> str | None:
         if "algorithms for" in q:
             proto_name = _extract_after(original, "algorithms for")
-            proto_id = f"protocol:{proto_name}" if not proto_name.startswith("protocol:") else proto_name
+            proto_id = (
+                f"protocol:{proto_name}" if not proto_name.startswith("protocol:") else proto_name
+            )
             neighbors = self.get_neighbors(proto_id, rel_type="USES_ALGORITHM")
             if not neighbors:
                 return f"No algorithms found for {proto_name}."
@@ -310,7 +312,9 @@ class KnowledgeGraph:
         if "key material for" in q:
             target = _extract_after(original, "key material for")
             all_keys = self.get_entities_by_type("key_material")
-            matched = [k for k in all_keys if k.properties.get("target") == target or target in k.id]
+            matched = [
+                k for k in all_keys if k.properties.get("target") == target or target in k.id
+            ]
             if not matched:
                 return f"No key material found for {target}."
             return "\n".join(f"- {k.id}: {k.properties}" for k in matched)
@@ -517,7 +521,12 @@ class KnowledgeGraph:
         """Register a KDF configuration (algorithm + iteration count + target)."""
         kdf_id = f"kdf:{algorithm}:{iterations}:{target}"
         return self.add_entity(
-            "kdf_config", kdf_id, algorithm=algorithm, iterations=iterations, target=target, **kwargs
+            "kdf_config",
+            kdf_id,
+            algorithm=algorithm,
+            iterations=iterations,
+            target=target,
+            **kwargs,
         )
 
     def _get_key_chain(self, start_id: str) -> list[tuple[Entity, str, int]]:
@@ -528,7 +537,10 @@ class KnowledgeGraph:
         while queue:
             current_id, depth = queue.pop(0)
             for rel in self.get_relationships(current_id, direction="out"):
-                if rel.rel_type in ("DERIVES_KEY", "WRAPS_KEY", "DECRYPTS") and rel.target_id not in visited:
+                if (
+                    rel.rel_type in ("DERIVES_KEY", "WRAPS_KEY", "DECRYPTS")
+                    and rel.target_id not in visited
+                ):
                     visited.add(rel.target_id)
                     neighbor = self.get_entity(rel.target_id)
                     if neighbor:

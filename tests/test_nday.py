@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,7 +14,6 @@ from clearwing.sourcehunt.nday_filter import (
     NdayFilter,
     parse_cve_list,
 )
-
 
 # --- NdayCandidate tests -----------------------------------------------------
 
@@ -30,7 +28,9 @@ class TestNdayCandidate:
 
     def test_parse_cve_list(self):
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False,
+            mode="w",
+            suffix=".txt",
+            delete=False,
         ) as f:
             f.write("# comment line\n")
             f.write("CVE-2024-1111 abc123 heap overflow\n")
@@ -51,7 +51,9 @@ class TestNdayCandidate:
 
     def test_parse_cve_list_empty(self):
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False,
+            mode="w",
+            suffix=".txt",
+            delete=False,
         ) as f:
             f.write("# only comments\n\n")
             f.flush()
@@ -216,7 +218,8 @@ class TestNdayPipeline:
     def test_finding_has_nday_diff(self):
         pipeline = NdayPipeline(llm=MagicMock())
         candidate = NdayCandidate(
-            cve_id="CVE-2024-1111", diff_text="the diff",
+            cve_id="CVE-2024-1111",
+            diff_text="the diff",
         )
         finding = pipeline._build_nday_finding(candidate)
         assert finding["nday_diff"] == "the diff"
@@ -278,7 +281,9 @@ class TestNdayValidation:
         pipeline = NdayPipeline(llm=MagicMock())
         mock_sandbox = MagicMock()
         mock_sandbox.exec.return_value = MagicMock(
-            exit_code=139, stdout="", stderr="segfault",
+            exit_code=139,
+            stdout="",
+            stderr="segfault",
         )
         mock_sandbox.write_file = MagicMock()
 
@@ -307,6 +312,7 @@ class TestNdayValidation:
 class TestNdayCLI:
     def test_nday_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -318,6 +324,7 @@ class TestNdayCLI:
 
     def test_cve_list_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -328,37 +335,63 @@ class TestNdayCLI:
 
     def test_recent_cves_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
         sourcehunt.add_parser(subs)
-        args = parser.parse_args([
-            "sourcehunt", "repo", "--nday", "--recent-cves", "--nday-days", "60",
-        ])
+        args = parser.parse_args(
+            [
+                "sourcehunt",
+                "repo",
+                "--nday",
+                "--recent-cves",
+                "--nday-days",
+                "60",
+            ]
+        )
         assert args.recent_cves is True
         assert args.nday_days == 60
 
     def test_nday_budget_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
         sourcehunt.add_parser(subs)
-        args = parser.parse_args([
-            "sourcehunt", "repo", "--nday", "--cve", "CVE-2024-1", "--nday-budget", "campaign",
-        ])
+        args = parser.parse_args(
+            [
+                "sourcehunt",
+                "repo",
+                "--nday",
+                "--cve",
+                "CVE-2024-1",
+                "--nday-budget",
+                "campaign",
+            ]
+        )
         assert args.nday_budget == "campaign"
 
     def test_patch_commit_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
         sourcehunt.add_parser(subs)
-        args = parser.parse_args([
-            "sourcehunt", "repo", "--nday", "--cve", "CVE-2024-1", "--patch-commit", "abc123",
-        ])
+        args = parser.parse_args(
+            [
+                "sourcehunt",
+                "repo",
+                "--nday",
+                "--cve",
+                "CVE-2024-1",
+                "--patch-commit",
+                "abc123",
+            ]
+        )
         assert args.patch_commit == "abc123"

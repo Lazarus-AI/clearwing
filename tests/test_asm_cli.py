@@ -39,13 +39,18 @@ def cli(capsys):
 def _isolate(tmp_path, monkeypatch):
     # point every on-disk store at the tmp dir and skip the knowledge graph
     monkeypatch.setattr(assets_mod, "_default_db_path", lambda: tmp_path / "assets.db")
-    monkeypatch.setattr("clearwing.core.config.default_results_dir", lambda s: str(tmp_path / "results" / s))
+    monkeypatch.setattr(
+        "clearwing.core.config.default_results_dir", lambda s: str(tmp_path / "results" / s)
+    )
     monkeypatch.setattr(asm_cmd, "_load_kg", lambda: None)
     monkeypatch.setattr(
         discovery_mod,
         "run_discovery",
         lambda scope, opts: types.SimpleNamespace(
-            assets=[Asset(scope.name, "domain", "example.com"), Asset(scope.name, "subdomain", "api.example.com")]
+            assets=[
+                Asset(scope.name, "domain", "example.com"),
+                Asset(scope.name, "subdomain", "api.example.com"),
+            ]
         ),
     )
 

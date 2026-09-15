@@ -486,14 +486,14 @@ def _maybe_configure_model_roles(cli, console: Console, primary: ProviderPreset)
         "model for every task. See docs/model-roles.md.[/dim]"
     )
     if not Confirm.ask("Configure per-role model selection now?", default=False):
-        console.print("[dim]Skipped — one endpoint serves every task. "
-                      "Run `clearwing models` anytime to see the roles.[/dim]")
+        console.print(
+            "[dim]Skipped — one endpoint serves every task. "
+            "Run `clearwing models` anytime to see the roles.[/dim]"
+        )
         return
 
     provider_keys: list[str] = [primary.key]
-    if Confirm.ask(
-        "Add a second provider for independent review (recommended)?", default=False
-    ):
+    if Confirm.ask("Add a second provider for independent review (recommended)?", default=False):
         auditor = _prompt_provider_choice(console, KNOWN_PROVIDERS)
         if auditor is not None and auditor.key != primary.key:
             provider_keys.append(auditor.key)

@@ -174,10 +174,7 @@ class _AxesSchema(BaseModel):
     )
     impactful: AxisResult | None = Field(
         default=None,
-        description=(
-            "Does the bug cross a meaningful security boundary? Omit on the "
-            "quick pass."
-        ),
+        description=("Does the bug cross a meaningful security boundary? Omit on the quick pass."),
     )
     general: AxisResult | None = Field(
         default=None,
@@ -206,12 +203,10 @@ class _VerdictSchema(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"] = Field(
         description="Validated severity of the finding."
     )
-    evidence_level: Literal[
-        "static_corroboration", "crash_reproduced", "root_cause_explained"
-    ] = Field(description="Strength of the evidence gathered during validation.")
-    pro_argument: str = Field(
-        default="", description="Strongest case FOR the vulnerability."
+    evidence_level: Literal["static_corroboration", "crash_reproduced", "root_cause_explained"] = (
+        Field(description="Strength of the evidence gathered during validation.")
     )
+    pro_argument: str = Field(default="", description="Strongest case FOR the vulnerability.")
     counter_argument: str = Field(
         default="", description="Strongest case AGAINST the vulnerability."
     )
@@ -241,12 +236,9 @@ class _VerdictSchema(BaseModel):
         # source so the false-reject audit can locate it. Advancing verdicts may
         # leave the fields null. Legacy verdicts read back via ValidatorVerdict
         # (dataclass) bypass this validator, so old checkpoints still load.
-        if not self.advance and (
-            self.tie_breaker_file is None or self.tie_breaker_line is None
-        ):
+        if not self.advance and (self.tie_breaker_file is None or self.tie_breaker_line is None):
             raise ValueError(
-                "verdicts with advance=False must set tie_breaker_file "
-                "and tie_breaker_line"
+                "verdicts with advance=False must set tie_breaker_file and tie_breaker_line"
             )
         return self
 
@@ -379,13 +371,15 @@ class Validator:
             if verification is not None:
                 verdict.dynamic_evidence = list(verification.evidence)
 
-        EventBus().emit_validation_result(ValidationResultPayload(
-            finding_id=verdict.finding_id,
-            axes={name: ar.passed for name, ar in verdict.axes.items()},
-            advance=verdict.advance,
-            severity=verdict.severity_validated,
-            evidence_level=verdict.evidence_level,
-        ))
+        EventBus().emit_validation_result(
+            ValidationResultPayload(
+                finding_id=verdict.finding_id,
+                axes={name: ar.passed for name, ar in verdict.axes.items()},
+                advance=verdict.advance,
+                severity=verdict.severity_validated,
+                evidence_level=verdict.evidence_level,
+            )
+        )
 
         return verdict
 
@@ -431,9 +425,7 @@ class Validator:
         total_chars = 0
         for start, end in islice(windows, 6):
             header = f"--- lines {start}-{end} ---"
-            body = "\n".join(
-                f"{n:5d}: {lines[n - 1]}" for n in range(start, end + 1)
-            )
+            body = "\n".join(f"{n:5d}: {lines[n - 1]}" for n in range(start, end + 1))
             chunk = f"{header}\n{body}"
             total_chars += len(chunk)
             if total_chars > 12000 and excerpts:
@@ -471,7 +463,8 @@ class Validator:
         return ordered
 
     def _merge_windows(
-        self, windows: list[tuple[int, int]],
+        self,
+        windows: list[tuple[int, int]],
     ) -> list[tuple[int, int]]:
         if not windows:
             return []
@@ -485,7 +478,9 @@ class Validator:
         return merged
 
     def _error_verdict(
-        self, finding: Finding, reason: str,
+        self,
+        finding: Finding,
+        reason: str,
     ) -> ValidatorVerdict:
         return ValidatorVerdict(
             finding_id=finding.get("id", "unknown"),
@@ -511,7 +506,10 @@ class Validator:
 
         temp_v = Verifier(self.llm)
         return await temp_v.arun_patch_oracle(
-            finding, file_content, sandbox, rerun_poc,
+            finding,
+            file_content,
+            sandbox,
+            rerun_poc,
         )
 
 
