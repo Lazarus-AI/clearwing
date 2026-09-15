@@ -73,12 +73,12 @@ class TestDockerfileRendering:
     def test_c_dockerfile_uses_gcc_base(self, c_repo: Path):
         sb = HunterSandbox(repo_path=str(c_repo))
         df = sb._render_dockerfile()
-        assert df.startswith("FROM gcc:12-bullseye")
+        assert df.startswith("FROM gcc:12-bookworm")
 
     def test_cpp_dockerfile_uses_gcc_base(self, cpp_repo: Path):
         sb = HunterSandbox(repo_path=str(cpp_repo))
         df = sb._render_dockerfile()
-        assert "FROM gcc:12-bullseye" in df
+        assert "FROM gcc:12-bookworm" in df
 
     def test_python_dockerfile_no_sanitizer_flags(self, python_repo: Path):
         sb = HunterSandbox(repo_path=str(python_repo))

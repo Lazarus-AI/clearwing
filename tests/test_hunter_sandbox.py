@@ -159,7 +159,7 @@ class TestHunterSandboxBuildImage:
         (temp_repo / "Makefile").write_text("all:\n")
         sb = HunterSandbox(repo_path=str(temp_repo))
         df = sb._render_dockerfile()
-        assert "FROM gcc:12-bullseye" in df
+        assert "FROM gcc:12-bookworm" in df
         assert "ripgrep" in df
         assert "gdb" in df
         assert "ltrace" not in df

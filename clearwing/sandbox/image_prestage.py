@@ -41,7 +41,7 @@ from typing import Callable, Mapping, Optional
 # backend imports this so the supported profiles and the pre-staged images
 # never drift apart.
 DEFAULT_BASE_IMAGE_TAGS: dict[str, str] = {
-    "c-cpp": "gcc:12-bullseye",
+    "c-cpp": "gcc:12-bookworm",
     "rust": "rust:1-slim",
     "go": "golang:1.22",
     "python": "python:3.12-slim",
