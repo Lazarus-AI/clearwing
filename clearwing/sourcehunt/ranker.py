@@ -395,9 +395,7 @@ class Ranker:
         )
         return candidates
 
-    def _reserve_band_minimum(
-        self, ordered: list[FileTarget], limit: int
-    ) -> list[FileTarget]:
+    def _reserve_band_minimum(self, ordered: list[FileTarget], limit: int) -> list[FileTarget]:
         """Take ``limit`` files from ``ordered`` (already sorted best-first),
         but reserve ``large_repo_band_min`` slots for each priority band first.
 
@@ -553,7 +551,7 @@ class Ranker:
                     return {}
                 last_exc = exc
                 if attempt < max_attempts - 1:
-                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2 ** attempt)
+                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2**attempt)
                     logger.debug(
                         "Ranker chunk %d/%d attempt %d failed (%s); retrying in %.1fs",
                         idx,
@@ -577,9 +575,8 @@ class Ranker:
     def _is_retryable_structured_output_error(exc: Exception) -> bool:
         if isinstance(exc, (json.JSONDecodeError, ValidationError)):
             return True
-        return (
-            isinstance(exc, ValueError)
-            and str(exc).startswith("LLM returned empty response; expected JSON matching")
+        return isinstance(exc, ValueError) and str(exc).startswith(
+            "LLM returned empty response; expected JSON matching"
         )
 
     def _build_user_message(self, chunk: list[FileTarget]) -> str:
