@@ -304,9 +304,14 @@ class TestLLMEndpointHelpers:
 
 
 class TestProviderManagerForEndpoint:
-    def test_for_endpoint_routes_all_tasks_to_one_llm(self, clean_env, monkeypatch):
-        """When constructed via for_endpoint, every get_native_client() call
-        returns the same cached LLM regardless of task."""
+    def test_for_endpoint_pins_one_model_with_per_role_inference(
+        self, clean_env, monkeypatch
+    ):
+        """for_endpoint pins the endpoint's single model/provider for every task,
+        but applies each task's role inference (utility ranking is deterministic,
+        researcher/reviewer think harder). A task therefore gets its own
+        role-specialized client — same model, role-specific reasoning — and
+        repeated calls for the same role return the cached client."""
         monkeypatch.setenv(ENV_ANTHROPIC_KEY, "sk-ant-test")
         endpoint = LLMEndpoint(
             provider="anthropic",
@@ -319,11 +324,15 @@ class TestProviderManagerForEndpoint:
         hunter = pm.get_native_client("hunter")
         verifier = pm.get_native_client("verifier")
 
-        assert isinstance(ranker, AsyncLLMClient)
-        assert ranker is hunter
-        assert hunter is verifier
-        assert ranker.provider_name == "anthropic"
-        assert ranker.model_name == "claude-sonnet-4-6"
+        # Every task resolves to the endpoint's single model/provider ...
+        for client in (ranker, hunter, verifier):
+            assert isinstance(client, AsyncLLMClient)
+            assert client.provider_name == "anthropic"
+            assert client.model_name == "claude-sonnet-4-6"
+        # ... while each role is inferred independently, so distinct roles get
+        # distinct role-specialized clients and the same role is cached.
+        assert ranker is not hunter
+        assert pm.get_native_client("ranker") is ranker
 
     def test_for_endpoint_openai_compat_uses_native_chat_model(self, clean_env):
         endpoint = LLMEndpoint(

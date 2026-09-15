@@ -313,7 +313,7 @@ class ProviderManager:
         if roles_cfg and isinstance(roles_cfg, dict):
             return cls._from_model_roles(roles_cfg)
 
-        # cwpro model_aliases mode: {"model_aliases": {"task": {"provider": {...}}}}
+        # Host model_aliases mode: {"model_aliases": {"task": {"provider": {...}}}}
         aliases = cfg.get("model_aliases")
         if aliases and isinstance(aliases, dict):
             return cls._from_model_aliases(aliases)
@@ -368,7 +368,7 @@ class ProviderManager:
 
     @classmethod
     def _from_model_aliases(cls, aliases: dict[str, Any]) -> ProviderManager:
-        """Build from cwpro's model_aliases routing format.
+        """Build from the host's model_aliases routing format.
 
         Shape: {"task_name": {"provider": {"model": ..., "api_key": ...,
         "base_url": ..., "adapter": ...}}}
@@ -393,23 +393,36 @@ class ProviderManager:
                     pricing=_pricing_from_config(pcfg.get("pricing")),
                 )
             )
+            # Carry the task's role inference profile (temperature, reasoning,
+            # output budget) onto the route. Host model_aliases only name a
+            # model per task, so without this the route's inference is empty and
+            # every call — the ranker included — runs at the provider's default
+            # (non-deterministic) temperature. Pinning role inference here is
+            # what makes the ranker deterministic (utility role → temperature 0)
+            # in the deployed single-endpoint-per-task path.
+            _role = role_for_task(alias_name)
             routes.append(
                 ModelRoute(
                     task=alias_name,
                     provider=alias_name,
                     model=pcfg.get("model", ""),
-                    reason="cwpro model_aliases routing",
+                    reason="model_aliases routing",
+                    reasoning=_role.reasoning,
+                    inference=_role.inference,
                 )
             )
         # Ensure a "default" route exists — fall back to the first alias.
         if not any(r.task == "default" for r in routes) and configs:
             first = configs[0]
+            _default_role = role_for_task("default")
             routes.append(
                 ModelRoute(
                     task="default",
                     provider=first.name,
                     model=first.model,
-                    reason="cwpro model_aliases fallback",
+                    reason="model_aliases fallback",
+                    reasoning=_default_role.reasoning,
+                    inference=_default_role.inference,
                 )
             )
         return cls(configs=configs, routes=routes)
@@ -780,7 +793,13 @@ class ProviderManager:
         """Get the native async LLM client for a task type."""
         if self._global_endpoint is not None:
             endpoint = self._endpoint_for_task(task)
-            cache_key = self._global_cache_key("native", endpoint)
+            # Key by role too: the endpoint client now carries the task's role
+            # inference profile (temperature etc.), so two tasks that share an
+            # endpoint+model but map to different roles — e.g. ranker (utility,
+            # temp 0) and hunter (researcher, temp 0.2) against the same model —
+            # must NOT share a cached client, or one role's temperature would
+            # silently apply to the other.
+            cache_key = f"{self._global_cache_key('native', endpoint)}:{role_for_task(task).name}"
             if cache_key not in self._native_cache:
                 self._native_cache[cache_key] = self._create_native_from_endpoint(endpoint, task)
             return self._native_cache[cache_key]
@@ -831,6 +850,30 @@ class ProviderManager:
         self, endpoint: LLMEndpoint, task: str = "default"
     ) -> AsyncLLMClient:
         provider_name = _adapter_for_endpoint(endpoint)
+        # Apply the task's role inference profile as the client's defaults —
+        # the same profile the multi-provider route path applies in
+        # `_create_native`. The single-endpoint path used to drop it entirely,
+        # so every task (ranker included) ran at the provider's default
+        # temperature. That made the ranker non-deterministic, which is the
+        # dominant source of run-to-run variance in which files a budget-limited
+        # SourceHunt reaches. Carrying the role profile here pins the ranker to
+        # temperature 0 (utility role) while leaving the hunter at its own
+        # profile, with no frontier model involved.
+        inference = role_for_task(task).inference
+        reasoning = inference.reasoning if inference else None
+        effort = (
+            effective_reasoning_effort(endpoint.model, reasoning)
+            if reasoning is not None
+            else "auto"
+        )
+        common = {
+            "reasoning_effort": effort,
+            "default_temperature": inference.temperature if inference else None,
+            "default_max_tokens": inference.max_output_tokens if inference else None,
+            "default_top_p": inference.top_p if inference else None,
+            "default_timeout_seconds": inference.timeout_seconds if inference else None,
+            "context_budget_tokens": inference.context_budget_tokens if inference else None,
+        }
         return AsyncLLMClient(
             model_name=endpoint.model,
             base_url=endpoint.base_url,
@@ -838,6 +881,7 @@ class ProviderManager:
             provider_name=provider_name,
             max_concurrency=_native_concurrency_for_task(task, provider_name),
             pricing=endpoint.pricing,
+            **common,
         )
 
     def _endpoint_for_task(self, task: str) -> LLMEndpoint:

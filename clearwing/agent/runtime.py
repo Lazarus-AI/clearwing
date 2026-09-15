@@ -396,8 +396,22 @@ class NativeAgentGraph:
             if not isinstance(content, str):
                 content = json.dumps(content)
 
+            # Cap the copy that enters the model conversation so a single huge
+            # tool result (a full port scan, HTTP body, or shell dump) cannot
+            # blow past the model context window before the summarizer can
+            # compact older turns. Flag detection / parsing below keep the full
+            # `content`.
+            _MAX_TOOL_RESULT_CHARS = 24000
+            convo_content = content
+            if len(convo_content) > _MAX_TOOL_RESULT_CHARS:
+                convo_content = (
+                    convo_content[:_MAX_TOOL_RESULT_CHARS]
+                    + f"\n\n[... tool result truncated: {len(content)} chars total, "
+                    f"showing first {_MAX_TOOL_RESULT_CHARS} ...]"
+                )
+
             message = ToolMessage(
-                content=content,
+                content=convo_content,
                 name=tool_name,
                 tool_call_id=tool_call_id,
             )
