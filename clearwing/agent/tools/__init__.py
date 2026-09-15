@@ -215,12 +215,19 @@ def get_all_tools() -> list[Any]:
     from .ops.mcp_tools import get_mcp_tools
     from .ops.skill_tools import load_skills
     from .recon.pivot_tools import get_pivot_tools
-    from .scan.scanner_tools import detect_os, detect_services, scan_ports, scan_vulnerabilities
+    from .scan.scanner_tools import (
+        detect_os,
+        detect_services,
+        record_finding,
+        scan_ports,
+        scan_vulnerabilities,
+    )
 
     tools = [
         scan_ports,
         detect_services,
         scan_vulnerabilities,
+        record_finding,
         detect_os,
         exploit_vulnerability,
         enumerate_privesc,

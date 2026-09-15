@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from opentelemetry import trace as otel_trace
 
@@ -94,6 +94,9 @@ from .variant_loop import (
     VariantPatternGenerator,
 )
 from .verifier import Verifier, apply_verifier_result
+
+if TYPE_CHECKING:
+    from .recursive_hunt_adapter import UnitHuntResult
 
 logger = logging.getLogger(__name__)
 tracer = get_oi_tracer(__name__)
@@ -526,8 +529,19 @@ class SourceHuntRunner:
             raise ValueError("target_files cannot be combined with entry-point sharding")
         if normalized_target_files and (enable_subsystem_hunt or subsystem_paths):
             raise ValueError("target_files cannot be combined with subsystem hunting")
-        if flow not in {"legacy", "proof"}:
-            raise ValueError("flow must be 'legacy' or 'proof'")
+        if flow not in {"legacy", "proof", "recursive"}:
+            raise ValueError("flow must be 'legacy', 'proof', or 'recursive'")
+        if flow == "recursive" and (
+            budget_usd > 0.0 or tier_budget is not None or subsystem_budget_usd > 0.0
+        ):
+            # §1: the recursive flow is a budget-free, local-only menu — it runs
+            # to a fixpoint (or the iteration safety valve), never a spend cap.
+            # Reject a stray budget explicitly rather than silently ignoring it,
+            # so an operator is never misled into thinking a cap is in effect.
+            raise ValueError(
+                "recursive flow is budget-free; omit budget_usd / tier_budget / "
+                "subsystem_budget_usd"
+            )
         if checkpoint is not None and flow != "legacy":
             raise ValueError("checkpoint restoration is currently supported only for legacy flow")
         if stop_after is not None and flow != "legacy":
@@ -1284,6 +1298,379 @@ class SourceHuntRunner:
             budget_usd=self.budget_usd,
         )
 
+    def _recursive_artifact_id(self) -> str:
+        """Stable artifact identity for prepare-cache / hunt-ledger reuse.
+
+        Keyed by repository + branch so a later recursive run over the same
+        source reuses prior preprocess/verdict state (the whole point of the
+        no-budget local menu: never re-pay for analysis already done).
+        """
+        import hashlib
+
+        basis = f"{self.repo_url}@{self.branch or ''}".encode()
+        return "art-" + hashlib.sha256(basis).hexdigest()[:24]
+
+    async def _recursive_hunt_unit(
+        self,
+        unit: Any,
+        *,
+        file_target: FileTarget,
+        repo_path: str,
+        hunter_llm: Any,
+        findings_pool: Any,
+        callgraph: Any,
+        pipeline_status: PipelineStatus,
+    ) -> UnitHuntResult:
+        """Hunt + adversarially verify a single unit (file).
+
+        Reuses the exact HunterPool construction (via ``_build_hunter_pool``)
+        and the staged verifier (``_verify``), so a recursive unit is analysed
+        with the same machinery as the staged flow — just one file at a time,
+        driven by the recursive orchestrator's priority queue.
+        """
+        from .recursive_hunt_adapter import UnitHuntResult
+
+        _conf = {"high": 0.9, "medium": 0.6, "low": 0.3}
+
+        try:
+            pool = self._build_hunter_pool(
+                files=[file_target],
+                repo_path=repo_path,
+                hunter_llm=hunter_llm,
+                work_cache=None,
+                seeded_by_file={},
+                semgrep_hints_by_file={},
+                entry_points_by_file={},
+                seed_corpus_by_file={},
+                findings_pool=findings_pool,
+                callgraph=callgraph,
+            )
+            findings = await pool.arun()
+        except Exception:
+            logger.warning("recursive: hunt failed for %s", unit.file_path, exc_info=True)
+            return UnitHuntResult("error", 0.0)
+
+        if not findings:
+            return UnitHuntResult("benign", 0.6)
+
+        self._recursive_all_findings.extend(findings)
+
+        try:
+            vres = await self._verify(
+                findings, repo_path=repo_path, pipeline_status=pipeline_status
+            )
+            verified = list(vres.verified)
+        except Exception:
+            logger.warning("recursive: verify failed for %s", unit.file_path, exc_info=True)
+            # Unverified but present: still a finding, at reduced confidence.
+            return UnitHuntResult(
+                "finding",
+                0.5,
+                [f.id for f in findings],
+                [str(f.file or "") for f in findings],
+            )
+
+        if not verified:
+            return UnitHuntResult("benign", 0.6)
+
+        self._recursive_all_verified.extend(verified)
+        conf = max((_conf.get(f.confidence, 0.5) for f in verified), default=0.5)
+        return UnitHuntResult(
+            "finding",
+            conf,
+            [f.id for f in verified],
+            [str(f.file or "") for f in verified],
+        )
+
+    async def _arun_recursive_flow(self) -> SourceHuntResult:
+        """Recursive SourceHunt (§6): local-only, no-budget, tag-driven priority
+        with callgraph deepening and a resumable, watchdog-guarded loop.
+
+        Preprocess runs semantic sink-class detection + full analysis (see
+        ``_preprocess``); the ranker lifts genuine sinks to the top; then the
+        :class:`RecursiveOrchestrator` drives per-unit hunt+verify, deepening
+        into callgraph neighbours of every finding until the frontier is empty.
+        """
+        import asyncio
+
+        from .hunt_ledger import (
+            HuntLedger,
+            HuntUnit,
+            SalvagePolicy,
+            SqliteHuntLedgerStore,
+            VerdictContext,
+        )
+        from .prepare_cache import PREPROCESS_SCHEMA_VERSION, compute_source_digest
+        from .recursive_hunt_adapter import RecursiveHuntFn
+        from .recursive_orchestrator import (
+            RecursiveOrchestrator,
+            SqliteCheckpointStore,
+        )
+        from .sink_class_detectors import DETECTOR_SET_VERSION
+
+        start_time = time.monotonic()
+        self._ensure_output_dir_layout()
+        self._ensure_spend_ledger()
+        pipeline_status = PipelineStatus()
+        self._recursive_all_findings: list[Finding] = []
+        self._recursive_all_verified: list[Finding] = []
+        logger.info(
+            "Recursive sourcehunt session %s starting on %s", self._session_id, self.repo_url
+        )
+        self._instrumentation.record(
+            "run",
+            stage="run",
+            status="started",
+            metadata={"flow": self._flow, "repository": self.repo_url},
+        )
+
+        try:
+            self._preflight_budget_clients()
+
+            # 1. Preprocess (semantic sink-class detection forced on).
+            self._emit_stage("preprocess", "started")
+            preprocess_result = self._filter_target_files(self._preprocess())
+            repo_path = preprocess_result.repo_path
+            files = preprocess_result.file_targets
+            files_ranked = len(files)
+            callgraph = preprocess_result.callgraph
+            self._emit_stage("preprocess", "completed", detail=f"{files_ranked} files")
+
+            # 2. Rank (tag-driven sink boost already wired into Ranker).
+            stage_files = [ft.get("path", "") for ft in files]
+            self._emit_stage("rank", "started", files=stage_files)
+            files = await self._rank(files, pipeline_status, stage_files)
+            preprocess_result.file_targets = files
+            self._emit_stage("rank", "completed", files=stage_files)
+
+            # Build the unit index and priority-ordered seed frontier.
+            by_path: dict[str, FileTarget] = {ft.get("path", ""): ft for ft in files}
+            artifact_id = self._recursive_artifact_id()
+
+            def _digest(ft: FileTarget) -> str:
+                try:
+                    data = (Path(repo_path) / ft.get("path", "")).read_bytes()
+                except Exception:
+                    data = b""
+                return compute_source_digest([(ft.get("path", ""), data)])
+
+            digests: dict[str, str] = {p: _digest(ft) for p, ft in by_path.items()}
+
+            def unit_for_path(path: str):
+                ft = by_path.get(path)
+                if ft is None:
+                    return None
+                return HuntUnit(artifact_id, digests.get(path, ""), path)
+
+            seed_units: list[tuple[float, HuntUnit]] = []
+            for ft in files:
+                path = ft.get("path", "")
+                u = unit_for_path(path)
+                if u is not None:
+                    seed_units.append((float(ft.get("priority", 0.0)), u))
+
+            # Findings pool (local, on-disk) for cross-unit dedup.
+            findings_pool = None
+            if self._enable_findings_pool:
+                from .findings_pool import FindingsPool
+
+                findings_pool = FindingsPool(
+                    checkpoint_path=Path(self.output_dir) / self._session_id / "findings_pool.jsonl"
+                )
+
+            hunter_llm = self._get_native_client("hunter", self.hunter_llm, budget_stage="hunt")
+
+            # 3. Recursive hunt loop. The orchestrator is synchronous (heapq +
+            #    watchdog threads); run it off the event loop and marshal each
+            #    async per-unit hunt back onto THIS loop so the LLM/sandbox
+            #    clients stay on the loop they were created on.
+            main_loop = asyncio.get_running_loop()
+
+            def hunt_and_verify(unit):
+                ft = by_path.get(unit.file_path)
+                if ft is None:
+                    from .recursive_hunt_adapter import UnitHuntResult
+
+                    return UnitHuntResult("error", 0.0)
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._recursive_hunt_unit(
+                        unit,
+                        file_target=ft,
+                        repo_path=repo_path,
+                        hunter_llm=hunter_llm,
+                        findings_pool=findings_pool,
+                        callgraph=callgraph,
+                        pipeline_status=pipeline_status,
+                    ),
+                    main_loop,
+                )
+                return fut.result()
+
+            hunt_fn = RecursiveHuntFn(
+                hunt_and_verify=hunt_and_verify,
+                unit_for_file=unit_for_path,
+                callgraph=callgraph,
+            )
+
+            # §4a/§1: persist the ledger across runs so R1 (exclusion) and R2
+            # (salvage) take effect, under a tenant/namespace-scoped directory so
+            # two tenants never share verdicts for the same artifact (units are
+            # also key-scoped by artifact_id + source_digest + path[+symbol]).
+            # Per-store env override still wins (mounted volume / shared DB).
+            from .recursive_stores import recursive_store_path
+
+            ledger_path = recursive_store_path(
+                self.output_dir,
+                "hunt_ledger.db",
+                override=os.environ.get("CLEARWING_HUNT_LEDGER_PATH"),
+            )
+            Path(ledger_path).parent.mkdir(parents=True, exist_ok=True)
+            ledger = HuntLedger(SqliteHuntLedgerStore(ledger_path), SalvagePolicy())
+            context = VerdictContext(
+                model_id=str(self.hunter_llm or ""),
+                detector_set_version=DETECTOR_SET_VERSION,
+                analysis_config_version=PREPROCESS_SCHEMA_VERSION,
+                verifier_confidence=0.8,
+            )
+            # §10.1: persistent, cross-process checkpoint keyed by the artifact
+            # (stable across restarts), so a run interrupted by a crash/OOM/
+            # container restart resumes from its last checkpoint on the next
+            # invocation. A completed (fixpoint) run deletes its checkpoint, so
+            # a fresh run over the same source starts clean.
+            checkpoint_path = recursive_store_path(
+                self.output_dir,
+                "recursion_checkpoint.db",
+                override=os.environ.get("CLEARWING_RECURSION_CHECKPOINT_PATH"),
+            )
+            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            checkpoint_store = SqliteCheckpointStore(checkpoint_path)
+            run_id = self._recursive_artifact_id()
+
+            # §10.2 watchdog: the per-unit hunt runs in-process on a HunterPool
+            # (sandbox = dind container), not as a `clearwing sourcehunt`
+            # subprocess, so the operative zombie defence is the orchestrator's
+            # hard timeout (unit_hard_timeout) → abandon → ledger error →
+            # bounded retry → quarantine (all wired + tested), plus the
+            # process-wide ContainerRegistry atexit safety net.
+            #
+            # Optional (opt-in) label-scoped container reclaim: with
+            # CLEARWING_RECURSIVE_UNIT_KILL set, tag this run's sandboxes with a
+            # unique label (clearwing.recursive_run=<run_id>) and, on a hard
+            # timeout, force-remove containers carrying that label — reclaiming a
+            # zombie unit's sandbox faster than the atexit net. The label is
+            # unique per run, so a kill never reaps another run's containers. Off
+            # by default (log-only), keeping existing behaviour unchanged; it
+            # relies on one recursive run per bridge process (see design §10.2 /
+            # remaining-tasks doc for the per-unit-label follow-up).
+            unit_kill = os.environ.get("CLEARWING_RECURSIVE_UNIT_KILL", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            run_label = f"clearwing.recursive_run={run_id}"
+            if unit_kill:
+                os.environ["CLEARWING_SANDBOX_EXTRA_LABELS"] = run_label
+
+            def _recursive_kill(unit: Any) -> None:
+                leaked = ""
+                try:
+                    from ..sandbox.registry import ContainerRegistry
+
+                    leaked = f" active_sandboxes={ContainerRegistry.get().active_count}"
+                except Exception:
+                    pass
+                logger.warning(
+                    "recursive watchdog: unit %s exceeded hard timeout; abandoned "
+                    "and marked error for bounded retry.%s",
+                    getattr(unit, "file_path", unit),
+                    leaked,
+                )
+                if not unit_kill:
+                    return
+                try:
+                    from ..sandbox.dind import get_subprocess_env
+                    from ..sandbox.sandbox_kill import kill_by_label
+
+                    res = kill_by_label(run_label, env=get_subprocess_env())
+                    if res.removed:
+                        logger.warning(
+                            "recursive watchdog: force-removed %d sandbox container(s) for %s",
+                            len(res.removed),
+                            run_label,
+                        )
+                    if res.errors:
+                        logger.warning("recursive watchdog: kill errors: %s", res.errors)
+                except Exception:  # noqa: BLE001 - kill is best-effort
+                    logger.warning("recursive watchdog: label-scoped kill failed", exc_info=True)
+
+            orchestrator = RecursiveOrchestrator(
+                ledger,
+                hunt_fn,
+                context,
+                checkpoint_store=checkpoint_store,
+                kill_fn=_recursive_kill,
+            )
+            resume = orchestrator.has_resumable(run_id)
+            if resume:
+                logger.info(
+                    "Recursive resume: found an unfinished checkpoint for %s — resuming",
+                    run_id,
+                )
+
+            self._emit_stage(
+                "hunt",
+                "started",
+                files=stage_files,
+                detail=("resuming" if resume else "fresh"),
+            )
+            run_result = await asyncio.to_thread(
+                orchestrator.run, run_id, seed_units, resume=resume
+            )
+            logger.info(
+                "Recursive run: hunted=%d excluded=%d findings=%d errors=%d reason=%s",
+                run_result.hunted,
+                run_result.excluded,
+                len(run_result.findings),
+                run_result.errors,
+                run_result.stopped_reason,
+            )
+            self._emit_stage(
+                "hunt",
+                "completed",
+                findings_so_far=len(self._recursive_all_findings),
+                detail=(
+                    f"hunted={run_result.hunted} excluded={run_result.excluded} "
+                    f"reason={run_result.stopped_reason}"
+                ),
+            )
+
+            all_findings = self._recursive_all_findings
+            verified = self._recursive_all_verified
+
+            return self._finalize_result(
+                start_time=start_time,
+                repo_path=repo_path,
+                findings=all_findings,
+                verified=verified,
+                exploited=[],
+                files_ranked=files_ranked,
+                files_hunted=run_result.hunted,
+                spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+                band_stats=None,
+                findings_pool=findings_pool,
+                subsystems_hunted=0,
+                subsystem_spent_usd=0.0,
+                subsystem_status="skipped",
+                pipeline_status=pipeline_status,
+                potentials=[],
+            )
+        finally:
+            if self._preprocessor is not None:
+                self._preprocessor.cleanup()
+                self._preprocessor = None
+            self._finalize_instrumentation("completed")
+
     def _read_proof_manifest(self, session_id: str) -> dict[str, Any]:
         """Capture the proof manifest before final spend-ledger checkpointing."""
 
@@ -1356,6 +1743,8 @@ class SourceHuntRunner:
                 return await self._arun_proof_flow()
             finally:
                 self._finalize_instrumentation("failed")
+        if self._flow == "recursive":
+            return await self._arun_recursive_flow()
         start_time = time.monotonic()
         self._ensure_output_dir_layout()
         self._ensure_spend_ledger()
@@ -2869,6 +3258,65 @@ class SourceHuntRunner:
         ]
 
     @tracer.chain(name="Hunt")
+    def _build_hunter_pool(
+        self,
+        *,
+        files: list[FileTarget],
+        repo_path: str,
+        hunter_llm: Any,
+        work_cache: Any,
+        seeded_by_file: dict[str, dict],
+        semgrep_hints_by_file: dict[str, list[dict]],
+        entry_points_by_file: dict,
+        seed_corpus_by_file: dict,
+        findings_pool: Any,
+        callgraph: Any,
+    ) -> HunterPool:
+        """Construct a HunterPool for the given file set.
+
+        Single construction site shared by the staged hunt (whole ranked set)
+        and the recursive flow (one unit at a time), so the two paths cannot
+        drift in the many pool options.
+        """
+        return HunterPool(
+            HuntPoolConfig(
+                files=files,
+                repo_path=repo_path,
+                sandbox_factory=self.sandbox_factory,
+                sandbox_manager=self._sandbox_manager,
+                hunter_factory=None,
+                llm=hunter_llm,
+                work_cache=work_cache,
+                max_parallel=self.max_parallel,
+                budget_usd=self.budget_usd,
+                tier_budget=self.tier_budget,
+                session_id_prefix=self._session_id,
+                seeded_crashes_by_file=seeded_by_file,
+                semgrep_hints_by_file=semgrep_hints_by_file,
+                agent_mode=self._effective_agent_mode,
+                prompt_mode=self._prompt_mode,
+                campaign_hint=self._campaign_hint,
+                exploit_mode=self._exploit_mode,
+                starting_band=self._starting_band,
+                max_band=self._max_band,
+                redundancy_override=self._redundancy_override,
+                max_steps_without_progress=self._max_steps_without_progress,
+                entry_points_by_file=entry_points_by_file,
+                seed_corpus_by_file=seed_corpus_by_file,
+                shard_entry_points=self._shard_entry_points,
+                findings_pool=findings_pool,
+                trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
+                instrumentation=self._instrumentation,
+                explicit_target_windows=bool(self._target_files),
+                callgraph=callgraph,
+                diversify_order=(
+                    bool(os.environ.get("CLEARWING_RANK_DIVERSITY"))
+                    or os.path.exists("/opt/clearwing/.rank-diversity")
+                ),
+                trace_step_max_chars=self._trace_step_max_chars,
+            )
+        )
+
     async def _hunt(
         self,
         *,
@@ -3003,43 +3451,17 @@ class SourceHuntRunner:
                 if self._checkpoint is not None
                 else None
             )
-            pool = HunterPool(
-                HuntPoolConfig(
-                    files=files,
-                    repo_path=repo_path,
-                    sandbox_factory=self.sandbox_factory,
-                    sandbox_manager=self._sandbox_manager,
-                    hunter_factory=None,
-                    llm=hunter_llm,
-                    work_cache=work_cache,
-                    max_parallel=self.max_parallel,
-                    budget_usd=self.budget_usd,
-                    tier_budget=self.tier_budget,
-                    session_id_prefix=self._session_id,
-                    seeded_crashes_by_file=seeded_by_file,
-                    semgrep_hints_by_file=semgrep_hints_by_file,
-                    agent_mode=self._effective_agent_mode,
-                    prompt_mode=self._prompt_mode,
-                    campaign_hint=self._campaign_hint,
-                    exploit_mode=self._exploit_mode,
-                    starting_band=self._starting_band,
-                    max_band=self._max_band,
-                    redundancy_override=self._redundancy_override,
-                    max_steps_without_progress=self._max_steps_without_progress,
-                    entry_points_by_file=entry_points_by_file,
-                    seed_corpus_by_file=seed_corpus_by_file,
-                    shard_entry_points=self._shard_entry_points,
-                    findings_pool=findings_pool,
-                    trajectory_root=Path(self.output_dir) / self._session_id / "trajectories",
-                    instrumentation=self._instrumentation,
-                    explicit_target_windows=bool(self._target_files),
-                    callgraph=callgraph,
-                    diversify_order=(
-                        bool(os.environ.get("CLEARWING_RANK_DIVERSITY"))
-                        or os.path.exists("/opt/clearwing/.rank-diversity")
-                    ),
-                    trace_step_max_chars=self._trace_step_max_chars,
-                )
+            pool = self._build_hunter_pool(
+                files=files,
+                repo_path=repo_path,
+                hunter_llm=hunter_llm,
+                work_cache=work_cache,
+                seeded_by_file=seeded_by_file,
+                semgrep_hints_by_file=semgrep_hints_by_file,
+                entry_points_by_file=entry_points_by_file,
+                seed_corpus_by_file=seed_corpus_by_file,
+                findings_pool=findings_pool,
+                callgraph=callgraph,
             )
             try:
                 result.findings = await pool.arun()
@@ -3360,6 +3782,13 @@ class SourceHuntRunner:
             "subsystem_paths": sorted(self._subsystem_paths or []),
         }
         self._preprocess_restored = False
+        # Recursive flow runs semantic sink-class detection and forces full
+        # per-file analysis (no large-repo degradation to filename tags), so
+        # the tag-driven ranker can lift genuine memory-bug sinks to the top.
+        recursive = self._flow == "recursive"
+        if recursive:
+            options["detect_sink_classes"] = True
+            options["force_full_analysis"] = True
         self._preprocessor = Preprocessor(
             repo_url=self.repo_url,
             branch=self.branch,
@@ -3371,6 +3800,8 @@ class SourceHuntRunner:
             run_taint=options["run_taint"],
             respect_gitignore=self._respect_gitignore,
             subsystem_paths=self._subsystem_paths,
+            detect_sink_classes=recursive,
+            force_full_analysis=recursive,
         )
         repo_path: str | None = None
         if self._target_files:
@@ -3405,6 +3836,45 @@ class SourceHuntRunner:
             else:
                 raise ValueError("preprocess checkpoint is invalid or incompatible with this run")
 
+        # §4: Recursive flow reuses a cross-run, artifact-keyed prepare cache so
+        # a re-hunt of the same source at the same content skips the expensive
+        # preprocess (clone+enumerate+tag+callgraph/taint). Keyed by
+        # artifact_id + commit sha; content change ⇒ miss.
+        prepare_cache = None
+        cache_digest = ""
+        if recursive:
+            from .checkpoints import repository_commit_sha
+            from .prepare_cache import PrepareCache, SqlitePrepareCacheStore
+            from .recursive_stores import recursive_store_path
+
+            repo_path = repo_path or self._preprocessor.resolve_repository()
+            cache_digest = repository_commit_sha(repo_path) or ""
+            if cache_digest:
+                cache_path = recursive_store_path(
+                    self.output_dir,
+                    "prepare_cache.db",
+                    override=os.environ.get("CLEARWING_PREPARE_CACHE_PATH"),
+                )
+                Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+                prepare_cache = PrepareCache(SqlitePrepareCacheStore(cache_path))
+                artifact_id = self._recursive_artifact_id()
+                cached = prepare_cache.get(artifact_id, cache_digest)
+                if cached is not None:
+                    try:
+                        restored = PreprocessResult.from_checkpoint(cached, repo_path)
+                        self._preprocess_restored = True
+                        logger.info(
+                            "Recursive prepare-cache hit for %s@%s — skipping preprocess",
+                            artifact_id,
+                            cache_digest[:12],
+                        )
+                        return restored
+                    except (OSError, ValueError):
+                        logger.warning(
+                            "Recursive prepare-cache payload invalid; re-running preprocess",
+                            exc_info=True,
+                        )
+
         result = self._preprocessor.run(repo_path=repo_path)
         preprocess_checkpoint = PreprocessCheckpoint.from_result(result, options=options)
         if self._checkpoint is None:
@@ -3412,6 +3882,14 @@ class SourceHuntRunner:
         else:
             self._checkpoint.preprocess = preprocess_checkpoint
         self._dump_checkpoint()
+        if prepare_cache is not None and cache_digest:
+            try:
+                prepare_cache.put(
+                    self._recursive_artifact_id(), cache_digest, result.to_checkpoint()
+                )
+                logger.info("Recursive prepare-cache stored for commit %s", cache_digest[:12])
+            except Exception:  # noqa: BLE001 - cache write must never fail the run
+                logger.warning("Recursive prepare-cache write failed", exc_info=True)
         return result
 
     @tracer.chain(name="Rank")

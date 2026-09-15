@@ -126,6 +126,10 @@ clearwing = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"
+markers = [
+    "integration: requires a local Docker daemon and sandbox images",
+    "timeout(seconds): documents the maximum expected integration-test duration",
+]
 
 [tool.black]
 line-length = 100

@@ -77,9 +77,13 @@ def add_parser(subparsers):
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--flow",
-        choices=["legacy", "proof"],
+        choices=["legacy", "proof", "recursive"],
         default="legacy",
-        help="Investigation engine: legacy file agents or proof obligations (default: legacy)",
+        help=(
+            "Investigation engine: legacy file agents, proof obligations, or "
+            "recursive (local-only, no-budget, tag-driven with callgraph "
+            "deepening) (default: legacy)"
+        ),
     )
     parser.add_argument("--branch", default="main", help="Git branch to clone (default: main)")
     parser.add_argument(
@@ -1407,18 +1411,11 @@ def handle(cli, args):
 
 
 def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
-    from ...core.events import EventBus, EventType
     from ...providers import ProviderManager, install_runtime_routing
     from ...sourcehunt.runner import SourceHuntRunner
     from ..machine import MachineChannel
 
     channel = MachineChannel(descriptor, "sourcehunt")
-    bus = EventBus()
-
-    def emit_stage(progress: Any) -> None:
-        channel.emit("progress", _public_progress(progress))
-
-    bus.subscribe(EventType.SOURCEHUNT_STAGE, emit_stage)
     try:
         request, routing = channel.read_start()
         print(f"sourcehunt machine-fd request fields: {sorted(request)}", file=sys.stderr)
@@ -1454,8 +1451,11 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
                 output_formats=parsed.get("format"),
                 checkpoint=parsed.get("checkpoint"),
                 stop_after=parsed.get("stop_after"),
+                proof_compile_commands=parsed.get("compile_commands"),
+                proof_build_configuration=parsed.get("build_configuration", "default"),
                 enable_semgrep=enable_semgrep or parsed["semgrep"],
                 provider_manager=provider_manager,
+                on_progress=lambda progress: channel.emit("progress", _public_progress(progress)),
             ).arun()
         )
         channel.result(_public_result(result), allow_truncation=False)
@@ -1464,7 +1464,6 @@ def _handle_machine(descriptor: int, *, enable_semgrep: bool = False) -> int:
         channel.error(exc)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
     finally:
-        bus.unsubscribe(EventType.SOURCEHUNT_STAGE, emit_stage)
         channel.close()
 
 
@@ -1493,13 +1492,15 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         "semgrep",
         "checkpoint",
         "stop_after",
+        "build_configuration",
+        "compile_commands",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ValueError(f"unknown request field(s): {', '.join(unknown)}")
     repo_url = _repository_url(value.get("repo_url"))
     depth = _choice(value.get("depth", "standard"), "depth", {"quick", "standard", "deep"})
-    flow = _choice(value.get("flow", "legacy"), "flow", {"legacy", "proof"})
+    flow = _choice(value.get("flow", "legacy"), "flow", {"legacy", "proof", "recursive"})
     agent_mode = _choice(
         value.get("agent_mode", "auto"), "agent_mode", {"auto", "constrained", "deep"}
     )
@@ -1539,6 +1540,14 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
         parsed["subsystem_max_parallel"] = value["subsystem_max_parallel"]
     if "subsystem_max_files" in value:
         parsed["subsystem_max_files"] = value["subsystem_max_files"]
+    if "build_configuration" in value:
+        parsed["build_configuration"] = _bounded_text(
+            value["build_configuration"], "build_configuration", 128
+        )
+    if "compile_commands" in value:
+        parsed["compile_commands"] = _bounded_text(
+            value["compile_commands"], "compile_commands", 4096
+        )
     if "format" in value:
         fmt = value["format"]
         parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
