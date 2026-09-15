@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from clearwing.agent.runtime import NativeAgentGraph, populate_knowledge_graph
@@ -13,6 +14,47 @@ from .prompts import build_system_prompt
 from .tools import get_all_tools, get_custom_tools
 
 
+# Matches an nmap "open port" line, e.g.
+#   22/tcp   open  ssh     OpenSSH 4.7p1 Debian 8ubuntu1 (protocol 2.0)
+_NMAP_OPEN_LINE = re.compile(
+    r"^\s*(\d{1,5})/(tcp|udp)\s+open\s+(\S+)\s*(.*)$", re.IGNORECASE
+)
+
+
+def _findings_from_nmap(output: str) -> list[dict]:
+    """Extract structured findings from nmap -sV style output.
+
+    Kali/nmap output reaches the graph as free text via kali_execute, so it never
+    populates the findings list on its own and the local operator model often narrates
+    "recorded findings" without emitting a record_finding tool call. Parsing the open
+    ports deterministically guarantees the run reports what the scan actually found.
+    Only lines that look like an nmap open-port row match, so non-nmap kali_execute
+    output yields nothing.
+    """
+    findings: list[dict] = []
+    for line in output.splitlines():
+        match = _NMAP_OPEN_LINE.match(line)
+        if not match:
+            continue
+        port = int(match.group(1))
+        proto = match.group(2).lower()
+        service = match.group(3).strip()
+        version = match.group(4).strip()
+        findings.append(
+            {
+                "port": port,
+                "protocol": proto,
+                "service": service,
+                "version": version,
+                "severity": "info",
+                "description": f"Open {service} on {port}/{proto}"
+                + (f" ({version})" if version else ""),
+                "source": "nmap",
+            }
+        )
+    return findings
+
+
 def _default_pentest_state_updater(tool_name: str, data: Any, state: dict) -> dict:
     if tool_name == "scan_ports" and isinstance(data, list):
         return {"open_ports": state.get("open_ports", []) + data}
@@ -20,6 +62,22 @@ def _default_pentest_state_updater(tool_name: str, data: Any, state: dict) -> di
         return {"services": state.get("services", []) + data}
     if tool_name == "scan_vulnerabilities" and isinstance(data, list):
         return {"vulnerabilities": state.get("vulnerabilities", []) + data}
+    if tool_name == "record_finding" and isinstance(data, dict):
+        return {"vulnerabilities": state.get("vulnerabilities", []) + [data]}
+    if tool_name == "kali_execute" and isinstance(data, dict):
+        output = data.get("output")
+        if isinstance(output, str):
+            parsed = _findings_from_nmap(output)
+            if parsed:
+                existing = state.get("vulnerabilities", [])
+                seen = {
+                    (v.get("port"), v.get("service"))
+                    for v in existing
+                    if isinstance(v, dict)
+                }
+                fresh = [f for f in parsed if (f["port"], f["service"]) not in seen]
+                if fresh:
+                    return {"vulnerabilities": existing + fresh}
     if tool_name == "detect_os" and isinstance(data, str):
         return {"os_info": data}
     if tool_name == "exploit_vulnerability" and isinstance(data, dict):

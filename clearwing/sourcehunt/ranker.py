@@ -188,8 +188,40 @@ class Ranker:
             # fuzzable parsers outrank non-fuzzable code at the same
             # surface+influence+reachability level.
             self._apply_fuzzable_boost(ft)
+            # Recursive SourceHunt: semantic sink-class tags lift surface to a
+            # class floor and add a continuous tie-breaker. No-op when the file
+            # carries no sink_classes (legacy/staged), so ranking is unchanged
+            # there. See tag_ranker / sink_class_detectors (design v1 §5).
+            self._apply_sink_class_boost(ft)
 
         return files
+
+    def _apply_sink_class_boost(self, ft: FileTarget) -> None:
+        """Lift surface to the sink-class floor and add a continuous term.
+
+        Fires only for files that semantic detectors tagged (recursive mode):
+        such a match is a stronger surface signal than a filename 'parser' tag,
+        so it should outrank parser decoys and break the median tie.
+        """
+        sinks = ft.get("sink_classes") or []
+        if not sinks:
+            return
+        floor = 4
+        if "live_identifier_aliases_reserved_sentinel" in sinks:
+            floor = 5
+        if ft.get("surface", 0) < floor:
+            ft["surface"] = floor
+            ft["priority"] = self._compute_priority(ft)
+        # Continuous tie-breaker from semantic evidence (breaks the integer-axis
+        # ties): base for having a sink class + normalized taint/imports_by.
+        micro = 0.2
+        micro += min(0.1, ft.get("taint_hits", 0) * 0.05)
+        micro += min(0.1, ft.get("imports_by", 0) / 500.0)
+        ft["priority"] = ft.get("priority", 0.0) + micro
+        existing = ft.get("surface_rationale", "") or ""
+        note = f" [sink-class: {','.join(sorted(set(sinks)))}]"
+        if note not in existing:
+            ft["surface_rationale"] = (existing + note).strip()
 
     @staticmethod
     def _score_map(

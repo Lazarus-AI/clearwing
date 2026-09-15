@@ -67,6 +67,10 @@ FileTag = Literal[
     "syscall_entry",
     "fuzzable",
     "attacker_reachable",
+    # Recursive SourceHunt semantic sink-class tags (see sink_class_detectors).
+    "sink_representation_domain_collision",
+    "sink_index_oob_write",
+    "sink_lifecycle_uaf",
 ]
 
 
@@ -102,6 +106,9 @@ class FileTarget(TypedDict, total=False):
     static_hint: int  # SourceAnalyzer regex hits → surface boost
     semgrep_hint: int  # v0.2: Semgrep findings count → surface boost + hint
     taint_hits: int  # v0.4: tree-sitter taint paths touching this file
+    # Recursive SourceHunt: suspected_mechanisms from semantic sink-class
+    # detectors (empty in legacy/staged runs, so ranking is unchanged there).
+    sink_classes: list[str]
     imports_by: int  # v0.1 cheap influence signal
     transitive_callers: int  # v0.2: tree-sitter callgraph (better influence)
     defines_constants: bool

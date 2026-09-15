@@ -349,7 +349,12 @@ def test_optional_docker_packages_remain_best_effort_without_hiding_stderr():
         )
     )
 
-    assert "valgrind || true ;" in dockerfile
+    assert "valgrind" in dockerfile
+    # Optional features stay best-effort: an optional apt block never gates on
+    # success (`[ "$ok" = 1 ]` is only appended for required packages), so a
+    # fetch failure does not fail the build.
+    assert '[ "$ok" = 1 ]' not in dockerfile
+    # stderr is never hidden — failures must show up in the build log.
     assert "2>/dev/null" not in dockerfile
 
 

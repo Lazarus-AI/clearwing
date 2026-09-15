@@ -323,6 +323,8 @@ class Preprocessor:
         max_imports_by_files: int = 1000,  # cap the imports_by walk
         respect_gitignore: bool = False,
         subsystem_paths: list[str] | None = None,
+        detect_sink_classes: bool = False,  # recursive: semantic sink-class tags
+        force_full_analysis: bool = False,  # recursive: never disable heavy analysis
     ):
         self.repo_url = repo_url
         self.branch = branch
@@ -336,6 +338,8 @@ class Preprocessor:
         self.max_imports_by_files = max_imports_by_files
         self.respect_gitignore = respect_gitignore
         self.subsystem_paths = subsystem_paths or []
+        self.detect_sink_classes = detect_sink_classes
+        self.force_full_analysis = force_full_analysis
         self._analyzer: SourceAnalyzer | None = None
         self._cloner: SourceAnalyzer | None = None
 
@@ -372,8 +376,17 @@ class Preprocessor:
         source_files = list(self._analyzer._iter_source_files(repo_path))
         logger.info("Preprocessor: found %d source files", len(source_files))
         imports_by_budget = self.max_imports_by_files
-        large_repo = len(source_files) > self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD
-        if len(source_files) > self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD:
+        # Recursive SourceHunt has no budget, so it never disables heavy analysis
+        # (callgraph/reachability/taint/imports_by) even on large repos — this is
+        # what revives the reachability axis and completes semantic detection.
+        large_repo = (
+            len(source_files) > self._LARGE_REPO_HEAVY_ANALYSIS_DISABLE_THRESHOLD
+            and not self.force_full_analysis
+        )
+        if (
+            not self.force_full_analysis
+            and len(source_files) > self._LARGE_REPO_IMPORTS_BY_DISABLE_THRESHOLD
+        ):
             imports_by_budget = 0
             logger.info(
                 "Large repo detected (%d source files); skipping imports_by scans",
@@ -441,6 +454,24 @@ class Preprocessor:
             if self.tag_files:
                 tags = _tag_file(rel_path, content_sample)
 
+            # Recursive SourceHunt: semantic sink-class detection (改修2). Reads
+            # the full file (capped) so compound patterns spanning the file are
+            # seen, appends sink-class tags, and records suspected_mechanisms
+            # for the tag-driven ranker. Off by default → legacy unaffected.
+            sink_mechanisms: list[str] = []
+            if self.detect_sink_classes and self.tag_files:
+                from .sink_class_detectors import detect_sink_classes as _detect_sinks
+
+                try:
+                    with open(abs_path, encoding="utf-8", errors="ignore") as _sf:
+                        _full = _sf.read(4_000_000)
+                except OSError:
+                    _full = content_sample
+                for _hit in _detect_sinks(rel_path, _full):
+                    if _hit.tag not in tags:
+                        tags.append(_hit.tag)  # type: ignore[arg-type]
+                    sink_mechanisms.append(_hit.suspected_mechanism)
+
             defines_constants = _file_defines_constants(content_sample, language)
 
             # v0.1 imports_by — capped to keep large repos snappy
@@ -465,6 +496,7 @@ class Preprocessor:
                 "static_hint": per_file_hints.get(abs_path, 0),
                 "semgrep_hint": 0,  # v0.2 fills in
                 "taint_hits": 0,  # v0.4: taint analyzer fills in
+                "sink_classes": sink_mechanisms,  # recursive: semantic detectors
                 "imports_by": imports_by,
                 "transitive_callers": 0,  # v0.2 fills in
                 "defines_constants": defines_constants,

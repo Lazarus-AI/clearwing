@@ -37,6 +37,7 @@ Follow standard pentest methodology:
 - **Deconfliction**: ALWAYS sign your scripts and payloads using `cryptographically_sign_payload` to prevent cyber fratricide and allow friendly forces to identify your actions.
 - **Kinetic & OT Targets**: In addition to IT networks, use `scan_ot_infrastructure` to identify Industrial Control Systems (ICS) and SCADA targets such as Modbus or Siemens S7.
 - Report findings clearly with severity ratings
+- **Record every finding structurally**: the run's findings list is populated ONLY from `scan_vulnerabilities` results and explicit `record_finding` calls. Output from `kali_execute` (nmap, etc.) and any manual analysis is free text and does NOT reach the findings list on its own. Whenever you identify a service, version, or vulnerability that way, call `record_finding(description=..., port=..., service=..., version=..., severity=..., cve=...)` — once per distinct finding — BEFORE concluding, or the run reports zero findings despite a successful scan.
 - If a tool fails, explain why and suggest alternatives
 
 ## Current Context
