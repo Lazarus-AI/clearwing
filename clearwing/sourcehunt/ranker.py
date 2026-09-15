@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -165,6 +166,18 @@ class Ranker:
             scores_by_chunk = await self._rank_chunks_bounded(chunks)
             for chunk, scores in zip(chunks, scores_by_chunk, strict=False):
                 self._apply_scores(chunk, scores)
+            # Opt-in determinism self-check (B1 verification): re-run the same
+            # LLM scoring a second time on the identical chunks and log how much
+            # the two passes agree. Inert unless the env flag OR the sentinel
+            # file is present, so it never costs anything in normal operation.
+            # The sentinel lets an operator toggle the check on a running
+            # container (touch/rm) without an env change or recreate. With the
+            # utility role pinned to temperature 0, agreement should be ~100%.
+            if os.environ.get("CLEARWING_RANKER_DETERMINISM_CHECK") or os.path.exists(
+                "/opt/clearwing/.ranker-determinism-check"
+            ):
+                print("RANKER_DET_CHECK: enabled — running second scoring pass", flush=True)
+                await self._log_determinism_selfcheck(chunks, scores_by_chunk)
 
         # Apply floors and compute priority for every file
         for ft in files:
@@ -177,6 +190,88 @@ class Ranker:
             self._apply_fuzzable_boost(ft)
 
         return files
+
+    @staticmethod
+    def _score_map(
+        chunks: list[list[FileTarget]],
+        scores_by_chunk: list[dict[str, dict[str, Any]]],
+    ) -> dict[str, tuple[Any, Any]]:
+        """Flatten per-chunk LLM scores into {path: (surface, influence)}."""
+        out: dict[str, tuple[Any, Any]] = {}
+        for chunk, scores in zip(chunks, scores_by_chunk, strict=False):
+            for ft in chunk:
+                path = ft.get("path", "")
+                entry = scores.get(path)
+                if entry and "surface" in entry and "influence" in entry:
+                    out[path] = (entry["surface"], entry["influence"])
+        return out
+
+    async def _log_determinism_selfcheck(
+        self,
+        chunks: list[list[FileTarget]],
+        scores_by_chunk_1: list[dict[str, dict[str, Any]]],
+    ) -> None:
+        """Re-rank the identical chunks and log pass-to-pass agreement.
+
+        Direct empirical measure of ranker determinism: if the utility role is
+        pinned to temperature 0 (greedy), the model should assign the same
+        (surface, influence) scores on both passes → ~100% agreement. Any
+        divergence localizes exactly which files the ranker is unstable on.
+
+        Only the first N chunks are re-ranked (N from
+        CLEARWING_RANKER_DETERMINISM_CHECK_CHUNKS, default 5), so the extra cost
+        is bounded regardless of corpus size — a sample is enough to measure
+        whether the model decodes deterministically.
+        """
+        try:
+            max_chunks = int(os.environ.get("CLEARWING_RANKER_DETERMINISM_CHECK_CHUNKS", "5"))
+        except ValueError:
+            max_chunks = 5
+        max_chunks = max(1, min(max_chunks, len(chunks)))
+        sample_chunks = chunks[:max_chunks]
+        sample_scores_1 = scores_by_chunk_1[:max_chunks]
+        try:
+            scores_by_chunk_2 = await self._rank_chunks_bounded(sample_chunks)
+        except Exception:  # noqa: BLE001 — a diagnostic must never break a run
+            print("RANKER_DET_CHECK: second pass FAILED", flush=True)
+            logger.warning("Ranker determinism self-check second pass failed", exc_info=True)
+            return
+
+        pass1 = self._score_map(sample_chunks, sample_scores_1)
+        pass2 = self._score_map(sample_chunks, scores_by_chunk_2)
+        common = sorted(set(pass1) & set(pass2))
+        if not common:
+            print("RANKER_DET_CHECK: no overlapping scored files", flush=True)
+            logger.warning("Ranker determinism self-check: no overlapping scored files")
+            return
+
+        exact = sum(1 for p in common if pass1[p] == pass2[p])
+        mismatches = [(p, pass1[p], pass2[p]) for p in common if pass1[p] != pass2[p]]
+        agreement = exact / len(common) * 100.0
+
+        # Budget-relevant view: does the top-N (by the score the budget cut
+        # would use) stay identical across passes? Rank each pass's files by
+        # (surface+influence) desc and compare the top-40 sets.
+        def _top_n(scores: dict[str, tuple[Any, Any]], n: int) -> set[str]:
+            ordered = sorted(scores, key=lambda p: (-(scores[p][0] + scores[p][1]), p))
+            return set(ordered[:n])
+
+        top_n = 40
+        top1, top2 = _top_n(pass1, top_n), _top_n(pass2, top_n)
+        top_overlap = len(top1 & top2)
+
+        summary = (
+            f"RANKER_DET_CHECK RESULT | temp={getattr(self.llm, 'default_temperature', '?')} | "
+            f"sampled {len(sample_chunks)}/{len(chunks)} chunks | files={len(common)} | "
+            f"score-agreement={agreement:.1f}% ({exact}/{len(common)} exact) | "
+            f"top-{top_n} overlap={top_overlap}/{top_n} | mismatches={len(mismatches)}"
+        )
+        print(summary, flush=True)
+        logger.warning(summary)
+        for path, s1, s2 in mismatches[:15]:
+            line = f"RANKER_DET_CHECK MISMATCH | {path} | pass1={s1} pass2={s2}"
+            print(line, flush=True)
+            logger.warning(line)
 
     async def _rank_chunks_bounded(
         self,
@@ -300,9 +395,7 @@ class Ranker:
         )
         return candidates
 
-    def _reserve_band_minimum(
-        self, ordered: list[FileTarget], limit: int
-    ) -> list[FileTarget]:
+    def _reserve_band_minimum(self, ordered: list[FileTarget], limit: int) -> list[FileTarget]:
         """Take ``limit`` files from ``ordered`` (already sorted best-first),
         but reserve ``large_repo_band_min`` slots for each priority band first.
 
@@ -458,7 +551,7 @@ class Ranker:
                     return {}
                 last_exc = exc
                 if attempt < max_attempts - 1:
-                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2 ** attempt)
+                    delay = max(0.0, self.config.chunk_retry_backoff_seconds) * (2**attempt)
                     logger.debug(
                         "Ranker chunk %d/%d attempt %d failed (%s); retrying in %.1fs",
                         idx,
@@ -482,9 +575,8 @@ class Ranker:
     def _is_retryable_structured_output_error(exc: Exception) -> bool:
         if isinstance(exc, (json.JSONDecodeError, ValidationError)):
             return True
-        return (
-            isinstance(exc, ValueError)
-            and str(exc).startswith("LLM returned empty response; expected JSON matching")
+        return isinstance(exc, ValueError) and str(exc).startswith(
+            "LLM returned empty response; expected JSON matching"
         )
 
     def _build_user_message(self, chunk: list[FileTarget]) -> str:
