@@ -175,8 +175,10 @@ def test_target_window_reuses_matching_work_item_cache(tmp_path: Path) -> None:
             max_parallel=1,
         )
     )
-    work_id = pool._expand_to_work_items(pool.config.files, "fast")[0].stable_identifier(
-        "hunt", "A"
+    work_id = pool._expand_to_work_items(pool.config.files, "fast")[0].cache_identifier(
+        "hunt",
+        "A",
+        trace_step_max_chars=pool.config.trace_step_max_chars,
     )
     pool._run_file_task = AsyncMock(side_effect=AssertionError("cache miss"))
 
