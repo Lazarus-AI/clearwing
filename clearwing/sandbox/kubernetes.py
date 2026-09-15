@@ -73,9 +73,7 @@ class KubernetesSandboxBackend:
     ) -> None:
         self.image = image or os.environ.get("CLEARWING_SANDBOX_IMAGE", "").strip()
         if not self.image:
-            raise ValueError(
-                "Kubernetes sandbox requires CLEARWING_SANDBOX_IMAGE or image="
-            )
+            raise ValueError("Kubernetes sandbox requires CLEARWING_SANDBOX_IMAGE or image=")
         self.namespace = namespace or kubernetes_namespace()
         self._api_factory = api_factory
 
@@ -156,9 +154,7 @@ class KubernetesSandbox:
         if self._pod_name is None:
             return False
         try:
-            pod = self._api_factory().read_namespaced_pod_status(
-                self._pod_name, self.namespace
-            )
+            pod = self._api_factory().read_namespaced_pod_status(self._pod_name, self.namespace)
             return bool(pod.status.phase == "Running")
         except Exception:
             return False
@@ -170,9 +166,7 @@ class KubernetesSandbox:
 
         pod_name = f"clearwing-sandbox-{uuid.uuid4().hex[:12]}"
         resources: dict[str, str] = {"memory": f"{self._config.memory_mb}Mi"}
-        requests: dict[str, str] = {
-            "memory": f"{min(self._config.memory_mb, 512)}Mi"
-        }
+        requests: dict[str, str] = {"memory": f"{min(self._config.memory_mb, 512)}Mi"}
         if self._config.cpus is not None and self._config.cpus > 0:
             resources["cpu"] = str(self._config.cpus)
             requests["cpu"] = str(min(self._config.cpus, 0.5))
@@ -267,9 +261,7 @@ class KubernetesSandbox:
         effective_timeout = self._config.timeout_seconds if timeout is None else timeout
         shell_command = command if isinstance(command, str) else shlex.join(command)
         if env:
-            exports = " ".join(
-                f"{name}={shlex.quote(value)}" for name, value in env.items()
-            )
+            exports = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
             shell_command = f"export {exports} && {shell_command}"
         if workdir:
             shell_command = f"cd {shlex.quote(workdir)} && {shell_command}"
@@ -284,9 +276,7 @@ class KubernetesSandbox:
         except TimeoutError:
             response.close()
             stdout, stderr, exit_code, timed_out = "", "command timed out", 124, True
-        return ExecResult(
-            exit_code, stdout, stderr, time.monotonic() - started, timed_out
-        )
+        return ExecResult(exit_code, stdout, stderr, time.monotonic() - started, timed_out)
 
     @staticmethod
     def _parse_exit_code(response: Any) -> int:
@@ -318,9 +308,7 @@ class KubernetesSandbox:
         response.run_forever(timeout=30)
 
     def read_file(self, container_path: str) -> bytes:
-        response = self._stream(
-            ["tar", "-cf", "-", "-C", "/", container_path.lstrip("/")]
-        )
+        response = self._stream(["tar", "-cf", "-", "-C", "/", container_path.lstrip("/")])
         response.run_forever(timeout=30)
         payload = response.read_stdout()
         if isinstance(payload, str):
