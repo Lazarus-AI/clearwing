@@ -137,11 +137,9 @@ def test_target_window_is_first_turn_numbered_source_and_unique_work(tmp_path: P
     assert WorkItem(file_target, "deep").stable_identifier("run") != WorkItem(
         {**file_target, "target_start_line": 1, "target_end_line": 1}, "deep"
     ).stable_identifier("run")
-    assert WorkItem(
-        {**file_target, "target_sha256": "old"}, "deep"
-    ).stable_identifier("run") != WorkItem(
-        {**file_target, "target_sha256": "new"}, "deep"
-    ).stable_identifier("run")
+    assert WorkItem({**file_target, "target_sha256": "old"}, "deep").stable_identifier(
+        "run"
+    ) != WorkItem({**file_target, "target_sha256": "new"}, "deep").stable_identifier("run")
 
 
 def test_target_window_reuses_matching_work_item_cache(tmp_path: Path) -> None:
@@ -175,8 +173,10 @@ def test_target_window_reuses_matching_work_item_cache(tmp_path: Path) -> None:
             max_parallel=1,
         )
     )
-    work_id = pool._expand_to_work_items(pool.config.files, "fast")[0].stable_identifier(
-        "hunt", "A"
+    work_id = pool._expand_to_work_items(pool.config.files, "fast")[0].cache_identifier(
+        "hunt",
+        "A",
+        trace_step_max_chars=pool.config.trace_step_max_chars,
     )
     pool._run_file_task = AsyncMock(side_effect=AssertionError("cache miss"))
 
@@ -423,9 +423,7 @@ def test_incomplete_target_window_keeps_partial_findings_in_pool(tmp_path: Path)
         )
     )
     partial = Finding(id="partial", file="target.c", line_number=1)
-    pool._run_one_hunter = AsyncMock(
-        return_value=([partial], 0.0, 0, "empty_response")
-    )
+    pool._run_one_hunter = AsyncMock(return_value=([partial], 0.0, 0, "empty_response"))
 
     findings = asyncio.run(pool.arun())
 
@@ -459,7 +457,9 @@ def test_specialist_hunter_keeps_campaign_hint_and_seeded_window(tmp_path: Path)
     assert context.files_read == {"target.c"}
     assert context.read_ranges == {"target.c": [(1, 1)]}
 
-    trace = next(tool for tool in build_reporting_tools(context) if tool.name == "record_trace_step")
+    trace = next(
+        tool for tool in build_reporting_tools(context) if tool.name == "record_trace_step"
+    )
     rejected = trace.handler(file="target.c", line=2, code_snippet="invented")
     assert rejected["error"]["code"] == "UNREAD_TRACE_SOURCE"
 
@@ -531,9 +531,7 @@ def test_target_window_cache_identity_includes_effective_prompt_context(tmp_path
                 files=[dict(window)],
                 repo_path=str(tmp_path),
                 explicit_target_windows=True,
-                semgrep_hints_by_file={
-                    "target.c": [{"line": 1, "description": hint}]
-                },
+                semgrep_hints_by_file={"target.c": [{"line": 1, "description": hint}]},
                 campaign_hint=campaign,
             )
         )
