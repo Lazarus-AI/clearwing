@@ -619,9 +619,7 @@ class TestHunterToolsHostFallback:
 
         assert ctx.read_ranges == {"include/codec_limits.h": [(1, 1)]}
         assert (
-            trace.invoke(
-                {"file": "include/codec_limits.h", "line": 1, "note": "ENTRY: observed"}
-            )
+            trace.invoke({"file": "include/codec_limits.h", "line": 1, "note": "ENTRY: observed"})
             == "Trace step 1 recorded."
         )
         rejected = trace.invoke(
@@ -635,6 +633,21 @@ class TestHunterToolsHostFallback:
         read = next(t for t in tools if t.name == "read_source_file")
         out = read.invoke({"path": "../../../etc/passwd"})
         assert "Error" in out
+        assert ctx.files_read == set()
+        assert ctx.read_ranges == {}
+
+    def test_missing_or_empty_source_file_does_not_count_as_coverage(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "empty.c").write_text("")
+
+        ctx = HunterContext(repo_path=str(repo))
+        read = next(t for t in build_hunter_tools(ctx) if t.name == "read_source_file")
+
+        assert "Error" in read.invoke({"path": "missing.c"})
+        assert read.invoke({"path": "empty.c"}) == ""
+        assert ctx.files_read == set()
+        assert ctx.read_ranges == {}
 
     def test_read_source_file_checked_in_symlink_escape_blocked(self, tmp_path):
         repo = tmp_path / "repo"
@@ -649,6 +662,8 @@ class TestHunterToolsHostFallback:
         out = read.invoke({"path": "leak.c"})
         assert "Error" in out
         assert "secret outside" not in out
+        assert ctx.files_read == set()
+        assert ctx.read_ranges == {}
 
     def test_read_source_file_git_metadata_blocked_and_hidden(self, tmp_path):
         repo = tmp_path / "repo"
@@ -661,9 +676,7 @@ class TestHunterToolsHostFallback:
         listing = next(t for t in tools if t.name == "list_source_tree")
 
         assert "Error" in read.invoke({"path": ".git/HEAD"})
-        assert not any(
-            entry.startswith(".git") for entry in listing.invoke({"dir_path": "."})
-        )
+        assert not any(entry.startswith(".git") for entry in listing.invoke({"dir_path": "."}))
 
     def test_grep_source_does_not_follow_symlink_outside_repository(self, tmp_path):
         repo = tmp_path / "repo"
@@ -698,7 +711,6 @@ class TestHunterToolsHostFallback:
             assert "file" in m
             assert "line_number" in m
             assert "matched_text" in m
-
 
     def test_grep_source_sandbox_ignores_glob_when_path_is_file(self):
         class _FakeSandbox:
@@ -817,9 +829,7 @@ class TestRecordFinding:
             "confidence": "medium",
             "evidence_level": "suspicion",
             "description": "source-backed issue",
-            "trace": {
-                "steps": [{"file": "x.c", "line": 1, "note": "ENTRY/SINK: issue"}]
-            },
+            "trace": {"steps": [{"file": "x.c", "line": 1, "note": "ENTRY/SINK: issue"}]},
         }
         arguments[field] = value
 
@@ -916,11 +926,7 @@ class TestRecordFinding:
                 "severity": "high",
                 "cwe": "CWE-416",
                 "description": "y",
-                "trace": {
-                    "steps": [
-                        {"file": "x.c", "line": 1, "note": "ENTRY/SINK: uaf"}
-                    ]
-                },
+                "trace": {"steps": [{"file": "x.c", "line": 1, "note": "ENTRY/SINK: uaf"}]},
             }
         )
         assert ctx.findings[0]["seeded_from_crash"] is True
@@ -1071,9 +1077,7 @@ class TestToolOutputSummary:
             {"path": "/workspace/src/main.rs", "offset": 80, "limit": 700},
             "    81\tfn first() {}\n    82\tfn second() {}\n... truncated 100 chars ...",
         )
-        assert summary == (
-            "read_file /workspace/src/main.rs:81-82 → 2 lines, continue at 83"
-        )
+        assert summary == ("read_file /workspace/src/main.rs:81-82 → 2 lines, continue at 83")
 
     def test_live_callee_result_reports_resolution_counts(self):
         summary = _live_tool_result_summary(
