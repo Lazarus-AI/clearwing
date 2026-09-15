@@ -215,7 +215,6 @@ def build_discovery_tools(ctx: HunterContext) -> list:
             rel = _normalize_path(ctx.repo_path, path)
         except ValueError as e:
             return f"Error: {e}"
-        ctx.files_read.add(rel)
         host_path = resolve_repo_file(ctx.repo_path, rel)
         if host_path is None:
             return f"Error reading {rel}: not a repository source file"
@@ -277,10 +276,13 @@ def build_discovery_tools(ctx: HunterContext) -> list:
                     Path(os.path.relpath(os.path.join(dirpath, d), ctx.repo_path)).as_posix() + "/"
                 )
             for f in filenames:
-                if resolve_repo_file(
-                    ctx.repo_path,
-                    os.path.relpath(os.path.join(dirpath, f), ctx.repo_path),
-                ) is None:
+                if (
+                    resolve_repo_file(
+                        ctx.repo_path,
+                        os.path.relpath(os.path.join(dirpath, f), ctx.repo_path),
+                    )
+                    is None
+                ):
                     continue
                 out.append(
                     Path(os.path.relpath(os.path.join(dirpath, f), ctx.repo_path)).as_posix()
