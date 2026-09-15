@@ -74,7 +74,10 @@ class Notifier:
         atype = getattr(payload, "asset_type", "asset")
         value = getattr(payload, "value", "")
         source = getattr(payload, "source", "")
-        self.notify(f":satellite: New {atype} in *{scope}*: `{value}`" + (f" (via {source})" if source else ""))
+        self.notify(
+            f":satellite: New {atype} in *{scope}*: `{value}`"
+            + (f" (via {source})" if source else "")
+        )
 
     def _on_finding(self, data: Any) -> None:
         if not isinstance(data, dict):
@@ -82,7 +85,9 @@ class Notifier:
         severity = data.get("severity", "info")
         ftype = data.get("finding_type", "finding")
         where = data.get("file") or data.get("hunter_target") or ""
-        self.notify(f":rotating_light: New *{severity}* {ftype}" + (f" in `{where}`" if where else ""))
+        self.notify(
+            f":rotating_light: New *{severity}* {ftype}" + (f" in `{where}`" if where else "")
+        )
 
     # -- transport ------------------------------------------------------
 

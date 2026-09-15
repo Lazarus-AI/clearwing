@@ -38,8 +38,13 @@ def test_cycle_emits_only_for_new_assets(store, captured_events):
         ]
     )
     monitor = AsmMonitor(
-        _cfg(store, max_iterations=2, poll_interval_seconds=0, scan_new_assets=False,
-             discover_fn=lambda s, o: next(cycles))
+        _cfg(
+            store,
+            max_iterations=2,
+            poll_interval_seconds=0,
+            scan_new_assets=False,
+            discover_fn=lambda s, o: next(cycles),
+        )
     )
     monitor.run()
     assert monitor.iterations == 2
@@ -55,9 +60,15 @@ def test_scan_runs_only_on_new_ip_and_host_assets(store):
         Asset("acme", "host", "https://a.acme.com"),
     ]
     monitor = AsmMonitor(
-        _cfg(store, max_iterations=1, poll_interval_seconds=0, scan_new_assets=True,
-             threat_intel=False, discover_fn=lambda s, o: assets,
-             scan_fn=lambda a: scanned.append(a.value) or [])
+        _cfg(
+            store,
+            max_iterations=1,
+            poll_interval_seconds=0,
+            scan_new_assets=True,
+            threat_intel=False,
+            discover_fn=lambda s, o: assets,
+            scan_fn=lambda a: scanned.append(a.value) or [],
+        )
     )
     monitor.run()
     assert sorted(scanned) == ["1.2.3.4", "https://a.acme.com"]  # not the subdomain
@@ -66,9 +77,14 @@ def test_scan_runs_only_on_new_ip_and_host_assets(store):
 def test_scan_disabled(store):
     scanned: list[str] = []
     monitor = AsmMonitor(
-        _cfg(store, max_iterations=1, poll_interval_seconds=0, scan_new_assets=False,
-             discover_fn=lambda s, o: [Asset("acme", "ip", "1.2.3.4")],
-             scan_fn=lambda a: scanned.append(a.value) or [])
+        _cfg(
+            store,
+            max_iterations=1,
+            poll_interval_seconds=0,
+            scan_new_assets=False,
+            discover_fn=lambda s, o: [Asset("acme", "ip", "1.2.3.4")],
+            scan_fn=lambda a: scanned.append(a.value) or [],
+        )
     )
     monitor.run()
     assert scanned == []
@@ -83,8 +99,13 @@ def test_cancel_stops_an_infinite_monitor(store):
         return [Asset("acme", "subdomain", f"h{calls['n']}.acme.com")]
 
     monitor = AsmMonitor(
-        _cfg(store, max_iterations=0, poll_interval_seconds=999, scan_new_assets=False,
-             discover_fn=discover)
+        _cfg(
+            store,
+            max_iterations=0,
+            poll_interval_seconds=999,
+            scan_new_assets=False,
+            discover_fn=discover,
+        )
     )
     monitor.run()
     assert calls["n"] == 1  # cancelled before a second cycle / long sleep
@@ -93,9 +114,14 @@ def test_cancel_stops_an_infinite_monitor(store):
 def test_on_cycle_callback(store):
     seen: list[int] = []
     monitor = AsmMonitor(
-        _cfg(store, max_iterations=1, poll_interval_seconds=0, scan_new_assets=False,
-             discover_fn=lambda s, o: [Asset("acme", "subdomain", "a.acme.com")],
-             on_cycle=lambda new: seen.append(len(new)))
+        _cfg(
+            store,
+            max_iterations=1,
+            poll_interval_seconds=0,
+            scan_new_assets=False,
+            discover_fn=lambda s, o: [Asset("acme", "subdomain", "a.acme.com")],
+            on_cycle=lambda new: seen.append(len(new)),
+        )
     )
     monitor.run()
     assert seen == [1]

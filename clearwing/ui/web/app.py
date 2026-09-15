@@ -59,6 +59,7 @@ def create_app():
     # processor on graceful shutdown so nothing gets dropped.
     _obs = ObservabilityIntegration.bootstrap_from_env()
     if _obs is not None:
+
         @app.on_event("shutdown")
         def _flush_observability() -> None:
             _obs.disconnect()
@@ -79,9 +80,7 @@ def create_app():
 
     def _ws_authorized(websocket: WebSocket) -> bool:
         provided = websocket.headers.get("x-api-key") or websocket.query_params.get("api_key")
-        return bool(
-            _api_key and provided is not None and hmac.compare_digest(provided, _api_key)
-        )
+        return bool(_api_key and provided is not None and hmac.compare_digest(provided, _api_key))
 
     # Serve the single-page frontend
     _static_dir = Path(__file__).parent / "static"
@@ -272,6 +271,7 @@ def create_app():
     @app.get("/api/disclosure/queue")
     async def disclosure_queue(state: str | None = None, repo: str | None = None):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
+
         db = DisclosureDB()
         try:
             return db.get_queue(state=state, repo_url=repo)
@@ -282,6 +282,7 @@ def create_app():
     async def disclosure_validate(finding_id: str, body: dict):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
+
         db = DisclosureDB()
         try:
             wf = DisclosureWorkflow(db)
@@ -296,6 +297,7 @@ def create_app():
     async def disclosure_reject(finding_id: str, body: dict):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
+
         db = DisclosureDB()
         try:
             wf = DisclosureWorkflow(db)
@@ -310,6 +312,7 @@ def create_app():
     async def disclosure_send(finding_id: str, body: dict):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
+
         db = DisclosureDB()
         try:
             wf = DisclosureWorkflow(db)
@@ -328,6 +331,7 @@ def create_app():
     async def disclosure_status():
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
+
         db = DisclosureDB()
         try:
             wf = DisclosureWorkflow(db)
@@ -343,7 +347,11 @@ def create_app():
         store = AssetStore()
         try:
             return [
-                {"scope": name, "assets": sum(store.stats(name).values()), "types": store.stats(name)}
+                {
+                    "scope": name,
+                    "assets": sum(store.stats(name).values()),
+                    "types": store.stats(name),
+                }
                 for name in store.scopes()
             ]
         finally:
@@ -406,12 +414,11 @@ def create_app():
                             serializable = data
                         elif hasattr(data, "__dataclass_fields__"):
                             from dataclasses import asdict
+
                             serializable = asdict(data)
                         else:
                             serializable = str(data)
-                        message_queue.put_nowait(
-                            {"type": event_type_name, "data": serializable}
-                        )
+                        message_queue.put_nowait({"type": event_type_name, "data": serializable})
                     except Exception:
                         logger.debug("Failed to enqueue event", exc_info=True)
 
