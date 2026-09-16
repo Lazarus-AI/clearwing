@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import struct
 import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from clearwing.sourcehunt.reveng import RevengPipeline, RevengResult
 from clearwing.sourcehunt.reveng_decompiler import (
-    DecompiledFunction,
     DecompilationResult,
+    DecompiledFunction,
     RevengSandbox,
     StaticAnalysisResult,
     format_static_summary,
@@ -21,10 +20,8 @@ from clearwing.sourcehunt.reveng_decompiler import (
 from clearwing.sourcehunt.reveng_reconstructor import (
     ReconstructedSource,
     ReconstructionResult,
-    ReconstructionValidation,
     RevengReconstructor,
 )
-
 
 # --- Dataclass defaults tests ------------------------------------------------
 
@@ -198,13 +195,15 @@ class TestRevengReconstructor:
 
         reconstructor = RevengReconstructor(mock_llm)
         decompilation = DecompilationResult(
-            functions=[DecompiledFunction(
-                name="FUN_00401234",
-                address=0x401234,
-                decompiled_c="void FUN_00401234(char *param1) {}",
-                size=100,
-                calls=["strlen"],
-            )],
+            functions=[
+                DecompiledFunction(
+                    name="FUN_00401234",
+                    address=0x401234,
+                    decompiled_c="void FUN_00401234(char *param1) {}",
+                    size=100,
+                    calls=["strlen"],
+                )
+            ],
             total_functions=1,
         )
         static_info = StaticAnalysisResult(file_type="ELF")
@@ -219,7 +218,8 @@ class TestRevengReconstructor:
         mock_llm = AsyncMock()
         reconstructor = RevengReconstructor(mock_llm)
         result = await reconstructor.areconstruct(
-            DecompilationResult(), StaticAnalysisResult(),
+            DecompilationResult(),
+            StaticAnalysisResult(),
         )
         assert result.reconstructed_count == 0
         assert result.sources == []
@@ -231,15 +231,18 @@ class TestRevengReconstructor:
 
         reconstructor = RevengReconstructor(mock_llm)
         decompilation = DecompilationResult(
-            functions=[DecompiledFunction(
-                name="FUN_00401234",
-                decompiled_c="void FUN_00401234() { return; }",
-            )],
+            functions=[
+                DecompiledFunction(
+                    name="FUN_00401234",
+                    decompiled_c="void FUN_00401234() { return; }",
+                )
+            ],
             total_functions=1,
         )
 
         result = await reconstructor.areconstruct(
-            decompilation, StaticAnalysisResult(),
+            decompilation,
+            StaticAnalysisResult(),
         )
         assert result.reconstructed_count == 1
         assert result.sources[0].original_name == "FUN_00401234"
@@ -259,7 +262,8 @@ class TestRevengReconstructor:
             for i in range(20)
         ]
         decompilation = DecompilationResult(
-            functions=functions, total_functions=20,
+            functions=functions,
+            total_functions=20,
         )
 
         await reconstructor.areconstruct(decompilation, StaticAnalysisResult())
@@ -279,7 +283,8 @@ class TestRevengReconstructor:
             for i in range(10)
         ]
         decompilation = DecompilationResult(
-            functions=functions, total_functions=10,
+            functions=functions,
+            total_functions=10,
         )
 
         await reconstructor.areconstruct(decompilation, StaticAnalysisResult())
@@ -323,6 +328,7 @@ class TestRevengPipeline:
 
     def test_reveng_hunt_prompt_has_placeholders(self):
         from clearwing.sourcehunt.reveng import REVENG_HUNT_PROMPT
+
         assert "{project_name}" in REVENG_HUNT_PROMPT
         assert "{binary_name}" in REVENG_HUNT_PROMPT
         assert "{arch}" in REVENG_HUNT_PROMPT
@@ -335,10 +341,12 @@ class TestRevengPipeline:
 class TestHunterSpecialist:
     def test_reveng_in_specialist_prompts(self):
         from clearwing.sourcehunt.hunter import _SPECIALIST_PROMPTS
+
         assert "reveng" in _SPECIALIST_PROMPTS
 
     def test_reveng_in_deep_specialist_focus(self):
         from clearwing.sourcehunt.hunter import _DEEP_SPECIALIST_FOCUS
+
         assert "reveng" in _DEEP_SPECIALIST_FOCUS
         assert "binary" in _DEEP_SPECIALIST_FOCUS["reveng"].lower()
 
@@ -349,6 +357,7 @@ class TestHunterSpecialist:
 class TestRevengCLI:
     def test_reveng_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -359,6 +368,7 @@ class TestRevengCLI:
 
     def test_arch_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -369,6 +379,7 @@ class TestRevengCLI:
 
     def test_arch_default(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
@@ -379,18 +390,26 @@ class TestRevengCLI:
 
     def test_reveng_budget_flag(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
         sourcehunt.add_parser(subs)
-        args = parser.parse_args([
-            "sourcehunt", "repo", "--reveng", "--reveng-budget", "campaign",
-        ])
+        args = parser.parse_args(
+            [
+                "sourcehunt",
+                "repo",
+                "--reveng",
+                "--reveng-budget",
+                "campaign",
+            ]
+        )
         assert args.reveng_budget == "campaign"
 
     def test_reveng_budget_default(self):
         import argparse
+
         from clearwing.ui.commands import sourcehunt
 
         parser = argparse.ArgumentParser()

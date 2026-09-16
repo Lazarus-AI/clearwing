@@ -100,8 +100,14 @@ def _probe_host(scope: Scope, host: str) -> list[Asset]:
         if not result.get("live"):
             continue
         assets = [
-            Asset(scope.name, "host", result["url"], parent_id=parent, source="probe",
-                  metadata={"status": result.get("status"), "server": result.get("server", "")})
+            Asset(
+                scope.name,
+                "host",
+                result["url"],
+                parent_id=parent,
+                source="probe",
+                metadata={"status": result.get("status"), "server": result.get("server", "")},
+            )
         ]
         assets.extend(
             Asset(scope.name, "technology", tech, parent_id=parent, source="probe")

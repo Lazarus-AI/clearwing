@@ -49,9 +49,7 @@ class Scope:
         candidate = name.strip().lower().rstrip(".")
         if any(candidate == ex or candidate.endswith("." + ex) for ex in self.exclusions):
             return False
-        return any(
-            candidate == root or candidate.endswith("." + root) for root in self.domains
-        )
+        return any(candidate == root or candidate.endswith("." + root) for root in self.domains)
 
     @classmethod
     def from_domain(cls, domain: str, name: str | None = None) -> Scope:
@@ -83,9 +81,7 @@ class Scope:
             return cls.from_config(target, section)
         if _DOMAIN_RE.fullmatch(target.strip().lower().rstrip(".")):
             return cls.from_domain(target)
-        raise ScopeError(
-            f"{target!r} is neither a configured asm scope nor a valid domain"
-        )
+        raise ScopeError(f"{target!r} is neither a configured asm scope nor a valid domain")
 
 
 __all__ = ["Scope", "ScopeError"]

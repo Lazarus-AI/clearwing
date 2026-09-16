@@ -26,10 +26,20 @@ def add_parser(subparsers):
 
     p_scan = sub.add_parser("scan", help="Discover the attack surface for a scope or domain")
     p_scan.add_argument("target", help="A configured asm scope name or a root domain")
-    p_scan.add_argument("--mode", default="recon", help="Workflow mode (recon, stealth, web-assessment, external-sweep)")
-    p_scan.add_argument("--no-scan", action="store_true", help="Do not port/service/vuln-scan new hosts")
-    p_scan.add_argument("--screenshot", action="store_true", help="Screenshot live web hosts into a gallery")
-    p_scan.add_argument("--notify", action="store_true", help="Send configured notifications for new assets")
+    p_scan.add_argument(
+        "--mode",
+        default="recon",
+        help="Workflow mode (recon, stealth, web-assessment, external-sweep)",
+    )
+    p_scan.add_argument(
+        "--no-scan", action="store_true", help="Do not port/service/vuln-scan new hosts"
+    )
+    p_scan.add_argument(
+        "--screenshot", action="store_true", help="Screenshot live web hosts into a gallery"
+    )
+    p_scan.add_argument(
+        "--notify", action="store_true", help="Send configured notifications for new assets"
+    )
     p_scan.add_argument("-o", "--output-dir", help="Report output directory")
 
     p_mon = sub.add_parser("monitor", help="Continuously monitor a scope for new assets")
@@ -88,7 +98,9 @@ def _handle_scan(cli, args, asm_cfg: dict[str, Any]) -> None:
 
     scope = Scope.resolve(args.target, asm_cfg)
     mode = get_mode(args.mode)
-    cli.console.print(f"[bold blue]ASM scan[/bold blue] scope=[cyan]{scope.name}[/cyan] mode=[cyan]{mode.name}[/cyan]")
+    cli.console.print(
+        f"[bold blue]ASM scan[/bold blue] scope=[cyan]{scope.name}[/cyan] mode=[cyan]{mode.name}[/cyan]"
+    )
 
     notifier = _maybe_notifier(cli, args, asm_cfg)
     store = AssetStore()
@@ -104,10 +116,14 @@ def _handle_scan(cli, args, asm_cfg: dict[str, Any]) -> None:
         bus = EventBus()
         for asset in new_assets:
             bus.emit_asset_discovered(
-                AssetDiscoveredPayload(scope.name, asset.asset_type, asset.value, asset.source, asset.parent_id)
+                AssetDiscoveredPayload(
+                    scope.name, asset.asset_type, asset.value, asset.source, asset.parent_id
+                )
             )
 
-        cli.console.print(f"[green]+[/green] {len(new_assets)} new assets; {sum(store.stats(scope.name).values())} total")
+        cli.console.print(
+            f"[green]+[/green] {len(new_assets)} new assets; {sum(store.stats(scope.name).values())} total"
+        )
         for atype, n in sorted(store.stats(scope.name).items()):
             cli.console.print(f"    {atype}: {n}")
 
@@ -135,7 +151,11 @@ def _handle_monitor(cli, args, asm_cfg: dict[str, Any]) -> None:
 
     scope = Scope.resolve(args.target, asm_cfg)
     mode = get_mode(args.mode)
-    interval = args.interval if args.interval is not None else float(asm_cfg.get("poll_interval_seconds", 86400))
+    interval = (
+        args.interval
+        if args.interval is not None
+        else float(asm_cfg.get("poll_interval_seconds", 86400))
+    )
     cli.console.print(
         f"[bold blue]ASM monitor[/bold blue] scope=[cyan]{scope.name}[/cyan] "
         f"interval={interval:.0f}s {'(single cycle)' if args.once else '(Ctrl-C to stop)'}"
@@ -198,7 +218,9 @@ def _handle_list(cli, args) -> None:
         if not args.target:
             scopes = store.scopes()
             if not scopes:
-                cli.console.print("[yellow]No scopes yet. Run `clearwing asm scan <domain>`.[/yellow]")
+                cli.console.print(
+                    "[yellow]No scopes yet. Run `clearwing asm scan <domain>`.[/yellow]"
+                )
             for name in scopes:
                 total = sum(store.stats(name).values())
                 cli.console.print(f"  [cyan]{name}[/cyan] — {total} assets")
@@ -220,12 +242,17 @@ def _sweep(cli, store, scope_name, asm_cfg, max_parallel: int = 10) -> list[dict
     cli.console.print("[cyan]Sweeping known hosts...[/cyan]")
     try:
         result = sweep_scope(
-            store, scope_name, max_parallel=max_parallel, threat_intel=asm_cfg.get("threat_intel", True)
+            store,
+            scope_name,
+            max_parallel=max_parallel,
+            threat_intel=asm_cfg.get("threat_intel", True),
         )
     except Exception as exc:  # scanning is best-effort
         cli.console.print(f"[yellow]Sweep skipped:[/yellow] {exc}")
         return []
-    cli.console.print(f"[green]+[/green] scanned {len(result.hosts_scanned)} hosts, {len(result.findings)} findings")
+    cli.console.print(
+        f"[green]+[/green] scanned {len(result.hosts_scanned)} hosts, {len(result.findings)} findings"
+    )
     return result.findings
 
 
@@ -259,7 +286,9 @@ def _maybe_notifier(cli, args, asm_cfg, force: bool = False):
         notifier.subscribe()
         return notifier
     if getattr(args, "notify", False):
-        cli.console.print("[yellow]--notify set but no webhook configured (asm.slack_webhook_url / env).[/yellow]")
+        cli.console.print(
+            "[yellow]--notify set but no webhook configured (asm.slack_webhook_url / env).[/yellow]"
+        )
     return None
 
 

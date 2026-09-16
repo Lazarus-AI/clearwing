@@ -219,7 +219,7 @@ def _endpoint_from_runtime(cfg: dict[str, Any]) -> LLMEndpoint | None:
     )
 
 
-def resolve_llm_endpoint(
+def resolve_llm_endpoint(  # noqa: C901 - precedence cascade mirrors configuration sources
     cli_model: str | None = None,
     cli_base_url: str | None = None,
     cli_api_key: str | None = None,
@@ -288,7 +288,8 @@ def resolve_llm_endpoint(
             logger.info(
                 "CLEARWING_MODEL=%s set without CLEARWING_BASE_URL; "
                 "inheriting base_url=%s from provider config",
-                env_model, env_base_url,
+                env_model,
+                env_base_url,
             )
         if not env_api_key:
             env_api_key = _resolve_config_secret(config_provider.get("api_key"))

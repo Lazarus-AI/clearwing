@@ -66,7 +66,6 @@ def test_pod_lifecycle(monkeypatch):
 def test_exit_code_parsing():
     response = MagicMock()
     response.read_channel.return_value = (
-        '{"status":"Failure","details":{"causes":'
-        '[{"reason":"ExitCode","message":"137"}]}}'
+        '{"status":"Failure","details":{"causes":[{"reason":"ExitCode","message":"137"}]}}'
     )
     assert KubernetesSandbox._parse_exit_code(response) == 137

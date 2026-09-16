@@ -754,9 +754,7 @@ class TestLargeRepoBandMinimum:
             large_repo_bands=4,
         )
         ranker = Ranker(AsyncMock(), config)
-        files = self._files_with_priorities(
-            [10.0, 9.9, 9.8, 9.7, 9.6, 9.5, 9.4, 0.0]
-        )
+        files = self._files_with_priorities([10.0, 9.9, 9.8, 9.7, 9.6, 9.5, 9.4, 0.0])
         out = ranker._select_llm_candidates(files)
         paths = {ft["path"] for ft in out}
         assert len(out) == 4
@@ -806,9 +804,7 @@ class TestLargeRepoBandMinimum:
         expected = [ft["path"] for ft in files[:10]]
         assert [ft["path"] for ft in out] == expected
         assert any(
-            "band_min=100" in r.message
-            and "bands=4" in r.message
-            and "limit=10" in r.message
+            "band_min=100" in r.message and "bands=4" in r.message and "limit=10" in r.message
             for r in caplog.records
         )
 

@@ -213,23 +213,19 @@ class AssetStore:
     def deltas_since(self, scope: str, since_ts: float) -> list[Asset]:
         """Assets first seen at or after *since_ts* — the "what's new" view."""
         rows = self._conn.execute(
-            "SELECT * FROM assets WHERE scope = ? AND first_seen >= ? "
-            "ORDER BY first_seen DESC",
+            "SELECT * FROM assets WHERE scope = ? AND first_seen >= ? ORDER BY first_seen DESC",
             (scope, since_ts),
         ).fetchall()
         return [_row_to_asset(row) for row in rows]
 
     def scopes(self) -> list[str]:
-        rows = self._conn.execute(
-            "SELECT DISTINCT scope FROM assets ORDER BY scope"
-        ).fetchall()
+        rows = self._conn.execute("SELECT DISTINCT scope FROM assets ORDER BY scope").fetchall()
         return [row["scope"] for row in rows]
 
     def stats(self, scope: str) -> dict[str, int]:
         """Count of assets per type for a scope (for reports / `asm list`)."""
         rows = self._conn.execute(
-            "SELECT asset_type, COUNT(*) AS n FROM assets WHERE scope = ? "
-            "GROUP BY asset_type",
+            "SELECT asset_type, COUNT(*) AS n FROM assets WHERE scope = ? GROUP BY asset_type",
             (scope,),
         ).fetchall()
         return {row["asset_type"]: row["n"] for row in rows}

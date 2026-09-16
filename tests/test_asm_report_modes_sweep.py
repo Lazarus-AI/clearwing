@@ -41,9 +41,20 @@ def test_build_report_groups_assets_and_findings(store):
 
 
 def test_render_markdown_and_json(store):
-    data = report_mod.build_report(store, "acme", since=0.0, findings=[
-        {"cve": "CVE-1", "severity": "critical", "known_exploited": True, "epss": 0.9, "target": "1.2.3.4"}
-    ])
+    data = report_mod.build_report(
+        store,
+        "acme",
+        since=0.0,
+        findings=[
+            {
+                "cve": "CVE-1",
+                "severity": "critical",
+                "known_exploited": True,
+                "epss": 0.9,
+                "target": "1.2.3.4",
+            }
+        ],
+    )
     md = report_mod.render_markdown(data)
     assert "# Attack surface — acme" in md and "**KEV**" in md and "api.acme.com" in md
     assert json.loads(report_mod.render_json(data))["scope"] == "acme"

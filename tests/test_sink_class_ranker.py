@@ -5,7 +5,10 @@ from clearwing.sourcehunt.sink_class_detectors import (
     detect_sink_classes,
     sink_class_tags,
 )
-from clearwing.sourcehunt.tag_ranker import retuned_surface, tag_driven_priority
+from clearwing.sourcehunt.tag_ranker import (
+    retuned_surface,
+    tag_driven_priority,
+)
 
 # Mimics the real libavcodec/h264_slice.c representation-domain-collision:
 # slice_table memset to -1 (=0xFFFF sentinel), slice_num = ++current_slice,

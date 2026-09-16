@@ -20,11 +20,15 @@ def _sub(scope, value, **kw):
 
 
 def test_record_returns_only_new_assets(store):
-    first = store.record_observations("acme", [_sub("acme", "a.acme.com"), _sub("acme", "b.acme.com")])
+    first = store.record_observations(
+        "acme", [_sub("acme", "a.acme.com"), _sub("acme", "b.acme.com")]
+    )
     assert sorted(a.value for a in first) == ["a.acme.com", "b.acme.com"]
 
     # re-observing a known asset plus one new one returns only the new one
-    delta = store.record_observations("acme", [_sub("acme", "a.acme.com"), _sub("acme", "c.acme.com")])
+    delta = store.record_observations(
+        "acme", [_sub("acme", "a.acme.com"), _sub("acme", "c.acme.com")]
+    )
     assert [a.value for a in delta] == ["c.acme.com"]
 
 
@@ -97,7 +101,9 @@ def test_deltas_since(store):
 
 
 def test_asset_types_constant_covers_the_hierarchy():
-    assert {"domain", "subdomain", "host", "ip", "port", "service", "url", "technology"} == set(ASSET_TYPES)
+    assert {"domain", "subdomain", "host", "ip", "port", "service", "url", "technology"} == set(
+        ASSET_TYPES
+    )
 
 
 # --- Scope ------------------------------------------------------------------

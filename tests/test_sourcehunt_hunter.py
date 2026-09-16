@@ -633,21 +633,6 @@ class TestHunterToolsHostFallback:
         read = next(t for t in tools if t.name == "read_source_file")
         out = read.invoke({"path": "../../../etc/passwd"})
         assert "Error" in out
-        assert ctx.files_read == set()
-        assert ctx.read_ranges == {}
-
-    def test_missing_or_empty_source_file_does_not_count_as_coverage(self, tmp_path):
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        (repo / "empty.c").write_text("")
-
-        ctx = HunterContext(repo_path=str(repo))
-        read = next(t for t in build_hunter_tools(ctx) if t.name == "read_source_file")
-
-        assert "Error" in read.invoke({"path": "missing.c"})
-        assert read.invoke({"path": "empty.c"}) == ""
-        assert ctx.files_read == set()
-        assert ctx.read_ranges == {}
 
     def test_read_source_file_checked_in_symlink_escape_blocked(self, tmp_path):
         repo = tmp_path / "repo"
@@ -662,8 +647,6 @@ class TestHunterToolsHostFallback:
         out = read.invoke({"path": "leak.c"})
         assert "Error" in out
         assert "secret outside" not in out
-        assert ctx.files_read == set()
-        assert ctx.read_ranges == {}
 
     def test_read_source_file_git_metadata_blocked_and_hidden(self, tmp_path):
         repo = tmp_path / "repo"
@@ -677,6 +660,23 @@ class TestHunterToolsHostFallback:
 
         assert "Error" in read.invoke({"path": ".git/HEAD"})
         assert not any(entry.startswith(".git") for entry in listing.invoke({"dir_path": "."}))
+
+    def test_unsuccessful_source_reads_do_not_count_as_coverage(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "empty.c").write_text("")
+        outside = tmp_path / "outside.c"
+        outside.write_text("outside the repository\n")
+        (repo / "blocked.c").symlink_to(outside)
+
+        ctx = HunterContext(repo_path=str(repo))
+        read = next(t for t in build_hunter_tools(ctx) if t.name == "read_source_file")
+
+        for path in ("missing.c", "empty.c", "blocked.c"):
+            read.invoke({"path": path})
+
+        assert ctx.files_read == set()
+        assert ctx.read_ranges == {}
 
     def test_grep_source_does_not_follow_symlink_outside_repository(self, tmp_path):
         repo = tmp_path / "repo"
