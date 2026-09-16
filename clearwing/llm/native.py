@@ -484,6 +484,10 @@ class NativeToolSpec:
     description: str
     schema: dict[str, Any]
     handler: Any
+    # Optional hook applied to model arguments before schema validation. This
+    # lets a tool normalize well-known aliases onto its advertised vocabulary.
+    # The hook receives and returns an arguments dictionary.
+    arg_coercer: Any = None
 
     async def ainvoke(self, arguments: dict[str, Any]) -> Any:
         # Provider-side structured tool calling is a generation aid, not a
@@ -500,6 +504,9 @@ class NativeToolSpec:
             normalized_arguments = {
                 key: value for key, value in arguments.items() if key in properties
             }
+
+        if self.arg_coercer is not None:
+            normalized_arguments = self.arg_coercer(normalized_arguments)
 
         # Missing top-level arguments have historically been reported by the
         # Python handler as TypeError. Keep that contract while validating the
