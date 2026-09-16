@@ -1606,10 +1606,10 @@ class NativeHunter:
         synthesis_injected = False
         step = 0
         # Progress guard: a step counts as progress when it adds a finding, a
-        # potential, or the first read of a previously-unread file (via the
-        # constrained read_source_file tool or the deep read_file tool). A
-        # successful execute or write_file does not count — otherwise a stream
-        # of varied failing commands would silently reset the stall counter.
+        # potential, reads a previously-unread file, or returns a previously-
+        # unread range from a deep read_file call. A successful execute or
+        # write_file does not count — otherwise a stream of varied failing
+        # commands would silently reset the stall counter.
         # When nothing advances for max_steps_without_progress steps the hunter
         # stops (see _should_stop). Steps that only reissued an already-
         # throttled call are left to the degenerate_loop terminal, so they do
@@ -1619,7 +1619,10 @@ class NativeHunter:
             len(self.ctx.potentials),
             len(self.ctx.files_read),
             len(self.ctx.deep_files_read),
+            0,
         )
+        deep_read_ranges: dict[str, list[tuple[int, int]]] = {}
+        deep_read_range_progress = 0
         steps_since_progress = 0
         prev_step_had_skip = False
         while True:
@@ -1629,6 +1632,7 @@ class NativeHunter:
                 len(self.ctx.potentials),
                 len(self.ctx.files_read),
                 len(self.ctx.deep_files_read),
+                deep_read_range_progress,
             )
             if progress_sig != last_progress_sig:
                 last_progress_sig = progress_sig
@@ -2083,6 +2087,10 @@ class NativeHunter:
                                 visible_read_ranges.get(reread_path, []),
                             )
                             if returned_range is not None:
+                                ranges = deep_read_ranges.setdefault(reread_path, [])
+                                if _uncovered_read_ranges(returned_range, ranges):
+                                    deep_read_range_progress += 1
+                                    ranges.append(returned_range)
                                 visible_read_ranges.setdefault(reread_path, []).append(
                                     returned_range
                                 )

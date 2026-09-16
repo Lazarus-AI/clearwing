@@ -739,6 +739,23 @@ def _stub_sandbox_for_deep_read():
     return sandbox
 
 
+def _stub_sandbox_for_deep_read_ranges():
+    sandbox = MagicMock()
+
+    def execute(command, **_):
+        start = int(command.split("-v s=", 1)[1].split()[0])
+        result = MagicMock()
+        result.exit_code = 0
+        result.stdout = f"{start:6}\tline {start}\n{start + 1:6}\tline {start + 1}\n"
+        result.stderr = f"__CLEARWING_TOTAL_LINES__={start + 100}\n"
+        result.timed_out = False
+        result.duration_seconds = 0.01
+        return result
+
+    sandbox.exec.side_effect = execute
+    return sandbox
+
+
 def _build_deep_hunter(sandbox, max_steps=20):
     from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
 
@@ -787,15 +804,37 @@ async def test_deep_read_file_counts_as_progress():
 
 
 @pytest.mark.asyncio
-async def test_deep_read_same_file_repeated_does_not_reset_stall():
-    # Re-reading the SAME path 10 times must not reset the stall counter —
-    # spec: only the *first* read of an unread file counts as progress.
+async def test_deep_read_new_ranges_count_as_progress():
+    hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read_ranges())
+    hunter.max_steps_without_progress = 3
+
+    offsets = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call(
+                "read_file",
+                {"path": "/workspace/only_file.c", "offset": next(offsets) * 2, "limit": 2},
+            )
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "max_steps"
+    assert llm.achat.call_count == 20
+    assert ctx.deep_files_read == {"/workspace/only_file.c"}
+
+
+@pytest.mark.asyncio
+async def test_deep_read_repeated_range_does_not_reset_stall():
+    # Requests vary so the duplicate-call guard does not preempt this check,
+    # but the tool keeps returning the same two lines. That repeated range is
+    # not progress and must still let the stall guard terminate the hunt.
     hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read())
     hunter.max_steps_without_progress = 3
 
-    # Vary offset each call so the degenerate_loop guard (which fires on
-    # identical repeated calls) doesn't preempt the stall guard — but the
-    # path is always the same, so no new file enters deep_files_read.
     offsets = itertools.count()
     llm.achat.side_effect = lambda **_: FakeResponse(
         tool_calls_list=[
