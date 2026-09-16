@@ -226,6 +226,50 @@ def _apply_elaboration(finding: Finding, elab_result) -> Finding:
     }
 
 
+_RECURSIVE_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+_RECURSIVE_EVIDENCE_RANK = {
+    "crash_reproduced": 4,
+    "root_cause_explained": 3,
+    "static_corroboration": 2,
+    "assumption_broken": 1,
+    "suspicion": 0,
+}
+
+
+def _normalize_recursive_finding_path(path: object) -> str:
+    """Return a stable repository-relative path for recursive finding keys."""
+    return str(path or "").replace("\\", "/").removeprefix("/workspace/").removeprefix("./")
+
+
+def _recursive_finding_rank(finding: Finding) -> tuple[int, int, int]:
+    """Order findings by verification, severity, and evidence strength."""
+    return (
+        1 if finding.get("verified") else 0,
+        _RECURSIVE_SEVERITY_RANK.get(finding.get("severity"), 0),
+        _RECURSIVE_EVIDENCE_RANK.get(finding.get("evidence_level"), 0),
+    )
+
+
+def _dedup_rank_recursive_findings(findings: list[Finding]) -> list[Finding]:
+    """Collapse stable duplicate keys and rank the strongest records first."""
+    best: dict[tuple, Finding] = {}
+    passthrough: list[Finding] = []
+    for finding in findings:
+        file = _normalize_recursive_finding_path(finding.get("file"))
+        line = finding.get("line_number")
+        finding_type = finding.get("finding_type") or finding.get("title")
+        if not file or line is None or not finding_type:
+            passthrough.append(finding)
+            continue
+        key = (file, line, finding_type)
+        current = best.get(key)
+        if current is None or _recursive_finding_rank(finding) > _recursive_finding_rank(current):
+            best[key] = finding
+    merged = [*best.values(), *passthrough]
+    merged.sort(key=_recursive_finding_rank, reverse=True)
+    return merged
+
+
 class SourceHuntRunner:
     """Public entry point for the sourcehunt pipeline."""
 
@@ -1645,8 +1689,11 @@ class SourceHuntRunner:
                 ),
             )
 
-            all_findings = self._recursive_all_findings
-            verified = self._recursive_all_verified
+            # Recursive deepening can emit the same lead repeatedly. Keep the
+            # strongest record for each stable key and surface the best evidence
+            # first without changing detection or verification decisions.
+            all_findings = _dedup_rank_recursive_findings(self._recursive_all_findings)
+            verified = _dedup_rank_recursive_findings(self._recursive_all_verified)
 
             return self._finalize_result(
                 start_time=start_time,
