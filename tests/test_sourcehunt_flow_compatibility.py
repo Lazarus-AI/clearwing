@@ -95,3 +95,19 @@ async def test_proof_failure_does_not_fall_back_to_legacy(tmp_path, monkeypatch)
 
     proof_flow.assert_awaited_once_with()
     legacy_preflight.assert_not_called()
+
+
+def test_recursive_flow_rejects_budget(tmp_path) -> None:
+    """§1: the recursive flow is budget-free; a stray budget is rejected."""
+    for over in (
+        {"budget_usd": 5.0},
+        {"subsystem_budget_usd": 2.0},
+    ):
+        with pytest.raises(ValueError, match="recursive flow is budget-free"):
+            _runner(tmp_path, flow="recursive", **over)
+
+
+def test_recursive_flow_allows_zero_budget(tmp_path) -> None:
+    """The default (no budget) recursive construction is accepted."""
+    runner = _runner(tmp_path, flow="recursive")
+    assert runner._flow == "recursive"

@@ -44,13 +44,10 @@ class TestPayloadSerialization:
             findings_so_far=12,
             cost_usd=0.5,
             detail="Verified 3/7",
-            progress=0.5,
         )
         d = asdict(p)
         assert d["stage"] == "verify"
         assert d["status"] == "completed"
-        assert d["progress"] == 0.5
-        assert d["file_count"] is None
 
     def test_hunt_progress_roundtrip(self):
         p = HuntProgressPayload(

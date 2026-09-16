@@ -306,6 +306,49 @@ def _model_supports_reasoning_capture(model_name: str) -> bool:
     return not any(pattern in lower for pattern in _REASONING_CAPTURE_UNSUPPORTED_PATTERNS)
 
 
+# Model families whose (vLLM) chat template defaults "thinking" ON. For these
+# the template emits <think>…</think> reasoning blocks that corrupt tool-call
+# parsing — the server answers HTTP 400 or the tool_calls come back malformed.
+# We disable it via the chat-template kwarg so the flag is honored uniformly
+# across EVERY call path (operate, sourcehunt, ranker, hunter, remediation),
+# mirroring how ``reasoning_effort`` is auto-resolved by model family above.
+# Case-insensitive substring match on the model name.
+_THINKING_DISABLE_PATTERNS: tuple[str, ...] = ("qwen3", "qwen-3")
+
+
+def _model_thinking_extra_body(model_name: str) -> dict[str, Any] | None:
+    """extra_body that disables chat-template "thinking" for a model family.
+
+    Returns ``None`` for models that don't need it, so the option is only sent
+    where relevant.
+    """
+    lower = model_name.lower()
+    if any(pattern in lower for pattern in _THINKING_DISABLE_PATTERNS):
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return None
+
+
+def _merge_extra_body(
+    base: dict[str, Any] | None, override: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Deep-merge two extra_body dicts (``override`` wins), preserving nested
+    keys such as ``chat_template_kwargs`` from both sides. Returns ``None`` when
+    both are empty so ChatOptions omits the field entirely."""
+    if not base and not override:
+        return None
+    if not base:
+        return dict(override or {})
+    if not override:
+        return dict(base)
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
 def _model_supports_reasoning_effort(model_name: str) -> bool:
     """False when *model_name*'s family rejects the ``reasoning_effort`` param.
 
@@ -522,6 +565,7 @@ class AsyncLLMClient:
         rate_limit_initial_backoff_seconds: float = 1.0,
         rate_limit_max_backoff_seconds: float = 60.0,
         reasoning_effort: str | None | Literal["auto"] = "auto",
+        extra_body: dict[str, Any] | None = None,
         default_temperature: float | None = None,
         default_max_tokens: int | None = None,
         default_top_p: float | None = None,
@@ -641,6 +685,13 @@ class AsyncLLMClient:
         # every model except the blacklisted ones (see
         # _REASONING_CAPTURE_UNSUPPORTED_PATTERNS), which error if it's set.
         self.capture_reasoning_content = _model_supports_reasoning_capture(model_name)
+        # Resolve extra_body once, here, so every ChatOptions built below sends
+        # the same value regardless of call path. The model-family default
+        # (e.g. Qwen3 "thinking" disabled) is the base; any explicitly
+        # configured extra_body (from the model registry) deep-merges on top and
+        # wins. This is the single place model-specific request-body knobs are
+        # applied — keeping operate / sourcehunt / ranker / hunter consistent.
+        self.extra_body = _merge_extra_body(_model_thinking_extra_body(model_name), extra_body)
         self.rate_limit_max_retries = max(0, rate_limit_max_retries)
         self.timeout_max_retries = max(0, timeout_max_retries)
         self.rate_limit_initial_backoff_seconds = max(0.1, rate_limit_initial_backoff_seconds)
@@ -885,6 +936,7 @@ class AsyncLLMClient:
                 capture_reasoning_content=self.capture_reasoning_content,
                 normalize_reasoning_content=self.capture_reasoning_content,
                 reasoning_effort=self.reasoning_effort,
+                extra_body=self.extra_body,
                 prompt_cache_key=prompt_cache_key,
                 response_json_spec=(
                     _json_spec_from_model(
@@ -1035,6 +1087,7 @@ class AsyncLLMClient:
                 capture_reasoning_content=self.capture_reasoning_content,
                 normalize_reasoning_content=self.capture_reasoning_content,
                 reasoning_effort=self.reasoning_effort,
+                extra_body=self.extra_body,
                 prompt_cache_key=prompt_cache_key,
             )
             async with self._semaphore:
@@ -1871,6 +1924,11 @@ class AsyncLLMClient:
             capture_reasoning_content=options.capture_reasoning_content,
             normalize_reasoning_content=options.normalize_reasoning_content,
             reasoning_effort=None,
+            # Preserve the request-body knobs (e.g. Qwen thinking-disable) from
+            # the source options — extra_body is unrelated to reasoning_effort
+            # and must survive the rebuild. ``extra_body_json`` is None or a JSON
+            # string, both of which ChatOptions accepts back as ``extra_body``.
+            extra_body=options.extra_body_json,
             prompt_cache_key=options.prompt_cache_key,
             response_json_spec=options.response_json_spec,
         )

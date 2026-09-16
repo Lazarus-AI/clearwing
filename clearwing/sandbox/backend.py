@@ -21,6 +21,7 @@ from types import ModuleType
 from typing import Protocol, runtime_checkable
 
 from .container import ExecResult, SandboxConfig, SandboxContainer
+from .image_prestage import DEFAULT_BASE_IMAGE_TAGS
 
 
 @dataclass(frozen=True)
@@ -137,15 +138,11 @@ class SandboxBackend(Protocol):
 
 # These implementation details belong to the zero-configuration Docker
 # adapter. They never appear in SandboxEnvironmentSpec or on the RPC wire.
-_DOCKER_PROFILE_IMAGES: dict[str, str] = {
-    "c-cpp": "gcc:12-bookworm",
-    "rust": "rust:1-slim",
-    "go": "golang:1.22",
-    "python": "python:3.12-slim",
-    "java": "eclipse-temurin:21",
-    "node": "node:20-slim",
-    "generic": "debian:11-slim",
-}
+# The logical-profile → base-tag mapping is owned by image_prestage (the single
+# source of truth), so offline pre-staging always covers exactly the profiles
+# this backend can build. Operators pass digest-pinned refs via profile_images
+# (see image_prestage.PinManifest.build_image_map) for offline-safe builds.
+_DOCKER_PROFILE_IMAGES: dict[str, str] = dict(DEFAULT_BASE_IMAGE_TAGS)
 
 _DOCKER_FEATURE_PACKAGES: dict[str, tuple[str, ...]] = {
     "source.search": ("ripgrep",),
@@ -186,11 +183,23 @@ class DockerSandboxBackend:
         profile_images: Mapping[str, str] | None = None,
         feature_packages: Mapping[str, tuple[str, ...]] | None = None,
         enhanced_runtime: str = "runsc",
+        offline_build: bool = False,
+        extra_labels: Mapping[str, str] | None = None,
     ) -> None:
         self._client_factory = client_factory
         self._process = process
         self._temporary_directory = temporary_directory
         self._profile_images = {**_DOCKER_PROFILE_IMAGES, **(profile_images or {})}
+        # Extra container labels merged onto every sandbox this backend creates.
+        # Used to tag a run's sandboxes (e.g. clearwing.recursive_run=<id>) so a
+        # label-scoped watchdog kill (sandbox_kill) reaps only that run's
+        # containers. Additive + default-None → existing behaviour unchanged.
+        self._extra_labels = dict(extra_labels or {})
+        # Closed-network hunting: never let `docker build` reach the registry to
+        # revalidate a base manifest. Combined with digest-pinned profile_images
+        # (from image_prestage) and a locally pre-staged base, builds run fully
+        # offline and dodge Docker Hub's per-IP manifest rate limit.
+        self._offline_build = offline_build
         self._feature_packages = {
             **_DOCKER_FEATURE_PACKAGES,
             **(feature_packages or {}),
@@ -225,11 +234,34 @@ class DockerSandboxBackend:
     ) -> SandboxEnvironment:
         from .dind import get_subprocess_env
 
+        docker_env = get_subprocess_env()
+
+        # Offline fast-path: on an air-gapped host the fat per-profile image
+        # (base + every feature package, loaded from the bundle) is used
+        # directly. It contains a superset of any spec's features, so no build
+        # and no apt/registry contact is needed. We still validate the request
+        # against the closed feature/profile mapping first (a stale or malicious
+        # spec must not slip through), then confirm the fat image is present.
+        if self._offline_build:
+            from .image_prestage import offline_image_tag
+
+            self._render_dockerfile(spec)  # validates profile + every feature
+            fat = offline_image_tag(spec.profile)
+            check_fat = self._process.run(
+                ["docker", "image", "inspect", fat],
+                capture_output=True,
+                timeout=10,
+                env=docker_env,
+            )
+            if check_fat.returncode == 0:
+                return SandboxEnvironment(fat, cached=True)
+            # Fall through: no fat image loaded; the digest-pinned base build
+            # below runs with --pull=false (works if the base was pre-staged).
+
         image = self._environment_image(spec)
         # Resolve and validate every required capability even on a cache hit.
         # A stale or malicious cache key must not bypass the closed mapping.
         dockerfile = self._render_dockerfile(spec)
-        docker_env = get_subprocess_env()
         check = self._process.run(
             ["docker", "image", "inspect", image],
             capture_output=True,
@@ -243,16 +275,19 @@ class DockerSandboxBackend:
             dockerfile_path = f"{build_dir}/Dockerfile"
             with open(dockerfile_path, "w", encoding="utf-8") as file:
                 file.write(dockerfile)
+            build_cmd = [
+                "docker",
+                "build",
+                "--platform",
+                self._target_platform(spec.profile),
+            ]
+            if self._offline_build:
+                # Use the local base image as-is; do not contact the registry to
+                # pull or revalidate the FROM manifest.
+                build_cmd.append("--pull=false")
+            build_cmd += ["-t", image, build_dir]
             process = self._process.Popen(
-                [
-                    "docker",
-                    "build",
-                    "--platform",
-                    self._target_platform(spec.profile),
-                    "-t",
-                    image,
-                    build_dir,
-                ],
+                build_cmd,
                 stdout=self._process.PIPE,
                 stderr=self._process.STDOUT,
                 text=True,
@@ -339,6 +374,149 @@ WORKDIR /workspace
 RUN mkdir -p /scratch
 """
 
+    # Feature classes whose packages may be absent on a given base distro
+    # (e.g. ltrace is not in Debian 11 bullseye) or are pure conveniences.
+    # For the fat offline image these are best-effort: a missing one is skipped
+    # rather than failing the whole build. Core build/toolchain/runtime/vcs
+    # packages remain required.
+    _OFFLINE_OPTIONAL_FEATURES = frozenset(
+        {"debug.native", "debug.valgrind", "trace.syscalls", "trace.library-calls"}
+    )
+
+    def _all_feature_packages(self) -> list[str]:
+        """Union of every feature's apt packages — the fat-image package set."""
+        seen: list[str] = []
+        for packages in self._feature_packages.values():
+            for pkg in packages:
+                if pkg not in seen:
+                    seen.append(pkg)
+        return seen
+
+    def _offline_package_split(self) -> tuple[list[str], list[str]]:
+        """(required, optional) apt packages for the fat offline image."""
+        optional: list[str] = []
+        for feature in self._OFFLINE_OPTIONAL_FEATURES:
+            optional.extend(self._feature_packages.get(feature, ()))
+        optional = list(dict.fromkeys(optional))
+        required = [p for p in self._all_feature_packages() if p not in optional]
+        return required, optional
+
+    def render_offline_dockerfile(self, profile: str, base_ref: str) -> str:
+        """Fat per-profile Dockerfile: base + every feature package.
+
+        Built on a connected host and shipped in the offline bundle; on the
+        air-gapped host the resulting image satisfies any spec's feature subset
+        without apt or a registry. Trace/debug extras are installed best-effort
+        so a package absent on a particular base distro (e.g. ltrace on Debian
+        11) is skipped instead of failing the whole image.
+        """
+        if profile not in self._profile_images:
+            raise ValueError(f"Docker sandbox does not support profile {profile!r}")
+        required, optional = self._offline_package_split()
+        required_block = self._apt_install_block(required, optional=False)
+        optional_block = self._offline_besteffort_block(optional)
+        return f"""FROM {base_ref}
+
+# Fat offline sandbox image for logical profile: {profile}
+# Core toolchain is required; trace/debug extras are best-effort.
+
+{required_block}
+
+{optional_block}
+
+WORKDIR /workspace
+RUN mkdir -p /scratch
+"""
+
+    @staticmethod
+    def _offline_besteffort_block(packages: list[str]) -> str:
+        """Install each package independently; never fail the build on a miss.
+
+        A per-package loop (not one apt call) so one unavailable package on a
+        given base distro does not abort the rest.
+        """
+        if not packages:
+            return "# (no optional features)"
+        pkg_list = " ".join(packages)
+        prep = (
+            "{ [ -f /etc/apt/sources.list ] && sed -ri '/-security/d' "
+            "/etc/apt/sources.list; } || true"
+        )
+        install = (
+            "apt-get update -o Acquire::Retries=3 -qq || true; "
+            f"for p in {pkg_list}; do "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
+            '-o Acquire::Retries=3 "$p" || echo "skip unavailable package: $p" >&2; '
+            "done; rm -rf /var/lib/apt/lists/*"
+        )
+        return f"RUN {prep}; {install}"
+
+    def build_offline_image(
+        self,
+        profile: str,
+        base_ref: str,
+        *,
+        on_output: Callable[[str], None] | None = None,
+        timeout_seconds: int = 3600,
+    ) -> str:
+        """Build and tag the fat per-profile image; return its tag.
+
+        Intended for the connected build host (`clearwing prestage export`).
+        Uses the digest-pinned ``base_ref`` so the fat image is reproducible.
+        """
+        from .dind import get_subprocess_env
+        from .image_prestage import offline_image_tag
+
+        tag = offline_image_tag(profile)
+        dockerfile = self.render_offline_dockerfile(profile, base_ref)
+        docker_env = get_subprocess_env()
+        with self._temporary_directory(prefix="clearwing-offline-build-") as build_dir:
+            with open(f"{build_dir}/Dockerfile", "w", encoding="utf-8") as fh:
+                fh.write(dockerfile)
+            proc = self._process.Popen(
+                [
+                    "docker",
+                    "build",
+                    "--platform",
+                    self._target_platform(profile),
+                    "-t",
+                    tag,
+                    build_dir,
+                ],
+                stdout=self._process.PIPE,
+                stderr=self._process.STDOUT,
+                text=True,
+                env=docker_env,
+            )
+            assert proc.stdout is not None
+            timed_out = threading.Event()
+
+            def _kill() -> None:
+                timed_out.set()
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+            watchdog = threading.Timer(timeout_seconds, _kill)
+            watchdog.start()
+            lines: list[str] = []
+            try:
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        lines.append(line)
+                        if on_output is not None:
+                            on_output(line)
+                proc.wait()
+            finally:
+                watchdog.cancel()
+            if timed_out.is_set():
+                raise RuntimeError(f"Offline image build for {profile} timed out")
+            if proc.returncode != 0:
+                raise RuntimeError("\n".join(lines[-40:]))
+        return tag
+
     @staticmethod
     def _target_platform(profile: str) -> str:
         if profile == "c-cpp" and platform.machine() in ("arm64", "aarch64"):
@@ -350,12 +528,28 @@ RUN mkdir -p /scratch
         if not packages:
             return "# (no optional features)" if optional else "# (no additional features)"
         package_list = " ".join(packages)
-        failure = " || true ;" if optional else " &&"
-        return (
-            "RUN apt-get update -qq && "
+        # Debian security pockets rotate point releases and delete the superseded
+        # .debs, so fetching e.g. `libc-dev-bin_2.31-13+deb11uN` 404s until the
+        # mirror index catches up — persistently enough that retrying `apt-get
+        # update` alone does not clear it within a CI window. Drop the -security
+        # source so apt installs the base-archive version instead (a throwaway
+        # build sandbox does not need the security-patched build tools), then
+        # still retry to ride out transient per-file fetch errors. Kept as one
+        # RUN layer; the base image (asserted elsewhere) is unchanged.
+        prep = "{ [ -f /etc/apt/sources.list ] && sed -ri '/-security/d' /etc/apt/sources.list; } || true"
+        install = (
+            "ok=0; for attempt in 1 2 3; do "
+            "apt-get update -o Acquire::Retries=3 -qq && "
             "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-            f"{package_list}{failure} rm -rf /var/lib/apt/lists/*"
+            f"-o Acquire::Retries=3 {package_list} "
+            '&& { ok=1; break; } || { echo "apt attempt $attempt failed; retrying" >&2; sleep 5; }; '
+            "done; rm -rf /var/lib/apt/lists/*"
         )
+        if optional:
+            # Optional features must never fail the build.
+            return f"RUN {prep}; {install}"
+        # Required packages: fail the build only if every retry is exhausted.
+        return f'RUN {prep}; {install}; [ "$ok" = 1 ]'
 
     def create(
         self,
@@ -372,9 +566,11 @@ RUN mkdir -p /scratch
         from .seccomp_profiles import get_seccomp_profile
 
         seccomp_json = json.dumps(get_seccomp_profile("hunter"))
+        labels = {"managed-by": "clearwing", **self._extra_labels}
         return SandboxContainer(
             SandboxConfig(
                 image=environment_ref,
+                labels=labels,
                 network_mode="none",
                 mounts=config.mounts,
                 memory_mb=config.memory_mb,
@@ -424,9 +620,49 @@ def sandbox_backend_from_env(
         return KubernetesSandboxBackend()
     if provider != "docker":
         raise ValueError(f"unknown sandbox backend {provider!r}")
+    # Closed-network mode: when CLEARWING_SANDBOX_OFFLINE is set, build from the
+    # digest-pinned base images produced by `clearwing prestage` and never let
+    # `docker build` reach the registry. If no pins have been staged the map is
+    # empty and the backend falls back to the default tags (which will fail
+    # offline — that is the operator's signal to run prestage first).
+    offline = os.environ.get("CLEARWING_SANDBOX_OFFLINE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    profile_images: Mapping[str, str] | None = None
+    if offline:
+        from .image_prestage import ImagePinStore
+
+        profile_images = {
+            p: ref
+            for p, ref in ImagePinStore().load().build_image_map().items()
+            if "@sha256:" in ref  # only trust digest-pinned refs offline
+        }
+    # Optional per-run container labels ("k=v,k2=v2"), e.g. the recursive flow's
+    # clearwing.recursive_run=<id> so a label-scoped watchdog kill reaps only
+    # that run's sandboxes. Absent → no extra labels (unchanged behaviour).
+    extra_labels = _parse_label_env(os.environ.get("CLEARWING_SANDBOX_EXTRA_LABELS", ""))
     return DockerSandboxBackend(
         docker_client_factory,
         process=process,
         temporary_directory=temporary_directory,
         enhanced_runtime=enhanced_runtime,
+        profile_images=profile_images,
+        offline_build=offline,
+        extra_labels=extra_labels or None,
     )
+
+
+def _parse_label_env(raw: str) -> dict[str, str]:
+    """Parse a ``k=v,k2=v2`` label string; ignore malformed pairs."""
+    labels: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            k = k.strip()
+            if k:
+                labels[k] = v.strip()
+    return labels

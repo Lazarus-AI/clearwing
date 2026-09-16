@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import logging
 import sys
 from typing import Any
 
@@ -15,6 +16,19 @@ def add_parser(subparsers):
     )
     parser.add_argument("--target", help="Target IP address or hostname")
     parser.add_argument("--machine-fd", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        dest="log_level",
+        help="Logging verbosity (default: INFO)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Shorthand for --log-level DEBUG",
+    )
     parser.add_argument(
         "--goal", action="append", dest="goals", help="Goal for the operator (can be repeated)"
     )
@@ -69,6 +83,12 @@ def add_parser(subparsers):
 
 def handle(cli, args):
     """Run the autonomous Operator agent."""
+    _log_level_name = "DEBUG" if args.verbose else args.log_level
+    logging.basicConfig(
+        level=getattr(logging, _log_level_name),
+        format="%(levelname)s: %(message)s",
+        force=True,
+    )
     if args.machine_fd is not None:
         raise SystemExit(_handle_machine(args.machine_fd))
     if not args.target:
@@ -246,10 +266,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
     goals_value = value.get("goals")
     if not isinstance(goals_value, list) or not 1 <= len(goals_value) <= 64:
         raise ValueError("goals must contain between 1 and 64 strings")
-    goals = [
-        _bounded_text(goal, f"goals[{index}]", 4096)
-        for index, goal in enumerate(goals_value)
-    ]
+    goals = [_bounded_text(goal, f"goals[{index}]", 4096) for index, goal in enumerate(goals_value)]
     return {
         "target": target,
         "goals": goals,
@@ -258,9 +275,7 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
             value.get("timeout_minutes", 60), "timeout_minutes", 1, 1440
         ),
         "cost_limit": _bounded_number(value.get("cost_limit", 0.0), "cost_limit", 0, 10000),
-        "auto_approve_scans": _boolean(
-            value.get("auto_approve_scans", True), "auto_approve_scans"
-        ),
+        "auto_approve_scans": _boolean(value.get("auto_approve_scans", True), "auto_approve_scans"),
         "auto_approve_exploits": _boolean(
             value.get("auto_approve_exploits", False), "auto_approve_exploits"
         ),

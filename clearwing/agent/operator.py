@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -402,10 +403,51 @@ class OperatorAgent:
             from clearwing.llm.native import response_text
 
             response = await operator_llm.aask_text(system=system, user=user)
-            return response_text(response).strip()
+            return self._normalize_decision(response_text(response))
         except Exception as e:
             logger.error("Operator LLM error: %s", e)
             return "Continue with the next goal."
+
+    @staticmethod
+    def _normalize_decision(text: str) -> str:
+        """Reduce a verbose operator-LLM reply to a clean control sentinel.
+
+        The turn loop dispatches on ``decision.startswith("GOALS_COMPLETE")``
+        and ``decision.startswith("ESCALATE:")``. Smaller/local models (e.g. the
+        qwen operator) frequently wrap the required sentinel in surrounding prose
+        instead of emitting it verbatim at the start ("All goals are done.\\n
+        GOALS_COMPLETE"). Without normalization those replies miss the
+        ``startswith`` checks and the operator loops until max_turns, burning
+        cost with no convergence. Collapse such replies back to the bare sentinel;
+        leave a genuine next-instruction untouched.
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return stripped
+        # Fast path: already a clean sentinel.
+        if stripped.startswith("GOALS_COMPLETE") or stripped.startswith("ESCALATE:"):
+            return stripped
+
+        lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
+        # ESCALATE takes precedence: a real question for the user must not be
+        # swallowed by an incidental completion mention. The sentinel carries a
+        # colon, so match "ESCALATE:" and keep the trailing question.
+        for ln in lines:
+            idx = ln.find("ESCALATE:")
+            if idx != -1:
+                question = ln[idx + len("ESCALATE:") :].strip().lstrip("*-`> ").strip()
+                if question:
+                    return f"ESCALATE: {question}"
+        # GOALS_COMPLETE: accept a line that is the sentinel, optionally led by
+        # list/quote markup and trailed by punctuation or prose; prefer the last
+        # such line and guard against explicit negations ("not GOALS_COMPLETE").
+        for ln in reversed(lines):
+            if (
+                re.match(r"^[\*\-\s>`]*GOALS_COMPLETE\b", ln)
+                and "not goals_complete" not in ln.lower()
+            ):
+                return "GOALS_COMPLETE"
+        return stripped
 
     def _has_real_recon(self, graph, config: dict) -> bool:
         """True if graph state shows a real scan/recon tool actually produced output.
