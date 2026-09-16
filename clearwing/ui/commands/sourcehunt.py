@@ -1549,8 +1549,24 @@ def _machine_request(value: dict[str, Any]) -> dict[str, Any]:
             value["compile_commands"], "compile_commands", 4096
         )
     if "format" in value:
-        fmt = value["format"]
-        parsed["format"] = [fmt] if isinstance(fmt, str) else fmt
+        raw_formats = value["format"]
+        if isinstance(raw_formats, str):
+            raw_formats = [raw_formats]
+        if not isinstance(raw_formats, list):
+            raise ValueError("format must be a string or list of strings")
+        formats = []
+        for item in raw_formats:
+            if not isinstance(item, str):
+                raise ValueError("format entries must be strings")
+            formats.extend(part.strip() for part in item.split(",") if part.strip())
+        allowed_formats = {"sarif", "markdown", "json", "all"}
+        invalid_formats = sorted(set(formats) - allowed_formats)
+        if not formats or invalid_formats:
+            raise ValueError(
+                "format must contain one or more of "
+                f"{sorted(allowed_formats)}; invalid: {invalid_formats}"
+            )
+        parsed["format"] = list(dict.fromkeys(formats))
     if "checkpoint" in value:
         checkpoint = value["checkpoint"]
         if not isinstance(checkpoint, dict):

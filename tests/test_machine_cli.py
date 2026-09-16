@@ -174,6 +174,22 @@ def test_sourcehunt_machine_request_semgrep_is_strict_and_default_off():
         sourcehunt._machine_request({"repo_url": "https://example.test/repo", "semgrep": "true"})
 
 
+def test_sourcehunt_machine_request_normalizes_output_formats():
+    request = {"repo_url": "https://example.test/repo"}
+
+    assert sourcehunt._machine_request(
+        {**request, "format": "json,sarif,markdown"}
+    )["format"] == ["json", "sarif", "markdown"]
+    assert sourcehunt._machine_request(
+        {**request, "format": ["json,sarif", "markdown", "json"]}
+    )["format"] == ["json", "sarif", "markdown"]
+
+    with pytest.raises(ValueError, match="invalid.*xml"):
+        sourcehunt._machine_request({**request, "format": "json,xml"})
+    with pytest.raises(ValueError, match="format entries must be strings"):
+        sourcehunt._machine_request({**request, "format": ["json", 1]})
+
+
 def test_sourcehunt_machine_handler_propagates_semgrep(monkeypatch):
     captured = {}
 
