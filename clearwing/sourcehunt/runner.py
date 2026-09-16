@@ -3034,6 +3034,10 @@ class SourceHuntRunner:
                     instrumentation=self._instrumentation,
                     explicit_target_windows=bool(self._target_files),
                     callgraph=callgraph,
+                    diversify_order=(
+                        bool(os.environ.get("CLEARWING_RANK_DIVERSITY"))
+                        or os.path.exists("/opt/clearwing/.rank-diversity")
+                    ),
                     trace_step_max_chars=self._trace_step_max_chars,
                 )
             )

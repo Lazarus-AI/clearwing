@@ -268,9 +268,61 @@ class HuntPoolConfig:
     work_cache: Any = None  # HuntWorkCache | None — work-item-granular hunt resume
     explicit_target_windows: bool = False
     callgraph: Any = None
+    # A1 deterministic diversity: when True, order files WITHIN each tier by a
+    # round-robin across multiple deterministic scoring lenses (attack surface,
+    # influence, reachability, and the balanced priority) instead of a single
+    # priority sort. When a tier's budget cannot cover the whole tier, this
+    # makes the hunted prefix span diverse viewpoints rather than the single
+    # priority formula's favorites — so a file that is strong in one dimension
+    # (e.g. a high-surface parser with mediocre influence) is not consistently
+    # buried and starved. Reproducible (a pure transform of the scores) and
+    # frontier-free; it widens coverage without changing the A/B/C tiers.
+    diversify_order: bool = False
     # Per-field character cap for trace-step code_snippet and note strings.
     # 0 or negative disables the cap (full trace retained).
     trace_step_max_chars: int = DEFAULT_TRACE_STEP_MAX_CHARS
+
+
+# --- A1 deterministic diversity: multi-view within-tier ordering -------------
+
+#: Scoring lenses for deterministic-diversity ordering. Each is a (name, key)
+#: pair where key maps a FileTarget to a sort score (higher = more important).
+#: "balanced" is the existing priority formula, kept FIRST so the very top of a
+#: tier is unchanged; the others each emphasize a single dimension so files that
+#: are extreme in that one dimension surface early.
+_DIVERSITY_VIEWS: list[tuple[str, Callable[[FileTarget], float]]] = [
+    ("balanced", lambda ft: float(ft.get("priority", 0.0))),
+    ("surface", lambda ft: float(ft.get("surface", 0))),
+    ("influence", lambda ft: float(ft.get("influence", 0))),
+    ("reachability", lambda ft: float(ft.get("reachability", 0))),
+]
+
+
+def diversified_tier_order(files: list[FileTarget]) -> list[FileTarget]:
+    """Order a tier's files by round-robin across the diversity views.
+
+    Each view ranks the files independently (score desc, then path for a
+    deterministic tiebreak). We then emit view0's #1, view1's #1, …, view0's
+    #2, … skipping files already emitted, until every file has been placed.
+    The result is fully deterministic given the (path, scores) and puts a
+    diverse set — not one lens's favorites — at the front of the tier.
+    """
+    if len(files) <= 1:
+        return list(files)
+    ranked: list[list[FileTarget]] = []
+    for _name, key in _DIVERSITY_VIEWS:
+        ranked.append(sorted(files, key=lambda ft: (-key(ft), ft.get("path", ""))))
+    ordered: list[FileTarget] = []
+    seen: set[int] = set()
+    for depth in range(len(files)):
+        for lst in ranked:
+            if depth < len(lst):
+                ft = lst[depth]
+                fid = id(ft)
+                if fid not in seen:
+                    seen.add(fid)
+                    ordered.append(ft)
+    return ordered
 
 
 def _format_seed_context(entries: list) -> str | None:
@@ -454,8 +506,15 @@ class HunterPool:
         # budget is exhausted. Sort each tier by priority descending (stable,
         # so equal-priority files keep their enumeration order) to make the
         # ranker's scores actually drive hunt order.
-        for _tier_files in by_tier.values():
-            _tier_files.sort(key=lambda ft: ft.get("priority", 0.0), reverse=True)
+        if self.config.diversify_order:
+            # A1: diversify the within-tier consumption order so a budget that
+            # cannot cover the whole tier still hunts a diverse prefix.
+            for _tier, _tier_files in list(by_tier.items()):
+                by_tier[_tier] = diversified_tier_order(_tier_files)
+            logger.info("HunterPool: A1 deterministic-diversity ordering enabled")
+        else:
+            for _tier_files in by_tier.values():
+                _tier_files.sort(key=lambda ft: ft.get("priority", 0.0), reverse=True)
 
         total_budget = self.config.budget_usd
         tb = self.config.tier_budget

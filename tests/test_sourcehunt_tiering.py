@@ -8,16 +8,17 @@ from __future__ import annotations
 
 import pytest
 
-from clearwing.sourcehunt.pool import TierBudget, assign_tier
+from clearwing.sourcehunt.pool import TierBudget, assign_tier, diversified_tier_order
 
 
-def _ft(surface: int, influence: int, reach: int = 3) -> dict:
+def _ft(surface: int, influence: int, reach: int = 3, path: str = "") -> dict:
     priority = surface * 0.5 + influence * 0.2 + reach * 0.3
     return {
         "surface": surface,
         "influence": influence,
         "reachability": reach,
         "priority": priority,
+        "path": path,
     }
 
 
@@ -101,3 +102,50 @@ class TestTierBudgetDataclass:
         # tier_c_fraction=0 is valid
         b = TierBudget(tier_a_fraction=0.75, tier_b_fraction=0.25, tier_c_fraction=0.0)
         assert b.tier_c_fraction == 0.0
+
+
+class TestDiversifiedTierOrder:
+    """A1 deterministic diversity: round-robin across scoring lenses so a
+    budget that cannot cover a whole tier still hunts a diverse prefix."""
+
+    def _corpus(self) -> list[dict]:
+        return [
+            _ft(1, 5, 3, path="influence_heavy.c"),  # priority 2.4
+            _ft(4, 4, 4, path="balanced_top.c"),  # priority 4.0 (highest)
+            _ft(1, 1, 5, path="reach_heavy.c"),  # priority 2.2
+            _ft(5, 1, 1, path="surface_heavy.c"),  # priority 3.0
+            _ft(3, 3, 3, path="mid1.c"),  # priority 3.0
+            _ft(3, 2, 3, path="mid2.c"),  # priority 2.8
+        ]
+
+    def test_single_dimension_champions_reach_prefix(self):
+        # Pure priority order buries influence_heavy (2.4) and reach_heavy (2.2)
+        # at ranks 5-6; a 4-file budget would starve them. Diversified ordering
+        # must lift each dimension's champion into the top-4.
+        order = diversified_tier_order(self._corpus())
+        top4 = {ft["path"] for ft in order[:4]}
+        assert "surface_heavy.c" in top4
+        assert "influence_heavy.c" in top4
+        assert "reach_heavy.c" in top4
+
+    def test_balanced_top_stays_first(self):
+        # The balanced lens is first, so the overall best file is unchanged.
+        order = diversified_tier_order(self._corpus())
+        assert order[0]["path"] == "balanced_top.c"
+
+    def test_preserves_all_files_without_duplicates(self):
+        corpus = self._corpus()
+        order = diversified_tier_order(corpus)
+        assert sorted(ft["path"] for ft in order) == sorted(ft["path"] for ft in corpus)
+        assert len({id(ft) for ft in order}) == len(corpus)
+
+    def test_deterministic(self):
+        corpus = self._corpus()
+        a = [ft["path"] for ft in diversified_tier_order(corpus)]
+        b = [ft["path"] for ft in diversified_tier_order(corpus)]
+        assert a == b
+
+    def test_empty_and_single(self):
+        assert diversified_tier_order([]) == []
+        one = [_ft(5, 5, 5, path="only.c")]
+        assert [ft["path"] for ft in diversified_tier_order(one)] == ["only.c"]
