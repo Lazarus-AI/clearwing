@@ -19,6 +19,7 @@ from clearwing.sourcehunt.checkpoints import SourceHuntCheckpoint
 from clearwing.sourcehunt.dynamic_verification import (
     ToolAssistedVerificationResult,
     _qualifies_as_product_crash,
+    run_mechanical_dynamic_probe,
     run_tool_assisted_verification,
 )
 from clearwing.sourcehunt.runner import SourceHuntRunner
@@ -364,6 +365,44 @@ def test_host_crash_gate_rejects_echo_timeout_oom_and_unrelated_crashes() -> Non
         output={**real_output, "stderr": "AddressSanitizer in harness.c:4"},
         product_file="src/example.c",
     )
+
+
+@pytest.mark.asyncio
+async def test_mechanical_probe_does_not_complete_when_nothing_ran() -> None:
+    execute = MagicMock()
+    execute.name = "execute"
+    execute.ainvoke = AsyncMock(
+        return_value={
+            "exit_code": 0,
+            "stdout": "===RUN_ERR===\n\n===BUILD_ERR===\ncompile failed\n===RAN=0===\n",
+            "stderr": "",
+        }
+    )
+
+    evidence = await run_mechanical_dynamic_probe([execute], _finding())
+
+    assert evidence is not None
+    assert evidence["completed"] is False
+    assert evidence["qualifying_crash"] is False
+
+
+@pytest.mark.asyncio
+async def test_mechanical_probe_completes_only_with_explicit_run_marker() -> None:
+    execute = MagicMock()
+    execute.name = "execute"
+    execute.ainvoke = AsyncMock(
+        return_value={
+            "exit_code": 0,
+            "stdout": "===RUN_ERR===\n\n===BUILD_ERR===\n\n===RAN=1===\n",
+            "stderr": "",
+        }
+    )
+
+    evidence = await run_mechanical_dynamic_probe([execute], _finding())
+
+    assert evidence is not None
+    assert evidence["completed"] is True
+    assert evidence["qualifying_crash"] is False
 
 
 @pytest.mark.asyncio

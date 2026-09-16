@@ -20,6 +20,7 @@ from clearwing.llm import (
     NativeToolSpec,
     ToolCall,
 )
+from clearwing.llm.native import response_text
 from clearwing.reporting.safety import redact_tree
 
 from .state import EVIDENCE_LEVELS, EvidenceLevel
@@ -140,10 +141,7 @@ def _qualifies_as_product_crash(
         if isinstance(integrity, dict) and integrity.get("available"):
             if not integrity.get("valid"):
                 return False
-            if any(
-                normalized in str(change)
-                for change in integrity.get("workspace_changes", [])
-            ):
+            if any(normalized in str(change) for change in integrity.get("workspace_changes", [])):
                 return False
     return True
 
@@ -175,6 +173,271 @@ def clamp_dynamic_evidence_level(
     if EVIDENCE_LEVELS.index(level) > EVIDENCE_LEVELS.index(maximum):
         return maximum
     return level
+
+
+_C_LIKE_EXTS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".c++"}
+
+# Deterministic C/C++ dynamic probe. Runs from /workspace inside the no-network
+# verification sandbox. Best-effort: (1) build + run any project fuzz harness on
+# its sample inputs under ASan/UBSan (the strongest crash oracle), then (2) a
+# sanitizer build-smoke of the non-test core sources. A runtime sanitizer report is a
+# host-observed product crash; a clean build+run is a completed dynamic call.
+_MECHANICAL_C_PROBE = r"""
+cd /workspace 2>/dev/null || { echo '===NO_WORKSPACE==='; exit 3; }
+SAN='-fsanitize=address,undefined -g -fno-omit-frame-pointer -O1'
+CC=$(command -v gcc || command -v clang || echo gcc)
+ran=0
+: > /tmp/cw_b.err; : > /tmp/cw_r.err
+CORE=$(ls *.c 2>/dev/null | grep -viE 'test|fuzz|example|main' | tr '\n' ' ')
+HARN=$(ls fuzz*/*fuzz*.c fuzz*/**/*fuzz*.c *fuzz*.c 2>/dev/null | head -1)
+DRV=$(ls fuzz*/*main*.c fuzz*/**/*main*.c 2>/dev/null | head -1)
+if [ -n "$HARN" ] && [ -n "$CORE" ]; then
+  if $CC $SAN -I. $CORE "$HARN" $DRV -o /tmp/cw_fz 2>>/tmp/cw_b.err; then
+    INS=$(ls fuzz*/inputs/* fuzz*/**/inputs/* fuzz*/corpus/* 2>/dev/null | head -60)
+    for f in $INS; do timeout 20 /tmp/cw_fz "$f" >/dev/null 2>>/tmp/cw_r.err || true; ran=1; done
+  fi
+fi
+if [ -n "$CORE" ]; then
+  $CC $SAN -I. -c $CORE -o /dev/null 2>>/tmp/cw_b.err && ran=1
+fi
+echo '===RUN_ERR==='; head -c 12000 /tmp/cw_r.err 2>/dev/null
+echo; echo '===BUILD_ERR==='; head -c 6000 /tmp/cw_b.err 2>/dev/null
+echo; echo "===RAN=$ran==="
+"""
+
+
+class _PocRepro(BaseModel):
+    """Single-shot repro spec: the model drafts, the harness executes it."""
+
+    language: str = ""
+    driver_filename: str = "cw_poc_driver.c"
+    driver_source: str = ""
+    build_command: str = ""
+    run_command: str = ""
+    applicable: bool = True
+    notes: str = ""
+
+
+_POC_SYSTEM_PROMPT = """You write ONE minimal, self-contained dynamic reproducer
+for a single reported vulnerability in a C/C++ project. The target repository is
+already checked out at /workspace (read-only sources you may compile). Produce a
+JSON object with: driver_filename (e.g. cw_poc_driver.c), driver_source (a
+COMPLETE C/C++ file with main() that #includes the relevant target header(s) from
+/workspace and exercises the exact code path so the described bug triggers a
+sanitizer report), build_command, and run_command.
+
+Hard requirements:
+- build_command MUST compile the driver together with every target source it
+  needs, from /workspace, with `-fsanitize=address,undefined -g -I/workspace`,
+  producing the binary at exactly /tmp/cw_poc. No network, no cmake fetch.
+- run_command MUST execute /tmp/cw_poc (with any argv/stdin needed) so the bug
+  fires. Keep total runtime under ~15s.
+- Prefer the smallest input that triggers it (from the finding's own PoC if it
+  states one). Do NOT fabricate a crash with abort()/raise — the crash must come
+  from the target code itself.
+- If a dynamic reproducer is genuinely not applicable to this finding, set
+  applicable=false and leave the commands empty.
+Return only the JSON object."""
+
+
+async def run_poc_driven_probe(
+    llm: AsyncLLMClient,
+    tools: Sequence[NativeToolSpec] | None,
+    finding: Any,
+    *,
+    product_file: str | None = None,
+) -> dict[str, Any] | None:
+    """Model drafts a PoC once; the harness builds+runs it deterministically.
+
+    This supports models that reliably draft a reproducer in a single structured
+    call but do not reliably orchestrate multi-turn ``execute`` tool loops. The
+    single-shot generation is delegated to the model; write/build/run/observe is
+    performed mechanically here.
+    A host-observed sanitizer crash referencing the product file is objective
+    confirmation (``crash_reproduced``). Returns an evidence dict or ``None``.
+    """
+
+    if not tools:
+        return None
+    by_name = {t.name: t for t in tools}
+    execute = by_name.get("execute")
+    write_file = by_name.get("write_file")
+    if execute is None or write_file is None:
+        return None
+    fpath = str((finding.get("file") if hasattr(finding, "get") else "") or "")
+    ext = ("." + fpath.rsplit(".", 1)[-1].lower()) if "." in fpath else ""
+    if ext not in _C_LIKE_EXTS:
+        return None
+
+    def _fv(key: str, default: str = "") -> str:
+        try:
+            return str(finding.get(key) or default)
+        except Exception:
+            return default
+
+    user = json.dumps(
+        {
+            "file": fpath,
+            "line": _fv("line_number"),
+            "finding_type": _fv("finding_type"),
+            "severity": _fv("severity"),
+            "description": _fv("description")[:4000],
+            "recommendation": _fv("recommendation")[:1000],
+            "code_snippet": _fv("code_snippet")[:2000],
+        },
+        default=str,
+    )
+    try:
+        response = await llm.aask_text(
+            system=_POC_SYSTEM_PROMPT,
+            user=user,
+            response_schema=_PocRepro,
+            response_schema_name="PocRepro",
+        )
+        spec = _PocRepro.model_validate_json(response_text(response))
+    except Exception:
+        logger.warning("PoC-driven probe: generation failed", exc_info=True)
+        return None
+    if not spec.applicable or not spec.driver_source or not spec.build_command:
+        return None
+
+    # 1) write the driver into the sandbox
+    driver_path = spec.driver_filename or "cw_poc_driver.c"
+    if "/" in driver_path:
+        driver_path = driver_path.rsplit("/", 1)[-1]
+    try:
+        await write_file.ainvoke(
+            {"path": f"/workspace/{driver_path}", "contents": spec.driver_source}
+        )
+    except Exception:
+        logger.warning("PoC-driven probe: write_file failed", exc_info=True)
+        return None
+
+    # 2) build then run, deterministically, capturing each result
+    build_cmd = spec.build_command
+    run_cmd = spec.run_command or "/tmp/cw_poc"
+    combined = f"cd /workspace 2>/dev/null; ( {build_cmd} ) 2>/tmp/cw_poc_build.err && echo ===POC_BUILT=== && ( {run_cmd} ) 2>&1; echo ===POC_DONE rc=$?==="
+    try:
+        output = await execute.ainvoke({"command": combined, "timeout": 300})
+        invoked = True
+    except Exception:
+        logger.warning("PoC-driven probe: execute failed", exc_info=True)
+        output, invoked = {"error": "poc execute raised"}, False
+
+    completed = _completed_tool_output(output, invoked)
+    run_section = ""
+    built = False
+    if isinstance(output, dict):
+        combined_out = f"{output.get('stdout', '')}\n{output.get('stderr', '')}"
+        built = "===POC_BUILT===" in combined_out
+        run_section = combined_out.split("===POC_BUILT===", 1)[-1] if built else ""
+    crash_view = {
+        "exit_code": 1
+        if _CRASH_SIGNATURE_RE.search(run_section)
+        else (output.get("exit_code") if isinstance(output, dict) else None),
+        "stdout": "",
+        "stderr": run_section,
+        "workspace_integrity": output.get("workspace_integrity")
+        if isinstance(output, dict)
+        else None,
+    }
+    qualifying_crash = _qualifies_as_product_crash(
+        tool_name="execute",
+        arguments={"command": "poc-driven-probe"},
+        output=crash_view,
+        product_file=product_file,
+    )
+    stored_output = redact_tree(output)
+    if isinstance(stored_output, dict):
+        stored_output = {
+            k: _clip(v, _MAX_TOOL_OUTPUT_CHARS) if isinstance(v, str) else v
+            for k, v in stored_output.items()
+        }
+    return {
+        "tool": "execute",
+        "call_id": "poc-driven-probe",
+        "arguments": {"poc_driven": True, "built": built, "driver": driver_path},
+        "output": stored_output,
+        "completed": completed and built,
+        "qualifying_crash": qualifying_crash,
+    }
+
+
+async def run_mechanical_dynamic_probe(
+    tools: Sequence[NativeToolSpec] | None,
+    finding: Any,
+    *,
+    product_file: str | None = None,
+) -> dict[str, Any] | None:
+    """Drive one deterministic build/run in the sandbox, model-independently.
+
+    The adversarial verifier requires at least one completed dynamic tool call,
+    but some models will not reliably emit an ``execute`` call. This performs that dynamic step
+    mechanically: it invokes the same ``execute`` tool the model would, with a
+    fixed build+repro command, so the dynamic gate reflects a real host
+    observation rather than the model's tool-use behavior. Returns an evidence
+    dict (with ``completed`` / ``qualifying_crash``) or ``None`` when no probe is
+    applicable (unsupported language, or no execute tool).
+    """
+
+    if not tools:
+        return None
+    execute = next((t for t in tools if t.name == "execute"), None)
+    if execute is None:
+        return None
+    fpath = str((finding.get("file") if hasattr(finding, "get") else "") or "")
+    ext = ("." + fpath.rsplit(".", 1)[-1].lower()) if "." in fpath else ""
+    if ext not in _C_LIKE_EXTS:
+        return None  # C/C++ MVP; other languages fall through to the caller
+
+    command = _MECHANICAL_C_PROBE
+    try:
+        output = await execute.ainvoke({"command": command, "timeout": 600})
+        invoked = True
+    except Exception:
+        logger.warning("mechanical dynamic probe failed to execute", exc_info=True)
+        output, invoked = {"error": "mechanical probe raised"}, False
+
+    # Only the RUN_ERR section counts as a product crash — build errors do not.
+    run_section = ""
+    combined = ""
+    if isinstance(output, dict):
+        combined = f"{output.get('stdout', '')}\n{output.get('stderr', '')}"
+        run_section = combined.split("===BUILD_ERR===", 1)[0]
+    # The shell wrapper itself ends successfully after printing diagnostics.
+    # Require its explicit marker so a failed build or absent harness cannot be
+    # mistaken for a completed dynamic run.
+    completed = _completed_tool_output(output, invoked) and "===RAN=1===" in combined
+    crash_view = {
+        "exit_code": 1
+        if _CRASH_SIGNATURE_RE.search(run_section)
+        else (output.get("exit_code") if isinstance(output, dict) else None),
+        "stdout": "",
+        "stderr": run_section,
+        "workspace_integrity": output.get("workspace_integrity")
+        if isinstance(output, dict)
+        else None,
+    }
+    qualifying_crash = _qualifies_as_product_crash(
+        tool_name="execute",
+        arguments={"command": "mechanical-dynamic-probe"},
+        output=crash_view,
+        product_file=product_file,
+    )
+    stored_output = redact_tree(output)
+    if isinstance(stored_output, dict):
+        stored_output = {
+            k: _clip(v, _MAX_TOOL_OUTPUT_CHARS) if isinstance(v, str) else v
+            for k, v in stored_output.items()
+        }
+    return {
+        "tool": "execute",
+        "call_id": "mechanical-dynamic-probe",
+        "arguments": {"mechanical": True},
+        "output": stored_output,
+        "completed": completed,
+        "qualifying_crash": qualifying_crash,
+    }
 
 
 async def run_tool_assisted_verification(
@@ -239,9 +502,7 @@ async def run_tool_assisted_verification(
         for tool_call in tool_calls:
             total_tool_calls += 1
             is_dynamic = tool_call.fn_name in _DYNAMIC_EVIDENCE_TOOLS
-            arguments = (
-                tool_call.fn_arguments if isinstance(tool_call.fn_arguments, dict) else {}
-            )
+            arguments = tool_call.fn_arguments if isinstance(tool_call.fn_arguments, dict) else {}
             if is_dynamic:
                 attempted_dynamic_calls += 1
             if total_tool_calls > max_tool_calls:
@@ -265,9 +526,7 @@ async def run_tool_assisted_verification(
             stored_output = redact_tree(output)
             if isinstance(stored_output, dict):
                 stored_output = {
-                    key: _clip(value, _MAX_TOOL_OUTPUT_CHARS)
-                    if isinstance(value, str)
-                    else value
+                    key: _clip(value, _MAX_TOOL_OUTPUT_CHARS) if isinstance(value, str) else value
                     for key, value in stored_output.items()
                 }
             stored_arguments = _stored_arguments(tool_call.fn_name, arguments)

@@ -27,6 +27,8 @@ from clearwing.reporting.safety import redact_text, redact_tree
 
 from .dynamic_verification import (
     clamp_dynamic_evidence_level,
+    run_mechanical_dynamic_probe,
+    run_poc_driven_probe,
     run_tool_assisted_verification,
 )
 from .state import (
@@ -275,6 +277,50 @@ class _VerdictSchema(BaseModel):
         )
 
 
+# --- Mechanical fallback ----------------------------------------------------
+
+
+async def _mechanical_verification_fallback(
+    llm: AsyncLLMClient,
+    verification_tools: Sequence[NativeToolSpec],
+    finding: Finding,
+    verification: Any,
+) -> dict[str, Any] | None:
+    """Run deterministic fallbacks when the model did not reproduce a crash."""
+    if verification.qualifying_crash_calls > 0:
+        return None
+
+    product_file = str(finding.get("file") or "") or None
+    poc_probe = await run_poc_driven_probe(
+        llm, verification_tools, finding, product_file=product_file
+    )
+    smoke_probe = None
+    if not (poc_probe and poc_probe.get("qualifying_crash")):
+        smoke_probe = await run_mechanical_dynamic_probe(
+            verification_tools, finding, product_file=product_file
+        )
+    candidates = [candidate for candidate in (poc_probe, smoke_probe) if candidate]
+    mechanical_probe = next(
+        (candidate for candidate in candidates if candidate.get("qualifying_crash")), None
+    ) or next((candidate for candidate in candidates if candidate.get("completed")), None)
+
+    if verification.completed_dynamic_calls == 0 and not (
+        mechanical_probe and mechanical_probe.get("completed")
+    ):
+        raise RuntimeError(
+            "dynamic verification incomplete: no build, run, or fuzz tool completed "
+            "(model + PoC + mechanical probes)"
+        )
+    if mechanical_probe:
+        logger.info(
+            "mechanical dynamic verification for %s: crash=%s poc_driven=%s",
+            finding.get("file"),
+            mechanical_probe.get("qualifying_crash"),
+            (mechanical_probe.get("arguments") or {}).get("poc_driven", False),
+        )
+    return mechanical_probe
+
+
 # --- Validator class ---------------------------------------------------------
 
 
@@ -326,6 +372,7 @@ class Validator:
         # the typed wire object and map it to the domain verdict directly (no
         # dict round-trip). Requires a model/gateway with constrained decoding.
         verification = None
+        mechanical_probe: dict[str, Any] | None = None
         try:
             if verification_tools:
                 verification = await run_tool_assisted_verification(
@@ -338,10 +385,11 @@ class Validator:
                     product_file=str(finding.get("file") or "") or None,
                 )
                 response = verification.response
-                if verification.completed_dynamic_calls == 0:
-                    raise RuntimeError(
-                        "dynamic verification incomplete: no build, run, or fuzz tool completed"
-                    )
+                # When the model does not reproduce a host-observed crash, try a
+                # one-shot PoC followed by the deterministic sanitizer fallback.
+                mechanical_probe = await _mechanical_verification_fallback(
+                    self.llm, verification_tools, finding, verification
+                )
             else:
                 response = await self.llm.aask_text(
                     system=system_prompt,
@@ -352,10 +400,38 @@ class Validator:
             schema = _VerdictSchema.model_validate_json(response_text(response))
             verdict = schema.to_verdict(finding.get("id", "unknown"))
             if verification_tools:
-                verdict.dynamic_evidence = list(verification.evidence)
+                evidence = list(verification.evidence) if verification else []
+                qualifying_crash_calls = verification.qualifying_crash_calls if verification else 0
+                if mechanical_probe is not None:
+                    evidence.append(mechanical_probe)
+                    if mechanical_probe.get("qualifying_crash"):
+                        qualifying_crash_calls += 1
+                        # A host-observed sanitizer crash referencing the product
+                        # file is objective ground truth that the bug is REAL and
+                        # TRIGGERABLE — stronger than any model opinion. Confirm
+                        # the finding mechanically, independent of the model's
+                        # 4-axis advance decision.
+                        verdict.advance = True
+                        verdict.evidence_level = "crash_reproduced"
+                        if verdict.severity_validated is None:
+                            verdict.severity_validated = finding.get("severity")
+                        for _axis_name in ("real", "triggerable", "impactful"):
+                            _ax = getattr(verdict.axes, _axis_name, None)
+                            if _ax is not None and not _ax.passed:
+                                _ax.passed = True
+                                if not _ax.rationale:
+                                    _ax.rationale = (
+                                        "Host-observed sanitizer crash reproduced "
+                                        "the defect mechanically."
+                                    )
+                        verdict.tie_breaker = (
+                            "Mechanical PoC probe reproduced a host-observed "
+                            "sanitizer crash in the product file. " + verdict.tie_breaker
+                        ).strip()
+                verdict.dynamic_evidence = evidence
                 clamped = clamp_dynamic_evidence_level(
                     verdict.evidence_level,
-                    qualifying_crash_calls=verification.qualifying_crash_calls,
+                    qualifying_crash_calls=qualifying_crash_calls,
                 )
                 if clamped != verdict.evidence_level:
                     verdict.evidence_level = clamped
