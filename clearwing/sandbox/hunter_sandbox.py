@@ -149,7 +149,7 @@ class HunterSandbox:
         if self._resolved_default_cpus is None:
             available = self.available_cpus
             if available <= 1.0:
-                limit = self.MIN_CPU_LIMIT
+                limit = min(self.MIN_CPU_LIMIT, available)
             else:
                 limit = min(self.AUTO_CPU_CAP, available - 1.0)
             self._resolved_default_cpus = limit

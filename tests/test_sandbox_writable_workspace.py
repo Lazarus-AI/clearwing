@@ -57,7 +57,7 @@ class TestSandboxContainerCpus:
 class TestHunterSandboxCpuPolicy:
     @pytest.mark.parametrize(
         ("available", "expected"),
-        [(1, 0.5), (2, 1.0), (3, 2.0), (4, 3.0), (64, 3.0)],
+        [(0.25, 0.25), (1, 0.5), (2, 1.0), (3, 2.0), (4, 3.0), (64, 3.0)],
     )
     def test_auto_limit_uses_docker_cpu_count(self, tmp_path, available, expected):
         manager = HunterSandbox(repo_path=str(tmp_path))
