@@ -441,7 +441,13 @@ class TestOperatorRun:
         mock_graph.astream = _astream
         mock_graph.ainvoke = AsyncMock()
 
+        # Default graph state carries real recon output (open_ports) so a
+        # GOALS_COMPLETE is backed by an actual scan: the operator's scan gate
+        # refuses an unbacked completion (empty recon) and would otherwise nudge
+        # the model instead of finishing. Tests that exercise the gate itself
+        # pass an explicit empty ``state_values``.
         sv = state_values or {
+            "open_ports": [{"port": 22, "service": "ssh"}],
             "vulnerabilities": [],
             "exploit_results": [],
             "flags_found": [],
@@ -476,6 +482,40 @@ class TestOperatorRun:
 
         assert result.status == "completed"
         assert result.turns == 2
+
+    @patch(
+        "clearwing.agent.operator.OperatorAgent._adecide_next",
+        new_callable=AsyncMock,
+    )
+    @patch("clearwing.agent.graph._create_llm")
+    @patch("clearwing.agent.operator.create_agent")
+    def test_scan_gate_nudges_unbacked_goals_complete(
+        self, mock_create, mock_create_llm, mock_decide
+    ):
+        """A GOALS_COMPLETE with no real recon in state is pushed back
+        (_SCAN_GATE_MAX_NUDGES times) to force a genuine scan, then accepted so a
+        model that never emits a scan tool call cannot deadlock the run."""
+        # Empty recon: no open_ports / services / vulnerabilities / exploit_results / os_info.
+        mock_graph = self._make_mock_graph(
+            ["done"] * 10,
+            state_values={
+                "vulnerabilities": [],
+                "exploit_results": [],
+                "flags_found": [],
+                "total_cost_usd": 0.0,
+                "total_tokens": 0,
+            },
+        )
+        mock_create.return_value = mock_graph
+        mock_create_llm.return_value = MagicMock()
+        mock_decide.return_value = "GOALS_COMPLETE"
+
+        cfg = OperatorConfig(goals=["scan"], target="10.0.0.1", max_turns=10)
+        op = OperatorAgent(cfg)
+        result = op.run()
+
+        assert op._scan_gate_nudges == OperatorAgent._SCAN_GATE_MAX_NUDGES
+        assert result.status == "completed"
 
     @patch(
         "clearwing.agent.operator.OperatorAgent._adecide_next",

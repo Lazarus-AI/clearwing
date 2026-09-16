@@ -92,7 +92,12 @@ def test_list_sourcehunt_findings_with_unknown_session_id():
     assert "no source hunts" in out[0]["error"]
 
 
-def test_prompt_template_mentions_hunt_source_code():
-    """The interactive agent's system prompt should advertise the new tool."""
-    assert "hunt_source_code" in SYSTEM_PROMPT_TEMPLATE
-    assert "source-hunt" in SYSTEM_PROMPT_TEMPLATE
+def test_pentest_prompt_does_not_advertise_source_hunt():
+    """The network-pentest system prompt no longer carries the source-hunt
+    bullet: quoting the SourceHunt pipeline in every operator run injected
+    white-box config irrelevant to a live-host network pentest. The
+    ``hunt_source_code`` tool itself stays registered and discoverable (see
+    ``test_hunt_source_code_is_discoverable_via_get_all_tools``); only its
+    prompt advertisement was dropped."""
+    assert "hunt_source_code" not in SYSTEM_PROMPT_TEMPLATE
+    assert "source-hunt" not in SYSTEM_PROMPT_TEMPLATE
