@@ -465,3 +465,89 @@ def test_flag_potential_detects_paraphrased_historical_duplicate(tmp_path) -> No
     assert duplicate["error"]["code"] == "POTENTIAL_ALREADY_EXISTS"
     assert duplicate["error"]["potential_id"] == potential_id
     assert len(ctx.potential_history) == 1
+
+
+def test_flag_potential_coerces_out_of_vocabulary_impact_class(tmp_path) -> None:
+    # Regression: a hunter (glm-5.3-b200) flagged a real cJSON.h lead with
+    # impact_class="integer_overflow" — a plausible category absent from the
+    # fixed taxonomy. Before coercion this failed jsonschema validation, aborted
+    # the unit, and cascaded the recursive run to "incomplete".
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    tools["flag_potential"].invoke(
+        {
+            "file": "cJSON.h",
+            "line": 281,
+            "hypothesis": "cJSON_SetIntValue stores an unclamped number into int valueint.",
+            "security_invariant": "Public setters must preserve the caller's value or fail loudly.",
+            "impact_class": "integer_overflow",
+        }
+    )
+
+    assert len(ctx.potentials) == 1
+    assert ctx.potentials[0]["impact_class"] == "memory_corruption"
+
+
+def test_flag_potential_unknown_impact_class_falls_back_to_other(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    tools["flag_potential"].invoke(
+        {
+            "file": "a.c",
+            "line": 1,
+            "hypothesis": "Something odd but unclassifiable.",
+            "impact_class": "banana_split",
+        }
+    )
+
+    # Never rejected: the open impact taxonomy degrades to "other", not a crash.
+    assert ctx.potentials[0]["impact_class"] == "other"
+
+
+def test_flag_potential_coerces_priority_and_novelty_synonyms(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    tools["flag_potential"].invoke(
+        {
+            "file": "a.c",
+            "line": 1,
+            "hypothesis": "x",
+            "priority": "critical",
+            "novelty": "new",
+        }
+    )
+
+    stored = ctx.potentials[0]
+    # priority is recomputed by the queue, but novelty coercion is observable.
+    assert stored["novelty"] == "distinct"
+
+
+def test_update_potential_coerces_action_and_evidence_synonyms(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    tools["flag_potential"].invoke(
+        {
+            "file": "a.c",
+            "line": 1,
+            "hypothesis": "x",
+            "security_invariant": "must hold",
+            "disproof_conditions": ["input is trusted"],
+        }
+    )
+    potential_id = ctx.potentials[0]["id"]
+
+    result = tools["update_potential"].invoke(
+        {
+            "potential_id": potential_id,
+            "action": "modify",  # synonym -> update
+            "observation": "reachable from a public entry point",
+            "reachability": "confirmed",  # synonym -> supported
+        }
+    )
+
+    assert "Updated" in result
+    assert ctx.potentials[0]["verification"]["reachability"] == "supported"

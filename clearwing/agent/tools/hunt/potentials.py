@@ -9,9 +9,9 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
 
@@ -45,6 +45,192 @@ _IMPACT_SCORES: dict[str, int] = {
 }
 _EVIDENCE_SCORES: dict[str, int] = {"supported": 8, "unknown": 0, "disproven": -20}
 _NOVELTY_SCORES: dict[str, int] = {"distinct": 8, "related": 2, "unknown": 0, "duplicate": -40}
+
+# Canonical enum vocabularies, derived from the Literals above.
+_IMPACT_ALLOWED: frozenset[str] = frozenset(get_args(PotentialImpact))
+_PRIORITY_ALLOWED: frozenset[str] = frozenset(get_args(PotentialPriority))
+_NOVELTY_ALLOWED: frozenset[str] = frozenset(get_args(PotentialNovelty))
+_EVIDENCE_ALLOWED: frozenset[str] = frozenset(get_args(EvidenceStatus))
+_ACTION_ALLOWED: frozenset[str] = frozenset(get_args(PotentialAction))
+
+# Models routinely emit a plausible-but-unlisted category name (e.g.
+# ``integer_overflow`` for ``impact_class``). Map the common ones onto the fixed
+# taxonomy so one out-of-vocabulary token never rejects the tool call — a
+# rejection aborts the hunter's current unit and can cascade the whole run to
+# ``incomplete``. Keys are normalized (lowercase, spaces/hyphens -> ``_``).
+_IMPACT_ALIASES: dict[str, str] = {
+    "integer_overflow": "memory_corruption",
+    "integer_underflow": "memory_corruption",
+    "int_overflow": "memory_corruption",
+    "signedness": "memory_corruption",
+    "overflow": "memory_corruption",
+    "underflow": "memory_corruption",
+    "buffer_overflow": "memory_corruption",
+    "buffer_overread": "memory_corruption",
+    "heap_overflow": "memory_corruption",
+    "stack_overflow": "memory_corruption",
+    "out_of_bounds": "memory_corruption",
+    "oob": "memory_corruption",
+    "oob_read": "memory_corruption",
+    "oob_write": "memory_corruption",
+    "use_after_free": "memory_corruption",
+    "uaf": "memory_corruption",
+    "double_free": "memory_corruption",
+    "null_dereference": "memory_corruption",
+    "null_deref": "memory_corruption",
+    "type_confusion": "memory_corruption",
+    "uninitialized": "memory_corruption",
+    "uninitialized_memory": "memory_corruption",
+    "format_string": "memory_corruption",
+    "rce": "code_execution",
+    "remote_code_execution": "code_execution",
+    "arbitrary_code_execution": "code_execution",
+    "command_injection": "code_execution",
+    "code_injection": "code_execution",
+    "deserialization": "code_execution",
+    "sql_injection": "integrity_or_confidentiality",
+    "sqli": "integrity_or_confidentiality",
+    "path_traversal": "integrity_or_confidentiality",
+    "directory_traversal": "integrity_or_confidentiality",
+    "information_disclosure": "integrity_or_confidentiality",
+    "info_leak": "integrity_or_confidentiality",
+    "infoleak": "integrity_or_confidentiality",
+    "data_tampering": "integrity_or_confidentiality",
+    "ssrf": "integrity_or_confidentiality",
+    "auth_bypass": "authorization_bypass",
+    "authentication_bypass": "authorization_bypass",
+    "authz_bypass": "authorization_bypass",
+    "access_control": "authorization_bypass",
+    "privilege_escalation": "authorization_bypass",
+    "privesc": "authorization_bypass",
+    "dos": "resource_exhaustion",
+    "denial_of_service": "resource_exhaustion",
+    "memory_leak": "resource_exhaustion",
+    "resource_leak": "resource_exhaustion",
+    "infinite_loop": "resource_exhaustion",
+    "cpu_exhaustion": "resource_exhaustion",
+    "logic_error": "other",
+    "logic_bug": "other",
+    "race_condition": "other",
+    "toctou": "other",
+}
+_NOVELTY_ALIASES: dict[str, str] = {
+    "new": "distinct",
+    "novel": "distinct",
+    "unique": "distinct",
+    "similar": "related",
+    "dupe": "duplicate",
+    "duplicated": "duplicate",
+}
+_PRIORITY_ALIASES: dict[str, str] = {
+    "critical": "high",
+    "severe": "high",
+    "urgent": "high",
+    "moderate": "medium",
+    "med": "medium",
+    "normal": "medium",
+    "minor": "low",
+    "info": "low",
+    "informational": "low",
+    "trivial": "low",
+}
+_EVIDENCE_ALIASES: dict[str, str] = {
+    "confirmed": "supported",
+    "proven": "supported",
+    "yes": "supported",
+    "true": "supported",
+    "refuted": "disproven",
+    "disproved": "disproven",
+    "false": "disproven",
+    "no": "disproven",
+    "unclear": "unknown",
+    "tbd": "unknown",
+}
+_ACTION_ALIASES: dict[str, str] = {
+    "modify": "update",
+    "edit": "update",
+    "open": "reopen",
+    "reopened": "reopen",
+    "closed": "close",
+    "dismiss": "close",
+}
+
+
+def _coerce_enum(
+    value: object,
+    allowed: frozenset[str],
+    aliases: dict[str, str],
+    fallback: str | None = None,
+) -> object:
+    """Map an LLM-supplied enum value onto the canonical taxonomy.
+
+    Exact (normalized) match wins, then a curated alias, then a substring hit
+    against an alias key. Unrecognized values are sent to ``fallback`` when one
+    is given, otherwise passed through unchanged so a downstream validator can
+    reject genuine garbage. ``None`` passes through so optional fields keep their
+    "not supplied" meaning.
+
+    Coercing a plausible-but-unlisted token (e.g. ``integer_overflow`` for
+    ``impact_class``) is far preferable to rejecting the whole tool call, which
+    aborts the hunter's current unit and can cascade the run to ``incomplete``.
+    Closed vocabularies (priority, novelty, evidence, action) pass unknown
+    tokens through so injection-style garbage is still refused.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in allowed:
+        return text
+    normalized = re.sub(r"[\s\-]+", "_", text)
+    if normalized in allowed:
+        return normalized
+    mapped = aliases.get(normalized)
+    if mapped is None:
+        mapped = next((v for k, v in aliases.items() if k in normalized), None)
+    if mapped is None and fallback is None:
+        return value  # unrecognized: let the schema/model validator decide
+    result = mapped if mapped is not None else fallback
+    logger.warning(
+        "coerced out-of-vocabulary enum value %r -> %r (allowed=%s)",
+        value,
+        result,
+        sorted(allowed),
+    )
+    return result
+
+
+def coerce_potential_enum_args(arguments: dict[str, object]) -> dict[str, object]:
+    """Normalize model-supplied enum arguments before schema validation.
+
+    Applied by the flag/update potential tools as a pre-validation hook so a
+    single out-of-vocabulary enum never rejects the call. Only ``impact_class``
+    (an open taxonomy the model routinely paraphrases) is given a safe
+    ``other`` fallback; the closed vocabularies map known synonyms and otherwise
+    pass through to the schema validator.
+    """
+
+    if not isinstance(arguments, dict):
+        return arguments
+    coerced = dict(arguments)
+    if "impact_class" in coerced:
+        coerced["impact_class"] = _coerce_enum(
+            coerced["impact_class"], _IMPACT_ALLOWED, _IMPACT_ALIASES, "other"
+        )
+    if "priority" in coerced:
+        coerced["priority"] = _coerce_enum(
+            coerced["priority"], _PRIORITY_ALLOWED, _PRIORITY_ALIASES
+        )
+    if "novelty" in coerced:
+        coerced["novelty"] = _coerce_enum(
+            coerced["novelty"], _NOVELTY_ALLOWED, _NOVELTY_ALIASES
+        )
+    if "action" in coerced:
+        coerced["action"] = _coerce_enum(coerced["action"], _ACTION_ALLOWED, _ACTION_ALIASES)
+    for field in ("attacker_control", "reachability", "guard_behavior", "impact"):
+        if field in coerced:
+            coerced[field] = _coerce_enum(coerced[field], _EVIDENCE_ALLOWED, _EVIDENCE_ALIASES)
+    return coerced
 
 
 class PotentialVerification(BaseModel):
@@ -135,6 +321,21 @@ class FlagPotentialInput(ToolInputModel):
         ),
     )
 
+    @field_validator("impact_class", mode="before")
+    @classmethod
+    def _coerce_impact_class(cls, v: object) -> object:
+        return _coerce_enum(v, _IMPACT_ALLOWED, _IMPACT_ALIASES, "other")
+
+    @field_validator("novelty", mode="before")
+    @classmethod
+    def _coerce_novelty(cls, v: object) -> object:
+        return _coerce_enum(v, _NOVELTY_ALLOWED, _NOVELTY_ALIASES)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _coerce_priority(cls, v: object) -> object:
+        return _coerce_enum(v, _PRIORITY_ALLOWED, _PRIORITY_ALIASES)
+
 
 class UpdatePotentialInput(ToolInputModel):
     potential_id: str = Field(description="ID returned by flag_potential.")
@@ -171,6 +372,26 @@ class UpdatePotentialInput(ToolInputModel):
         description="supported means source evidence supports the suspected missing/ineffective guard.",
     )
     impact: EvidenceStatus | None = None
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _coerce_action(cls, v: object) -> object:
+        return _coerce_enum(v, _ACTION_ALLOWED, _ACTION_ALIASES)
+
+    @field_validator("impact_class", mode="before")
+    @classmethod
+    def _coerce_impact_class(cls, v: object) -> object:
+        return _coerce_enum(v, _IMPACT_ALLOWED, _IMPACT_ALIASES, "other")
+
+    @field_validator("novelty", mode="before")
+    @classmethod
+    def _coerce_novelty(cls, v: object) -> object:
+        return _coerce_enum(v, _NOVELTY_ALLOWED, _NOVELTY_ALIASES)
+
+    @field_validator("attacker_control", "reachability", "guard_behavior", "impact", mode="before")
+    @classmethod
+    def _coerce_evidence(cls, v: object) -> object:
+        return _coerce_enum(v, _EVIDENCE_ALLOWED, _EVIDENCE_ALIASES)
 
 
 def _score_potential(potential: dict) -> tuple[int, list[str]]:
@@ -590,6 +811,7 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
             ),
             schema=FlagPotentialInput.model_json_schema(),
             handler=flag_potential,
+            arg_coercer=coerce_potential_enum_args,
         ),
         NativeToolSpec(
             name="update_potential",
@@ -603,6 +825,7 @@ def build_potential_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: 
             ),
             schema=UpdatePotentialInput.model_json_schema(),
             handler=update_potential,
+            arg_coercer=coerce_potential_enum_args,
         ),
         NativeToolSpec(
             name="defer_potential",
