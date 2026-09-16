@@ -313,7 +313,10 @@ def _model_supports_reasoning_capture(model_name: str) -> bool:
 # across EVERY call path (operate, sourcehunt, ranker, hunter, remediation),
 # mirroring how ``reasoning_effort`` is auto-resolved by model family above.
 # Case-insensitive substring match on the model name.
-_THINKING_DISABLE_PATTERNS: tuple[str, ...] = ("qwen3", "qwen-3")
+# Some tool-capable model families default chat-template thinking on. Their
+# emitted thinking blocks can interfere with structured tool-call parsing;
+# disable that template mode independently of the reasoning-effort setting.
+_THINKING_DISABLE_PATTERNS: tuple[str, ...] = ("qwen3", "qwen-3", "glm-5.3")
 
 
 def _model_thinking_extra_body(model_name: str) -> dict[str, Any] | None:
