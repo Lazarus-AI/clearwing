@@ -270,6 +270,76 @@ def _dedup_rank_recursive_findings(findings: list[Finding]) -> list[Finding]:
     return merged
 
 
+def _recursive_finding_key(finding: Finding) -> tuple[str, int, str]:
+    """Build the normalized key used by the recursive verification budget."""
+    return (
+        _normalize_recursive_finding_path(finding.get("file")),
+        int(finding.get("line_number") or 0),
+        str(finding.get("finding_type") or finding.get("title") or ""),
+    )
+
+
+def _select_recursive_findings_for_verification(
+    findings: list[Finding],
+    seen: set[tuple[str, int, str]],
+    remaining_budget: int,
+) -> tuple[list[Finding], int, int]:
+    """Select the strongest unique findings within the remaining budget.
+
+    Selection happens per completed hunt unit because recursive verification is
+    part of the online orchestration loop. Sorting each unit before consuming
+    budget prevents a weaker duplicate from displacing stronger evidence.
+    """
+    selected: list[Finding] = []
+    deferred = 0
+    for finding in sorted(findings, key=_recursive_finding_rank, reverse=True):
+        key = _recursive_finding_key(finding)
+        if key in seen:
+            continue
+        seen.add(key)
+        if remaining_budget <= 0:
+            deferred += 1
+            continue
+        remaining_budget -= 1
+        selected.append(finding)
+    return selected, deferred, remaining_budget
+
+
+def _recursive_scope_excluded(
+    path: str,
+    excluded_dirs: set[str],
+    excluded_file_stems: tuple[str, ...],
+) -> bool:
+    """Return whether a path is outside the shipping-source hunt scope."""
+    if not excluded_dirs:
+        return False
+    segments = [segment for segment in str(path).replace("\\", "/").split("/") if segment]
+    if any(segment.lower() in excluded_dirs for segment in segments[:-1]):
+        return True
+    stem = segments[-1].rsplit(".", 1)[0].lower() if segments else ""
+    if stem.startswith(("test_", "fuzz_")):
+        return True
+    return stem.endswith(excluded_file_stems)
+
+
+def _recursive_fixpoint_completion(
+    stopped_reason: str,
+    verification_incomplete: bool,
+    deferred: int,
+    verified_count: int,
+) -> tuple[bool, str | None]:
+    """Apply the documented completed/degraded policy at a clean fixpoint."""
+    if stopped_reason != "fixpoint":
+        return verification_incomplete, None
+    if verification_incomplete or deferred:
+        return (
+            False,
+            "Verification bounded to top-N by convergence policy; "
+            f"{verified_count} verified, {deferred} leads deferred unverified",
+        )
+    return False, None
+
+
 class SourceHuntRunner:
     """Public entry point for the sourcehunt pipeline."""
 
@@ -1399,9 +1469,28 @@ class SourceHuntRunner:
 
         self._recursive_all_findings.extend(findings)
 
+        to_verify, deferred, self._recursive_verify_budget = (
+            _select_recursive_findings_for_verification(
+                findings,
+                self._recursive_verify_seen,
+                self._recursive_verify_budget,
+            )
+        )
+        self._recursive_verify_deferred += deferred
+
+        if not to_verify:
+            # Duplicate and over-budget findings remain visible in the report;
+            # they simply do not consume another verifier call.
+            return UnitHuntResult(
+                "finding",
+                0.5,
+                [finding.id for finding in findings],
+                [str(finding.file or "") for finding in findings],
+            )
+
         try:
             vres = await self._verify(
-                findings, repo_path=repo_path, pipeline_status=pipeline_status
+                to_verify, repo_path=repo_path, pipeline_status=pipeline_status
             )
             verified = list(vres.verified)
         except Exception:
@@ -1458,6 +1547,44 @@ class SourceHuntRunner:
         pipeline_status = PipelineStatus()
         self._recursive_all_findings: list[Finding] = []
         self._recursive_all_verified: list[Finding] = []
+        # Verification is bounded across the complete recursive run. Unique
+        # overflow findings remain in the report as unverified evidence.
+        self._recursive_verify_seen: set[tuple[str, int, str]] = set()
+        try:
+            self._recursive_verify_budget = int(
+                os.environ.get("CLEARWING_RECURSIVE_VERIFY_TOPN", "24")
+            )
+        except ValueError:
+            self._recursive_verify_budget = 24
+        self._recursive_verify_deferred = 0
+
+        # Recursive analysis concentrates on shipping source by default. The
+        # directory set is configurable, and the scope-all flag disables both
+        # directory and filename-stem filtering.
+        default_excludes = (
+            "test,tests,testing,fuzz,fuzzing,example,examples,sample,samples,"
+            "vendor,vendored,third_party,third-party,3rdparty,external,deps,"
+            "docs,doc,benchmark,benchmarks,bench,.github,node_modules"
+        )
+        self._recursive_exclude_dirs = {
+            directory.strip().lower()
+            for directory in os.environ.get(
+                "CLEARWING_RECURSIVE_EXCLUDE_DIRS", default_excludes
+            ).split(",")
+            if directory.strip()
+        }
+        if os.environ.get("CLEARWING_RECURSIVE_SCOPE_ALL") in ("1", "true", "yes"):
+            self._recursive_exclude_dirs = set()
+        self._recursive_exclude_file_stems: tuple[str, ...] = (
+            "_test",
+            "_tests",
+            "_fuzzer",
+            "_fuzz",
+            "_benchmark",
+            "_bench",
+            "_example",
+            "_demo",
+        )
         logger.info(
             "Recursive sourcehunt session %s starting on %s", self._session_id, self.repo_url
         )
@@ -1476,6 +1603,30 @@ class SourceHuntRunner:
             preprocess_result = self._filter_target_files(self._preprocess())
             repo_path = preprocess_result.repo_path
             files = preprocess_result.file_targets
+
+            def scope_excluded(path: str) -> bool:
+                return _recursive_scope_excluded(
+                    path,
+                    self._recursive_exclude_dirs,
+                    self._recursive_exclude_file_stems,
+                )
+
+            if self._recursive_exclude_dirs:
+                kept = [target for target in files if not scope_excluded(target.get("path", ""))]
+                dropped = len(files) - len(kept)
+                if kept:
+                    files = kept
+                    logger.info(
+                        "Recursive scope filter: kept %d files, excluded %d",
+                        len(kept),
+                        dropped,
+                    )
+                else:
+                    logger.warning(
+                        "Recursive scope filter would exclude every file; keeping the unfiltered set"
+                    )
+            self._recursive_scope_excluded = scope_excluded
+            preprocess_result.file_targets = files
             files_ranked = len(files)
             callgraph = preprocess_result.callgraph
             self._emit_stage("preprocess", "completed", detail=f"{files_ranked} files")
@@ -1486,6 +1637,17 @@ class SourceHuntRunner:
             files = await self._rank(files, pipeline_status, stage_files)
             preprocess_result.file_targets = files
             self._emit_stage("rank", "completed", files=stage_files)
+
+            # Recursive verification needs the same isolated sandbox factory as
+            # the staged flow. Startup failure is recorded and degrades evidence
+            # rather than discarding the findings already produced.
+            try:
+                self._ensure_sandbox_factory(repo_path, files)
+            except Exception:
+                logger.warning(
+                    "recursive: verification sandbox init failed; findings will be reported unverified",
+                    exc_info=True,
+                )
 
             # Build the unit index and priority-ordered seed frontier.
             by_path: dict[str, FileTarget] = {ft.get("path", ""): ft for ft in files}
@@ -1501,6 +1663,8 @@ class SourceHuntRunner:
             digests: dict[str, str] = {p: _digest(ft) for p, ft in by_path.items()}
 
             def unit_for_path(path: str):
+                if self._recursive_scope_excluded(path):
+                    return None
                 ft = by_path.get(path)
                 if ft is None:
                     return None
@@ -1694,6 +1858,15 @@ class SourceHuntRunner:
             # first without changing detection or verification decisions.
             all_findings = _dedup_rank_recursive_findings(self._recursive_all_findings)
             verified = _dedup_rank_recursive_findings(self._recursive_all_verified)
+
+            self._verification_incomplete, degraded_detail = _recursive_fixpoint_completion(
+                run_result.stopped_reason,
+                self._verification_incomplete,
+                self._recursive_verify_deferred,
+                len(verified),
+            )
+            if degraded_detail:
+                pipeline_status.record_degraded("verifier", degraded_detail)
 
             return self._finalize_result(
                 start_time=start_time,
