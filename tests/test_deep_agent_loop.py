@@ -828,6 +828,54 @@ async def test_deep_read_new_ranges_count_as_progress():
 
 
 @pytest.mark.asyncio
+async def test_reporting_error_gets_bounded_recovery_at_stall_boundary():
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo", sandbox=MagicMock())
+    attempts = itertools.count()
+
+    def record_finding(**_):
+        if next(attempts) == 0:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "INCOMPLETE_TRACE",
+                    "message": "trace needs ENTRY and SINK roles",
+                },
+            }
+        ctx.findings.append(MagicMock())
+        return "finding recorded"
+
+    tool = NativeToolSpec(
+        name="record_finding",
+        description="record finding",
+        schema={"type": "object", "properties": {}},
+        handler=record_finding,
+    )
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=[tool],
+        ctx=ctx,
+        max_steps=6,
+        agent_mode="deep",
+    )
+    hunter.max_steps_without_progress = 2
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("record_finding")]),
+        FakeResponse(tool_calls_list=[_make_tool_call("record_finding")]),
+        FakeResponse(text="Investigation complete."),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert llm.achat.call_count == 3
+    assert len(ctx.findings) == 1
+
+
+@pytest.mark.asyncio
 async def test_deep_read_repeated_range_does_not_reset_stall():
     # Requests vary so the duplicate-call guard does not preempt this check,
     # but the tool keeps returning the same two lines. That repeated range is

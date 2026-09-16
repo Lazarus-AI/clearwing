@@ -1619,12 +1619,14 @@ class NativeHunter:
             len(self.ctx.potentials),
             len(self.ctx.files_read),
             len(self.ctx.deep_files_read),
+            len(self.ctx.trace_steps),
             0,
         )
         deep_read_ranges: dict[str, list[tuple[int, int]]] = {}
         deep_read_range_progress = 0
         steps_since_progress = 0
         prev_step_had_skip = False
+        reporting_recovery_turns = 0
         while True:
             step += 1
             progress_sig = (
@@ -1632,6 +1634,7 @@ class NativeHunter:
                 len(self.ctx.potentials),
                 len(self.ctx.files_read),
                 len(self.ctx.deep_files_read),
+                len(self.ctx.trace_steps),
                 deep_read_range_progress,
             )
             if progress_sig != last_progress_sig:
@@ -1671,7 +1674,18 @@ class NativeHunter:
                         "recorded. If no finding was recorded, state that plainly.",
                     )
                 )
-            stop_reason = self._should_stop(step, total_cost_usd, steps_since_progress)
+            # A reporting-tool rejection is actionable feedback, not proof that
+            # the investigation has stalled. Preserve the accumulated stall
+            # count, but guarantee two bounded turns for the model to repair a
+            # malformed potential, trace, or finding before applying it again.
+            recovery_active = reporting_recovery_turns > 0
+            stop_reason = self._should_stop(
+                step,
+                total_cost_usd,
+                0 if recovery_active else steps_since_progress,
+            )
+            if recovery_active:
+                reporting_recovery_turns -= 1
             if stop_reason:
                 logger.warning(
                     "Hunter stopped for %s: %s (step=%d, cost=$%.4f, findings=%d)",
@@ -2079,6 +2093,12 @@ class NativeHunter:
                             },
                         )
                         tool_output = await self._run_tool(tools_by_name, tool_call)
+                        if (
+                            tool_call.fn_name
+                            in {"flag_potential", "record_trace_step", "record_finding"}
+                            and _tool_result_is_error(tool_output)
+                        ):
+                            reporting_recovery_turns = max(reporting_recovery_turns, 2)
                         if tool_call.fn_name == "read_file" and isinstance(tool_output, str):
                             reread_path = str(tool_arguments.get("path") or "")
                             tool_summary, returned_range = _read_file_tool_response(

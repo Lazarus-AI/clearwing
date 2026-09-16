@@ -230,6 +230,21 @@ def coerce_potential_enum_args(arguments: dict[str, object]) -> dict[str, object
     for field in ("attacker_control", "reachability", "guard_behavior", "impact"):
         if field in coerced:
             coerced[field] = _coerce_enum(coerced[field], _EVIDENCE_ALLOWED, _EVIDENCE_ALIASES)
+    # OpenAI-compatible models occasionally exceed a tool's advertised array
+    # bound by one item while otherwise returning a complete, useful potential.
+    # Keep the highest-priority prefix instead of rejecting the whole call and
+    # spending another agent turn recreating the same lead.
+    for field, maximum in (
+        ("attacker_inputs", 6),
+        ("required_relationships", 6),
+        ("observed_checks", 6),
+        ("missing_checks", 6),
+        ("open_questions", 4),
+        ("disproof_conditions", 3),
+    ):
+        value = coerced.get(field)
+        if isinstance(value, list) and len(value) > maximum:
+            coerced[field] = value[:maximum]
     return coerced
 
 

@@ -525,6 +525,23 @@ def test_flag_potential_coerces_priority_and_novelty_synonyms(tmp_path) -> None:
     assert stored["novelty"] == "distinct"
 
 
+def test_flag_potential_trims_overlong_evidence_lists(tmp_path) -> None:
+    ctx = HunterContext(repo_path=str(tmp_path))
+    tools = {tool.name: tool for tool in build_potential_tools(ctx)}
+
+    result = tools["flag_potential"].invoke(
+        {
+            "file": "a.c",
+            "line": 1,
+            "hypothesis": "An unchecked length may cross the buffer boundary.",
+            "disproof_conditions": ["one", "two", "three", "four"],
+        }
+    )
+
+    assert isinstance(result, str)
+    assert ctx.potentials[0]["disproof_conditions"] == ["one", "two", "three"]
+
+
 def test_update_potential_coerces_action_and_evidence_synonyms(tmp_path) -> None:
     ctx = HunterContext(repo_path=str(tmp_path))
     tools = {tool.name: tool for tool in build_potential_tools(ctx)}
