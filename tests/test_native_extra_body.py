@@ -35,8 +35,17 @@ def test_qwen_family_disables_thinking() -> None:
         assert _client(model).extra_body == QWEN_DISABLE
 
 
-def test_non_qwen_models_send_no_extra_body() -> None:
-    for model in ("claude-opus-4-6", "glm-5.3", "z-ai/glm-5.3", "gpt-4o"):
+def test_glm_family_disables_thinking() -> None:
+    # GLM-5.3 (incl. the self-hosted b200 route) also defaults chat-template
+    # "thinking" ON; its <think> block corrupts tool-call parsing, so it needs
+    # the same enable_thinking:False extra_body as the Qwen family.
+    for model in ("glm-5.3", "glm-5.3-b200", "z-ai/glm-5.3"):
+        assert _model_thinking_extra_body(model) == QWEN_DISABLE
+        assert _client(model).extra_body == QWEN_DISABLE
+
+
+def test_non_thinking_models_send_no_extra_body() -> None:
+    for model in ("claude-opus-4-6", "gpt-4o"):
         assert _model_thinking_extra_body(model) is None
         assert _client(model).extra_body is None
 
