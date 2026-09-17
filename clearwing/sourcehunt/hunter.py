@@ -1627,6 +1627,7 @@ class NativeHunter:
         prev_step_had_skip = False
         while True:
             step += 1
+            synthesis_prompt_added = False
             progress_sig = (
                 len(self.ctx.findings),
                 len(self.ctx.potentials),
@@ -1648,6 +1649,7 @@ class NativeHunter:
                 near_steps = step >= self.max_steps - 1
                 if near_budget or near_steps:
                     synthesis_injected = True
+                    synthesis_prompt_added = True
                     messages.append(
                         ChatMessage(
                             "user",
@@ -1663,6 +1665,7 @@ class NativeHunter:
                     )
             final_synthesis_turn = step == self.max_steps
             if final_synthesis_turn:
+                synthesis_prompt_added = True
                 messages.append(
                     ChatMessage(
                         "user",
@@ -1671,7 +1674,17 @@ class NativeHunter:
                         "recorded. If no finding was recorded, state that plainly.",
                     )
                 )
-            stop_reason = self._should_stop(step, total_cost_usd, steps_since_progress)
+            # A synthesis prompt must reach the model before the stall guard
+            # can terminate the hunt. Otherwise a late stall can enqueue the
+            # prompt and immediately exit without giving the model the final
+            # turn that was intended to conclude the investigation cleanly.
+            # Budget and max-step limits still win because only the progress
+            # counter is suppressed for this one turn.
+            stop_reason = self._should_stop(
+                step,
+                total_cost_usd,
+                0 if synthesis_prompt_added else steps_since_progress,
+            )
             if stop_reason:
                 logger.warning(
                     "Hunter stopped for %s: %s (step=%d, cost=$%.4f, findings=%d)",
