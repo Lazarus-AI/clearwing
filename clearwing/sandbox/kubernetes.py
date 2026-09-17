@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -26,7 +27,8 @@ from .backend import (
 from .container import ExecResult
 
 _STARTUP_TIMEOUT_SECONDS = 120
-_DEADLINE_FLOOR_SECONDS = 900
+
+logger = logging.getLogger(__name__)
 
 
 def kubernetes_namespace() -> str:
@@ -174,20 +176,20 @@ class KubernetesSandbox:
             allow_privilege_escalation=False,
             capabilities=client.V1Capabilities(drop=["ALL"], add=["SYS_PTRACE"]),
         )
+        api = self._api_factory()
+        owner_references = self._owner_references(api=api, client=client)
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(
                 name=pod_name,
                 namespace=self.namespace,
                 labels={"app.kubernetes.io/managed-by": "clearwing", "purpose": "sandbox"},
+                owner_references=owner_references,
             ),
             spec=client.V1PodSpec(
                 automount_service_account_token=False,
                 enable_service_links=False,
                 host_network=False,
                 restart_policy="Never",
-                active_deadline_seconds=max(
-                    _DEADLINE_FLOOR_SECONDS, self._config.timeout_seconds * 3
-                ),
                 containers=[
                     client.V1Container(
                         name="sandbox",
@@ -206,15 +208,41 @@ class KubernetesSandbox:
                 ],
             ),
         )
-        api = self._api_factory()
         api.create_namespaced_pod(self.namespace, pod)
         self._pod_name = pod_name
+        from .registry import ContainerRegistry
+
+        ContainerRegistry.get().register(self)
         try:
             self._wait_until_running(api)
         except BaseException:
             self.stop()
             raise
         return pod_name
+
+    def _owner_references(self, *, api: Any, client: Any) -> list[Any] | None:
+        """Make Kubernetes garbage-collect a sandbox if its caller pod disappears."""
+        caller_name = os.environ.get("HOSTNAME", "").strip()
+        if not caller_name:
+            return None
+        try:
+            caller = api.read_namespaced_pod(caller_name, self.namespace)
+            uid = caller.metadata.uid
+            if not isinstance(uid, str) or not uid:
+                return None
+            return [
+                client.V1OwnerReference(
+                    api_version="v1",
+                    kind="Pod",
+                    name=caller_name,
+                    uid=uid,
+                    block_owner_deletion=False,
+                    controller=False,
+                )
+            ]
+        except Exception:
+            logger.debug("Could not attach sandbox to caller pod", exc_info=True)
+            return None
 
     def _wait_until_running(self, api: Any) -> None:
         deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
@@ -348,16 +376,29 @@ class KubernetesSandbox:
     def stop(self) -> None:
         if self._pod_name is None:
             return
-        pod_name, self._pod_name = self._pod_name, None
+        pod_name = self._pod_name
         try:
             self._api_factory().delete_namespaced_pod(
                 pod_name, self.namespace, grace_period_seconds=5
             )
-        except Exception:
-            pass
+        except Exception as error:
+            if getattr(error, "status", None) != 404:
+                logger.warning("Failed to delete Kubernetes sandbox pod %s", pod_name, exc_info=True)
+                return
+        from .registry import ContainerRegistry
+
+        ContainerRegistry.get().unregister(self)
+        self._pod_name = None
 
     def __enter__(self) -> KubernetesSandbox:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.stop()
+
+    def __del__(self) -> None:
+        if self._pod_name is not None:
+            try:
+                self.stop()
+            except Exception:
+                logger.debug("Kubernetes sandbox garbage-collection cleanup failed", exc_info=True)

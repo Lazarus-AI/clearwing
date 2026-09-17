@@ -400,30 +400,36 @@ class HunterSandbox:
 
         sb = self.backend.create(environment_ref, cfg)
         _t = time.monotonic()
-        sb.start()
-        logger.debug(
-            "Sandbox instance started environment=%s in %.2fs",
-            environment_ref,
-            time.monotonic() - _t,
-        )
+        try:
+            sb.start()
+            logger.debug(
+                "Sandbox instance started environment=%s in %.2fs",
+                environment_ref,
+                time.monotonic() - _t,
+            )
 
-        if writable_workspace:
-            sb.copy_tree_into(self.repo_path, "/workspace")
-            try:
-                baseline = sb.exec(
-                    "cd /workspace && "
-                    "rm -rf /workspace/.git && "
-                    "find . -name .git -type f -delete && "
-                    "git init -q && git add -A && "
-                    "git -c user.name=clearwing -c user.email=clearwing@localhost "
-                    "commit -m initial -q && git rev-parse HEAD",
-                    timeout=120,
-                )
-                if baseline.exit_code != 0:
-                    raise RuntimeError(baseline.stderr or "git baseline creation failed")
-                sb.workspace_baseline_commit = baseline.stdout.strip()
-            except Exception:
-                logger.warning("git init in writable workspace failed", exc_info=True)
+            if writable_workspace:
+                sb.copy_tree_into(self.repo_path, "/workspace")
+                try:
+                    baseline = sb.exec(
+                        "cd /workspace && "
+                        "rm -rf /workspace/.git && "
+                        "find . -name .git -type f -delete && "
+                        "git init -q && git add -A && "
+                        "git -c user.name=clearwing -c user.email=clearwing@localhost "
+                        "commit -m initial -q && git rev-parse HEAD",
+                        timeout=120,
+                    )
+                    if baseline.exit_code != 0:
+                        raise RuntimeError(baseline.stderr or "git baseline creation failed")
+                    sb.workspace_baseline_commit = baseline.stdout.strip()
+                except Exception:
+                    logger.warning("git init in writable workspace failed", exc_info=True)
+        except BaseException:
+            sb.stop()
+            if scratch_host_dir:
+                shutil.rmtree(scratch_host_dir, ignore_errors=True)
+            raise
 
         # Stash scratch host dir + variant on the container for cleanup / introspection
         sb.scratch_host_dir = scratch_host_dir
