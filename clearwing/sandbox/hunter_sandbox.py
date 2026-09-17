@@ -346,6 +346,13 @@ class HunterSandbox:
 
         Returns a SandboxInstance ready for exec/write/read.
         """
+        if self.backend.name == "kubernetes":
+            # Kubernetes sandboxes do not share the caller's filesystem.
+            # Stream the repository after pod startup and use the image's
+            # pod-local /scratch directory instead of requesting host mounts.
+            writable_workspace = True
+            scratch_mount = False
+
         if self._environment_ref is None:
             self.prepare_environment()
 

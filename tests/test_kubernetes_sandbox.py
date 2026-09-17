@@ -42,6 +42,25 @@ def test_host_mounts_are_rejected():
         backend.create("sandbox:1", config)
 
 
+def test_hunter_sandbox_streams_workspace_and_uses_pod_local_scratch(tmp_path):
+    from clearwing.sandbox.hunter_sandbox import HunterSandbox
+
+    backend = MagicMock(name="backend")
+    backend.name = "kubernetes"
+    backend.available_cpus.return_value = (None, "Kubernetes scheduler")
+    backend.ensure_environment.return_value = SimpleNamespace(reference="sandbox:1", cached=True)
+    instance = MagicMock()
+    instance.scratch_host_dir = None
+    backend.create.return_value = instance
+    manager = HunterSandbox(str(tmp_path), backend=backend)
+
+    manager.spawn()
+
+    config = backend.create.call_args.args[1]
+    assert config.mounts == []
+    instance.copy_tree_into.assert_called_once_with(str(tmp_path), "/workspace")
+
+
 def test_pod_lifecycle(monkeypatch):
     client = pytest.importorskip("kubernetes.client")
     api = MagicMock()
