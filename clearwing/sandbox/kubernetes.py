@@ -233,6 +233,15 @@ class KubernetesSandbox:
             raise RuntimeError("sandbox pod has not been started")
         from kubernetes.stream import stream
 
+        if stdin is not None:
+            # The Kubernetes Python WSClient has no half-close operation for
+            # stdin. Make the remote process consume an exact byte count so it
+            # can finish without waiting for an EOF that the client cannot send.
+            command = [
+                "/bin/sh",
+                "-c",
+                f"head -c {len(stdin)} | {shlex.join(command)}",
+            ]
         response = stream(
             self._api_factory().connect_get_namespaced_pod_exec,
             self._pod_name,
@@ -248,7 +257,6 @@ class KubernetesSandbox:
         if stdin is not None:
             for offset in range(0, len(stdin), 1024 * 1024):
                 response.write_stdin(stdin[offset : offset + 1024 * 1024])
-            response.close_stdin()
         return response
 
     def exec(

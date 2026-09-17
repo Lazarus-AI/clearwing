@@ -88,3 +88,23 @@ def test_exit_code_parsing():
         '{"status":"Failure","details":{"causes":[{"reason":"ExitCode","message":"137"}]}}'
     )
     assert KubernetesSandbox._parse_exit_code(response) == 137
+
+
+def test_stream_with_stdin_uses_exact_length_instead_of_half_close(monkeypatch):
+    import kubernetes.stream
+
+    response = MagicMock(spec=["write_stdin"])
+    stream = MagicMock(return_value=response)
+    monkeypatch.setattr(kubernetes.stream, "stream", stream)
+    sandbox = KubernetesSandbox("sandbox:1", SandboxRunConfig(), namespace="jobs")
+    sandbox._pod_name = "clearwing-sandbox-test"
+
+    result = sandbox._stream(["tar", "-xf", "-", "-C", "/workspace"], stdin=b"payload")
+
+    assert result is response
+    assert stream.call_args.kwargs["command"] == [
+        "/bin/sh",
+        "-c",
+        "head -c 7 | tar -xf - -C /workspace",
+    ]
+    response.write_stdin.assert_called_once_with(b"payload")
