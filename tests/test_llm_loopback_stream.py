@@ -73,6 +73,47 @@ def loopback_client(base_url, tmp_path, enforcing, transport, monkeypatch):
     return client, ledger
 
 
+def test_builder_configures_openai_endpoint_and_auth():
+    client = AsyncLLMClient(
+        model_name="fixture-model",
+        provider_name="openai",
+        api_key="secret",
+        base_url="https://gateway.example/v1",
+    )._build_client(Client)
+
+    target = client.resolve_service_target("fixture-model")
+    assert client.adapter_kind.name == "openai"
+    assert target.endpoint.base_url == "https://gateway.example/v1/"
+    assert target.auth.kind == "key"
+
+
+@pytest.mark.parametrize(
+    ("provider", "adapter", "url"),
+    [
+        ("openai_codex", "openai_resp", "https://chatgpt.example/codex/responses"),
+        ("anthropic_oauth", "anthropic", "https://anthropic.example/v1/messages"),
+    ],
+)
+def test_builder_preserves_oauth_request_override(provider, adapter, url):
+    client = AsyncLLMClient(
+        model_name="fixture-model",
+        provider_name="openai",
+        api_key="secret",
+    )
+    client.provider_name = provider
+    client.base_url = "https://chatgpt.example/codex" if provider == "openai_codex" else None
+    client._default_headers = {"authorization": "Bearer secret"}
+    if provider == "anthropic_oauth":
+        client._anthropic_oauth_url = url
+
+    native = client._build_client(Client)
+    target = native.resolve_service_target("fixture-model")
+
+    assert native.adapter_kind.name == adapter
+    assert target.auth.kind == "request_override"
+    assert target.auth.url == url
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["native", "fallback"])
 @pytest.mark.parametrize("enforcing", [False, True])
