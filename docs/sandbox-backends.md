@@ -111,6 +111,20 @@ The returned `SandboxInstance` provides `start`, `exec`, `write_file`,
 lifecycle properties. Downstream SourceHunt code depends on this protocol,
 not on the Docker SDK implementation.
 
+### Kubernetes lifecycle
+
+Kubernetes sandbox pods intentionally have no pod-wide
+`activeDeadlineSeconds`: SourceHunts may legitimately outlive the default
+per-command timeout. Individual `exec` calls still enforce their requested
+timeouts, and the caller owns the overall SourceHunt deadline.
+
+Clearwing deletes each pod during normal cleanup, retries a failed deletion at
+process exit, and records the calling pod as an owner when it can be resolved.
+The owner reference is the hard-crash safety net: Kubernetes garbage-collects
+the sandbox after the calling pod is deleted even when Clearwing cannot run
+cleanup. Deployments should apply a TTL to completed caller Jobs so that this
+fallback is timely.
+
 ## JSON-RPC protocol
 
 The socket adapter uses JSON-RPC 2.0. Each request or response is one UTF-8
