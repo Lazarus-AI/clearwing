@@ -1,15 +1,48 @@
 from __future__ import annotations
 
 import json
+import random
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
-from genai_pyo3 import ChatMessage, ChatOptions, ChatRequest, ChatResponse, JsonSpec, Tool, Usage
+from genai_pyo3 import (
+    BadRequestError,
+    ChatMessage,
+    ChatOptions,
+    ChatRequest,
+    ChatResponse,
+    JsonSpec,
+    ServerError,
+    Tool,
+    Usage,
+)
 
 from clearwing.llm.budget import SpendLedger
 from clearwing.llm.native import AsyncLLMClient
+
+
+def server_error(status: int, *, retry_after: float | None = None) -> ServerError:
+    error = ServerError(f"HTTP {status} from model provider")
+    error.status = status
+    error.retryable = True
+    error.retry_after = retry_after
+    error.headers = {"retry-after": str(retry_after)} if retry_after is not None else {}
+    error.body = '{"error":"model provider response failed"}'
+    error.kind = "http_error"
+    return error
+
+
+def bad_request_error(status: int) -> BadRequestError:
+    error = BadRequestError(f"HTTP {status} from model provider")
+    error.status = status
+    error.retryable = False
+    error.retry_after = None
+    error.headers = {}
+    error.body = '{"error":"bad request"}'
+    error.kind = "http_error"
+    return error
 
 
 @pytest.fixture(autouse=True)
@@ -238,7 +271,10 @@ async def test_failed_fallback_stream_never_replays_request(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enforcing", [False, True])
-@pytest.mark.parametrize("error", ["connection refused", "HTTP 429"])
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("connection refused"), RuntimeError("HTTP 429"), server_error(502)],
+)
 async def test_unbilled_stream_retry_settles_only_success(monkeypatch, tmp_path, enforcing, error):
     async def events():
         yield SimpleNamespace(content="ok", end=object())
@@ -246,7 +282,7 @@ async def test_unbilled_stream_retry_settles_only_success(monkeypatch, tmp_path,
     response = ChatResponse(
         content=[{"text": "ok"}], usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1)
     )
-    native = SimpleNamespace(astream_chat=AsyncMock(side_effect=[RuntimeError(error), events()]))
+    native = SimpleNamespace(astream_chat=AsyncMock(side_effect=[error, events()]))
     monkeypatch.setattr(AsyncLLMClient, "_build_client", lambda *_: native)
     monkeypatch.setattr(AsyncLLMClient, "_chat_response_from_stream_end", lambda *_: response)
     ledger = make_ledger(tmp_path, enforcing)
@@ -270,6 +306,94 @@ async def test_unbilled_stream_retry_settles_only_success(monkeypatch, tmp_path,
     assert ledger.snapshot()["reserved_usd"] == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforcing", [False, True])
+@pytest.mark.parametrize("status", [502, 503, 504])
+async def test_deferred_native_gateway_error_before_first_event_retries_once(
+    monkeypatch, tmp_path, enforcing, status
+):
+    async def rejected_events():
+        if False:
+            yield None
+        raise server_error(status)
+
+    async def successful_events():
+        yield SimpleNamespace(content="ok", end=object())
+
+    response = ChatResponse(
+        content=[{"text": "ok"}],
+        usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1),
+    )
+    operation = AsyncMock(side_effect=[rejected_events(), successful_events()])
+    monkeypatch.setattr(
+        AsyncLLMClient,
+        "_build_client",
+        lambda *_: SimpleNamespace(astream_chat=operation),
+    )
+    monkeypatch.setattr(AsyncLLMClient, "_chat_response_from_stream_end", lambda *_: response)
+    ledger = make_ledger(tmp_path, enforcing)
+    client = AsyncLLMClient(
+        model_name="fixture-model",
+        provider_name="openai",
+        api_key="dummy",
+        rate_limit_max_retries=1,
+    ).with_spend_ledger(ledger, stage="test")
+    monkeypatch.setattr(client, "_retry_delay_seconds", lambda *_: 0)
+    deltas = []
+
+    result = await client.achat_stream(
+        messages=[ChatMessage("user", "hello")],
+        max_tokens=2,
+        on_text_delta=deltas.append,
+    )
+
+    assert result is response
+    assert deltas == ["ok"]
+    assert operation.await_count == 2
+    assert ledger.spent_usd == 1.0
+    assert ledger.snapshot()["reserved_usd"] == 0
+    assert ledger._records[-1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        server_error(500),
+        bad_request_error(400),
+        bad_request_error(401),
+        bad_request_error(403),
+        bad_request_error(404),
+        bad_request_error(422),
+    ],
+)
+async def test_other_structured_http_errors_are_not_retried(error):
+    operation = AsyncMock(side_effect=error)
+    client = AsyncLLMClient(
+        model_name="fixture-model",
+        provider_name="openai",
+        api_key="dummy",
+        rate_limit_max_retries=3,
+    )
+
+    with pytest.raises(type(error)):
+        await client._with_retries(operation)
+
+    operation.assert_awaited_once()
+
+
+def test_structured_retry_after_takes_precedence(monkeypatch):
+    client = AsyncLLMClient(
+        model_name="fixture-model",
+        provider_name="openai",
+        api_key="dummy",
+        rate_limit_max_backoff_seconds=60,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0)
+
+    assert client._retry_delay_seconds(server_error(502, retry_after=7.5), 0) == 7.5
+
+
 def make_ledger(tmp_path, enforcing):
     return SpendLedger(
         limit_usd=10.0 if enforcing else 0.0,
@@ -285,7 +409,8 @@ def make_ledger(tmp_path, enforcing):
 @pytest.mark.parametrize("enforcing", [False, True])
 @pytest.mark.parametrize("partial", [False, True])
 @pytest.mark.parametrize(
-    "error", ["connection reset", "connection refused", "HTTP 429", "eof", "callback"]
+    "error",
+    ["connection reset", "connection refused", "HTTP 429", "server_502", "eof", "callback"],
 )
 async def test_accepted_native_stream_never_replays(
     monkeypatch, tmp_path, enforcing, partial, error
@@ -296,7 +421,7 @@ async def test_accepted_native_stream_never_replays(
         else:
             yield SimpleNamespace(kind="chunk", content=None, end=None)
         if error != "eof":
-            raise RuntimeError(error)
+            raise server_error(502) if error == "server_502" else RuntimeError(error)
 
     native = SimpleNamespace(astream_chat=AsyncMock(side_effect=lambda *_: events()))
     monkeypatch.setattr(AsyncLLMClient, "_build_client", lambda *_: native)
@@ -336,18 +461,19 @@ async def test_accepted_native_stream_never_replays(
 @pytest.mark.parametrize(
     "error,unbilled",
     [
-        ("connection refused", True),
-        ("HTTP 429", True),
-        ("error sending request", False),
-        ("connection reset", False),
-        ("timeout", False),
-        ("Web stream error", False),
+        (RuntimeError("connection refused"), True),
+        (RuntimeError("HTTP 429"), True),
+        (server_error(502), True),
+        (RuntimeError("error sending request"), False),
+        (RuntimeError("connection reset"), False),
+        (RuntimeError("timeout"), False),
+        (RuntimeError("Web stream error"), False),
     ],
 )
 async def test_dispatch_failure_retry_and_accounting(
     monkeypatch, tmp_path, enforcing, streaming, error, unbilled
 ):
-    operation = AsyncMock(side_effect=RuntimeError(error))
+    operation = AsyncMock(side_effect=error)
     native = SimpleNamespace(astream_chat=operation, achat=operation)
     monkeypatch.setattr(AsyncLLMClient, "_build_client", lambda *_: native)
     ledger = make_ledger(tmp_path, enforcing)
@@ -360,7 +486,7 @@ async def test_dispatch_failure_retry_and_accounting(
     monkeypatch.setattr(client, "_retry_delay_seconds", lambda *_: 0)
     call = client.achat_stream if streaming else client.achat
     kwargs = {"on_text_delta": Mock()} if streaming else {}
-    with pytest.raises(RuntimeError, match=error):
+    with pytest.raises(type(error), match=str(error)):
         await call(messages=[ChatMessage("user", "hello")], max_tokens=2, **kwargs)
     assert operation.await_count == (2 if unbilled else 1)
     assert ledger.spent_usd == (2.0 if enforcing and not unbilled else 0.0)
