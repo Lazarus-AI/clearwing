@@ -1233,19 +1233,26 @@ class SourceHuntRunner:
         return summary
 
     def run(self) -> SourceHuntResult:
+        from clearwing.observability.otel import force_flush
         from clearwing.ui.llm_activity import llm_activity_panel
 
         self._ensure_spend_ledger()
-        with llm_activity_panel(
-            live=self._live,
-            budget_usd=self.budget_usd or None,
-            spend_ledger=self._spend_ledger,
-            trace_context=lambda: (
-                getattr(self, "_otel_trace_id", None),
-                getattr(self, "_otel_span_id", None),
-            ),
-        ):
-            return asyncio.run(self.arun())
+        try:
+            with llm_activity_panel(
+                live=self._live,
+                budget_usd=self.budget_usd or None,
+                spend_ledger=self._spend_ledger,
+                trace_context=lambda: (
+                    getattr(self, "_otel_trace_id", None),
+                    getattr(self, "_otel_span_id", None),
+                ),
+            ):
+                return asyncio.run(self.arun())
+        finally:
+            # Flush this run's spans before the caller exits or advances to the
+            # next repo. We deliberately do not disconnect: the shared provider
+            # must persist across repeated run() calls within one process.
+            force_flush()
 
     async def _arun_proof_flow(self) -> SourceHuntResult:
         """Run the proof-carrying engine and adapt its typed output."""
@@ -1953,6 +1960,17 @@ class SourceHuntRunner:
 
     @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
+        # Programmatic callers (the eval harness, the sourcehunt agent tool,
+        # notebooks, campaign per-repo runs) reach the runner directly,
+        # bypassing the CLI/web entrypoints that normally wire up OTLP tracing.
+        # Bootstrap here — the single async entry all runs pass through — so
+        # their spans are exported instead of dropping into the no-op proxy
+        # provider. It is a no-op unless OTLP export is configured and is
+        # idempotent (a process-wide singleton), so it stays safe under the CLI.
+        from clearwing.observability.integration import ObservabilityIntegration
+
+        ObservabilityIntegration.bootstrap_from_env()
+
         self._run_started_at = datetime.now(timezone.utc).isoformat()
         self._run_started_monotonic = time.monotonic()
         span_context = otel_trace.get_current_span().get_span_context()
