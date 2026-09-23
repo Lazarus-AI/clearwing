@@ -101,7 +101,10 @@ def _otlp_exporter() -> SpanExporter:
         )
         if api_key := os.environ.get("PHOENIX_API_KEY"):
             if not standard_headers_configured:
-                kwargs["headers"] = {"api_key": api_key}
+                # Phoenix authenticates OTLP ingestion via a Bearer token; an
+                # ``api_key`` header is rejected with 401 and the batch span
+                # processor drops the spans silently.
+                kwargs["headers"] = {"authorization": f"Bearer {api_key}"}
         return OTLPSpanExporter(**kwargs)
     return OTLPSpanExporter()
 
