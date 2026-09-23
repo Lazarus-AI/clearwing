@@ -1960,8 +1960,7 @@ class SourceHuntRunner:
 
     @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
-        # Programmatic callers (the eval harness, the sourcehunt agent tool,
-        # notebooks, campaign per-repo runs) reach the runner directly,
+        # Programmatic callers reach the runner directly,
         # bypassing the CLI/web entrypoints that normally wire up OTLP tracing.
         # Bootstrap here — the single async entry all runs pass through — so
         # their spans are exported instead of dropping into the no-op proxy
