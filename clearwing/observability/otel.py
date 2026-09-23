@@ -101,7 +101,7 @@ def _otlp_exporter() -> SpanExporter:
         )
         if api_key := os.environ.get("PHOENIX_API_KEY"):
             if not standard_headers_configured:
-                kwargs["headers"] = {"api_key": api_key}
+                kwargs["headers"] = {"authorization": f"Bearer {api_key}"}
         return OTLPSpanExporter(**kwargs)
     return OTLPSpanExporter()
 

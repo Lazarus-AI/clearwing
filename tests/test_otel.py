@@ -108,7 +108,7 @@ def test_standard_and_phoenix_environment_detection(monkeypatch):
     assert otel.telemetry_configured() is False
 
 
-def test_phoenix_api_key_becomes_otlp_header(monkeypatch):
+def test_phoenix_api_key_becomes_bearer_header(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_HEADERS", raising=False)
@@ -123,7 +123,7 @@ def test_phoenix_api_key_becomes_otlp_header(monkeypatch):
 
     exporter.assert_called_once_with(
         endpoint="https://phoenix.example/v1/traces",
-        headers={"api_key": "secret-key"},
+        headers={"authorization": "Bearer secret-key"},
     )
 
 

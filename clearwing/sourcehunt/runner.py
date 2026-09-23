@@ -1233,19 +1233,23 @@ class SourceHuntRunner:
         return summary
 
     def run(self) -> SourceHuntResult:
+        from clearwing.observability.otel import force_flush
         from clearwing.ui.llm_activity import llm_activity_panel
 
         self._ensure_spend_ledger()
-        with llm_activity_panel(
-            live=self._live,
-            budget_usd=self.budget_usd or None,
-            spend_ledger=self._spend_ledger,
-            trace_context=lambda: (
-                getattr(self, "_otel_trace_id", None),
-                getattr(self, "_otel_span_id", None),
-            ),
-        ):
-            return asyncio.run(self.arun())
+        try:
+            with llm_activity_panel(
+                live=self._live,
+                budget_usd=self.budget_usd or None,
+                spend_ledger=self._spend_ledger,
+                trace_context=lambda: (
+                    getattr(self, "_otel_trace_id", None),
+                    getattr(self, "_otel_span_id", None),
+                ),
+            ):
+                return asyncio.run(self.arun())
+        finally:
+            force_flush()
 
     async def _arun_proof_flow(self) -> SourceHuntResult:
         """Run the proof-carrying engine and adapt its typed output."""
