@@ -1249,9 +1249,6 @@ class SourceHuntRunner:
             ):
                 return asyncio.run(self.arun())
         finally:
-            # Flush this run's spans before the caller exits or advances to the
-            # next repo. We deliberately do not disconnect: the shared provider
-            # must persist across repeated run() calls within one process.
             force_flush()
 
     async def _arun_proof_flow(self) -> SourceHuntResult:
@@ -1960,16 +1957,6 @@ class SourceHuntRunner:
 
     @tracer.chain(name="SourceHunt")
     async def arun(self) -> SourceHuntResult:
-        # Programmatic callers reach the runner directly,
-        # bypassing the CLI/web entrypoints that normally wire up OTLP tracing.
-        # Bootstrap here — the single async entry all runs pass through — so
-        # their spans are exported instead of dropping into the no-op proxy
-        # provider. It is a no-op unless OTLP export is configured and is
-        # idempotent (a process-wide singleton), so it stays safe under the CLI.
-        from clearwing.observability.integration import ObservabilityIntegration
-
-        ObservabilityIntegration.bootstrap_from_env()
-
         self._run_started_at = datetime.now(timezone.utc).isoformat()
         self._run_started_monotonic = time.monotonic()
         span_context = otel_trace.get_current_span().get_span_context()
