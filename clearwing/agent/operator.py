@@ -122,12 +122,18 @@ class OperatorAgent:
     # model that will not emit a scan tool call).
     _SCAN_GATE_MAX_NUDGES = 2
 
+    # How many consecutive turns with no agent output to tolerate before ending
+    # the loop. A single empty turn is normal (the operator can nudge the agent
+    # back into action); a run of them means the agent is genuinely stuck.
+    _MAX_CONSECUTIVE_EMPTY = 3
+
     def __init__(self, config: OperatorConfig):
         self.config = config
         self._turns = 0
         self._progress: list[str] = []
         self._escalated = False
         self._scan_gate_nudges = 0
+        self._consecutive_empty = 0
 
     def run(self) -> OperatorResult:
         """Run the operator loop to completion (sync wrapper over :meth:`arun`)."""
@@ -210,16 +216,18 @@ class OperatorAgent:
                 self._turns += 1
                 agent_response = await self._arun_inner_turn(graph, config, input_msg)
 
-                if not agent_response:
-                    # Agent produced no output — might be done
-                    break
+                # The goal is injected only on the first turn. Afterwards the
+                # operator's decision (below) is the sole driver, so clear
+                # input_msg now — never silently re-inject the original goal,
+                # which makes the agent re-plan from scratch every turn.
+                input_msg = None
 
-                self._emit("agent", agent_response)
-                self._progress.append(f"Turn {self._turns}: {agent_response[:200]}")
-
-                # Handle interrupts (approval requests)
+                # Drain every pending approval interrupt so the agent's tool
+                # calls (kali_execute, scans, ...) actually run this turn. The
+                # bound guards against a pathological approve-forever turn.
                 state = graph.get_state(config)
-                if state.next:
+                drain = 0
+                while getattr(state, "next", None) and drain < 64:
                     handled = await self._ahandle_interrupt(state, graph, config)
                     if not handled:
                         # Needs user escalation for approval
@@ -232,10 +240,29 @@ class OperatorAgent:
                             "please review and re-run with auto_approve_exploits=True "
                             "if authorized.",
                         )
-                    continue
+                    state = graph.get_state(config)
+                    drain += 1
 
-                # Ask the operator LLM what to do next
-                decision = await self._adecide_next(operator_llm, agent_response)
+                if agent_response:
+                    self._consecutive_empty = 0
+                    self._emit("agent", agent_response)
+                    self._progress.append(f"Turn {self._turns}: {agent_response[:200]}")
+                else:
+                    # Tolerate an occasional empty turn (the operator can nudge
+                    # the agent below), but end the loop if the agent goes silent
+                    # for several turns in a row — it is genuinely stuck.
+                    self._consecutive_empty += 1
+                    if self._consecutive_empty >= self._MAX_CONSECUTIVE_EMPTY:
+                        break
+
+                # Ask the operator LLM what to do next. This now runs on EVERY
+                # turn (previously an auto-approved interrupt did `continue` and
+                # skipped it, so the operator never steered and the agent kept
+                # re-planning the original goal). Termination is via the
+                # operator emitting GOALS_COMPLETE, or the cost/timeout caps.
+                decision = await self._adecide_next(
+                    operator_llm, agent_response or "(agent produced no text this turn)"
+                )
 
                 if decision.startswith("GOALS_COMPLETE"):
                     # Scan gate: a local model sometimes narrates scan results it

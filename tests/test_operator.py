@@ -648,5 +648,7 @@ class TestOperatorRun:
         op = OperatorAgent(cfg)
         result = op.run()
 
-        # Should exit cleanly after first turn yields empty
-        assert result.turns <= 1
+        # A single empty turn no longer ends the loop (the operator may nudge
+        # the agent back into action); the loop ends once the agent has been
+        # silent for _MAX_CONSECUTIVE_EMPTY turns in a row.
+        assert result.turns <= OperatorAgent._MAX_CONSECUTIVE_EMPTY
