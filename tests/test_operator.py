@@ -157,9 +157,14 @@ class TestRunInnerTurn:
 
         mock_graph = MagicMock()
         mock_graph.astream = _astream_of([{"messages": [mock_ai]}])
+        # No pending interrupt -> the inner-turn cycle ends after one stream.
+        mock_graph.get_state.return_value = MagicMock(next=None)
 
-        result = _run(op._arun_inner_turn(mock_graph, {}, {"messages": []}))
+        result, needs_escalation = _run(
+            op._arun_inner_turn(mock_graph, {}, {"messages": []})
+        )
         assert "port 22" in result
+        assert needs_escalation is False
 
     def test_handles_list_content(self):
         cfg = OperatorConfig(goals=["scan"], target="10.0.0.1")
@@ -171,8 +176,9 @@ class TestRunInnerTurn:
 
         mock_graph = MagicMock()
         mock_graph.astream = _astream_of([{"messages": [mock_ai]}])
+        mock_graph.get_state.return_value = MagicMock(next=None)
 
-        result = _run(op._arun_inner_turn(mock_graph, {}, {"messages": []}))
+        result, _ = _run(op._arun_inner_turn(mock_graph, {}, {"messages": []}))
         assert "SSH" in result
 
     def test_handles_exception(self):
@@ -181,8 +187,9 @@ class TestRunInnerTurn:
 
         mock_graph = MagicMock()
         mock_graph.astream = _astream_raises(RuntimeError("connection lost"))
+        mock_graph.get_state.return_value = MagicMock(next=None)
 
-        result = _run(op._arun_inner_turn(mock_graph, {}, {"messages": []}))
+        result, _ = _run(op._arun_inner_turn(mock_graph, {}, {"messages": []}))
         assert "error" in result.lower()
 
 
@@ -353,7 +360,7 @@ class TestHandleInterrupt:
         mock_graph = MagicMock()
         mock_graph.ainvoke = AsyncMock()
 
-        result = _run(op._ahandle_interrupt(mock_state, mock_graph, {}))
+        result = _run(op._approve_pending(mock_state, mock_graph, {}))
         assert result is True
 
     def test_exploit_not_auto_approved(self):
@@ -375,7 +382,7 @@ class TestHandleInterrupt:
 
         mock_graph = MagicMock()
 
-        result = _run(op._ahandle_interrupt(mock_state, mock_graph, {}))
+        result = _run(op._approve_pending(mock_state, mock_graph, {}))
         assert result is False
 
     def test_exploit_auto_approved_when_enabled(self):
@@ -397,7 +404,7 @@ class TestHandleInterrupt:
         mock_graph = MagicMock()
         mock_graph.ainvoke = AsyncMock()
 
-        result = _run(op._ahandle_interrupt(mock_state, mock_graph, {}))
+        result = _run(op._approve_pending(mock_state, mock_graph, {}))
         assert result is True
 
     def test_no_tasks(self):
@@ -407,7 +414,7 @@ class TestHandleInterrupt:
         mock_state = MagicMock()
         mock_state.tasks = None
 
-        result = _run(op._ahandle_interrupt(mock_state, MagicMock(), {}))
+        result = _run(op._approve_pending(mock_state, MagicMock(), {}))
         assert result is True
 
 

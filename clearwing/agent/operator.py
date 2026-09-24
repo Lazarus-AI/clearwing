@@ -212,9 +212,13 @@ class OperatorAgent:
                             error="Cost limit reached",
                         )
 
-                # Run one turn of the inner agent
+                # Run one full ReAct cycle. This drives reason->tool->observe
+                # internally (resuming after each auto-approved interrupt) and
+                # returns the agent's text including its post-tool reasoning.
                 self._turns += 1
-                agent_response = await self._arun_inner_turn(graph, config, input_msg)
+                agent_response, needs_escalation = await self._arun_inner_turn(
+                    graph, config, input_msg
+                )
 
                 # The goal is injected only on the first turn. Afterwards the
                 # operator's decision (below) is the sole driver, so clear
@@ -222,26 +226,16 @@ class OperatorAgent:
                 # which makes the agent re-plan from scratch every turn.
                 input_msg = None
 
-                # Drain every pending approval interrupt so the agent's tool
-                # calls (kali_execute, scans, ...) actually run this turn. The
-                # bound guards against a pathological approve-forever turn.
-                state = graph.get_state(config)
-                drain = 0
-                while getattr(state, "next", None) and drain < 64:
-                    handled = await self._ahandle_interrupt(state, graph, config)
-                    if not handled:
-                        # Needs user escalation for approval
-                        return self._build_result(
-                            graph,
-                            config,
-                            start,
-                            "escalated",
-                            escalation_question="Exploit approval required — "
-                            "please review and re-run with auto_approve_exploits=True "
-                            "if authorized.",
-                        )
-                    state = graph.get_state(config)
-                    drain += 1
+                if needs_escalation:
+                    return self._build_result(
+                        graph,
+                        config,
+                        start,
+                        "escalated",
+                        escalation_question="Exploit approval required — "
+                        "please review and re-run with auto_approve_exploits=True "
+                        "if authorized.",
+                    )
 
                 if agent_response:
                     self._consecutive_empty = 0
@@ -342,35 +336,77 @@ class OperatorAgent:
             f"{callback_guidance}"
         )
 
-    async def _arun_inner_turn(self, graph, config: dict, input_msg: dict) -> str:
-        """Run one turn of the inner ReAct agent and extract its response text."""
-        last_ai_content = ""
+    async def _arun_inner_turn(self, graph, config: dict, input_msg):
+        """Run one full ReAct cycle and return (text, needs_escalation).
+
+        A single "turn" drives the agent through reason -> tool-call -> observe
+        -> reason as many times as needed, resuming the SAME graph stream after
+        each auto-approved interrupt. Previously the stream was only run up to
+        the first approval interrupt and the resume output was discarded, so the
+        operator only ever saw the agent's pre-tool narration ("I'll now list
+        X") and never its reasoning about the tool RESULT — the agent then
+        re-planned the same command forever. Capturing post-tool AI content is
+        what lets the operator actually advance the agent.
+
+        Returns the concatenated AI text produced this cycle and a flag that is
+        True when an interrupt could not be auto-approved (needs user).
+        """
+        collected: list[str] = []
+        needs_escalation = False
+
+        def _capture(event) -> None:
+            msgs = event.get("messages", []) if isinstance(event, dict) else []
+            if not msgs:
+                return
+            last = msgs[-1]
+            if getattr(last, "type", None) != "ai" or not hasattr(last, "content"):
+                return
+            content = last.content
+            if isinstance(content, list):
+                content = "\n".join(
+                    c["text"]
+                    for c in content
+                    if isinstance(c, dict) and c.get("type") == "text"
+                )
+            if content and (not collected or collected[-1] != content):
+                collected.append(content)
+
+        # Bound the reason/tool/observe cycles so a pathological loop can't spin
+        # forever within a single operator turn.
+        max_cycles = 40
         try:
-            async for event in graph.astream(input_msg, config, stream_mode="values"):
-                msgs = event.get("messages", [])
-                if msgs:
-                    last = msgs[-1]
-                    if hasattr(last, "content") and last.type == "ai":
-                        content = last.content
-                        if isinstance(content, list):
-                            text_parts = [
-                                c["text"]
-                                for c in content
-                                if isinstance(c, dict) and c.get("type") == "text"
-                            ]
-                            content = "\n".join(text_parts)
-                        if content:
-                            last_ai_content = content
+            stream_input = input_msg
+            for _ in range(max_cycles):
+                async for event in graph.astream(
+                    stream_input, config, stream_mode="values"
+                ):
+                    _capture(event)
+
+                # Reached a stop. If it is an approval interrupt, approve and
+                # resume the SAME stream so the agent observes the tool result.
+                state = graph.get_state(config)
+                if not getattr(state, "next", None):
+                    break  # natural end of the cycle
+
+                approved = await self._approve_pending(state, graph, config)
+                if not approved:
+                    needs_escalation = True
+                    break
+                stream_input = Command(resume=True)
         except Exception as e:
             logger.warning("Inner agent error: %s", e)
-            last_ai_content = f"[Agent error: {e}]"
+            if not collected:
+                collected.append(f"[Agent error: {e}]")
 
-        return last_ai_content
+        return "\n\n".join(collected), needs_escalation
 
-    async def _ahandle_interrupt(self, state, graph, config: dict) -> bool:
-        """Handle an interrupt (approval request) from the inner agent.
+    async def _approve_pending(self, state, graph, config: dict) -> bool:
+        """Decide whether the pending interrupt(s) may be auto-approved.
 
-        Returns True if handled, False if needs user escalation.
+        Returns True if approval is granted (the CALLER resumes the graph),
+        False if the interrupt needs a real user. This no longer resumes the
+        graph itself — the inner-turn stream owns resumption so the agent's
+        post-tool reasoning is captured in the same cycle.
         """
         tasks = getattr(state, "tasks", None)
         if not tasks:
@@ -384,18 +420,14 @@ class OperatorAgent:
                 prompt = str(intr.value)
                 self._emit("approval", prompt)
 
-                # Decide whether to auto-approve
                 is_scan = any(
                     kw in prompt.lower()
                     for kw in ["scan", "detect", "enumerate", "fingerprint", "nmap"]
                 )
                 if is_scan and self.config.auto_approve_scans:
-                    await graph.ainvoke(Command(resume=True), config)
                     self._progress.append(f"Auto-approved scan: {prompt[:100]}")
                     return True
-
                 if self.config.auto_approve_exploits:
-                    await graph.ainvoke(Command(resume=True), config)
                     self._progress.append(f"Auto-approved exploit: {prompt[:100]}")
                     return True
 
