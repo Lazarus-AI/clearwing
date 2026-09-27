@@ -20,12 +20,17 @@ from urllib.parse import urljoin
 import aiohttp
 import jsonschema
 from genai_pyo3 import (
+    ApiError,
+    AuthData,
     ChatMessage,
     ChatOptions,
     ChatRequest,
     ChatResponse,
     Client,
+    GenaiError,
     JsonSpec,
+    RateLimitError,
+    ServerError,
     StreamEnd,
     Tool,
     Usage,
@@ -858,6 +863,8 @@ class AsyncLLMClient:
             return True
         if isinstance(exc, Exception) and self._is_rate_limit_error(exc):
             return True
+        if isinstance(exc, Exception) and self._is_transient_gateway_error(exc):
+            return True
         if self._is_unsupported_reasoning_effort_error(exc):
             return True
         if isinstance(exc, Exception) and self._is_definitely_unbilled_transport_error(exc):
@@ -1272,20 +1279,32 @@ class AsyncLLMClient:
         def traced(client):
             return _TracedGenAIClient(client)
 
-        # anthropic_oauth bypasses the normal auth resolver entirely —
-        # with_request_override sends only our explicit headers (Bearer
-        # token + beta flags), avoiding the ANTHROPIC_API_KEY env lookup.
-        if self.provider_name == "anthropic_oauth":
-            return traced(
-                client_cls.with_request_override(
-                    "anthropic",
-                    self._anthropic_oauth_url,
-                    self._default_headers or {},
+        def builder(adapter_kind: str | None = None):
+            return (
+                client_cls.builder()
+                .adapter_kind(adapter_kind or self.provider_name)
+                .timeouts(
+                    connect_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
+                    read_seconds=_LLM_READ_TIMEOUT_SECONDS,
+                    total_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
                 )
             )
 
+        # anthropic_oauth bypasses the normal auth resolver entirely. A
+        # request override sends only our explicit headers (Bearer token +
+        # beta flags), avoiding the ANTHROPIC_API_KEY env lookup.
+        if self.provider_name == "anthropic_oauth":
+            configured = builder("anthropic").provider(
+                "anthropic",
+                auth=AuthData.request_override(
+                    self._anthropic_oauth_url,
+                    self._default_headers or {},
+                ),
+            )
+            return traced(configured.build())
+
         # openai_codex (ChatGPT OAuth) is the openai_resp adapter pointed at
-        # the ChatGPT backend's Responses endpoint. with_request_override sends
+        # the ChatGPT backend's Responses endpoint. Its request override sends
         # our exact URL + headers (Bearer token, ChatGPT-Account-ID, originator)
         # through genai-pyo3's native transport — verified to work end-to-end.
         # (The old aiohttp fallback blamed "Cloudflare 404s reqwest/HTTP2"; that
@@ -1299,46 +1318,25 @@ class AsyncLLMClient:
             headers = dict(self._default_headers or {})
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            return traced(client_cls.with_request_override("openai_resp", responses_url, headers))
+            configured = builder("openai_resp").provider(
+                "openai_resp",
+                auth=AuthData.request_override(responses_url, headers),
+            )
+            return traced(configured.build())
 
         rust_provider = self.provider_name
         default_headers = self._default_headers
         base_url = self.base_url
-        if base_url:
-            base_url = base_url if base_url.endswith("/") else f"{base_url}/"
-            if self.api_key:
-                return traced(
-                    client_cls.with_api_key_and_base_url(
-                        rust_provider,
-                        self.api_key,
-                        base_url,
-                        default_headers=default_headers,
-                        connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                        read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                        timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
-                    )
-                )
-            return traced(
-                client_cls.with_base_url(
-                    rust_provider,
-                    base_url,
-                    default_headers=default_headers,
-                    connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                    read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                    timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
-                )
+        configured = builder()
+        if default_headers:
+            configured = configured.default_headers(default_headers)
+        if base_url or self.api_key:
+            configured = configured.provider(
+                rust_provider,
+                endpoint=(base_url if not base_url or base_url.endswith("/") else f"{base_url}/"),
+                auth=AuthData.key(self.api_key) if self.api_key else None,
             )
-        if self.api_key:
-            return traced(
-                client_cls.with_api_key(
-                    rust_provider,
-                    self.api_key,
-                    default_headers=default_headers,
-                    connect_timeout_seconds=_LLM_CONNECT_TIMEOUT_SECONDS,
-                    read_timeout_seconds=_LLM_READ_TIMEOUT_SECONDS,
-                    timeout_seconds=_LLM_TOTAL_TIMEOUT_SECONDS,
-                )
-            )
+            return traced(configured.build())
         raise RuntimeError(
             f"Cannot build LLM client for model={self.model_name} "
             f"provider={self.provider_name}: no API key or base URL configured. "
@@ -1895,12 +1893,15 @@ class AsyncLLMClient:
                     raise
                 is_rate_limit = self._is_rate_limit_error(exc)
                 is_transport = self._is_definitely_unbilled_transport_error(exc)
+                is_transient_gateway = self._is_transient_gateway_error(exc)
                 retry_limit = (
                     min(self.rate_limit_max_retries, self.timeout_max_retries)
-                    if self._is_timeout_error(exc)
+                    if self._is_timeout_error(exc) or is_transient_gateway
                     else self.rate_limit_max_retries
                 )
-                if (not is_rate_limit and not is_transport) or attempt >= retry_limit:
+                if (
+                    not is_rate_limit and not is_transport and not is_transient_gateway
+                ) or attempt >= retry_limit:
                     raise
 
                 delay = self._retry_delay_seconds(exc, attempt)
@@ -1910,7 +1911,13 @@ class AsyncLLMClient:
                     "%.2fs (attempt %d/%d): %s",
                     self.model_name,
                     self.provider_name,
-                    "rate-limited" if is_rate_limit else "transport error",
+                    (
+                        "rate-limited"
+                        if is_rate_limit
+                        else (
+                            "transient gateway error" if is_transient_gateway else "transport error"
+                        )
+                    ),
                     delay,
                     attempt,
                     retry_limit,
@@ -1960,15 +1967,20 @@ class AsyncLLMClient:
     @staticmethod
     def _is_native_http_rejection(exc: BaseException) -> bool:
         """Recognize genai HTTP rejections deferred until the first stream poll."""
-        return bool(
-            re.match(
-                r"^Web stream error for model '[^\n]+'\.\n"
-                r"Cause: HTTP error\.\nStatus: (?:400|401|403|404|422|429)\b",
-                str(exc),
-            )
-        )
+        return isinstance(exc, ApiError) and AsyncLLMClient._genai_http_status(exc) is not None
+
+    @staticmethod
+    def _genai_http_status(exc: BaseException) -> int | None:
+        if not isinstance(exc, GenaiError):
+            return None
+        status = getattr(exc, "status", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        return status if isinstance(status, int) else None
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
+        if isinstance(exc, RateLimitError) or self._genai_http_status(exc) == 429:
+            return True
         text = str(exc).lower()
         return (
             " 429" in text
@@ -1978,6 +1990,15 @@ class AsyncLLMClient:
             or "rate limit" in text
             or "ratelimit" in text
         )
+
+    @staticmethod
+    def _is_transient_gateway_error(exc: Exception) -> bool:
+        """Recognize bounded, pre-response gateway failures safe to retry."""
+        return isinstance(exc, ServerError) and AsyncLLMClient._genai_http_status(exc) in {
+            502,
+            503,
+            504,
+        }
 
     @staticmethod
     def _is_timeout_error(exc: Exception) -> bool:
@@ -2022,7 +2043,9 @@ class AsyncLLMClient:
         return "  <- ".join(parts)
 
     def _retry_delay_seconds(self, exc: Exception, attempt: int) -> float:
-        retry_after = self._parse_retry_after_seconds(str(exc))
+        retry_after = getattr(exc, "retry_after", None)
+        if not isinstance(retry_after, (int, float)) or retry_after < 0:
+            retry_after = self._parse_retry_after_seconds(str(exc))
         if retry_after is not None:
             base_delay = retry_after
         else:
