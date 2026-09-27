@@ -1647,13 +1647,25 @@ class NativeHunter:
             if not synthesis_injected:
                 near_budget = self.budget_usd > 0 and total_cost_usd >= self.budget_usd * 0.75
                 near_steps = step >= self.max_steps - 1
-                if near_budget or near_steps:
+                near_stall = (
+                    self.max_steps_without_progress > 0
+                    and steps_since_progress >= self.max_steps_without_progress
+                )
+                if near_budget or near_steps or near_stall:
                     synthesis_injected = True
                     synthesis_prompt_added = True
+                    if near_stall and not (near_budget or near_steps):
+                        synthesis_reason = (
+                            "Your investigation has made no durable progress for several "
+                            "turns and will stop after this recovery turn unless you conclude "
+                            "it now."
+                        )
+                    else:
+                        synthesis_reason = "You are approaching the end of your budget."
                     messages.append(
                         ChatMessage(
                             "user",
-                            "You are approaching the end of your budget. Synthesize your final "
+                            f"{synthesis_reason} Synthesize your final "
                             "findings now. For each lead you investigated, either record_finding "
                             "if it is source-backed, or discard it only if the source affirmatively "
                             "disproves it. Do not drop leads merely because you ran out of time "
