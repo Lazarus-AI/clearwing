@@ -1,7 +1,9 @@
-"""Unit tests for deep agent mode tools (execute, read_file, write_file)."""
+"""Unit tests for deep agent mode search and sandbox tools."""
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -40,7 +42,142 @@ def test_build_deep_agent_tools_set(ctx):
     names = {t.name for t in tools}
     assert "think" not in names
     assert "semgrep_scan" not in names
-    assert {"execute", "read_file", "write_file", "record_finding"} <= names
+    assert {
+        "grep_source",
+        "find_source",
+        "execute",
+        "read_file",
+        "write_file",
+        "record_finding",
+    } <= names
+
+
+def _repo_tools(repo: Path):
+    return {t.name: t for t in build_deep_agent_tools(HunterContext(repo_path=str(repo)))}
+
+
+def test_deep_grep_source_bounded_and_explicit_empty(tmp_path):
+    source = tmp_path / "src" / "codec.c"
+    source.parent.mkdir()
+    source.write_text("".join(f"needle {line}\n" for line in range(45)))
+    tools = _repo_tools(tmp_path)
+
+    found = tools["grep_source"].invoke({"pattern": "needle", "path": "src"})
+    assert found["status"] == "truncated"
+    assert found["truncated"] is True
+    assert found["count"] == 40
+    assert found["matches"][0] == {
+        "file": "src/codec.c",
+        "line_number": 1,
+        "matched_text": "needle 0",
+    }
+    assert "read_file" in found["next_action"]
+
+    empty = tools["grep_source"].invoke({"pattern": "absent", "path": "src"})
+    assert empty["status"] == "no_matches"
+    assert empty["matches"] == []
+    assert empty["truncated"] is False
+
+
+def test_deep_find_source_matches_files_directories_and_stays_in_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "src" / "parser"
+    target.mkdir(parents=True)
+    for index in range(45):
+        (target / f"parser_{index:02}.c").write_text("int x;\n")
+    outside = tmp_path / "outside_secret.c"
+    outside.write_text("secret\n")
+    (repo / "outside_secret.c").symlink_to(outside)
+    tools = _repo_tools(repo)
+
+    files = tools["find_source"].invoke({"query": "parser_", "kind": "file"})
+    assert files["status"] == "truncated"
+    assert files["count"] == 40
+    assert all(hit["type"] == "file" for hit in files["matches"])
+    directories = tools["find_source"].invoke({"query": "pars*", "kind": "directory"})
+    assert directories["matches"] == [{"path": "src/parser", "type": "directory"}]
+    assert tools["find_source"].invoke({"query": "missing"})["status"] == "no_matches"
+    assert tools["find_source"].invoke({"query": "secret"})["status"] == "no_matches"
+    assert tools["find_source"].invoke({"query": "x", "path": "../"})["status"] == "error"
+
+
+def test_deep_grep_sandbox_command_has_global_result_cap(tmp_path):
+    source = tmp_path / "src.c"
+    source.write_text("needle\n")
+    sandbox = MagicMock()
+    sandbox.exec.return_value = ExecResult(
+        exit_code=0,
+        stdout="".join(f"/workspace/src.c:{line}:needle\n" for line in range(1, 42)),
+        stderr="",
+        duration_seconds=0.01,
+    )
+    tools = {t.name: t for t in build_deep_agent_tools(HunterContext(str(tmp_path), sandbox))}
+
+    result = tools["grep_source"].invoke({"pattern": "needle"})
+
+    assert result["status"] == "truncated"
+    assert len(result["matches"]) == 40
+    command = sandbox.exec.call_args.args[0]
+    assert "head -n 41" in command
+    assert "/workspace" in command
+
+
+def test_deep_find_uses_bounded_sandbox_repository_search(tmp_path):
+    (tmp_path / "src").mkdir()
+    sandbox = MagicMock()
+    sandbox.exec.return_value = ExecResult(
+        exit_code=0,
+        stdout="directory\t/workspace/src/parser\nfile\t/workspace/src/parser.c\n",
+        stderr="",
+        duration_seconds=0.01,
+    )
+    tools = {t.name: t for t in build_deep_agent_tools(HunterContext(str(tmp_path), sandbox))}
+
+    result = tools["find_source"].invoke({"query": "parser", "path": "src"})
+
+    assert result["status"] == "matches"
+    assert result["matches"] == [
+        {"path": "src/parser", "type": "directory"},
+        {"path": "src/parser.c", "type": "file"},
+    ]
+    command = sandbox.exec.call_args.args[0]
+    assert "find /workspace/src" in command
+    assert "head -n 41" in command
+    assert sandbox.exec.call_args.kwargs["timeout"] == 30
+
+
+def test_deep_find_sandbox_command_returns_real_paths(tmp_path):
+    (tmp_path / "src" / "parser").mkdir(parents=True)
+    (tmp_path / "src" / "parser.c").write_text("int parse(void);\n")
+    sandbox = MagicMock()
+
+    def run_in_test_repo(command, timeout):
+        completed = subprocess.run(
+            command.replace("/workspace", str(tmp_path)),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return ExecResult(
+            exit_code=completed.returncode,
+            stdout=completed.stdout.replace(str(tmp_path), "/workspace"),
+            stderr=completed.stderr,
+            duration_seconds=0.01,
+        )
+
+    sandbox.exec.side_effect = run_in_test_repo
+    tools = {t.name: t for t in build_deep_agent_tools(HunterContext(str(tmp_path), sandbox))}
+
+    result = tools["find_source"].invoke({"query": "pars*", "path": "src"})
+
+    assert result["status"] == "matches"
+    assert result["matches"] == [
+        {"path": "src/parser", "type": "directory"},
+        {"path": "src/parser.c", "type": "file"},
+    ]
 
 
 def test_execute_runs_command(tools, mock_sandbox):
@@ -55,6 +192,23 @@ def test_execute_runs_command(tools, mock_sandbox):
 def test_execute_custom_timeout(tools, mock_sandbox):
     tools["execute"].handler(command="make", timeout=600)
     mock_sandbox.exec.assert_called_once_with("make", timeout=600)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find / -name evp.h",
+        "cd /workspace && find /workspace -name internal.h",
+        "grep -rn cipher_final / 2>/dev/null | head",
+        "grep -rn RDPGFX_SURFACE_COMMAND --include=*.h .",
+        "find . -name pkcs15.h",
+    ],
+)
+def test_execute_redirects_broad_search_to_repository_tools(tools, mock_sandbox, command):
+    result = tools["execute"].handler(command=command)
+    assert "grep_source" in result["error"]
+    assert "find_source" in result["error"]
+    mock_sandbox.exec.assert_not_called()
 
 
 def test_execute_ignores_unexpected_arguments(tools, mock_sandbox):
