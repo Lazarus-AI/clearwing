@@ -14,8 +14,14 @@ from clearwing.agent.tools.hunt import build_reporting_tools
 from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
 from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
+from clearwing.data.memory import ContextSummarizer
 from clearwing.llm.native import NativeToolSpec
-from clearwing.sourcehunt.hunter import NativeHunter, _read_file_tool_response, _tool_output_text
+from clearwing.sourcehunt.hunter import (
+    NativeHunter,
+    _read_file_tool_response,
+    _ReadCoverageLedger,
+    _tool_output_text,
+)
 
 
 @dataclass
@@ -157,6 +163,23 @@ def test_read_metadata_preserves_an_oversized_source_line():
     assert "     2\ttail" not in summary
     assert "EOF: False" in summary
     assert "Next line: 2" in summary
+
+
+def test_read_coverage_merges_path_aliases_and_warns_only_for_covered_range():
+    ledger = _ReadCoverageLedger()
+    assert ledger.add("src/./parser.c", (1, 20))
+    assert ledger.add("/workspace/src/parser.c", (11, 30))
+    assert not ledger.add("src/parser.c", (12, 18))
+    assert ledger.ranges_for("/workspace/src/parser.c") == [(1, 30)]
+    note = ledger.redundant_read_note("/workspace/src/parser.c", (12, 18))
+    assert note is not None and "src/parser.c lines 12-18" in note
+    assert ledger.redundant_read_note("src/parser.c", (25, 35)) is None
+    short_file = _ReadCoverageLedger()
+    short_file.add("src/short.c", (1, 2))
+    short_file.note_file_length(
+        "src/short.c", "     1\ta\n     2\tb\n[CLEARWING_READ_METADATA total_lines=2]"
+    )
+    assert short_file.redundant_read_note("src/short.c", (1, 100)) is not None
 
 
 def test_structured_search_summary_preserves_status_and_next_action():
@@ -681,7 +704,7 @@ async def test_overlapping_read_file_refreshes_return_content_with_direction():
             tool_calls_list=[
                 _make_tool_call(
                     "read_file",
-                    {"path": "views.py", "offset": 10, "limit": 10},
+                    {"path": "views.py", "offset": 10, "limit": 10, "refresh": True},
                 )
             ]
         ),
@@ -945,6 +968,157 @@ async def test_deep_read_repeated_range_does_not_reset_stall():
     assert result.stop_reason == "stalled"
     assert llm.achat.call_count < 20
     assert ctx.deep_files_read == {"/workspace/only_file.c"}
+
+
+@pytest.mark.asyncio
+async def test_deep_read_coverage_survives_compaction_and_retries_before_tool_call():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, _ = _build_deep_hunter(sandbox)
+    hunter.max_steps_without_progress = 2
+    summarizer = ContextSummarizer()
+    summarizer.should_summarize = MagicMock(side_effect=[False, True, False, False])
+    hunter.summarizer = summarizer
+    llm.aask_text.return_value = FakeResponse(text="Earlier source was inspected.")
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "/workspace/src/foo.c", "limit": 2})
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/./foo.c", "limit": 2, "refresh": True})
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        ),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert result.tokens_used == 4 * FakeUsage().total_tokens
+    assert llm.aask_text.call_count == 1
+    second_messages = llm.achat.call_args_list[1].kwargs["messages"]
+    assert not any(message.content.startswith("[SOURCE COVERAGE") for message in second_messages)
+    retry_messages = llm.achat.call_args_list[2].kwargs["messages"]
+    assert "src/foo.c lines 1-2" in retry_messages[-1].content
+    assert "possibly before context compaction" in retry_messages[-1].content
+    assert "refresh=true" in retry_messages[-1].content
+    assert not any(
+        message.role == "assistant"
+        and message.tool_calls
+        and any(
+            call.fn_arguments.get("path") == "/workspace/src/foo.c" for call in message.tool_calls
+        )
+        for message in retry_messages
+    )
+    second_read = [
+        call.args[1]["tool_summary"]
+        for call in logger.log.call_args_list
+        if call.args and call.args[0] == "tool_result"
+    ][1]
+    assert "Coverage scope: this hunt" in second_read
+    assert "Overlap: 100%" in second_read
+    assert "New lines: None" in second_read
+    retries = [
+        call for call in logger.log.call_args_list if call.args and call.args[0] == "coverage_retry"
+    ]
+    assert len(retries) == 1
+    assert len([call for call in logger.log.call_args_list if call.args[0] == "tool_result"]) == 3
+    assert sandbox.exec.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_deep_hunter_seeds_coverage_from_initial_source_window():
+    hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read())
+    ctx.read_ranges["src/target.c"] = [(20, 40)]
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/target.c", "offset": 19, "limit": 21})
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    first_messages = llm.achat.call_args_list[0].kwargs["messages"]
+    assert not any(message.content.startswith("[SOURCE COVERAGE") for message in first_messages)
+    retry_messages = llm.achat.call_args_list[1].kwargs["messages"]
+    assert "src/target.c lines 20-40" in retry_messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_coverage_retry_drops_entire_mixed_tool_batch():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, _ = _build_deep_hunter(sandbox)
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/foo.c", "limit": 2}),
+                _make_tool_call("execute", {"command": "touch /workspace/should-not-run"}),
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert sandbox.exec.call_count == 1
+    retry_messages = llm.achat.call_args_list[2].kwargs["messages"]
+    assert retry_messages[-1].content.startswith("[SOURCE COVERAGE")
+    assert all("should-not-run" not in str(message.to_dict()) for message in retry_messages)
+    assert (
+        len([call for call in logger.log.call_args_list if call.args[0] == "coverage_retry"]) == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_compaction_rearms_coverage_warning_for_a_file():
+    hunter, llm, _ = _build_deep_hunter(_stub_sandbox_for_deep_read())
+    hunter.max_steps_without_progress = 5
+    summarizer = ContextSummarizer()
+    summarizer.should_summarize = MagicMock(side_effect=[False, False, True])
+    hunter.summarizer = summarizer
+    llm.aask_text.return_value = FakeResponse(text="Earlier source was inspected.")
+
+    def read():
+        return FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        )
+
+    llm.achat.side_effect = [read(), read(), read(), read(), FakeResponse(text="done")]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert llm.aask_text.call_count == 1
+    retries = [call for call in logger.log.call_args_list if call.args[0] == "coverage_retry"]
+    assert len(retries) == 2
+    after_compaction = llm.achat.call_args_list[4].kwargs["messages"]
+    assert after_compaction[-1].content.startswith("[SOURCE COVERAGE")
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import re
 import time
 from dataclasses import dataclass, field
@@ -1583,6 +1584,88 @@ class NativeHunter:
             return "stalled"
         return None
 
+    async def _request_with_coverage_retry(
+        self,
+        messages: list[ChatMessage],
+        active_tools: list[NativeToolSpec],
+        read_coverage: _ReadCoverageLedger,
+        warned_read_paths: set[str],
+        trajectory: HunterTrajectoryLogger,
+        step: int,
+    ) -> tuple[Any, int, int, float]:
+        """Retry one unprompted covered read before committing its tool calls."""
+
+        provider_name = getattr(self.llm, "provider_name", None)
+        total_input = 0
+        total_output = 0
+        total_cost = 0.0
+        coverage_retry_used = False
+        while True:
+            response = await self.llm.achat(
+                messages=list(messages),
+                system=self.prompt,
+                tools=active_tools,
+                cache_prefix=True,
+                prompt_cache_key=(f"{self.ctx.session_id or ''}:{self.ctx.work_item_id or ''}"),
+            )
+            input_tokens = response.usage.prompt_tokens or 0
+            output_tokens = response.usage.completion_tokens or 0
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
+            call_cost = _estimate_cost_usd(
+                input_tokens, output_tokens, self.llm.model_name, cached_tokens
+            )
+            total_input += input_tokens
+            total_output += output_tokens
+            total_cost += call_cost
+            if input_tokens or output_tokens:
+                CostTracker().record_llm_call(
+                    input_tokens,
+                    output_tokens,
+                    self.llm.model_name,
+                    cached_tokens=cached_tokens,
+                    provider=provider_name,
+                )
+
+            warning: tuple[str, str] | None = None
+            if self.agent_mode == "deep" and not coverage_retry_used:
+                for proposed_call in response.tool_calls:
+                    if proposed_call.fn_name != "read_file":
+                        continue
+                    arguments = proposed_call.fn_arguments
+                    if not isinstance(arguments, dict) or arguments.get("refresh") is True:
+                        continue
+                    path = str(arguments.get("path") or "")
+                    key = _canonical_read_path(path)
+                    if key in warned_read_paths:
+                        continue
+                    note = read_coverage.redundant_read_note(path, _requested_read_range(arguments))
+                    if note:
+                        warning = (key, note)
+                        break
+            if warning is None:
+                return response, total_input, total_output, total_cost
+
+            # Nothing from the rejected assistant response has entered messages,
+            # so the retry leaves no unmatched tool call or result behind.
+            key, note = warning
+            warned_read_paths.add(key)
+            coverage_retry_used = True
+            trajectory.log(
+                "coverage_retry",
+                {
+                    "step": step,
+                    "path": key,
+                    "content": note,
+                    "rejected_tool_calls": [
+                        _serialize_tool_call(call) for call in response.tool_calls
+                    ],
+                    "reasoning_content": response.reasoning_content,
+                    "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                },
+            )
+            messages.append(ChatMessage("user", note))
+
     @tracer.agent(name="sourcehunt.hunter")
     async def arun(self) -> HunterRunResult:
         user_msg = (
@@ -1606,14 +1689,11 @@ class NativeHunter:
         last_reasoning_content = ""
         last_output_tokens = 0
         files_visited: set[str] = set()
-        # {rel_path: set of (start_line, end_line) tuples from read_file calls}
-        lines_read: dict[str, list[tuple[int, int]]] = {}
-        # Ranges still present in the active conversation epoch. Unlike
-        # lines_read, this is cleared after compaction so a focused reread can
-        # legitimately boost code back into recent context.
-        visible_read_ranges: dict[str, list[tuple[int, int]]] = {
-            path: list(ranges) for path, ranges in self.ctx.read_ranges.items()
-        }
+        read_coverage = _ReadCoverageLedger()
+        for path, ranges in self.ctx.read_ranges.items():
+            for returned_range in ranges:
+                read_coverage.add(path, returned_range)
+        warned_read_paths: set[str] = set()
         flags_raised: int = 0
         empty_response_nudges: int = 0
         potential_reminder_active = False
@@ -1622,9 +1702,8 @@ class NativeHunter:
         synthesis_injected = False
         step = 0
         # Progress guard: a step counts as progress when it adds a finding, a
-        # potential, reads a previously-unread file, or returns a previously-
-        # unread range from a deep read_file call. A successful execute or
-        # write_file does not count — otherwise a stream of varied failing
+        # potential, or returns previously-undelivered source lines. A successful
+        # execute or write_file does not count — otherwise a stream of varied failing
         # commands would silently reset the stall counter.
         # When nothing advances for max_steps_without_progress steps the hunter
         # stops (see _should_stop). Repeated structured searches count toward
@@ -1633,10 +1712,8 @@ class NativeHunter:
             len(self.ctx.findings),
             tuple(sorted(str(p.get("id")) for p in self.ctx.potentials)),
             len(self.ctx.files_read),
-            len(self.ctx.deep_files_read),
             0,
         )
-        deep_read_ranges: dict[str, list[tuple[int, int]]] = {}
         deep_read_range_progress = 0
         seen_search_locations: set[tuple[str, str, int]] = set()
         search_progress_epoch = 0
@@ -1650,7 +1727,6 @@ class NativeHunter:
                 len(self.ctx.findings),
                 tuple(sorted(str(p.get("id")) for p in self.ctx.potentials)),
                 len(self.ctx.files_read),
-                len(self.ctx.deep_files_read),
                 deep_read_range_progress,
             )
             if progress_sig != last_progress_sig:
@@ -1832,10 +1908,12 @@ class NativeHunter:
                 if self.summarizer and self.summarizer.should_summarize(messages):
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
-                    visible_read_ranges.clear()
+                    # The targeted warning may have been summarized away. Give
+                    # the model one fresh reminder before penalizing a later
+                    # covered read whose warning is no longer in context.
+                    warned_read_paths.clear()
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
-                provider_name = getattr(self.llm, "provider_name", None)
                 active_tools = [] if final_synthesis_turn else self.tools
                 if final_decision_turn and active_tools:
                     active_tools = [
@@ -1852,30 +1930,22 @@ class NativeHunter:
                     active_tools = [
                         tool for tool in active_tools if tool.name not in inactive_potential_tools
                     ]
-                response = await self.llm.achat(
-                    messages=messages,
-                    system=self.prompt,
-                    tools=active_tools,
-                    # Prompt caching: mark the growing prefix cacheable so each
-                    # turn re-reads system + tools + prior history from cache
-                    # instead of paying full input price to re-send it. This is
-                    # a transport/billing hint only — the model still receives
-                    # byte-identical input, so findings are unchanged. Inert on
-                    # providers without caching. The key is stable per hunt so
-                    # OpenAI-style routing keeps hitting the same prefix cache.
-                    cache_prefix=True,
-                    prompt_cache_key=(f"{self.ctx.session_id or ''}:{self.ctx.work_item_id or ''}"),
+                (
+                    response,
+                    request_input,
+                    request_output,
+                    request_cost,
+                ) = await self._request_with_coverage_retry(
+                    messages,
+                    active_tools,
+                    read_coverage,
+                    warned_read_paths,
+                    trajectory,
+                    step,
                 )
-                input_tokens = response.usage.prompt_tokens or 0
-                output_tokens = response.usage.completion_tokens or 0
-                details = getattr(response.usage, "prompt_tokens_details", None)
-                cached_tokens = (getattr(details, "cached_tokens", None) or 0) if details else 0
-                call_cost = _estimate_cost_usd(
-                    input_tokens,
-                    output_tokens,
-                    self.llm.model_name,
-                    cached_tokens,
-                )
+                total_input_tokens += request_input
+                total_output_tokens += request_output
+                total_cost_usd += request_cost
             # Preserve the provider's reasoning_content alongside the
             # visible text. `response.first_text` only returns the
             # first Text part — reasoning/thinking blocks are separate
@@ -1903,23 +1973,6 @@ class NativeHunter:
                     "model": response.provider_model_name,
                 },
             )
-            total_input_tokens += response.usage.prompt_tokens or 0
-            total_output_tokens += response.usage.completion_tokens or 0
-            # Older genai-pyo3 responses and lightweight test doubles may not
-            # expose prompt_tokens_details at all. Treat that the same as a
-            # response where nothing was cache-served.
-            total_cost_usd += call_cost
-            # Keep process-wide cost/UI metrics separate from the OTel span,
-            # which is emitted directly around the model request above.
-            if input_tokens or output_tokens:
-                CostTracker().record_llm_call(
-                    input_tokens,
-                    output_tokens,
-                    self.llm.model_name,
-                    cached_tokens=cached_tokens,
-                    provider=provider_name,
-                )
-
             last_assistant_text = response.first_text or ""
             last_reasoning_content = response.reasoning_content or ""
             last_output_tokens = response.usage.completion_tokens or 0
@@ -2077,10 +2130,6 @@ class NativeHunter:
                         if fpath:
                             rel = str(fpath).removeprefix("/workspace/").removeprefix("/")
                             files_visited.add(rel)
-                            if tool_call.fn_name == "read_file":
-                                lines_read.setdefault(rel, []).append(
-                                    _requested_read_range(tool_arguments)
-                                )
                     elif tool_call.fn_name == "flag_potential":
                         flags_raised += 1
 
@@ -2185,19 +2234,16 @@ class NativeHunter:
                                 seen_search_locations.update(locations)
                         if tool_call.fn_name == "read_file" and isinstance(tool_output, str):
                             reread_path = str(tool_arguments.get("path") or "")
+                            read_coverage.note_file_length(reread_path, tool_output)
                             tool_summary, returned_range = _read_file_tool_response(
                                 tool_arguments,
                                 tool_output,
-                                visible_read_ranges.get(reread_path, []),
+                                read_coverage.ranges_for(reread_path),
                             )
-                            if returned_range is not None:
-                                ranges = deep_read_ranges.setdefault(reread_path, [])
-                                if _uncovered_read_ranges(returned_range, ranges):
-                                    deep_read_range_progress += 1
-                                    ranges.append(returned_range)
-                                visible_read_ranges.setdefault(reread_path, []).append(
-                                    returned_range
-                                )
+                            if returned_range is not None and read_coverage.add(
+                                reread_path, returned_range
+                            ):
+                                deep_read_range_progress += 1
                         else:
                             tool_summary = _tool_output_text(
                                 tool_call.fn_name,
@@ -2637,6 +2683,77 @@ def _requested_read_range(arguments: dict[str, Any]) -> tuple[int, int]:
     return offset + 1, offset + limit
 
 
+def _canonical_read_path(path: str) -> str:
+    """Use one coverage key for repository-relative and /workspace paths."""
+
+    normalized = posixpath.normpath(path)
+    if normalized == "/workspace":
+        return "."
+    if normalized.startswith("/workspace/"):
+        return normalized.removeprefix("/workspace/")
+    return normalized
+
+
+@dataclass
+class _ReadCoverageLedger:
+    """Source lines delivered to this hunter's model during the whole hunt."""
+
+    ranges: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+    file_lengths: dict[str, int] = field(default_factory=dict)
+
+    def ranges_for(self, path: str) -> list[tuple[int, int]]:
+        return self.ranges.get(_canonical_read_path(path), [])
+
+    def add(self, path: str, returned: tuple[int, int]) -> bool:
+        """Record a delivered range and return whether it contains new lines."""
+
+        start, end = returned
+        if start < 1 or end < start:
+            return False
+        key = _canonical_read_path(path)
+        covered = self.ranges.get(key, [])
+        has_new_lines = bool(_uncovered_read_ranges(returned, covered))
+        merged: list[tuple[int, int]] = []
+        for left, right in sorted([*covered, returned]):
+            if merged and left <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+            else:
+                merged.append((left, right))
+        self.ranges[key] = merged
+        return has_new_lines
+
+    def note_file_length(self, path: str, raw_output: str) -> None:
+        match = _READ_FILE_METADATA.search(raw_output)
+        if match:
+            self.file_lengths[_canonical_read_path(path)] = int(match.group(1))
+
+    def redundant_read_note(self, path: str, requested: tuple[int, int]) -> str | None:
+        """Explain a fully covered request without scanning unrelated files."""
+
+        key = _canonical_read_path(path)
+        covered = self.ranges.get(key, [])
+        if not covered:
+            return None
+        start, end = requested
+        end = min(end, self.file_lengths.get(key, end))
+        if start > end or _uncovered_read_ranges((start, end), covered):
+            return None
+        relevant = [
+            (max(start, left), min(end, right))
+            for left, right in covered
+            if left <= end and right >= start
+        ]
+        return (
+            "[SOURCE COVERAGE — THIS HUNT]\n"
+            f"Your read_file request for {key} lines {start}-{end} is already covered "
+            "by source delivered earlier in this hunt, possibly before context compaction.\n"
+            f"Previously delivered here: {_format_line_ranges(relevant)}.\n"
+            "That tool call was not executed. Choose an unread range, finish, or "
+            "call read_file with refresh=true if you need these lines back in recent context. "
+            "A refresh adds no new source coverage."
+        )
+
+
 def _range_coverage_fraction(
     requested: tuple[int, int], covered_ranges: list[tuple[int, int]]
 ) -> float:
@@ -2663,7 +2780,7 @@ def _range_coverage_fraction(
 def _uncovered_read_ranges(
     requested: tuple[int, int], covered_ranges: list[tuple[int, int]]
 ) -> list[tuple[int, int]]:
-    """Return requested line intervals not already represented in context."""
+    """Return line intervals not previously delivered during this hunt."""
     start, end = requested
     intersections = sorted(
         (max(start, covered_start), min(end, covered_end))
@@ -2713,7 +2830,7 @@ def _format_line_ranges(ranges: list[tuple[int, int]]) -> str:
 def _read_file_tool_response(
     arguments: dict[str, Any],
     raw_output: str,
-    visible_ranges: list[tuple[int, int]],
+    covered_ranges: list[tuple[int, int]],
 ) -> tuple[str, tuple[int, int] | None]:
     """Render truthful read metadata from source lines actually sent to the model."""
 
@@ -2734,8 +2851,8 @@ def _read_file_tool_response(
         if (match := re.match(r"\s*(\d+)\t", line))
     ]
     returned = (numbered[0], numbered[-1]) if numbered else None
-    coverage = _range_coverage_fraction(returned, visible_ranges) if returned is not None else 0.0
-    uncovered = _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
+    coverage = _range_coverage_fraction(returned, covered_ranges) if returned is not None else 0.0
+    uncovered = _uncovered_read_ranges(returned, covered_ranges) if returned is not None else []
     truncated = raw_truncated or display_truncated
     eof = total_lines is not None and (
         (returned is not None and returned[1] >= total_lines and not truncated)
@@ -2757,6 +2874,7 @@ def _read_file_tool_response(
             f"EOF: {eof}",
             f"Truncated: {truncated}",
             f"Next line: {next_line if next_line is not None else 'None'}",
+            "Coverage scope: this hunt",
             f"Overlap: {coverage:.0%}",
             f"New lines: {_format_line_ranges(uncovered)}",
             "[/READ_FILE]",

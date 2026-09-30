@@ -65,6 +65,10 @@ class ReadFileInput(ToolInputModel):
     end_line: int | None = Field(
         default=None, description="Alias — 1-based inclusive end line. Requires start_line."
     )
+    refresh: bool = Field(
+        default=False,
+        description="Set true to deliberately reread lines already shown during this hunt.",
+    )
 
 
 class WriteFileInput(ToolInputModel):
@@ -519,6 +523,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
                 "Repository-relative paths resolve inside /workspace. "
                 "Parameters: path (required), offset (line offset, default 0), "
                 "limit (max lines, default 100), or start_line and end_line. "
+                "Set refresh=true to deliberately revisit covered lines. "
                 "The response reports returned lines and the next line to read."
             ),
             schema=ReadFileInput.model_json_schema(),
