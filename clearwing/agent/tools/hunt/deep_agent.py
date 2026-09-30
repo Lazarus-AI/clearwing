@@ -39,6 +39,7 @@ from .sandbox import HunterContext
 logger = logging.getLogger(__name__)
 
 _OUTPUT_CAP = 100_000  # 100 KB cap on stdout/stderr per execute call
+READ_FILE_DEFAULT_LINES = 100
 
 
 class ExecuteInput(ToolInputModel):
@@ -54,8 +55,8 @@ class ReadFileInput(ToolInputModel):
         default=0, description="Line offset (0-based, default 0). Or use start_line (1-based)."
     )
     limit: int = Field(
-        default=2000,
-        description="Max lines to return (default 2000). Or use end_line with start_line.",
+        default=READ_FILE_DEFAULT_LINES,
+        description="Max lines to return (default 100). Or use end_line with start_line.",
     )
     start_line: int | None = Field(
         default=None,
@@ -300,7 +301,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
     def read_file(
         path: str,
         offset: int = 0,
-        limit: int = 2000,
+        limit: int = READ_FILE_DEFAULT_LINES,
         start_line: int | None = None,
         end_line: int | None = None,
         **_: object,
@@ -309,11 +310,14 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
             return "error: no sandbox available"
         # Accept both idioms. Model naturally reaches for start_line/end_line
         # (the prompt used to advertise them); swallowing them via **_ made the
-        # tool silently return lines 1-2000 and looked like a tool bug.
+        # tool silently return the default first window and looked like a tool bug.
         if start_line is not None:
+            start_line = max(1, start_line)
             offset = start_line - 1
             if end_line is not None:
                 limit = max(1, end_line - start_line + 1)
+        offset = max(0, offset)
+        limit = max(1, limit)
         start = offset + 1
         end = offset + limit
         # Previously this was `sed ... | cat -n`, which numbers output
@@ -514,7 +518,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
                 "Read lines from a relevant grep_source or find_source hit. "
                 "Repository-relative paths resolve inside /workspace. "
                 "Parameters: path (required), offset (line offset, default 0), "
-                "limit (max lines, default 2000). No other parameters exist."
+                "limit (max lines, default 100), or start_line and end_line. "
+                "The response reports returned lines and the next line to read."
             ),
             schema=ReadFileInput.model_json_schema(),
             handler=read_file,

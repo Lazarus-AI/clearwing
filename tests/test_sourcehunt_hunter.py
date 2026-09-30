@@ -51,6 +51,7 @@ FIXTURE_C_PROPAGATION = Path(__file__).parent / "fixtures" / "vuln_samples" / "c
 def test_read_range_coverage_distinguishes_refresh_from_new_code() -> None:
     requested = _requested_read_range({"start_line": 150, "end_line": 249})
 
+    assert _requested_read_range({}) == (1, 100)
     assert _range_coverage_fraction(requested, [(1, 500)]) == 1.0
     assert _range_coverage_fraction(requested, [(1, 199)]) == 0.5
     assert _range_coverage_fraction(requested, []) == 0.0

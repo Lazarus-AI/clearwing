@@ -85,6 +85,80 @@ def test_read_metadata_does_not_treat_source_word_as_truncation():
     assert "Truncated: False" in summary
 
 
+def test_read_metadata_uses_delivered_lines_for_eof_and_continuation():
+    source = "".join(f"{line:6d}\t{'x' * 220}\n" for line in range(1, 101))
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py"},
+        f"{source}[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned is not None
+    assert returned[0] == 1
+    assert returned[1] < 100
+    assert "Requested: 1-100" in summary
+    assert "Total lines: 100" in summary
+    assert "EOF: False" in summary
+    assert "Truncated: True" in summary
+    assert f"Next line: {returned[1] + 1}" in summary
+    assert f"{returned[1] + 1:6d}\t" not in summary
+    assert f"{returned[1]:6d}\t{'x' * 220}" in summary
+
+
+def test_read_metadata_reports_eof_only_after_last_line_is_delivered():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py", "offset": 98, "limit": 100},
+        "    99\tlast but one\n   100\tlast\n[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned == (99, 100)
+    assert "EOF: True" in summary
+    assert "Next line: None" in summary
+
+
+def test_read_metadata_reports_eof_for_request_past_end():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py", "offset": 100},
+        "\n[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned is None
+    assert "EOF: True" in summary
+    assert "Next line: None" in summary
+
+
+def test_read_metadata_does_not_claim_eof_after_raw_output_cap():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py"},
+        "     1\tfirst\n     2\tsecond\n\n[file truncated at 100000 characters]"
+        "\n[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned == (1, 2)
+    assert "EOF: False" in summary
+    assert "Truncated: True" in summary
+    assert "Next line: 3" in summary
+    assert "[file truncated" not in summary
+
+
+def test_read_metadata_preserves_an_oversized_source_line():
+    long_line = "x" * 12_100
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py"},
+        f"     1\t{long_line}\n     2\ttail\n[CLEARWING_READ_METADATA total_lines=2]",
+        [],
+    )
+
+    assert returned == (1, 1)
+    assert f"     1\t{long_line}" in summary
+    assert "     2\ttail" not in summary
+    assert "EOF: False" in summary
+    assert "Next line: 2" in summary
+
+
 def test_structured_search_summary_preserves_status_and_next_action():
     result = {
         "status": "truncated",

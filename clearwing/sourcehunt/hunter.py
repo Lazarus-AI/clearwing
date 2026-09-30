@@ -24,6 +24,7 @@ from clearwing.agent.tools.hunt import (
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
+from clearwing.agent.tools.hunt.deep_agent import READ_FILE_DEFAULT_LINES
 from clearwing.core.events import EventBus, EventType
 from clearwing.data.memory import ContextSummarizer
 from clearwing.llm import (
@@ -1000,7 +1001,7 @@ Tools:
 - execute(command): Build, debug, and test with gcc, gdb, strace, valgrind, make, and similar commands. Shell grep/find/rg searches are blocked.
 - grep_source(pattern, path, file_glob): Search repository source content with bounded results.
 - find_source(query, path, kind): Find repository files and directories by name.
-- read_file(path): Read a file from the container.
+- read_file(path, offset, limit): Read a source window from the container.
 - write_file(path, contents): Write a file in the container.
 - record_trace_step(file, line, function, code_snippet, note): Record one step in the vulnerability dataflow trace as you read code. Build the trace incrementally from attacker entry to sink.
 - record_finding(...): Submit a vulnerability finding with severity, CWE, evidence level, and description.
@@ -1017,6 +1018,8 @@ If you find nothing after thorough analysis, say so explicitly.
 DEEP_SEARCH_GUIDANCE = """
 For source navigation, use grep_source for content and find_source for filenames
 or directories. Then read_file on a relevant hit before drawing a conclusion.
+read_file reports the lines actually returned, total lines, and Next line.
+When more source is needed, continue at Next line; EOF refers to returned content.
 Both searches are limited to the repository. A no_matches result means the
 query found nothing in that scope; a truncated result needs a narrower scope.
 If successive queries return the same locations, change approach or finish.
@@ -2075,9 +2078,9 @@ class NativeHunter:
                             rel = str(fpath).removeprefix("/workspace/").removeprefix("/")
                             files_visited.add(rel)
                             if tool_call.fn_name == "read_file":
-                                offset = int(tool_arguments.get("offset", 0))
-                                limit = int(tool_arguments.get("limit", 2000))
-                                lines_read.setdefault(rel, []).append((offset + 1, offset + limit))
+                                lines_read.setdefault(rel, []).append(
+                                    _requested_read_range(tool_arguments)
+                                )
                     elif tool_call.fn_name == "flag_potential":
                         flags_raised += 1
 
@@ -2501,10 +2504,13 @@ class NativeHunter:
                 }
             sandbox_id = self.ctx.sandbox.short_id if self.ctx.sandbox else None
             if tool_call.fn_name in ("read_source_file", "read_file"):
-                offset = arguments.get("offset", 0)
-                limit = arguments.get("limit", 500)
-                start = arguments.get("start_line", offset + 1)
-                end = arguments.get("end_line", offset + limit)
+                if tool_call.fn_name == "read_file":
+                    start, end = _requested_read_range(arguments)
+                else:
+                    offset = arguments.get("offset", 0)
+                    limit = arguments.get("limit", 500)
+                    start = arguments.get("start_line", offset + 1)
+                    end = arguments.get("end_line", offset + limit)
                 EventBus().emit(
                     EventType.TOOL_START,
                     {
@@ -2621,11 +2627,13 @@ def _requested_read_range(arguments: dict[str, Any]) -> tuple[int, int]:
         start = max(1, int(start_line))
         end_line = arguments.get("end_line")
         end = (
-            int(end_line) if end_line is not None else start + int(arguments.get("limit", 2000)) - 1
+            int(end_line)
+            if end_line is not None
+            else start + int(arguments.get("limit", READ_FILE_DEFAULT_LINES)) - 1
         )
         return start, max(start, end)
     offset = max(0, int(arguments.get("offset", 0)))
-    limit = max(1, int(arguments.get("limit", 2000)))
+    limit = max(1, int(arguments.get("limit", READ_FILE_DEFAULT_LINES)))
     return offset + 1, offset + limit
 
 
@@ -2676,6 +2684,24 @@ def _uncovered_read_ranges(
 
 
 _READ_FILE_METADATA = re.compile(r"\n?\[CLEARWING_READ_METADATA total_lines=(\d+)\]\s*$")
+_READ_FILE_OUTPUT_TRUNCATION = re.compile(r"\n\n\[file truncated at \d+ characters\]\s*$")
+# Bound model context while preserving a complete last line and a usable cursor.
+_READ_FILE_VISIBLE_CHAR_LIMIT = 12_000
+
+
+def _clip_read_file_lines(content: str, limit: int) -> tuple[str, bool]:
+    """Keep complete source lines so the continuation cursor stays accurate."""
+    if len(content) <= limit:
+        return content, False
+    chunks = content.splitlines(keepends=True)
+    kept: list[str] = []
+    size = 0
+    for chunk in chunks:
+        if kept and size + len(chunk) > limit:
+            break
+        kept.append(chunk)
+        size += len(chunk)
+    return "".join(kept), len(kept) < len(chunks)
 
 
 def _format_line_ranges(ranges: list[tuple[int, int]]) -> str:
@@ -2691,11 +2717,17 @@ def _read_file_tool_response(
 ) -> tuple[str, tuple[int, int] | None]:
     """Render truthful read metadata from source lines actually sent to the model."""
 
+    if raw_output.startswith(("error reading ", "error: no sandbox available")):
+        return raw_output, None
     requested = _requested_read_range(arguments)
     metadata_match = _READ_FILE_METADATA.search(raw_output)
     total_lines = int(metadata_match.group(1)) if metadata_match else None
     content = _READ_FILE_METADATA.sub("", raw_output)
-    rendered_content = _clip_text(content, 3000)
+    raw_truncated = bool(_READ_FILE_OUTPUT_TRUNCATION.search(content))
+    content = _READ_FILE_OUTPUT_TRUNCATION.sub("", content)
+    rendered_content, display_truncated = _clip_read_file_lines(
+        content, _READ_FILE_VISIBLE_CHAR_LIMIT
+    )
     numbered = [
         int(match.group(1))
         for line in rendered_content.splitlines()
@@ -2704,18 +2736,27 @@ def _read_file_tool_response(
     returned = (numbered[0], numbered[-1]) if numbered else None
     coverage = _range_coverage_fraction(returned, visible_ranges) if returned is not None else 0.0
     uncovered = _uncovered_read_ranges(returned, visible_ranges) if returned is not None else []
-    eof = total_lines is not None and requested[1] >= total_lines
-    truncated = bool(re.search(r"\[(?:file )?truncated at \d+ characters\]", content)) or len(
-        content
-    ) > len(rendered_content)
+    truncated = raw_truncated or display_truncated
+    eof = total_lines is not None and (
+        (returned is not None and returned[1] >= total_lines and not truncated)
+        or (returned is None and requested[0] > total_lines)
+    )
+    if eof:
+        next_line = None
+    elif returned is not None:
+        next_line = returned[1] + 1
+    else:
+        next_line = requested[0]
 
     header = "\n".join(
         [
             "[READ_FILE]",
             f"Requested: {requested[0]}-{requested[1]}",
             f"Returned: {_format_line_ranges([returned] if returned else [])}",
+            f"Total lines: {total_lines if total_lines is not None else 'Unknown'}",
             f"EOF: {eof}",
             f"Truncated: {truncated}",
+            f"Next line: {next_line if next_line is not None else 'None'}",
             f"Overlap: {coverage:.0%}",
             f"New lines: {_format_line_ranges(uncovered)}",
             "[/READ_FILE]",
