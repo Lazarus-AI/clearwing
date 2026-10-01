@@ -1589,7 +1589,6 @@ class NativeHunter:
         messages: list[ChatMessage],
         active_tools: list[NativeToolSpec],
         read_coverage: _ReadCoverageLedger,
-        warned_read_paths: set[str],
         trajectory: HunterTrajectoryLogger,
         step: int,
     ) -> tuple[Any, int, int, float]:
@@ -1630,33 +1629,10 @@ class NativeHunter:
             warning: tuple[str, str] | None = None
             if self.agent_mode == "deep" and not coverage_retry_used:
                 for proposed_call in response.tool_calls:
-                    if proposed_call.fn_name not in {"read_file", "read_function"}:
-                        continue
-                    arguments = proposed_call.fn_arguments
-                    if not isinstance(arguments, dict) or arguments.get("refresh") is True:
-                        continue
-                    if proposed_call.fn_name == "read_function":
-                        callgraph = self.ctx.callgraph
-                        locations = (
-                            function_locations(callgraph, str(arguments.get("name") or ""))
-                            if callgraph is not None
-                            else []
-                        )
-                        if len(locations) != 1:
-                            continue
-                        path, start, end = locations[0]
-                        requested = (start, end)
-                    else:
-                        path = str(arguments.get("path") or "")
-                        requested = _requested_read_range(arguments)
-                    key = _canonical_read_path(path)
-                    if key in warned_read_paths:
-                        continue
-                    note = read_coverage.redundant_read_note(
-                        path, requested, tool_name=proposed_call.fn_name
+                    warning = _covered_read_warning(
+                        proposed_call, self.ctx, read_coverage
                     )
-                    if note:
-                        warning = (key, note)
+                    if warning is not None:
                         break
             if warning is None:
                 return response, total_input, total_output, total_cost
@@ -1664,7 +1640,6 @@ class NativeHunter:
             # Nothing from the rejected assistant response has entered messages,
             # so the retry leaves no unmatched tool call or result behind.
             key, note = warning
-            warned_read_paths.add(key)
             coverage_retry_used = True
             trajectory.log(
                 "coverage_retry",
@@ -1708,7 +1683,6 @@ class NativeHunter:
         for path, ranges in self.ctx.read_ranges.items():
             for returned_range in ranges:
                 read_coverage.add(path, returned_range)
-        warned_read_paths: set[str] = set()
         flags_raised: int = 0
         empty_response_nudges: int = 0
         potential_reminder_active = False
@@ -1923,10 +1897,6 @@ class NativeHunter:
                 if self.summarizer and self.summarizer.should_summarize(messages):
                     pre = len(messages)
                     messages = await self.summarizer.summarize(messages, self.llm)
-                    # The targeted warning may have been summarized away. Give
-                    # the model one fresh reminder before penalizing a later
-                    # covered read whose warning is no longer in context.
-                    warned_read_paths.clear()
                     logger.info("Hunter context summarized: %d → %d messages", pre, len(messages))
 
                 active_tools = [] if final_synthesis_turn else self.tools
@@ -1954,7 +1924,6 @@ class NativeHunter:
                     messages,
                     active_tools,
                     read_coverage,
-                    warned_read_paths,
                     trajectory,
                     step,
                 )
@@ -2150,6 +2119,11 @@ class NativeHunter:
 
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
+                    covered_read_warning = (
+                        _covered_read_warning(tool_call, self.ctx, read_coverage)
+                        if self.agent_mode == "deep"
+                        else None
+                    )
 
                     if final_decision_blocked:
                         tool_output = {
@@ -2190,6 +2164,19 @@ class NativeHunter:
                                 "tool_output": tool_output,
                                 "tool_summary": tool_summary,
                                 "dynamic_verification_blocked": True,
+                            },
+                        )
+                    elif covered_read_warning is not None:
+                        tool_output = {"error": covered_read_warning[1]}
+                        tool_summary = covered_read_warning[1]
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                                "coverage_blocked": True,
                             },
                         )
                     elif skipped:
@@ -2774,20 +2761,46 @@ class _ReadCoverageLedger:
         end = min(end, self.file_lengths.get(key, end))
         if start > end or _uncovered_read_ranges((start, end), covered):
             return None
-        relevant = [
-            (max(start, left), min(end, right))
-            for left, right in covered
-            if left <= end and right >= start
-        ]
+        covered_lines = "\n".join(f"- lines {left}-{right}" for left, right in covered)
+        total_lines = self.file_lengths.get(key)
+        total_label = total_lines if total_lines is not None else "an unknown number of"
         return (
             "[SOURCE COVERAGE — THIS HUNT]\n"
             f"Your {tool_name} request for {key} lines {start}-{end} is already covered "
             "by source delivered earlier in this hunt, possibly before context compaction.\n"
-            f"Previously delivered here: {_format_line_ranges(relevant)}.\n"
-            "That tool call was not executed. Choose an unread range, finish, or "
+            f"{key} is covered in this hunt:\n{covered_lines}\n"
+            f"out of {total_label} lines.\n"
+            "That tool call was not executed. Choose unread source, finish, or "
             f"call {tool_name} with refresh=true if you need these lines back in recent context. "
             "A refresh adds no new source coverage."
         )
+
+
+def _covered_read_warning(
+    tool_call: ToolCall, ctx: HunterContext, coverage: _ReadCoverageLedger
+) -> tuple[str, str] | None:
+    """Return the coverage warning for an unprompted fully covered read."""
+
+    if tool_call.fn_name not in {"read_file", "read_function"}:
+        return None
+    arguments = tool_call.fn_arguments
+    if not isinstance(arguments, dict) or arguments.get("refresh") is True:
+        return None
+    if tool_call.fn_name == "read_function":
+        locations = (
+            function_locations(ctx.callgraph, str(arguments.get("name") or ""))
+            if ctx.callgraph is not None
+            else []
+        )
+        if len(locations) != 1:
+            return None
+        path, start, end = locations[0]
+        requested = (start, end)
+    else:
+        path = str(arguments.get("path") or "")
+        requested = _requested_read_range(arguments)
+    note = coverage.redundant_read_note(path, requested, tool_name=tool_call.fn_name)
+    return (_canonical_read_path(path), note) if note else None
 
 
 def _range_coverage_fraction(
