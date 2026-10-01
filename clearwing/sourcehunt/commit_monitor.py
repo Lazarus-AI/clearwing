@@ -45,6 +45,7 @@ class CommitMonitorConfig:
     depth: str = "standard"
     budget_usd: float = 0.0
     sandbox_cpus: float | None = None
+    sandbox_memory_mb: int | None = None
     enable_semgrep: bool = False
     on_finding: Callable | None = None
     runner_factory: Callable | None = None  # test injection point
@@ -277,6 +278,7 @@ class CommitMonitor:
                 output_dir=self.config.output_dir,
                 provider_manager=provider_manager,
                 sandbox_cpus=self.config.sandbox_cpus,
+                sandbox_memory_mb=self.config.sandbox_memory_mb,
                 enable_semgrep=self.config.enable_semgrep,
             )
         try:

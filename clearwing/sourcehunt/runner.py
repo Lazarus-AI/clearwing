@@ -420,6 +420,7 @@ class SourceHuntRunner:
         respect_gitignore: bool = False,
         live: bool = False,
         sandbox_cpus: float | None = None,
+        sandbox_memory_mb: int | None = None,
         *,
         config: SourceHuntConfig | None = None,
         flow: str = "legacy",
@@ -558,6 +559,9 @@ class SourceHuntRunner:
             campaign_hint = campaign_hint if campaign_hint is not None else h.campaign_hint
             gvisor_runtime = gvisor_runtime if gvisor_runtime is not None else h.gvisor_runtime
             sandbox_cpus = sandbox_cpus if sandbox_cpus is not None else h.sandbox_cpus
+            sandbox_memory_mb = (
+                sandbox_memory_mb if sandbox_memory_mb is not None else h.sandbox_memory_mb
+            )
             trace_step_max_chars = (
                 h.trace_step_max_chars if trace_step_max_chars is None else trace_step_max_chars
             )
@@ -629,6 +633,10 @@ class SourceHuntRunner:
         trace_step_max_chars = max(0, trace_step_max_chars)
         if sandbox_cpus is not None and (not math.isfinite(sandbox_cpus) or sandbox_cpus < 0):
             raise ValueError("sandbox_cpus must be a finite number greater than or equal to 0")
+        if sandbox_memory_mb is not None and (
+            type(sandbox_memory_mb) is not int or not 512 <= sandbox_memory_mb <= 16384
+        ):
+            raise ValueError("sandbox_memory_mb must be an integer between 512 and 16384")
         normalized_target_files = self._normalize_target_files(target_files or ())
         target_window_lines = 480 if target_window_lines is None else target_window_lines
         if type(target_window_lines) is not int or not 40 <= target_window_lines <= 500:
@@ -788,6 +796,7 @@ class SourceHuntRunner:
         self._enable_behavior_monitor = enable_behavior_monitor
         self._enable_artifact_store = enable_artifact_store
         self._sandbox_cpus = None if sandbox_cpus is None else float(sandbox_cpus)
+        self._sandbox_memory_mb = sandbox_memory_mb
         self._gvisor_runtime = self._check_runtime_available(gvisor_runtime)
         self._preprocessing = preprocessing
         self._enable_semgrep = enable_semgrep
@@ -1308,6 +1317,7 @@ class SourceHuntRunner:
                 falsify=self._falsify,
                 gvisor_runtime=self._gvisor_runtime,
                 sandbox_cpus=self._sandbox_cpus,
+                sandbox_memory_mb=self._sandbox_memory_mb,
                 evaluation_hints=evaluation_hints,
             ),
             model_client_factory=model_client,
@@ -4228,7 +4238,12 @@ class SourceHuntRunner:
         if self.sandbox_factory is not None:
             return
         if self._sandbox_manager is not None:
-            self.sandbox_factory = self._sandbox_manager.spawn
+            if self._sandbox_memory_mb is None:
+                self.sandbox_factory = self._sandbox_manager.spawn
+            else:
+                self.sandbox_factory = lambda **kw: self._sandbox_manager.spawn(
+                    memory_mb=kw.pop("memory_mb", self._sandbox_memory_mb), **kw
+                )
             return
 
         languages = sorted(
@@ -4250,6 +4265,7 @@ class SourceHuntRunner:
                 languages=languages,
                 deep_agent_mode=use_deep,
                 default_cpus=self._sandbox_cpus,
+                default_memory_mb=self._sandbox_memory_mb or 4096,
                 gvisor_runtime=self._gvisor_runtime,
             )
             environment_ref = manager.prepare_environment()
@@ -4289,7 +4305,6 @@ class SourceHuntRunner:
         if use_deep:
             self.sandbox_factory = lambda **kw: manager.spawn(
                 writable_workspace=True,
-                memory_mb=kw.pop("memory_mb", 16384),
                 timeout_seconds=kw.pop("timeout_seconds", 30),
                 runtime=kw.pop("runtime", gvisor_rt),
                 **kw,

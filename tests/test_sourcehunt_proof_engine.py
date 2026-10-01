@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,6 +16,21 @@ from clearwing.sourcehunt.proof import (
     ProofStore,
 )
 from clearwing.sourcehunt.runner import SourceHuntRunner
+
+
+def test_proof_sandbox_uses_default_and_explicit_memory_limit(tmp_path) -> None:
+    manager = MagicMock()
+    with patch("clearwing.sourcehunt.proof.engine.HunterSandbox", return_value=manager):
+        default = ProofFlowRunner(repo_url="test", config=ProofRunConfig(output_dir=str(tmp_path)))
+        default._build_sandbox_runner(tmp_path, ["c"])
+        manager.spawn.assert_called_with(session_id=None, runtime=None)
+
+        overridden = ProofFlowRunner(
+            repo_url="test",
+            config=ProofRunConfig(output_dir=str(tmp_path), sandbox_memory_mb=6144),
+        )
+        overridden._build_sandbox_runner(tmp_path, ["c"])
+        manager.spawn.assert_called_with(session_id=None, runtime=None, memory_mb=6144)
 
 
 def _write_sentinel_fixture(path, *, fixed: bool) -> None:
@@ -216,13 +232,9 @@ def test_public_runner_merges_proof_and_spend_manifests(tmp_path) -> None:
     assert manifest["metrics"]["totals"]["actions"] == 0
     assert manifest["outputs"]["manifest"] == str(manifest_path)
     assert manifest["outputs"]["ledger"].endswith("spend-ledger.jsonl")
-    assert manifest["outputs"]["spend_summary"].endswith(
-        "spend-summary.json"
-    )
+    assert manifest["outputs"]["spend_summary"].endswith("spend-summary.json")
     spend_summary = json.loads(
-        (output / result.session_id / "spend-summary.json").read_text(
-            encoding="utf-8"
-        )
+        (output / result.session_id / "spend-summary.json").read_text(encoding="utf-8")
     )
     assert spend_summary["call_count"] == 0
     assert spend_summary["status"] == "completed"

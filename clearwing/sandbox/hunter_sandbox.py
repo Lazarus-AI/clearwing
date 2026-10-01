@@ -79,8 +79,12 @@ class HunterSandbox:
         default_cpus: float | None = None,
         backend: SandboxBackend | None = None,
         gvisor_runtime: str | None = None,
+        default_memory_mb: int = 4096,
     ):
         self._validate_cpu_limit(default_cpus, name="default_cpus")
+        if type(default_memory_mb) is not int or not 512 <= default_memory_mb <= 16384:
+            raise ValueError("default_memory_mb must be an integer between 512 and 16384")
+        self.default_memory_mb = default_memory_mb
         self.repo_path = os.path.abspath(repo_path)
         self.languages = languages or []
         self.sanitizers = sanitizers or ["asan", "ubsan"]
@@ -315,7 +319,7 @@ class HunterSandbox:
     def spawn(
         self,
         session_id: str | None = None,
-        memory_mb: int = 2048,
+        memory_mb: int | None = None,
         timeout_seconds: int = 300,
         scratch_mount: bool = True,
         variant: list[str] | None = None,
@@ -383,7 +387,7 @@ class HunterSandbox:
             policy="sourcehunt",
             isolation="enhanced" if runtime else "default",
             mounts=mounts,
-            memory_mb=memory_mb,
+            memory_mb=self.default_memory_mb if memory_mb is None else memory_mb,
             cpus=resolved_cpus,
             timeout_seconds=timeout_seconds,
             env=env,

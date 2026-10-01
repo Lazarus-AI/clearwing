@@ -422,6 +422,13 @@ def add_parser(subparsers):
         help="CPU limit per sandbox (default: auto; 0 disables the limit)",
     )
     parser.add_argument(
+        "--sandbox-memory-mb",
+        type=int,
+        default=None,
+        metavar="MiB",
+        help="Memory limit per sandbox in MiB (default: 4096)",
+    )
+    parser.add_argument(
         "--tier-split",
         default="70/25/5",
         help="Budget split A/B/C as percentages "
@@ -1177,6 +1184,7 @@ def handle(cli, args):
                 depth=args.depth,
                 budget_usd=args.budget,
                 sandbox_cpus=args.sandbox_cpus,
+                sandbox_memory_mb=args.sandbox_memory_mb,
                 enable_semgrep=args.semgrep,
                 output_dir=args.output_dir,
                 enable_github_checks=args.github_checks,
@@ -1223,6 +1231,7 @@ def handle(cli, args):
                 depth=args.depth,
                 budget_usd=args.budget,
                 sandbox_cpus=args.sandbox_cpus,
+                sandbox_memory_mb=args.sandbox_memory_mb,
                 enable_semgrep=args.semgrep,
                 enable_github_checks=args.github_checks,
                 github_check_name=args.github_check_name,
@@ -1307,6 +1316,7 @@ def handle(cli, args):
         enable_semgrep=args.semgrep,
         live=args.live,
         sandbox_cpus=args.sandbox_cpus,
+        sandbox_memory_mb=args.sandbox_memory_mb,
         flow=args.flow,
         proof_compile_commands=args.compile_commands,
         proof_validation_manifest=args.validation_manifest,

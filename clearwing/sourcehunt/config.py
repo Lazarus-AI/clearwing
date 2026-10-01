@@ -102,6 +102,7 @@ class HuntTuning:
     campaign_hint: str | None = None
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None  # None = auto, 0 = unlimited
+    sandbox_memory_mb: int | None = None  # None = 4096 MiB
     nday_filter_batch_size: int = 10
     reveng_batch_size: int = 8
     # Per-field character cap for trace-step code_snippet and note strings.

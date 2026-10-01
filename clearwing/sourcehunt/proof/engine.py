@@ -88,6 +88,7 @@ class ProofRunConfig:
     falsify: bool = True
     gvisor_runtime: str | None = None
     sandbox_cpus: float | None = None
+    sandbox_memory_mb: int | None = None
     evaluation_hints: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1007,10 +1008,13 @@ class ProofFlowRunner:
                 default_cpus=self.config.sandbox_cpus,
             )
             self._sandbox.prepare_environment()
-            container = self._sandbox.spawn(
-                session_id=self.config.session_id or None,
-                runtime=self.config.gvisor_runtime,
-            )
+            spawn_kwargs = {
+                "session_id": self.config.session_id or None,
+                "runtime": self.config.gvisor_runtime,
+            }
+            if self.config.sandbox_memory_mb is not None:
+                spawn_kwargs["memory_mb"] = self.config.sandbox_memory_mb
+            container = self._sandbox.spawn(**spawn_kwargs)
         except Exception as exc:
             raise ProofPreflightError(
                 f"Unable to start the required C/C++ analysis sandbox: {exc}",

@@ -130,9 +130,10 @@ class TestHunterSandboxCpuPolicy:
             sandbox = manager.spawn(scratch_mount=False)
 
         assert sandbox.config.cpus == 1.0
+        assert sandbox.config.memory_mb == 4096
 
     def test_spawn_override_wins_over_manager_default(self, tmp_path):
-        manager = HunterSandbox(repo_path=str(tmp_path), default_cpus=1.0)
+        manager = HunterSandbox(repo_path=str(tmp_path), default_cpus=1.0, default_memory_mb=6144)
 
         with (
             patch.object(
@@ -140,9 +141,24 @@ class TestHunterSandboxCpuPolicy:
             ),
             patch.object(SandboxContainer, "start", return_value="cid"),
         ):
-            sandbox = manager.spawn(scratch_mount=False, cpus=2.5)
+            sandbox = manager.spawn(scratch_mount=False, cpus=2.5, memory_mb=8192)
 
         assert sandbox.config.cpus == 2.5
+        assert sandbox.config.memory_mb == 8192
+
+        with (
+            patch.object(
+                HunterSandbox, "_prepare_variant_environment", return_value="sandbox:test"
+            ),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+        ):
+            inherited = manager.spawn(scratch_mount=False)
+        assert inherited.config.memory_mb == 6144
+
+    @pytest.mark.parametrize("value", [0, 511, 16385, 1.5, True, "4096"])
+    def test_invalid_manager_memory_limit_rejected(self, tmp_path, value):
+        with pytest.raises(ValueError, match="default_memory_mb"):
+            HunterSandbox(repo_path=str(tmp_path), default_memory_mb=value)
 
 
 class TestSourceHuntSandboxCpuWiring:
@@ -168,13 +184,13 @@ class TestSourceHuntSandboxCpuWiring:
             languages=["c"],
             deep_agent_mode=True,
             default_cpus=1.5,
+            default_memory_mb=4096,
             gvisor_runtime=None,
         )
         assert runner.sandbox_factory is not None
         runner.sandbox_factory()
         manager.spawn.assert_called_once_with(
             writable_workspace=True,
-            memory_mb=16384,
             timeout_seconds=30,
             runtime=None,
         )
@@ -227,6 +243,80 @@ class TestSourceHuntSandboxCpuWiring:
 
         assert explicit.sandbox_cpus == 1.5
         assert automatic.sandbox_cpus is None
+
+
+class TestSourceHuntSandboxMemoryWiring:
+    def test_constrained_and_deep_modes_default_to_4096(self):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        for depth in ("standard", "deep"):
+            manager = MagicMock()
+            manager.default_cpu_limit = 1.0
+            manager.available_cpus = 4.0
+            with patch("clearwing.sourcehunt.runner.HunterSandbox", return_value=manager) as cls:
+                runner = SourceHuntRunner(repo_url="test", depth=depth, max_parallel=1)
+                runner._ensure_sandbox_factory("/tmp/repo", [{"language": "c"}])
+
+            assert cls.call_args.kwargs["default_memory_mb"] == 4096
+            runner.sandbox_factory()
+            assert "memory_mb" not in manager.spawn.call_args.kwargs
+
+    def test_structured_tuning_and_explicit_override(self):
+        from clearwing.sourcehunt import HuntTuning, SourceHuntConfig, TargetConfig
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        config = SourceHuntConfig(
+            target=TargetConfig(repo_url="test"),
+            tuning=HuntTuning(sandbox_memory_mb=6144),
+        )
+        assert SourceHuntRunner(config=config)._sandbox_memory_mb == 6144
+        assert SourceHuntRunner(config=config, sandbox_memory_mb=8192)._sandbox_memory_mb == 8192
+
+    def test_explicit_limit_reaches_new_manager(self):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        manager = MagicMock()
+        manager.default_cpu_limit = 1.0
+        manager.available_cpus = 4.0
+        with patch("clearwing.sourcehunt.runner.HunterSandbox", return_value=manager) as cls:
+            runner = SourceHuntRunner(repo_url="test", sandbox_memory_mb=6144)
+            runner._ensure_sandbox_factory("/tmp/repo", [{"language": "c"}])
+
+        assert cls.call_args.kwargs["default_memory_mb"] == 6144
+
+    def test_explicit_limit_reaches_existing_manager(self):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        manager = MagicMock()
+        runner = SourceHuntRunner(repo_url="test", sandbox_memory_mb=6144)
+        runner._sandbox_manager = manager
+        runner._ensure_sandbox_factory("/tmp/repo", [])
+
+        runner.sandbox_factory()
+        manager.spawn.assert_called_with(memory_mb=6144)
+        runner.sandbox_factory(memory_mb=8192)
+        manager.spawn.assert_called_with(memory_mb=8192)
+
+    @pytest.mark.parametrize("value", [0, 511, 16385, 1.5, True, "4096"])
+    def test_runner_rejects_invalid_memory_limit(self, value):
+        from clearwing.sourcehunt.runner import SourceHuntRunner
+
+        with pytest.raises(ValueError, match="sandbox_memory_mb"):
+            SourceHuntRunner(repo_url="test", sandbox_memory_mb=value)
+
+    def test_cli_flag_and_default(self):
+        import argparse
+
+        from clearwing.ui.commands import sourcehunt
+
+        parser = argparse.ArgumentParser()
+        sourcehunt.add_parser(parser.add_subparsers())
+
+        explicit = parser.parse_args(["sourcehunt", "test-repo", "--sandbox-memory-mb", "6144"])
+        automatic = parser.parse_args(["sourcehunt", "test-repo"])
+
+        assert explicit.sandbox_memory_mb == 6144
+        assert automatic.sandbox_memory_mb is None
 
 
 class TestCopyTreeInto:
