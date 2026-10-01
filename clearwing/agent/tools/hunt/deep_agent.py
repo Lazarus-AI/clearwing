@@ -99,6 +99,22 @@ class ListFunctionsInput(ToolInputModel):
 
 class ReadFunctionInput(ToolInputModel):
     name: str = Field(description="Exact function name to read (e.g. 'foo_bar_baz').")
+    refresh: bool = Field(
+        default=False,
+        description="Set true to deliberately reread a function already shown during this hunt.",
+    )
+
+
+def function_locations(callgraph: object, name: str) -> list[tuple[str, int, int]]:
+    """Return distinct exact-name definitions in the callgraph."""
+    return list(
+        dict.fromkeys(
+            (path, info.start_line, info.end_line)
+            for path, infos in callgraph.function_info.items()
+            for info in infos
+            if info.name == name
+        )
+    )
 
 
 class FindSourceInput(ToolInputModel):
@@ -417,26 +433,21 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         cg = ctx.callgraph
         if cg is None:
             return {"error": "callgraph not available"}
-        hits = [(f, fi) for f, infos in cg.function_info.items() for fi in infos if fi.name == name]
-        if not hits:
+        locations = function_locations(cg, name)
+        if not locations:
             all_names = {fi.name for infos in cg.function_info.values() for fi in infos}
             near = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
             return {"error": f"no function named '{name}'", "did_you_mean": near}
-        # De-dup identical (file, start, end) — callgraph sometimes double-lists.
-        uniq = list({(f, fi.start_line, fi.end_line): (f, fi) for f, fi in hits}.values())
-        if len(uniq) > 1:
+        if len(locations) > 1:
             return {
                 "error": "ambiguous name; multiple definitions",
                 "candidates": [
-                    {"file": f, "start_line": fi.start_line, "end_line": fi.end_line}
-                    for f, fi in uniq
+                    {"file": f, "start_line": start, "end_line": end} for f, start, end in locations
                 ],
             }
-        f, fi = uniq[0]
-        body = read_file(
-            f"/workspace/{f}", offset=fi.start_line - 1, limit=fi.end_line - fi.start_line + 1
-        )
-        return {"file": f, "start_line": fi.start_line, "end_line": fi.end_line, "body": body}
+        f, start, end = locations[0]
+        body = read_file(f"/workspace/{f}", offset=start - 1, limit=end - start + 1)
+        return {"file": f, "start_line": start, "end_line": end, "body": body}
 
     reporting_tools = build_reporting_tools(ctx)
 
@@ -475,7 +486,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
                 description=(
                     "Read a function body by exact name. Returns {file, start_line, "
                     "end_line, body}. On miss: did_you_mean suggestions. On ambiguity: "
-                    "candidate list."
+                    "candidate list. Uses the same source coverage and 12,000-character "
+                    "visible limit as read_file; use refresh=true for a deliberate reread."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
                 handler=read_function,

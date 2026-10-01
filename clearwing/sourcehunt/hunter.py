@@ -25,7 +25,7 @@ from clearwing.agent.tools.hunt import (
     build_hunter_tools,
     build_propagation_auditor_tools,
 )
-from clearwing.agent.tools.hunt.deep_agent import READ_FILE_DEFAULT_LINES
+from clearwing.agent.tools.hunt.deep_agent import READ_FILE_DEFAULT_LINES, function_locations
 from clearwing.core.events import EventBus, EventType
 from clearwing.data.memory import ContextSummarizer
 from clearwing.llm import (
@@ -1630,16 +1630,31 @@ class NativeHunter:
             warning: tuple[str, str] | None = None
             if self.agent_mode == "deep" and not coverage_retry_used:
                 for proposed_call in response.tool_calls:
-                    if proposed_call.fn_name != "read_file":
+                    if proposed_call.fn_name not in {"read_file", "read_function"}:
                         continue
                     arguments = proposed_call.fn_arguments
                     if not isinstance(arguments, dict) or arguments.get("refresh") is True:
                         continue
-                    path = str(arguments.get("path") or "")
+                    if proposed_call.fn_name == "read_function":
+                        callgraph = self.ctx.callgraph
+                        locations = (
+                            function_locations(callgraph, str(arguments.get("name") or ""))
+                            if callgraph is not None
+                            else []
+                        )
+                        if len(locations) != 1:
+                            continue
+                        path, start, end = locations[0]
+                        requested = (start, end)
+                    else:
+                        path = str(arguments.get("path") or "")
+                        requested = _requested_read_range(arguments)
                     key = _canonical_read_path(path)
                     if key in warned_read_paths:
                         continue
-                    note = read_coverage.redundant_read_note(path, _requested_read_range(arguments))
+                    note = read_coverage.redundant_read_note(
+                        path, requested, tool_name=proposed_call.fn_name
+                    )
                     if note:
                         warning = (key, note)
                         break
@@ -2117,7 +2132,7 @@ class NativeHunter:
                     # two tools' arguments literal — only tools without an
                     # inherent legitimate-pagination shape benefit from
                     # normalizing away incrementing digits.
-                    if tool_call.fn_name in ("read_file", "read_source_file"):
+                    if tool_call.fn_name in ("read_file", "read_function", "read_source_file"):
                         key = (tool_call.fn_name, tool_call.fn_arguments_json[:300])
                     else:
                         normalized_args = re.sub(r"\d+", "#", tool_call.fn_arguments_json)
@@ -2232,13 +2247,32 @@ class NativeHunter:
                             if locations - seen_search_locations:
                                 search_progress_epoch += 1
                                 seen_search_locations.update(locations)
-                        if tool_call.fn_name == "read_file" and isinstance(tool_output, str):
-                            reread_path = str(tool_arguments.get("path") or "")
-                            read_coverage.note_file_length(reread_path, tool_output)
+                        read_arguments = tool_arguments
+                        raw_read_output = tool_output if isinstance(tool_output, str) else None
+                        function_name = None
+                        if (
+                            tool_call.fn_name == "read_function"
+                            and isinstance(tool_output, dict)
+                            and isinstance(tool_output.get("body"), str)
+                        ):
+                            function_name = str(tool_arguments.get("name") or "")
+                            read_arguments = {
+                                "path": tool_output["file"],
+                                "start_line": tool_output["start_line"],
+                                "end_line": tool_output["end_line"],
+                            }
+                            raw_read_output = tool_output["body"]
+                        if (
+                            tool_call.fn_name in {"read_file", "read_function"}
+                            and raw_read_output is not None
+                        ):
+                            reread_path = str(read_arguments.get("path") or "")
+                            read_coverage.note_file_length(reread_path, raw_read_output)
                             tool_summary, returned_range = _read_file_tool_response(
-                                tool_arguments,
-                                tool_output,
+                                read_arguments,
+                                raw_read_output,
                                 read_coverage.ranges_for(reread_path),
+                                function_name=function_name,
                             )
                             if returned_range is not None and read_coverage.add(
                                 reread_path, returned_range
@@ -2727,7 +2761,9 @@ class _ReadCoverageLedger:
         if match:
             self.file_lengths[_canonical_read_path(path)] = int(match.group(1))
 
-    def redundant_read_note(self, path: str, requested: tuple[int, int]) -> str | None:
+    def redundant_read_note(
+        self, path: str, requested: tuple[int, int], *, tool_name: str = "read_file"
+    ) -> str | None:
         """Explain a fully covered request without scanning unrelated files."""
 
         key = _canonical_read_path(path)
@@ -2745,11 +2781,11 @@ class _ReadCoverageLedger:
         ]
         return (
             "[SOURCE COVERAGE — THIS HUNT]\n"
-            f"Your read_file request for {key} lines {start}-{end} is already covered "
+            f"Your {tool_name} request for {key} lines {start}-{end} is already covered "
             "by source delivered earlier in this hunt, possibly before context compaction.\n"
             f"Previously delivered here: {_format_line_ranges(relevant)}.\n"
             "That tool call was not executed. Choose an unread range, finish, or "
-            "call read_file with refresh=true if you need these lines back in recent context. "
+            f"call {tool_name} with refresh=true if you need these lines back in recent context. "
             "A refresh adds no new source coverage."
         )
 
@@ -2831,6 +2867,8 @@ def _read_file_tool_response(
     arguments: dict[str, Any],
     raw_output: str,
     covered_ranges: list[tuple[int, int]],
+    *,
+    function_name: str | None = None,
 ) -> tuple[str, tuple[int, int] | None]:
     """Render truthful read metadata from source lines actually sent to the model."""
 
@@ -2858,28 +2896,55 @@ def _read_file_tool_response(
         (returned is not None and returned[1] >= total_lines and not truncated)
         or (returned is None and requested[0] > total_lines)
     )
-    if eof:
+    function_complete = (
+        function_name is not None
+        and returned is not None
+        and returned[1] >= requested[1]
+        and not truncated
+    )
+    if eof or function_complete:
         next_line = None
     elif returned is not None:
         next_line = returned[1] + 1
     else:
         next_line = requested[0]
 
-    header = "\n".join(
-        [
-            "[READ_FILE]",
-            f"Requested: {requested[0]}-{requested[1]}",
-            f"Returned: {_format_line_ranges([returned] if returned else [])}",
-            f"Total lines: {total_lines if total_lines is not None else 'Unknown'}",
-            f"EOF: {eof}",
-            f"Truncated: {truncated}",
-            f"Next line: {next_line if next_line is not None else 'None'}",
-            "Coverage scope: this hunt",
-            f"Overlap: {coverage:.0%}",
-            f"New lines: {_format_line_ranges(uncovered)}",
-            "[/READ_FILE]",
-        ]
-    )
+    header_lines = [
+        "[READ_FILE]",
+        *(
+            [
+                f"Function: {function_name}",
+                f"File: {arguments['path']}",
+                f"Function end: {requested[1]}",
+                f"Function complete: {function_complete}",
+            ]
+            if function_name is not None
+            else []
+        ),
+        f"Requested: {requested[0]}-{requested[1]}",
+        f"Returned: {_format_line_ranges([returned] if returned else [])}",
+        f"Total lines: {total_lines if total_lines is not None else 'Unknown'}",
+        f"EOF: {eof}",
+        f"Truncated: {truncated}",
+        f"Next line: {next_line if next_line is not None else 'None'}",
+        *(
+            [
+                f"Continue with read_file(path={arguments['path']!r}, "
+                f"start_line={next_line}, end_line={requested[1]})."
+            ]
+            if function_name is not None
+            and not function_complete
+            and not eof
+            and next_line is not None
+            and next_line <= requested[1]
+            else []
+        ),
+        "Coverage scope: this hunt",
+        f"Overlap: {coverage:.0%}",
+        f"New lines: {_format_line_ranges(uncovered)}",
+        "[/READ_FILE]",
+    ]
+    header = "\n".join(header_lines)
     return f"{header}\n{rendered_content}", returned
 
 
