@@ -4238,12 +4238,7 @@ class SourceHuntRunner:
         if self.sandbox_factory is not None:
             return
         if self._sandbox_manager is not None:
-            if self._sandbox_memory_mb is None:
-                self.sandbox_factory = self._sandbox_manager.spawn
-            else:
-                self.sandbox_factory = lambda **kw: self._sandbox_manager.spawn(
-                    memory_mb=kw.pop("memory_mb", self._sandbox_memory_mb), **kw
-                )
+            self.sandbox_factory = self._sandbox_manager.spawn
             return
 
         languages = sorted(

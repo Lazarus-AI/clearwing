@@ -284,18 +284,26 @@ class TestSourceHuntSandboxMemoryWiring:
 
         assert cls.call_args.kwargs["default_memory_mb"] == 6144
 
-    def test_explicit_limit_reaches_existing_manager(self):
+    def test_existing_manager_owns_its_memory_default(self, tmp_path):
         from clearwing.sourcehunt.runner import SourceHuntRunner
 
-        manager = MagicMock()
+        manager = HunterSandbox(repo_path=str(tmp_path), default_memory_mb=6144)
         runner = SourceHuntRunner(repo_url="test", sandbox_memory_mb=6144)
         runner._sandbox_manager = manager
         runner._ensure_sandbox_factory("/tmp/repo", [])
 
-        runner.sandbox_factory()
-        manager.spawn.assert_called_with(memory_mb=6144)
-        runner.sandbox_factory(memory_mb=8192)
-        manager.spawn.assert_called_with(memory_mb=8192)
+        assert runner.sandbox_factory.__self__ is manager
+        with (
+            patch.object(
+                HunterSandbox, "_prepare_variant_environment", return_value="sandbox:test"
+            ),
+            patch.object(SandboxContainer, "start", return_value="cid"),
+        ):
+            inherited = runner.sandbox_factory(scratch_mount=False)
+            overridden = runner.sandbox_factory(memory_mb=8192, scratch_mount=False)
+
+        assert inherited.config.memory_mb == 6144
+        assert overridden.config.memory_mb == 8192
 
     @pytest.mark.parametrize("value", [0, 511, 16385, 1.5, True, "4096"])
     def test_runner_rejects_invalid_memory_limit(self, value):
