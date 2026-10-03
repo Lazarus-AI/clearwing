@@ -1,8 +1,7 @@
 """Per-file hunter runtime for sourcehunt.
 
-This module now uses a native async tool-calling loop backed by genai-pyo3,
-not LangChain/LangGraph. The prompts and tool set are unchanged; the
-execution model is simpler: assistant response -> tool calls -> tool results ->
+This module uses a native async tool-calling loop backed by genai-pyo3.
+The execution model is assistant response -> tool calls -> tool results ->
 next assistant response, repeated until the model stops calling tools or the
 step budget is exhausted.
 """
@@ -993,12 +992,14 @@ def _build_propagation_prompt(file_target: FileTarget) -> str:
 
 # --- Deep agent mode ----------------------------------------------------------
 
-DEEP_AGENT_PROMPT = """You are a security researcher with full shell access inside a sandboxed container.
+DEEP_AGENT_PROMPT = """You are a security researcher with shell access inside a sandboxed container.
 Your shell starts in /workspace, a writable copy of the source tree. Use repository-relative paths; do not prepend `cd /workspace`. Modify source, add debug printfs, recompile, and use `git diff` to track your changes.
 ASan is enabled by default. UBSan is also available.
 
 Tools:
-- execute(command): Run any shell command. gcc, gdb, strace, valgrind, make are all available.
+- execute(command): Build, debug, and test with gcc, gdb, strace, valgrind, make, and similar commands. Shell grep/find/rg searches are blocked.
+- grep_source(pattern, path, file_glob): Search repository source content with bounded results.
+- find_source(query, path, kind): Find repository files and directories by name.
 - read_file(path): Read a file from the container.
 - write_file(path, contents): Write a file in the container.
 - record_trace_step(file, line, function, code_snippet, note): Record one step in the vulnerability dataflow trace as you read code. Build the trace incrementally from attacker entry to sink.
@@ -1011,6 +1012,16 @@ Tags: {tags}
 {seeded_crash_block}{semgrep_hints_block}{specialist_focus}
 When you find a vulnerability, call record_finding. Partial results are valuable — if you find a primitive but can't build a full exploit, record it anyway.
 If you find nothing after thorough analysis, say so explicitly.
+"""
+
+DEEP_SEARCH_GUIDANCE = """
+For source navigation, use grep_source for content and find_source for filenames
+or directories. Then read_file on a relevant hit before drawing a conclusion.
+Both searches are limited to the repository. A no_matches result means the
+query found nothing in that scope; a truncated result needs a narrower scope.
+If successive queries return the same locations, change approach or finish.
+Shell execute is for builds, debugging, tests, and verification, not broad
+grep/find searches. Search results alone are leads, not proof of a finding.
 """
 
 _DEEP_SPECIALIST_FOCUS = {
@@ -1113,7 +1124,7 @@ def _build_deep_agent_prompt(
         if count > 0:
             prompt += "\n" + POOL_ACCESS_BLOCK.format(count=count)
 
-    return prompt + DEEP_TRACE_INSTRUCTIONS
+    return prompt + DEEP_SEARCH_GUIDANCE + DEEP_TRACE_INSTRUCTIONS
 
 
 def _build_unconstrained_prompt(
@@ -1187,6 +1198,8 @@ def _build_unconstrained_prompt(
     prompt += "\n" + (
         DEEP_TRACE_INSTRUCTIONS if agent_mode == "deep" else TRACE_BUILDING_INSTRUCTIONS
     )
+    if agent_mode == "deep":
+        prompt += DEEP_SEARCH_GUIDANCE
 
     return prompt
 
@@ -1437,7 +1450,7 @@ def _build_subsystem_prompt(
     # Subsystem hunt runs in deep-agent mode (read_file/execute), so use the
     # trace block that references read_file — NOT read_source_file, which the
     # deep agent doesn't have.
-    return prompt + DEEP_TRACE_INSTRUCTIONS
+    return prompt + DEEP_SEARCH_GUIDANCE + DEEP_TRACE_INSTRUCTIONS
 
 
 def build_subsystem_hunter_agent(
@@ -1547,8 +1560,8 @@ class NativeHunter:
     initial_user_message: str = ""  # spec 006: override default first message
     max_repeated_skips: int = 15  # hard cap on total skipped degenerate-loop calls before giving up
     lead_checkpoint_calls: int = 4
-    # Stop when this many consecutive steps make no new progress — no new
-    # finding, no new potential, and no first read of an unread file. 0 disables.
+    # Stop when this many consecutive steps make no new progress — findings,
+    # potentials, source reads, or at most two distinct search discoveries.
     # Complements degenerate_loop (repeated identical calls) and empty_response
     # (empty turns), which do not catch varied-but-unproductive reading.
     max_steps_without_progress: int = 8
@@ -1611,25 +1624,28 @@ class NativeHunter:
         # write_file does not count — otherwise a stream of varied failing
         # commands would silently reset the stall counter.
         # When nothing advances for max_steps_without_progress steps the hunter
-        # stops (see _should_stop). Steps that only reissued an already-
-        # throttled call are left to the degenerate_loop terminal, so they do
-        # not count toward the stall.
+        # stops (see _should_stop). Repeated structured searches count toward
+        # this guard; other throttled calls retain the degenerate_loop terminal.
         last_progress_sig = (
             len(self.ctx.findings),
-            len(self.ctx.potentials),
+            tuple(sorted(str(p.get("id")) for p in self.ctx.potentials)),
             len(self.ctx.files_read),
             len(self.ctx.deep_files_read),
             0,
         )
         deep_read_ranges: dict[str, list[tuple[int, int]]] = {}
         deep_read_range_progress = 0
+        seen_search_locations: set[tuple[str, str, int]] = set()
+        search_progress_epoch = 0
+        last_search_progress_epoch = 0
+        search_resets = 0
         steps_since_progress = 0
         prev_step_had_skip = False
         while True:
             step += 1
             progress_sig = (
                 len(self.ctx.findings),
-                len(self.ctx.potentials),
+                tuple(sorted(str(p.get("id")) for p in self.ctx.potentials)),
                 len(self.ctx.files_read),
                 len(self.ctx.deep_files_read),
                 deep_read_range_progress,
@@ -1637,9 +1653,47 @@ class NativeHunter:
             if progress_sig != last_progress_sig:
                 last_progress_sig = progress_sig
                 steps_since_progress = 0
+                last_search_progress_epoch = search_progress_epoch
+            elif search_progress_epoch != last_search_progress_epoch and search_resets < 2:
+                # A new source location buys one chance to inspect it. More
+                # searches cannot indefinitely postpone the eight-step guard.
+                steps_since_progress = 0
+                search_resets += 1
+                last_search_progress_epoch = search_progress_epoch
             elif not prev_step_had_skip:
                 steps_since_progress += 1
             prev_step_had_skip = False
+            final_decision_turn = (
+                self.max_steps_without_progress > 0
+                and steps_since_progress == self.max_steps_without_progress - 1
+                and bool(self.ctx.potentials)
+                and step < self.max_steps
+            )
+            if final_decision_turn:
+                messages.append(
+                    ChatMessage(
+                        "user",
+                        "FINAL LEAD DECISION: The no-progress guard will stop this hunt "
+                        "after this turn. Choose one action for each active lead: call "
+                        "record_finding only if the source evidence supports the claim; "
+                        "call dismiss_potential or defer_potential if it does not; or "
+                        "give a concise tool-free final response beginning UNVERIFIED: "
+                        "and naming exactly what remains unverified. An update_potential or another search is "
+                        "not a final decision. Do not promote an uncertain lead.",
+                    )
+                )
+            elif (
+                self.max_steps_without_progress > 0
+                and steps_since_progress == self.max_steps_without_progress - 2
+            ):
+                messages.append(
+                    ChatMessage(
+                        "user",
+                        "The hunt is near its no-progress limit. Read a relevant new "
+                        "source location, record a supported lead or finding, or finish. "
+                        "Repeated search results do not extend the hunt.",
+                    )
+                )
             # Forced fresh synthesis: when approaching the stop boundary,
             # inject a user message demanding the model consolidate findings
             # before we cut it off.
@@ -1780,6 +1834,12 @@ class NativeHunter:
 
                 provider_name = getattr(self.llm, "provider_name", None)
                 active_tools = [] if final_synthesis_turn else self.tools
+                if final_decision_turn and active_tools:
+                    active_tools = [
+                        tool
+                        for tool in active_tools
+                        if tool.name in {"record_finding", "dismiss_potential", "defer_potential"}
+                    ]
                 if active_tools and not self.ctx.potentials:
                     inactive_potential_tools = {
                         "update_potential",
@@ -1970,6 +2030,11 @@ class NativeHunter:
                             tool_arguments,
                         )
                     )
+                    final_decision_blocked = final_decision_turn and tool_call.fn_name not in {
+                        "record_finding",
+                        "dismiss_potential",
+                        "defer_potential",
+                    }
                     # Keyed on a normalized prefix rather than the full argument
                     # string: models stuck in a degenerate loop often reissue the
                     # same call with a growing/mutating tail (e.g. appending
@@ -2019,7 +2084,24 @@ class NativeHunter:
                     repeated_tool_calls[key] = repeated_tool_calls.get(key, 0) + 1
                     skipped = repeated_tool_calls[key] > 3
 
-                    if dynamic_verification_blocked:
+                    if final_decision_blocked:
+                        tool_output = {
+                            "error": "final lead decision required: record_finding, dismiss_potential, defer_potential, or give a tool-free explanation"
+                        }
+                        tool_summary = _tool_output_text(
+                            tool_call.fn_name, tool_arguments, tool_output
+                        )
+                        trajectory.log(
+                            "tool_result",
+                            {
+                                "step": step,
+                                "tool_call": _serialize_tool_call(tool_call),
+                                "tool_output": tool_output,
+                                "tool_summary": tool_summary,
+                                "final_decision_blocked": True,
+                            },
+                        )
+                    elif dynamic_verification_blocked:
                         tool_output = {
                             "error": (
                                 "dynamic verification requires an active potential. "
@@ -2045,7 +2127,7 @@ class NativeHunter:
                         )
                     elif skipped:
                         total_repeated_skips += 1
-                        prev_step_had_skip = True
+                        prev_step_had_skip = tool_call.fn_name not in {"grep_source", "find_source"}
                         tool_output = {
                             "error": (
                                 "tool call skipped: you already made this exact call and it "
@@ -2079,6 +2161,25 @@ class NativeHunter:
                             },
                         )
                         tool_output = await self._run_tool(tools_by_name, tool_call)
+                        if (
+                            self.agent_mode == "deep"
+                            and tool_call.fn_name in {"grep_source", "find_source"}
+                            and isinstance(tool_output, dict)
+                            and tool_output.get("status") in {"matches", "truncated"}
+                        ):
+                            locations = {
+                                (
+                                    str(hit.get("file") or hit.get("path")),
+                                    str(hit.get("type") or "file"),
+                                    int(hit.get("line_number") or 0),
+                                )
+                                for hit in tool_output.get("matches", [])
+                                if isinstance(hit, dict)
+                                and (hit.get("file") or hit.get("type") == "file")
+                            }
+                            if locations - seen_search_locations:
+                                search_progress_epoch += 1
+                                seen_search_locations.update(locations)
                         if tool_call.fn_name == "read_file" and isinstance(tool_output, str):
                             reread_path = str(tool_arguments.get("path") or "")
                             tool_summary, returned_range = _read_file_tool_response(
@@ -2327,11 +2428,20 @@ class NativeHunter:
                 step,
                 len(self.ctx.findings),
             )
+            terminal_reason = "completed"
+            if (
+                final_decision_turn
+                and self.ctx.potentials
+                and not last_assistant_text.lstrip().startswith("UNVERIFIED:")
+            ):
+                # A generic tool-free reply must not make an unresolved lead
+                # look completed. The model had its final decision turn.
+                terminal_reason = "stalled"
             trajectory.log(
                 "finish",
                 {
                     "step": step,
-                    "status": "completed",
+                    "status": terminal_reason,
                     "findings": [self._serialize_finding(f) for f in self.ctx.findings],
                     "total_input_tokens": total_input_tokens,
                     "total_output_tokens": total_output_tokens,
@@ -2342,7 +2452,7 @@ class NativeHunter:
                 findings=list(self.ctx.findings),
                 cost_usd=total_cost_usd,
                 tokens_used=total_input_tokens + total_output_tokens,
-                stop_reason="completed",
+                stop_reason=terminal_reason,
                 transcript_summary=last_assistant_text[-500:],
                 potentials=[*self.ctx.potential_history, *self.ctx.potentials],
             )
@@ -2665,6 +2775,31 @@ def _summarize_read_source(arguments: dict[str, Any], value: str) -> str:
 
 
 def _tool_output_text(tool_name: str, arguments: dict[str, Any], value: Any) -> str:
+    if tool_name in {"grep_source", "find_source"} and isinstance(value, dict):
+        status = value.get("status", "error")
+        matches = value.get("matches") or []
+        lines = [
+            f"{tool_name}: status={status}; showing={len(matches)}; "
+            f"scope={value.get('scope', '.')}; truncated={bool(value.get('truncated'))}"
+        ]
+        if status == "error":
+            lines.append(f"error: {value.get('error', 'unknown search error')}")
+        elif status == "no_matches":
+            lines.append("No matches in the requested repository scope.")
+        else:
+            for match in matches[:20]:
+                if tool_name == "grep_source":
+                    lines.append(
+                        f"{match.get('file', '?')}:{match.get('line_number', '?')}: "
+                        f"{str(match.get('matched_text', ''))[:100]}"
+                    )
+                else:
+                    lines.append(f"[{match.get('type', '?')}] {match.get('path', '?')}")
+            if len(matches) > 20:
+                lines.append(f"... {len(matches) - 20} additional hits omitted; narrow the query.")
+        if value.get("next_action"):
+            lines.append(str(value["next_action"]))
+        return _clip_text("\n".join(lines), 3000)
     if isinstance(value, str):
         if tool_name == "read_source_file":
             return _summarize_read_source(arguments, value)

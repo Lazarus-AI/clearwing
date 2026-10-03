@@ -16,6 +16,7 @@ import fnmatch
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 
 from pydantic import Field
@@ -109,7 +110,7 @@ def _container_path(rel_path: str) -> str:
     return f"/workspace/{rel_path}".replace("//", "/")
 
 
-def _parse_rg_output(stdout: str, default_file: str = "") -> list[dict]:
+def _parse_rg_output(stdout: str, default_file: str = "", max_results: int = 100) -> list[dict]:
     """Turn ripgrep's `--no-heading --line-number` output into match dicts."""
     matches: list[dict] = []
     for line in stdout.splitlines():
@@ -133,7 +134,7 @@ def _parse_rg_output(stdout: str, default_file: str = "") -> list[dict]:
                 "matched_text": _safe_source_output(text.rstrip(), "grep match"),
             }
         )
-        if len(matches) >= 100:
+        if len(matches) >= max_results:
             break
     return matches
 
@@ -143,6 +144,7 @@ def _grep_python_fallback(
     rel_dir: str,
     pattern: str,
     file_glob: str,
+    max_results: int = 100,
 ) -> list[dict]:
     """Pure-Python fallback when no sandbox is attached (test mode)."""
     try:
@@ -186,7 +188,7 @@ def _grep_python_fallback(
                                 "matched_text": _safe_source_output(line.rstrip(), "grep match"),
                             }
                         )
-                        if len(matches) >= 100:
+                        if len(matches) >= max_results:
                             return matches
         except OSError:
             continue
@@ -292,7 +294,13 @@ def build_discovery_tools(ctx: HunterContext) -> list:
                 return out
         return out
 
-    def grep_source(pattern: str, path: str = ".", file_glob: str = "") -> list[dict]:
+    def grep_source(
+        pattern: str,
+        path: str = ".",
+        file_glob: str = "",
+        *,
+        max_results: int = 100,
+    ) -> list[dict]:
         """ripgrep-style search for a pattern. Returns up to 100 matches.
 
         Args:
@@ -320,15 +328,31 @@ def build_discovery_tools(ctx: HunterContext) -> list:
         if ctx.sandbox is not None:
             # Run rg inside the sandbox so we don't depend on the host having it
             target = _container_path(rel)
-            argv = ["rg", "--no-heading", "--line-number", "--with-filename", "--max-count", "100"]
+            argv = ["rg", "--no-heading", "--line-number", "--with-filename"]
             if file_glob and not path_is_file:
                 argv += ["-g", file_glob]
-            argv += [pattern, target]
-            result = ctx.sandbox.exec(argv, timeout=30)
-            return _parse_rg_output(result.stdout, default_file=rel if path_is_file else "")
+            argv += ["--", pattern, target]
+            if max_results == 100:
+                # Preserve the constrained hunter's existing command shape.
+                argv[4:4] = ["--max-count", "100"]
+                result = ctx.sandbox.exec(argv, timeout=30)
+            else:
+                # Deep mode asks for one extra match to distinguish a complete
+                # result from a truncated one. Bound output across all files.
+                command = f"{shlex.join(argv)} | head -n {max_results}"
+                result = ctx.sandbox.exec(command, timeout=30)
+            if result.timed_out:
+                return [{"error": "repository content search timed out"}]
+            if result.stderr and not result.stdout:
+                return [{"error": _safe_source_output(result.stderr.strip(), "grep error")}]
+            return _parse_rg_output(
+                result.stdout,
+                default_file=rel if path_is_file else "",
+                max_results=max_results,
+            )
         else:
             # Fallback: use Python re on the host file tree (slower but works in tests)
-            return _grep_python_fallback(ctx.repo_path, rel, pattern, file_glob)
+            return _grep_python_fallback(ctx.repo_path, rel, pattern, file_glob, max_results)
 
     def find_callers(symbol: str) -> list[dict]:
         """Find files/lines that reference a symbol. Wraps grep_source.

@@ -4,14 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from clearwing.sourcehunt.hunter import (
-    DISCOVERY_PROMPT,
-    EXPLOIT_EXTENSION,
-    HUNTER_EXECUTION_RULES,
-    MITIGATION_REASONING,
-    SELF_CHECK,
     _build_unconstrained_prompt,
     build_hunter_agent,
 )
@@ -51,6 +44,15 @@ class TestBuildUnconstrainedPrompt:
         assert "Before you record a finding" in prompt
         assert "attacker would actually trigger" in prompt
 
+    def test_deep_mode_guides_search_to_source_read(self):
+        prompt = _build_unconstrained_prompt(
+            _make_file_target(), "test-project", None, None, agent_mode="deep"
+        )
+        assert "grep_source for content" in prompt
+        assert "find_source for filenames" in prompt
+        assert "read_file on a relevant hit" in prompt
+        assert "If successive queries return the same locations" in prompt
+
     def test_has_file_and_project(self):
         ft = _make_file_target("lib/parser.c")
         prompt = _build_unconstrained_prompt(ft, "my-project", None, None)
@@ -59,25 +61,24 @@ class TestBuildUnconstrainedPrompt:
 
     def test_exploit_mode_appends_extension_and_mitigation(self):
         ft = _make_file_target()
-        prompt = _build_unconstrained_prompt(
-            ft, "test-project", None, None, exploit_mode=True
-        )
+        prompt = _build_unconstrained_prompt(ft, "test-project", None, None, exploit_mode=True)
         assert "please write exploits" in prompt
         assert "defensive mitigation" in prompt
         assert "int32_t[] gets no canary" in prompt
 
     def test_no_exploit_mode_omits_extension(self):
         ft = _make_file_target()
-        prompt = _build_unconstrained_prompt(
-            ft, "test-project", None, None, exploit_mode=False
-        )
+        prompt = _build_unconstrained_prompt(ft, "test-project", None, None, exploit_mode=False)
         assert "please write exploits" not in prompt
         assert "defensive mitigation" not in prompt
 
     def test_campaign_hint_formatted(self):
         ft = _make_file_target()
         prompt = _build_unconstrained_prompt(
-            ft, "test-project", None, None,
+            ft,
+            "test-project",
+            None,
+            None,
             campaign_hint="bugs reachable from unauthenticated remote input",
         )
         assert "bugs reachable from unauthenticated remote input" in prompt
@@ -111,7 +112,10 @@ class TestBuildUnconstrainedPrompt:
         crash = {"report": "UBSan: signed-integer-overflow"}
         hints = [{"line": 10, "description": "width truncation"}]
         prompt = _build_unconstrained_prompt(
-            ft, "test-project", crash, hints,
+            ft,
+            "test-project",
+            crash,
+            hints,
             campaign_hint="integer overflow bugs",
             exploit_mode=True,
         )
