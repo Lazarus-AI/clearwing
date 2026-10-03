@@ -39,6 +39,7 @@ from .sandbox import HunterContext
 logger = logging.getLogger(__name__)
 
 _OUTPUT_CAP = 100_000  # 100 KB cap on stdout/stderr per execute call
+READ_FILE_DEFAULT_LINES = 100
 
 
 class ExecuteInput(ToolInputModel):
@@ -54,8 +55,8 @@ class ReadFileInput(ToolInputModel):
         default=0, description="Line offset (0-based, default 0). Or use start_line (1-based)."
     )
     limit: int = Field(
-        default=2000,
-        description="Max lines to return (default 2000). Or use end_line with start_line.",
+        default=READ_FILE_DEFAULT_LINES,
+        description="Max lines to return (default 100). Or use end_line with start_line.",
     )
     start_line: int | None = Field(
         default=None,
@@ -63,6 +64,10 @@ class ReadFileInput(ToolInputModel):
     )
     end_line: int | None = Field(
         default=None, description="Alias — 1-based inclusive end line. Requires start_line."
+    )
+    refresh: bool = Field(
+        default=False,
+        description="Set true to deliberately reread lines already shown during this hunt.",
     )
 
 
@@ -94,6 +99,22 @@ class ListFunctionsInput(ToolInputModel):
 
 class ReadFunctionInput(ToolInputModel):
     name: str = Field(description="Exact function name to read (e.g. 'foo_bar_baz').")
+    refresh: bool = Field(
+        default=False,
+        description="Set true to deliberately reread a function already shown during this hunt.",
+    )
+
+
+def function_locations(callgraph: object, name: str) -> list[tuple[str, int, int]]:
+    """Return distinct exact-name definitions in the callgraph."""
+    return list(
+        dict.fromkeys(
+            (path, info.start_line, info.end_line)
+            for path, infos in callgraph.function_info.items()
+            for info in infos
+            if info.name == name
+        )
+    )
 
 
 class FindSourceInput(ToolInputModel):
@@ -300,7 +321,7 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
     def read_file(
         path: str,
         offset: int = 0,
-        limit: int = 2000,
+        limit: int = READ_FILE_DEFAULT_LINES,
         start_line: int | None = None,
         end_line: int | None = None,
         **_: object,
@@ -309,11 +330,14 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
             return "error: no sandbox available"
         # Accept both idioms. Model naturally reaches for start_line/end_line
         # (the prompt used to advertise them); swallowing them via **_ made the
-        # tool silently return lines 1-2000 and looked like a tool bug.
+        # tool silently return the default first window and looked like a tool bug.
         if start_line is not None:
+            start_line = max(1, start_line)
             offset = start_line - 1
             if end_line is not None:
                 limit = max(1, end_line - start_line + 1)
+        offset = max(0, offset)
+        limit = max(1, limit)
         start = offset + 1
         end = offset + limit
         # Previously this was `sed ... | cat -n`, which numbers output
@@ -409,26 +433,21 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         cg = ctx.callgraph
         if cg is None:
             return {"error": "callgraph not available"}
-        hits = [(f, fi) for f, infos in cg.function_info.items() for fi in infos if fi.name == name]
-        if not hits:
+        locations = function_locations(cg, name)
+        if not locations:
             all_names = {fi.name for infos in cg.function_info.values() for fi in infos}
             near = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
             return {"error": f"no function named '{name}'", "did_you_mean": near}
-        # De-dup identical (file, start, end) — callgraph sometimes double-lists.
-        uniq = list({(f, fi.start_line, fi.end_line): (f, fi) for f, fi in hits}.values())
-        if len(uniq) > 1:
+        if len(locations) > 1:
             return {
                 "error": "ambiguous name; multiple definitions",
                 "candidates": [
-                    {"file": f, "start_line": fi.start_line, "end_line": fi.end_line}
-                    for f, fi in uniq
+                    {"file": f, "start_line": start, "end_line": end} for f, start, end in locations
                 ],
             }
-        f, fi = uniq[0]
-        body = read_file(
-            f"/workspace/{f}", offset=fi.start_line - 1, limit=fi.end_line - fi.start_line + 1
-        )
-        return {"file": f, "start_line": fi.start_line, "end_line": fi.end_line, "body": body}
+        f, start, end = locations[0]
+        body = read_file(f"/workspace/{f}", offset=start - 1, limit=end - start + 1)
+        return {"file": f, "start_line": start, "end_line": end, "body": body}
 
     reporting_tools = build_reporting_tools(ctx)
 
@@ -467,7 +486,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
                 description=(
                     "Read a function body by exact name. Returns {file, start_line, "
                     "end_line, body}. On miss: did_you_mean suggestions. On ambiguity: "
-                    "candidate list."
+                    "candidate list. Uses the same source coverage and 12,000-character "
+                    "visible limit as read_file; use refresh=true for a deliberate reread."
                 ),
                 schema=ReadFunctionInput.model_json_schema(),
                 handler=read_function,
@@ -514,7 +534,9 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
                 "Read lines from a relevant grep_source or find_source hit. "
                 "Repository-relative paths resolve inside /workspace. "
                 "Parameters: path (required), offset (line offset, default 0), "
-                "limit (max lines, default 2000). No other parameters exist."
+                "limit (max lines, default 100), or start_line and end_line. "
+                "Set refresh=true to deliberately revisit covered lines. "
+                "The response reports returned lines and the next line to read."
             ),
             schema=ReadFileInput.model_json_schema(),
             handler=read_file,

@@ -14,8 +14,15 @@ from clearwing.agent.tools.hunt import build_reporting_tools
 from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
 from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
+from clearwing.data.memory import ContextSummarizer
 from clearwing.llm.native import NativeToolSpec
-from clearwing.sourcehunt.hunter import NativeHunter, _read_file_tool_response, _tool_output_text
+from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
+from clearwing.sourcehunt.hunter import (
+    NativeHunter,
+    _read_file_tool_response,
+    _ReadCoverageLedger,
+    _tool_output_text,
+)
 
 
 @dataclass
@@ -83,6 +90,146 @@ def test_read_metadata_does_not_treat_source_word_as_truncation():
 
     assert returned == (1, 1)
     assert "Truncated: False" in summary
+
+
+def test_read_metadata_uses_delivered_lines_for_eof_and_continuation():
+    source = "".join(f"{line:6d}\t{'x' * 220}\n" for line in range(1, 101))
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py"},
+        f"{source}[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned is not None
+    assert returned[0] == 1
+    assert returned[1] < 100
+    assert "Requested: 1-100" in summary
+    assert "Total lines: 100" in summary
+    assert "EOF: False" in summary
+    assert "Truncated: True" in summary
+    assert f"Next line: {returned[1] + 1}" in summary
+    assert f"{returned[1] + 1:6d}\t" not in summary
+    assert f"{returned[1]:6d}\t{'x' * 220}" in summary
+
+
+def test_read_metadata_reports_eof_only_after_last_line_is_delivered():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py", "offset": 98, "limit": 100},
+        "    99\tlast but one\n   100\tlast\n[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned == (99, 100)
+    assert "EOF: True" in summary
+    assert "Next line: None" in summary
+
+
+def test_read_metadata_reports_eof_for_request_past_end():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py", "offset": 100},
+        "\n[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned is None
+    assert "EOF: True" in summary
+    assert "Next line: None" in summary
+
+
+def test_read_metadata_does_not_claim_eof_after_raw_output_cap():
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py"},
+        "     1\tfirst\n     2\tsecond\n\n[file truncated at 100000 characters]"
+        "\n[CLEARWING_READ_METADATA total_lines=100]",
+        [],
+    )
+
+    assert returned == (1, 2)
+    assert "EOF: False" in summary
+    assert "Truncated: True" in summary
+    assert "Next line: 3" in summary
+    assert "[file truncated" not in summary
+
+
+def test_read_metadata_preserves_an_oversized_source_line():
+    long_line = "x" * 12_100
+    summary, returned = _read_file_tool_response(
+        {"path": "parser.py"},
+        f"     1\t{long_line}\n     2\ttail\n[CLEARWING_READ_METADATA total_lines=2]",
+        [],
+    )
+
+    assert returned == (1, 1)
+    assert f"     1\t{long_line}" in summary
+    assert "     2\ttail" not in summary
+    assert "EOF: False" in summary
+    assert "Next line: 2" in summary
+
+
+def test_function_read_uses_file_limit_and_function_boundary():
+    source = "".join(f"{line:6d}\t{'x' * 220}\n" for line in range(10, 110))
+    arguments = {"path": "src/parser.c", "start_line": 10, "end_line": 109}
+    summary, returned = _read_file_tool_response(
+        arguments,
+        f"{source}[CLEARWING_READ_METADATA total_lines=200]",
+        [],
+        function_name="parse_input",
+    )
+
+    assert returned is not None and 10 <= returned[1] < 109
+    assert "Function: parse_input" in summary
+    assert "File: src/parser.c" in summary
+    assert "Function complete: False" in summary
+    assert "Truncated: True" in summary
+    assert f"Next line: {returned[1] + 1}" in summary
+    assert (
+        f"Continue with read_file(path='src/parser.c', start_line={returned[1] + 1}, end_line=109)."
+    ) in summary
+    assert len(summary.split("[/READ_FILE]\n", 1)[1]) <= 12_000
+
+    final, final_range = _read_file_tool_response(
+        arguments,
+        "   109\tlast line\n[CLEARWING_READ_METADATA total_lines=200]",
+        [(10, 108)],
+        function_name="parse_input",
+    )
+    assert final_range == (109, 109)
+    assert "Function complete: True" in final
+    assert "EOF: False" in final
+    assert "Next line: None" in final
+
+
+def test_read_coverage_merges_path_aliases_and_warns_only_for_covered_range():
+    ledger = _ReadCoverageLedger()
+    assert ledger.add("src/./parser.c", (1, 20))
+    assert ledger.add("/workspace/src/parser.c", (11, 30))
+    assert not ledger.add("src/parser.c", (12, 18))
+    assert ledger.ranges_for("/workspace/src/parser.c") == [(1, 30)]
+    note = ledger.redundant_read_note("/workspace/src/parser.c", (12, 18))
+    assert note is not None and "src/parser.c lines 12-18" in note
+    assert ledger.redundant_read_note("src/parser.c", (25, 35)) is None
+    short_file = _ReadCoverageLedger()
+    short_file.add("src/short.c", (1, 2))
+    short_file.note_file_length(
+        "src/short.c", "     1\ta\n     2\tb\n[CLEARWING_READ_METADATA total_lines=2]"
+    )
+    assert short_file.redundant_read_note("src/short.c", (1, 100)) is not None
+
+
+def test_coverage_warning_lists_all_merged_ranges_and_file_length():
+    ledger = _ReadCoverageLedger()
+    ledger.add("src/jv.c", (1, 20))
+    ledger.add("src/jv.c", (30, 50))
+    ledger.note_file_length("src/jv.c", "[CLEARWING_READ_METADATA total_lines=50]")
+
+    fragmented = ledger.redundant_read_note("src/jv.c", (5, 10))
+    assert fragmented is not None
+    assert "src/jv.c is covered in this hunt:\n- lines 1-20\n- lines 30-50\nout of 50 lines." in fragmented
+
+    ledger.add("src/jv.c", (21, 29))
+    complete = ledger.redundant_read_note("src/jv.c", (5, 10))
+    assert complete is not None
+    assert "src/jv.c is covered in this hunt:\n- lines 1-50\nout of 50 lines." in complete
 
 
 def test_structured_search_summary_preserves_status_and_next_action():
@@ -607,7 +754,7 @@ async def test_overlapping_read_file_refreshes_return_content_with_direction():
             tool_calls_list=[
                 _make_tool_call(
                     "read_file",
-                    {"path": "views.py", "offset": 10, "limit": 10},
+                    {"path": "views.py", "offset": 10, "limit": 10, "refresh": True},
                 )
             ]
         ),
@@ -792,6 +939,133 @@ def _build_deep_hunter(sandbox, max_steps=20):
     return hunter, llm, ctx
 
 
+def _add_function(ctx, name, start, end, path="src/foo.c"):
+    if ctx.callgraph is None:
+        ctx.callgraph = CallGraph()
+    ctx.callgraph.function_info[path].append(FunctionInfo(name, start, end))
+
+
+@pytest.mark.asyncio
+async def test_function_reads_share_file_coverage_and_reset_stall():
+    sandbox = _stub_sandbox_for_deep_read_ranges()
+    hunter, llm, ctx = _build_deep_hunter(sandbox)
+    _add_function(ctx, "first", 1, 2)
+    _add_function(ctx, "second", 3, 4)
+    _add_function(ctx, "third", 5, 6)
+    hunter.tools = build_deep_agent_tools(ctx)
+    hunter.max_steps_without_progress = 2
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "first"})]),
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "second"})]),
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "third"})]),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert sandbox.exec.call_count == 3
+    summaries = [
+        call.args[1]["tool_summary"]
+        for call in logger.log.call_args_list
+        if call.args[0] == "tool_result"
+    ]
+    assert all("New lines:" in summary for summary in summaries)
+    assert "New lines: 5-6" in summaries[2]
+
+
+@pytest.mark.asyncio
+async def test_long_function_is_delivered_with_file_read_limit():
+    sandbox = _stub_sandbox_for_deep_read()
+    sandbox.exec.return_value.stdout = "".join(
+        f"{line:6d}\t{'x' * 220}\n" for line in range(1, 101)
+    )
+    sandbox.exec.return_value.stderr = "__CLEARWING_TOTAL_LINES__=200\n"
+    hunter, llm, ctx = _build_deep_hunter(sandbox)
+    _add_function(ctx, "long_function", 1, 100)
+    hunter.tools = build_deep_agent_tools(ctx)
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "long_function"})]),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    summary = next(
+        call.args[1]["tool_summary"]
+        for call in logger.log.call_args_list
+        if call.args[0] == "tool_result"
+    )
+    assert "Function: long_function" in summary
+    assert "Truncated: True" in summary
+    assert len(summary.split("[/READ_FILE]\n", 1)[1]) <= 12_000
+    assert "Continue with read_file" in summary
+    assert "New lines: 1-52" in summary
+
+
+@pytest.mark.asyncio
+async def test_covered_function_retries_and_refresh_shares_file_ledger():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, ctx = _build_deep_hunter(sandbox)
+    _add_function(ctx, "foo", 1, 2)
+    hunter.tools = build_deep_agent_tools(ctx)
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "/workspace/src/./foo.c", "limit": 2})
+            ]
+        ),
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "foo"})]),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_function", {"name": "foo", "refresh": True})]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert sandbox.exec.call_count == 2
+    assert "src/foo.c lines 1-2" in llm.achat.call_args_list[2].kwargs["messages"][-1].content
+    summaries = [
+        call.args[1]["tool_summary"]
+        for call in logger.log.call_args_list
+        if call.args[0] == "tool_result"
+    ]
+    assert "New lines: None" in summaries[1]
+
+
+@pytest.mark.asyncio
+async def test_missing_and_ambiguous_functions_do_not_add_coverage():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, ctx = _build_deep_hunter(sandbox)
+    _add_function(ctx, "duplicate", 1, 2)
+    _add_function(ctx, "duplicate", 3, 4, path="src/other.c")
+    hunter.tools = build_deep_agent_tools(ctx)
+    hunter.max_steps_without_progress = 2
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "missing"})]),
+        FakeResponse(tool_calls_list=[_make_tool_call("read_function", {"name": "duplicate"})]),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    sandbox.exec.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_deep_read_file_counts_as_progress():
     # Deep-mode read_file doesn't populate ctx.files_read (that set is fed by
@@ -871,6 +1145,204 @@ async def test_deep_read_repeated_range_does_not_reset_stall():
     assert result.stop_reason == "stalled"
     assert llm.achat.call_count < 20
     assert ctx.deep_files_read == {"/workspace/only_file.c"}
+
+
+@pytest.mark.asyncio
+async def test_deep_read_coverage_survives_compaction_and_retries_before_tool_call():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, _ = _build_deep_hunter(sandbox)
+    hunter.max_steps_without_progress = 2
+    summarizer = ContextSummarizer()
+    summarizer.should_summarize = MagicMock(side_effect=[False, True, False, False])
+    hunter.summarizer = summarizer
+    llm.aask_text.return_value = FakeResponse(text="Earlier source was inspected.")
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "/workspace/src/foo.c", "limit": 2})
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/./foo.c", "limit": 2, "refresh": True})
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert result.tokens_used == 5 * FakeUsage().total_tokens
+    assert llm.aask_text.call_count == 1
+    second_messages = llm.achat.call_args_list[1].kwargs["messages"]
+    assert not any(message.content.startswith("[SOURCE COVERAGE") for message in second_messages)
+    retry_messages = llm.achat.call_args_list[2].kwargs["messages"]
+    assert "src/foo.c lines 1-2" in retry_messages[-1].content
+    assert "possibly before context compaction" in retry_messages[-1].content
+    assert "refresh=true" in retry_messages[-1].content
+    assert not any(
+        message.role == "assistant"
+        and message.tool_calls
+        and any(
+            call.fn_arguments.get("path") == "/workspace/src/foo.c" for call in message.tool_calls
+        )
+        for message in retry_messages
+    )
+    second_read = [
+        call.args[1]["tool_summary"]
+        for call in logger.log.call_args_list
+        if call.args and call.args[0] == "tool_result"
+    ][1]
+    assert "Coverage scope: this hunt" in second_read
+    assert "Overlap: 100%" in second_read
+    assert "New lines: None" in second_read
+    retries = [
+        call for call in logger.log.call_args_list if call.args and call.args[0] == "coverage_retry"
+    ]
+    assert len(retries) == 2
+    assert len([call for call in logger.log.call_args_list if call.args[0] == "tool_result"]) == 2
+    assert sandbox.exec.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_deep_hunter_seeds_coverage_from_initial_source_window():
+    hunter, llm, ctx = _build_deep_hunter(_stub_sandbox_for_deep_read())
+    ctx.read_ranges["src/target.c"] = [(20, 40)]
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/target.c", "offset": 19, "limit": 21})
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    first_messages = llm.achat.call_args_list[0].kwargs["messages"]
+    assert not any(message.content.startswith("[SOURCE COVERAGE") for message in first_messages)
+    retry_messages = llm.achat.call_args_list[1].kwargs["messages"]
+    assert "src/target.c lines 20-40" in retry_messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_coverage_retry_drops_entire_mixed_tool_batch():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, _ = _build_deep_hunter(sandbox)
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("read_file", {"path": "src/foo.c", "limit": 2})]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/foo.c", "limit": 2}),
+                _make_tool_call("execute", {"command": "touch /workspace/should-not-run"}),
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert sandbox.exec.call_count == 1
+    retry_messages = llm.achat.call_args_list[2].kwargs["messages"]
+    assert retry_messages[-1].content.startswith("[SOURCE COVERAGE")
+    assert all("should-not-run" not in str(message.to_dict()) for message in retry_messages)
+    assert (
+        len([call for call in logger.log.call_args_list if call.args[0] == "coverage_retry"]) == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_coverage_retry_blocks_a_different_covered_range_in_the_same_file():
+    sandbox = _stub_sandbox_for_deep_read()
+    hunter, llm, ctx = _build_deep_hunter(sandbox)
+    ctx.read_ranges["src/foo.c"] = [(1, 2), (4, 5)]
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/foo.c", "start_line": 1, "end_line": 2})
+            ]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("read_file", {"path": "src/foo.c", "start_line": 4, "end_line": 5})
+            ]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert sandbox.exec.call_count == 0
+    retries = [call for call in logger.log.call_args_list if call.args[0] == "coverage_retry"]
+    assert len(retries) == 1
+    blocked = [
+        call for call in logger.log.call_args_list
+        if call.args[0] == "tool_result" and call.args[1].get("coverage_blocked")
+    ]
+    assert len(blocked) == 1
+    assert "src/foo.c lines 4-5" in blocked[0].args[1]["tool_summary"]
+
+
+@pytest.mark.asyncio
+async def test_covered_reads_are_blocked_after_retry_and_rechecked_next_turn():
+    hunter, llm, _ = _build_deep_hunter(_stub_sandbox_for_deep_read())
+    hunter.max_steps_without_progress = 5
+
+    def read(refresh=False):
+        return FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "read_file", {"path": "src/foo.c", "limit": 2, "refresh": refresh}
+                )
+            ]
+        )
+
+    llm.achat.side_effect = [
+        read(), read(), read(), read(), read(refresh=True), FakeResponse(text="done")
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        logger = MagicMock()
+        mock_traj.for_hunter.return_value = logger
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert llm.aask_text.call_count == 0
+    retries = [call for call in logger.log.call_args_list if call.args[0] == "coverage_retry"]
+    assert len(retries) == 2
+    blocked = [
+        call for call in logger.log.call_args_list
+        if call.args[0] == "tool_result" and call.args[1].get("coverage_blocked")
+    ]
+    assert len(blocked) == 1
+    assert "refresh=true" in blocked[0].args[1]["tool_summary"]
+    assert llm.achat.call_args_list[4].kwargs["messages"][-1].content.startswith(
+        "[SOURCE COVERAGE"
+    )
+    assert hunter.ctx.sandbox.exec.call_count == 2
 
 
 @pytest.mark.asyncio
