@@ -998,6 +998,32 @@ async def test_hunter_stalls_when_no_progress():
 
 
 @pytest.mark.asyncio
+async def test_early_stall_delivers_final_synthesis_prompt_and_can_complete():
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=500, budget_usd=0.0)
+    hunter.max_steps_without_progress = 3
+    llm.achat.side_effect = [
+        FakeResponse(
+            text="still investigating",
+            tool_calls_list=[_make_tool_call("think", {"notes": "first pass"})],
+        ),
+        FakeResponse(
+            text="still investigating",
+            tool_calls_list=[_make_tool_call("think", {"notes": "second pass"})],
+        ),
+        FakeResponse(text="Investigation complete; no finding was recorded."),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert llm.achat.call_count == 3
+    recovery_messages = llm.achat.call_args.kwargs["messages"]
+    assert any("made no durable progress" in message.content for message in recovery_messages)
+
+
+@pytest.mark.asyncio
 async def test_late_stall_delivers_final_synthesis_prompt_before_stopping():
     hunter, llm = _make_hunter(agent_mode="deep", max_steps=4, budget_usd=0.0)
     hunter.max_steps_without_progress = 3
