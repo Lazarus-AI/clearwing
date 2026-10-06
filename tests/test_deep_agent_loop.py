@@ -995,3 +995,32 @@ async def test_hunter_stalls_when_no_progress():
 
     assert result.stop_reason == "stalled"
     assert llm.achat.call_count < 20  # stops well short of max_steps
+
+
+@pytest.mark.asyncio
+async def test_late_stall_delivers_final_synthesis_prompt_before_stopping():
+    hunter, llm = _make_hunter(agent_mode="deep", max_steps=4, budget_usd=0.0)
+    hunter.max_steps_without_progress = 3
+    counter = itertools.count()
+    llm.achat.side_effect = [
+        FakeResponse(
+            text="still investigating",
+            tool_calls_list=[_make_tool_call("think", {"notes": f"step {next(counter)}"})],
+        ),
+        FakeResponse(
+            text="still investigating",
+            tool_calls_list=[_make_tool_call("think", {"notes": f"step {next(counter)}"})],
+        ),
+        FakeResponse(text="Investigation complete; no finding was recorded."),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert llm.achat.call_count == 3
+    final_messages = llm.achat.call_args.kwargs["messages"]
+    assert any(
+        "approaching the end of your budget" in message.content for message in final_messages
+    )
