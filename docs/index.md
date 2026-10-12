@@ -3,7 +3,7 @@
 **Autonomous vulnerability scanner and source-code hunter.** Built on
 `genai-pyo3`, a native Rust-backed LLM runtime speaking every major
 provider (Anthropic, OpenAI, OpenRouter, Ollama, LM Studio, Together,
-Groq, DeepSeek, MiniMax, Gemini, any OpenAI-compatible endpoint).
+Groq, DeepSeek, Kimi, MiniMax, Gemini, any OpenAI-compatible endpoint).
 
 Clearwing is a dual-mode offensive-security tool:
 
@@ -27,7 +27,7 @@ Clearwing is a dual-mode offensive-security tool:
 | Page | What you'll learn |
 |---|---|
 | [**Quickstart**](quickstart.md) | Install, run a network scan, run a sourcehunt pass, read the results |
-| [**LLM providers**](providers.md) | OpenRouter / Ollama / LM Studio / vLLM / Together / Groq / DeepSeek / OpenAI — CLI + env + config.yaml recipes for each |
+| [**LLM providers**](providers.md) | OpenRouter / Ollama / LM Studio / vLLM / Kimi / Together / Groq / DeepSeek / OpenAI — CLI + env + config.yaml recipes for each |
 | [**Sourcehunt evaluation and rollout**](eval_rollout.md) | Run the paired proof/legacy empirical campaign, evaluate cutover gates, and roll out proof flow safely |
 | [**Architecture**](architecture.md) | How the ReAct loops, sandboxes, capabilities layer, Finding dataclass, and knowledge graph fit together |
 | [**CLI reference**](cli.md) | Every `clearwing <subcommand>` flag, with examples |
