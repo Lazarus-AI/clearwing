@@ -551,3 +551,90 @@ class TestErrorHandling:
         assert runner.session_id.startswith("sh-")
         result = runner.run()
         assert result.session_id == runner.session_id
+
+
+# --- staged budget carry-forward -------------------------------------------
+
+
+def _write_stage_ledger(output_root: Path, bridge_run_id: str, settled: list[float]) -> None:
+    """Materialise one sibling bridge-run stage's ledger on disk.
+
+    Mirrors the bridge layout: each stage lives at
+    ``<output_root>/sh_<bridge_run_id>/sh-<session>/spend-ledger.jsonl`` with a
+    ``run_started`` header followed by one ``call_settled`` event per cost.
+    """
+    session_id = "sh-" + bridge_run_id[:8]
+    session_dir = output_root / bridge_run_id / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"event": "run_started", "session_id": session_id, "budget_usd": 6.0})]
+    for cost in settled:
+        lines.append(json.dumps({"event": "call_settled", "cost_usd": cost}))
+    (session_dir / "spend-ledger.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class TestStagedBudgetCarryForward:
+    """A later staged bridge run must inherit prior stages' settled spend.
+
+    Reproduces the real bridge layout where each stage is isolated under
+    ``<run>/sourcehunt/sh_<bridge_run_id>/`` and ``output_dir`` is that
+    per-stage directory. The shared parent holds every sibling stage's ledger.
+    """
+
+    def _runner_for_stage(self, output_root: Path, bridge_run_id: str, budget: float):
+        output_dir = output_root / bridge_run_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="quick",
+            budget_usd=budget,
+            output_dir=str(output_dir),
+            ranker_llm=_make_ranker_llm(["x"]),
+        )
+
+    def test_prior_stage_spend_is_summed_across_siblings(self, tmp_path):
+        output_root = tmp_path / "sourcehunt"
+        _write_stage_ledger(output_root, "sh_" + "a" * 32, [1.5, 0.75])
+        _write_stage_ledger(output_root, "sh_" + "b" * 32, [2.0])
+        runner = self._runner_for_stage(output_root, "sh_" + "c" * 32, budget=6.0)
+        assert runner._prior_stage_spend_usd() == pytest.approx(4.25)
+
+    def test_later_stage_limit_is_reduced_by_prior_spend(self, tmp_path):
+        output_root = tmp_path / "sourcehunt"
+        _write_stage_ledger(output_root, "sh_" + "a" * 32, [4.5])
+        runner = self._runner_for_stage(output_root, "sh_" + "c" * 32, budget=6.0)
+        ledger = runner._ensure_spend_ledger()
+        # 6.0 budget − 4.5 already spent by the prior stage → 1.5 remaining.
+        assert ledger.limit_usd == pytest.approx(1.5)
+        assert ledger.enforcing is True
+
+    def test_exhausted_prior_spend_keeps_a_tiny_enforcing_limit(self, tmp_path):
+        output_root = tmp_path / "sourcehunt"
+        _write_stage_ledger(output_root, "sh_" + "a" * 32, [6.0])
+        runner = self._runner_for_stage(output_root, "sh_" + "c" * 32, budget=6.0)
+        ledger = runner._ensure_spend_ledger()
+        # Fully consumed: must stay strictly positive so enforcing stays True
+        # (a literal 0 would read as "no cap" and run the stage unbounded).
+        assert ledger.limit_usd > 0
+        assert ledger.enforcing is True
+
+    def test_first_stage_starts_at_full_budget(self, tmp_path):
+        output_root = tmp_path / "sourcehunt"
+        runner = self._runner_for_stage(output_root, "sh_" + "c" * 32, budget=6.0)
+        assert runner._prior_stage_spend_usd() == pytest.approx(0.0)
+        assert runner._ensure_spend_ledger().limit_usd == pytest.approx(6.0)
+
+    def test_standalone_layout_never_carries_forward(self, tmp_path):
+        # A non-bridge output_dir (no ``sh_`` basename) must ignore neighbours,
+        # even if a sibling ledger happens to exist alongside it.
+        _write_stage_ledger(tmp_path, "sh_" + "a" * 32, [5.0])
+        runner = SourceHuntRunner(
+            repo_url=str(FIXTURE_C_PROPAGATION),
+            local_path=str(FIXTURE_C_PROPAGATION),
+            depth="quick",
+            budget_usd=6.0,
+            output_dir=str(tmp_path),
+            ranker_llm=_make_ranker_llm(["x"]),
+        )
+        assert runner._prior_stage_spend_usd() == pytest.approx(0.0)
+        assert runner._ensure_spend_ledger().limit_usd == pytest.approx(6.0)
