@@ -86,6 +86,16 @@ class TestProviderCatalog:
         assert preset.provider_adapter == "openai"
         assert preset.is_openai_compat
 
+    def test_cheaperinference_preset(self):
+        preset = preset_by_key("cheaperinference")
+        assert preset is not None
+        assert preset.display_name == "Cheaper Inference"
+        assert preset.default_base_url == "https://api.cheaperinference.com/v1"
+        assert preset.default_model == "gpt-5.4-mini"
+        assert preset.api_key_env_var == "CHEAPER_INFERENCE_API_KEY"
+        assert preset.provider_adapter == "openai"
+        assert preset.is_openai_compat
+
     def test_openai_oauth_preset_is_not_openai_compat(self):
         preset = preset_by_key("openai-oauth")
         assert preset is not None

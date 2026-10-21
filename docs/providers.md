@@ -18,7 +18,7 @@ Backends covered below:
 - **OpenAI (Responses API)** — GPT-5.x / o-series via `/v1/responses`
   (`openai_resp` adapter). Required for GPT-5.x and o-series.
 - **OpenAI OAuth (ChatGPT)** — Plus/Pro login via Codex backend (`openai_codex`).
-- **OpenRouter, OrcaRouter, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
+- **OpenRouter, OrcaRouter, Cheaper Inference, Together, Groq, Fireworks, DeepSeek, LM Studio, vLLM, custom** —
   anything that speaks `/v1/chat/completions` (`openai` adapter).
 - **MiniMax** — M2.7 / M2.5 via the Anthropic-compatible endpoint
   (`anthropic` adapter at `api.minimax.io/anthropic`).
@@ -259,6 +259,57 @@ provider:
   base_url: https://api.orcarouter.ai/v1
   api_key: ${ORCAROUTER_API_KEY}
   model: anthropic/claude-sonnet-4.6
+  adapter: openai
+```
+
+## Cheaper Inference
+
+[Cheaper Inference](https://cheaperinference.com) is an OpenAI-compatible
+LLM gateway. Model names are bare ids: `gpt-5.4-mini`, `gpt-5.4`,
+`claude-sonnet-5`, `gemini-3.1-pro`, `deepseek-v4-flash`, `glm-5.3`.
+The live list is at `GET https://api.cheaperinference.com/v1/models`.
+Grab a key from the [Cheaper Inference signup page](https://cheaperinference.com/signup)
+(keys start with `ci_live_`) and point Clearwing at it with the
+`openai` adapter — it is a preset in the setup wizard, so you can also
+just run `clearwing setup --provider cheaperinference`.
+
+### Per-command (flags)
+
+```bash
+clearwing sourcehunt /path/to/repo \
+    --base-url https://api.cheaperinference.com/v1 \
+    --api-key "$CHEAPER_INFERENCE_API_KEY" \
+    --model gpt-5.4-mini
+```
+
+### Per-session (env vars)
+
+```bash
+export CLEARWING_BASE_URL=https://api.cheaperinference.com/v1
+export CLEARWING_API_KEY=$CHEAPER_INFERENCE_API_KEY
+export CLEARWING_MODEL=gpt-5.4-mini
+
+# Every command picks this up automatically
+clearwing interactive
+clearwing sourcehunt /path/to/repo
+```
+
+### Persistent (config file)
+
+```bash
+clearwing config --set-provider \
+    base_url=https://api.cheaperinference.com/v1 \
+    api_key='${CHEAPER_INFERENCE_API_KEY}' \
+    model=gpt-5.4-mini
+```
+
+This writes `~/.clearwing/config.yaml` with:
+
+```yaml
+provider:
+  base_url: https://api.cheaperinference.com/v1
+  api_key: ${CHEAPER_INFERENCE_API_KEY}
+  model: gpt-5.4-mini
   adapter: openai
 ```
 
