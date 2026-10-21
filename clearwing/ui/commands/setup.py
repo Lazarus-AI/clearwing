@@ -48,8 +48,8 @@ def add_parser(subparsers):
         metavar="KEY",
         help=(
             "Skip the menu and configure this provider directly "
-            "(e.g. openrouter, orcarouter, ollama, lmstudio, anthropic, openai, "
-            "openai-oauth, together, groq, deepseek, fireworks, custom)"
+            "(e.g. openrouter, orcarouter, cheaperinference, ollama, lmstudio, "
+            "anthropic, openai, openai-oauth, together, groq, deepseek, fireworks, custom)"
         ),
     )
     parser.add_argument(

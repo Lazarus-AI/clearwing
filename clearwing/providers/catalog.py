@@ -189,6 +189,24 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         provider_adapter="openai",
     ),
     ProviderPreset(
+        key="cheaperinference",
+        display_name="Cheaper Inference",
+        description="OpenAI-compatible LLM gateway. One key for GPT / Claude / "
+        "Gemini / DeepSeek / GLM via bare model names like `gpt-5.4-mini`.",
+        docs_url="https://cheaperinference.com/signup",
+        default_base_url="https://api.cheaperinference.com/v1",
+        default_model="gpt-5.4-mini",
+        api_key_env_var="CHEAPER_INFERENCE_API_KEY",
+        alt_models=(
+            "gpt-5.4",
+            "claude-sonnet-5",
+            "gemini-3.1-pro",
+            "deepseek-v4-flash",
+            "glm-5.3",
+        ),
+        provider_adapter="openai",
+    ),
+    ProviderPreset(
         key="ollama",
         display_name="Ollama (local, native adapter)",
         description="Local models, free, no API key. Uses the native "
