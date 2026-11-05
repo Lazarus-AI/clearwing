@@ -1,5 +1,52 @@
-owner:
-  team: team-applied-ai
-product: clearwing
+# .lazarus/asset.yml — Repo metadata manifest
+# Spec: https://lazarus-ai.atlassian.net/wiki/spaces/lkb/pages/2175270935
+# Product registry: https://lazarus-ai.atlassian.net/wiki/spaces/lkb/pages/2141257730
+#
+# This file describes what this repo is, who owns it, and where it deploys.
+# Field order is fixed — do not rearrange. CI validates this file.
+
+schema: v1
+
+# identity ─────────────────────────────────────────────────────────
+#
+# These come from the repo name: <product>-<component>-<type>
+# Example: aie-auth-svc → product: aie, component: auth, type: svc
+
+# What this repo does — the middle segment(s) of the repo name.
 component: core
+
+# Which product this repo belongs to. Must be a registered slug.
+# Valid: aie | atls | clearwing | constructor | hexis | recursor | scribe | sovereign
+product: clearwing
+
+# What kind of artifact this repo produces.
+# Valid: cli | data | evals | img | infra | lib | sdk | svc | ui
 type: svc
+
+# ownership ─────────────────────────────────────────────────────────
+#
+# Who is responsible for this repo.
+
+owner:
+  # The Jira project key where this repo's work is tracked.
+  jira_project: LP
+
+  # The GitHub team slug from CODEOWNERS (e.g. commercial-engineering).
+  # Run: cat CODEOWNERS — look for @Lazarus-AI/<team>
+  # If no CODEOWNERS file exists, set to TBD and file one.
+  team: team-applied-ai
+
+# deployment ────────────────────────────────────────────────────────
+#
+# Where does this repo's artifact actually run?
+# Libraries, infra repos, and anything without a runtime: deployments: []
+#
+# Each entry is one deployment target. Repos that deploy to both
+# SaaS and on-prem get two entries.
+#
+# target:       saas | on-prem
+# environments: saas → [dev, qa, prod]  |  on-prem → [customer]
+# gcp_project:  required for saas, omit for on-prem
+# infra_repo:   the repo that holds the deploy config (terraform, helm, etc.)
+
+deployments: []
