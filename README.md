@@ -10,8 +10,9 @@ The challenge:  Produce similar results as Glasswing - using models everyone has
 
 **Autonomous vulnerability scanner and source-code hunter.** Built on
 `genai-pyo3`, a native Rust-backed LLM runtime speaking every major
-provider (Anthropic, OpenAI, OpenRouter, OrcaRouter, Ollama, LM Studio,
-Together, Groq, DeepSeek, MiniMax, Gemini, any OpenAI-compatible endpoint).
+provider (Anthropic, OpenAI, OpenRouter, OrcaRouter, Cheaper Inference,
+Ollama, LM Studio, Together, Groq, DeepSeek, MiniMax, Gemini, any
+OpenAI-compatible endpoint).
 
 Clearwing is a dual-mode offensive-security tool:
 
@@ -96,8 +97,8 @@ Or skip the wizard and configure directly:
 # Anthropic direct
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# Or any OpenAI-compatible endpoint — OpenRouter, OrcaRouter, Ollama,
-# LM Studio, vLLM, Together, Groq, DeepSeek, OpenAI:
+# Or any OpenAI-compatible endpoint — OpenRouter, OrcaRouter,
+# Cheaper Inference, Ollama, LM Studio, vLLM, Together, Groq, DeepSeek, OpenAI:
 export CLEARWING_BASE_URL=https://openrouter.ai/api/v1
 export CLEARWING_API_KEY=sk-or-...
 export CLEARWING_MODEL=anthropic/claude-opus-4
@@ -106,6 +107,11 @@ export CLEARWING_MODEL=anthropic/claude-opus-4
 export CLEARWING_BASE_URL=https://api.orcarouter.ai/v1
 export CLEARWING_API_KEY=sk-orca-...
 export CLEARWING_MODEL=anthropic/claude-sonnet-4.6
+
+# Cheaper Inference (OpenAI-compatible gateway, keys start with ci_live_):
+export CLEARWING_BASE_URL=https://api.cheaperinference.com/v1
+export CLEARWING_API_KEY=ci_live_...
+export CLEARWING_MODEL=gpt-5.4-mini
 ```
 
 See [`docs/providers.md`](docs/providers.md) for provider-specific
