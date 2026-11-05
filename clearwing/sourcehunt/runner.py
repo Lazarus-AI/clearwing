@@ -1192,10 +1192,68 @@ class SourceHuntRunner:
         except Exception:
             logger.debug("Sourcehunt instrumentation finalization failed", exc_info=True)
 
+    def _prior_stage_spend_usd(self) -> float:
+        """Settled spend from sibling bridge-run stages of the same hunt.
+
+        A staged hunt (preprocess → rank → sourcehunt) runs each stage as a
+        separate bridge run. The bridge isolates every stage's output under
+        ``<run>/sourcehunt/sh_<bridge_run_id>/`` (see the bridge worker's
+        ``isolate_sourcehunt_output``), so ``self.output_dir`` is a per-stage
+        directory and its *parent* is the shared, run-scoped output root that
+        holds every sibling stage's ledger at
+        ``sh_<bridge_run_id>/<session>/spend-ledger.jsonl``.
+
+        Without this, ``budget_usd`` is enforced fresh per stage and the hunt
+        can spend N× the cap. Stages are strictly sequential — a stage only
+        starts once the previous one has reached a terminal result — so prior
+        ledgers are fully settled on disk and this read is race-free.
+
+        Returns 0.0 unless the on-disk layout is the bridge-staged one, so
+        standalone CLI runs and tests (whose ``output_dir`` parent is arbitrary)
+        are never charged for unrelated neighbours.
+        """
+
+        output_dir = Path(self.output_dir)
+        bridge_run_dir = output_dir.name
+        # Bridge-run dirs are ``sh_<hex>`` (underscore); session dirs are
+        # ``sh-<hex>`` (hyphen). Only the former marks the staged layout.
+        if not bridge_run_dir.startswith("sh_"):
+            return 0.0
+        output_root = output_dir.parent
+        if not output_root.is_dir():
+            return 0.0
+
+        total = 0.0
+        for ledger_path in output_root.glob("sh_*/*/spend-ledger.jsonl"):
+            # Skip this stage's own bridge-run directory.
+            if ledger_path.parent.parent.name == bridge_run_dir:
+                continue
+            try:
+                for line in ledger_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if event.get("event") == "call_settled":
+                        total += float(event.get("cost_usd", 0.0) or 0.0)
+            except (OSError, ValueError):
+                continue
+        return total
+
     def _ensure_spend_ledger(self) -> SpendLedger:
         if self._spend_ledger is None:
+            limit_usd = self.budget_usd
+            if self.budget_usd > 0 and not self._resuming:
+                prior_spend = self._prior_stage_spend_usd()
+                if prior_spend > 0:
+                    # Carry prior stages' spend forward so the dollar cap is a
+                    # lifetime budget for the whole staged hunt, not per stage.
+                    # Floor just above zero: a literal 0 would read as "no cap"
+                    # (enforcing is ``limit_usd > 0``), so an already-exhausted
+                    # hunt must keep a tiny positive, still-enforcing limit that
+                    # trips on the first paid call rather than running unbounded.
+                    limit_usd = max(SpendLedger._EPSILON, self.budget_usd - prior_spend)
             self._spend_ledger = SpendLedger(
-                limit_usd=self.budget_usd,
+                limit_usd=limit_usd,
                 session_id=self._session_id,
                 repo_url=self.repo_url,
                 output_dir=self.output_dir,
