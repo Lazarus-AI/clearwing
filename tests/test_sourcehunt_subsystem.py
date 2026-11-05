@@ -321,6 +321,8 @@ def test_subsystem_prompt_includes_file_listing():
     assert "Lifecycle/state" in prompt
     assert "dominates every subsequent" in prompt
     assert "Map validation, mutation, and use by lifecycle stage" in prompt
+    assert "grep_source for content" in prompt
+    assert "find_source for filenames" in prompt
 
 
 def test_subsystem_prompt_cross_file_calls():

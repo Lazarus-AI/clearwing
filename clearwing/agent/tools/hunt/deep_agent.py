@@ -1,9 +1,7 @@
-"""Deep agent mode tools: execute, read_file, write_file.
+"""Deep agent mode tools: bounded source discovery and sandbox operations.
 
-Replaces the constrained 9-tool hunter set with 3 primitives that give
-the model full-shell access inside the sandbox container. The model
-uses the same tools a human researcher would — gcc, gdb, strace, make,
-etc. — all via ``execute()``.
+Pairs repository-scoped search with sandbox tools for source reading,
+compilation, debugging, and test execution.
 
 Model-side reasoning is captured natively via rust-genai's
 `capture_reasoning_content=True` on every chat request; the hunter
@@ -19,15 +17,20 @@ See docs/spec/001_deep_agent_mode.md for the design rationale.
 from __future__ import annotations
 
 import difflib
+import fnmatch
 import logging
+import os
 import re
 import shlex
+from pathlib import Path
 
 from pydantic import Field
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
 from clearwing.reporting.safety import redact_text
+from clearwing.sourcehunt.paths import resolve_repo_directory, resolve_repo_file
 
+from .discovery import build_discovery_tools
 from .pool_query import build_pool_query_tools
 from .potentials import build_potential_tools
 from .reporting import build_reporting_tools
@@ -44,7 +47,9 @@ class ExecuteInput(ToolInputModel):
 
 
 class ReadFileInput(ToolInputModel):
-    path: str = Field(description="Absolute path in the container.")
+    path: str = Field(
+        description="Repository-relative path from a search hit, or /workspace/... path."
+    )
     offset: int = Field(
         default=0, description="Line offset (0-based, default 0). Or use start_line (1-based)."
     )
@@ -91,6 +96,16 @@ class ReadFunctionInput(ToolInputModel):
     name: str = Field(description="Exact function name to read (e.g. 'foo_bar_baz').")
 
 
+class FindSourceInput(ToolInputModel):
+    query: str = Field(description="Filename or directory name substring, or glob pattern.")
+    path: str = Field(default=".", description="Repository-relative directory to search.")
+    kind: str = Field(default="both", description="Match files, directories, or both.")
+
+
+_SEARCH_LIMIT = 40
+_SHELL_SEARCH = re.compile(r"(?:^|[;&|]\s*)\s*(?:find|grep|rg)\b")
+
+
 def _cap_output(text: str, label: str = "output") -> str:
     safe = redact_text(text)
     if len(safe) <= _OUTPUT_CAP:
@@ -113,7 +128,7 @@ def _matches(name: str, tokens: list[str]) -> bool:
 
 
 def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa: C901
-    """Build the deep agent tool set: execute, read_file, write_file,
+    """Build the deep agent tool set: bounded search, execute, read_file, write_file,
     plus the shared reporting + findings-pool tools.
     """
     # Deep hunters read source via read_file/execute (cat/sed/grep), not the
@@ -121,8 +136,156 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
     # context so the reporting guard doesn't reject every trace step for a
     # file it never saw a read_source_file call for.
     ctx.agent_mode = "deep"
+    discovery_grep = next(tool for tool in build_discovery_tools(ctx) if tool.name == "grep_source")
+
+    def grep_source(pattern: str, path: str = ".", file_glob: str = "", **_: object) -> dict:
+        matches = discovery_grep.handler(
+            pattern=pattern, path=path, file_glob=file_glob, max_results=_SEARCH_LIMIT + 1
+        )
+        if matches and "error" in matches[0]:
+            return {
+                "status": "error",
+                "error": matches[0]["error"],
+                "matches": [],
+                "truncated": False,
+            }
+        truncated = len(matches) > _SEARCH_LIMIT
+        visible = [
+            {**match, "matched_text": str(match.get("matched_text", ""))[:240]}
+            for match in matches[:_SEARCH_LIMIT]
+        ]
+        return {
+            "status": "truncated" if truncated else "matches" if matches else "no_matches",
+            "pattern": pattern,
+            "scope": path,
+            "matches": visible,
+            "count": min(len(matches), _SEARCH_LIMIT),
+            "truncated": truncated,
+            "next_action": "Read a relevant hit with read_file; refine the query if truncated or empty.",
+        }
+
+    def find_source(query: str, path: str = ".", kind: str = "both", **_: object) -> dict:  # noqa: C901
+        if kind not in {"file", "directory", "both"}:
+            return {
+                "status": "error",
+                "error": "kind must be file, directory, or both",
+                "matches": [],
+                "truncated": False,
+            }
+        if not query.strip():
+            return {
+                "status": "error",
+                "error": "query must not be empty",
+                "matches": [],
+                "truncated": False,
+            }
+        base = resolve_repo_directory(ctx.repo_path, path)
+        if base is None:
+            return {
+                "status": "error",
+                "error": "path is outside the repository or is not a directory",
+                "matches": [],
+                "truncated": False,
+            }
+        root = Path(ctx.repo_path).resolve()
+        has_glob = any(char in query for char in "*?[]")
+        needle = query.lower()
+        matches: list[dict[str, str]] = []
+
+        if ctx.sandbox is not None:
+            relative_base = base.relative_to(root).as_posix()
+            container_base = "/workspace" if relative_base == "." else f"/workspace/{relative_base}"
+            name_pattern = query if has_glob else f"*{query}*"
+            type_filter = {
+                "file": "-type f",
+                "directory": "-type d",
+                "both": r"\( -type f -o -type d \)",
+            }[kind]
+            command = (
+                f"find {shlex.quote(container_base)} -path '*/.git' -prune -o "
+                f"\\( -iname {shlex.quote(name_pattern)} -a {type_filter} \\) -print "
+                "| while IFS= read -r match; do "
+                'if [ -d "$match" ]; then printf "directory\\t%s\\n" "$match"; '
+                'else printf "file\\t%s\\n" "$match"; fi; done '
+                f"| head -n {_SEARCH_LIMIT + 1}"
+            )
+            result = ctx.sandbox.exec(command, timeout=30)
+            if result.timed_out:
+                return {
+                    "status": "error",
+                    "error": "repository path search timed out",
+                    "matches": [],
+                    "truncated": False,
+                }
+            if result.stderr and not result.stdout:
+                return {
+                    "status": "error",
+                    "error": _cap_output(result.stderr.strip(), "find error"),
+                    "matches": [],
+                    "truncated": False,
+                }
+            for row in result.stdout.splitlines():
+                entry_type, separator, absolute = row.partition("\t")
+                if not separator or entry_type not in {"file", "directory"}:
+                    continue
+                if not absolute.startswith("/workspace/"):
+                    continue
+                matches.append(
+                    {"path": redact_text(absolute.removeprefix("/workspace/")), "type": entry_type}
+                )
+        else:
+
+            def wanted(name: str) -> bool:
+                return fnmatch.fnmatch(name.lower(), needle) if has_glob else needle in name.lower()
+
+            for directory, dirnames, filenames in os.walk(base, followlinks=False):
+                dirnames[:] = sorted(
+                    name
+                    for name in dirnames
+                    if name != ".git"
+                    and resolve_repo_directory(
+                        ctx.repo_path, (Path(directory) / name).relative_to(root).as_posix()
+                    )
+                    is not None
+                )
+                if kind in {"directory", "both"}:
+                    for name in dirnames:
+                        if wanted(name):
+                            relative = (Path(directory) / name).relative_to(root).as_posix()
+                            matches.append({"path": redact_text(relative), "type": "directory"})
+                            if len(matches) > _SEARCH_LIMIT:
+                                break
+                if len(matches) > _SEARCH_LIMIT:
+                    break
+                if kind in {"file", "both"}:
+                    for name in sorted(filenames):
+                        candidate = Path(directory) / name
+                        relative = candidate.relative_to(root).as_posix()
+                        if wanted(name) and resolve_repo_file(ctx.repo_path, relative) is not None:
+                            matches.append({"path": redact_text(relative), "type": "file"})
+                            if len(matches) > _SEARCH_LIMIT:
+                                break
+                if len(matches) > _SEARCH_LIMIT:
+                    break
+        truncated = len(matches) > _SEARCH_LIMIT
+        return {
+            "status": "truncated" if truncated else "matches" if matches else "no_matches",
+            "query": query,
+            "scope": path,
+            "matches": matches[:_SEARCH_LIMIT],
+            "count": min(len(matches), _SEARCH_LIMIT),
+            "truncated": truncated,
+            "next_action": "Read a relevant file with read_file; refine the query if truncated or empty.",
+        }
 
     def execute(command: str, timeout: int = 300, **_: object) -> dict:
+        if _SHELL_SEARCH.search(command):
+            return {
+                "error": (
+                    "Shell search blocked. Use grep_source for repository "
+                    "content or find_source for repository paths, then read_file a hit."
+                )
+            }
         if ctx.sandbox is None:
             return {"error": "no sandbox available"}
         result = ctx.sandbox.exec(command, timeout=timeout)
@@ -316,10 +479,31 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
 
     return [
         NativeToolSpec(
+            name="grep_source",
+            description=(
+                "Search source content inside the repository. Returns at most 40 file:line "
+                "matches and an explicit no_matches or truncated state. Read a relevant hit "
+                "with read_file; repeated results call for a different approach or a finish."
+            ),
+            schema=discovery_grep.schema,
+            handler=grep_source,
+        ),
+        NativeToolSpec(
+            name="find_source",
+            description=(
+                "Find repository files or directories by name substring or glob. Returns at "
+                "most 40 labeled paths and an explicit no_matches or truncated state. "
+                "Read a relevant file with read_file."
+            ),
+            schema=FindSourceInput.model_json_schema(),
+            handler=find_source,
+        ),
+        NativeToolSpec(
             name="execute",
             description=(
-                "Run a shell command inside the sandbox container. "
-                "Use for compilation, debugging, running tests, etc."
+                "Run a shell command inside the sandbox container for compilation, "
+                "debugging, and tests. Use grep_source for source content and "
+                "find_source for paths instead of shell grep/find searches."
             ),
             schema=ExecuteInput.model_json_schema(),
             handler=execute,
@@ -327,7 +511,8 @@ def build_deep_agent_tools(ctx: HunterContext) -> list[NativeToolSpec]:  # noqa:
         NativeToolSpec(
             name="read_file",
             description=(
-                "Read lines from a file in the container. "
+                "Read lines from a relevant grep_source or find_source hit. "
+                "Repository-relative paths resolve inside /workspace. "
                 "Parameters: path (required), offset (line offset, default 0), "
                 "limit (max lines, default 2000). No other parameters exist."
             ),

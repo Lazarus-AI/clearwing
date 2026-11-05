@@ -11,10 +11,11 @@ import pytest
 from genai_pyo3 import ToolCall
 
 from clearwing.agent.tools.hunt import build_reporting_tools
+from clearwing.agent.tools.hunt.deep_agent import build_deep_agent_tools
 from clearwing.agent.tools.hunt.potentials import build_potential_tools
 from clearwing.agent.tools.hunt.sandbox import HunterContext
 from clearwing.llm.native import NativeToolSpec
-from clearwing.sourcehunt.hunter import NativeHunter, _read_file_tool_response
+from clearwing.sourcehunt.hunter import NativeHunter, _read_file_tool_response, _tool_output_text
 
 
 @dataclass
@@ -82,6 +83,24 @@ def test_read_metadata_does_not_treat_source_word_as_truncation():
 
     assert returned == (1, 1)
     assert "Truncated: False" in summary
+
+
+def test_structured_search_summary_preserves_status_and_next_action():
+    result = {
+        "status": "truncated",
+        "scope": "src",
+        "truncated": True,
+        "matches": [
+            {"file": "src/gfx.c", "line_number": i, "matched_text": "x" * 240} for i in range(40)
+        ],
+        "next_action": "Read a relevant hit with read_file.",
+    }
+
+    summary = _tool_output_text("grep_source", {}, result)
+
+    assert summary.startswith("grep_source: status=truncated")
+    assert "additional hits omitted" in summary
+    assert "read_file" in summary
 
 
 @pytest.mark.asyncio
@@ -995,3 +1014,242 @@ async def test_hunter_stalls_when_no_progress():
 
     assert result.stop_reason == "stalled"
     assert llm.achat.call_count < 20  # stops well short of max_steps
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("symbol", "filename"),
+    [
+        ("RDPGFX_SURFACE_COMMAND", "gfx.c"),
+        ("struct sc_file", "profile.c"),
+    ],
+)
+async def test_repeated_source_searches_stall_without_shell_loops(tmp_path, symbol, filename):
+    """FreeRDP/OpenSC pattern: varied queries returning the same source hit."""
+    source = tmp_path / filename
+    source.write_text(f"{symbol}\n")
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path=str(tmp_path))
+    hunter = NativeHunter(
+        llm=llm,
+        prompt="test prompt",
+        tools=build_deep_agent_tools(ctx),
+        ctx=ctx,
+        max_steps=100,
+        agent_mode="deep",
+    )
+    assert hunter.max_steps_without_progress == 8
+    queries = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call("grep_source", {"pattern": f"{symbol}{'(?:)' * next(queries)}"})
+        ]
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert result.findings == []
+    assert llm.achat.call_count <= 12
+    assert all(
+        "grep_source" in {tool.name for tool in call.kwargs["tools"]}
+        for call in llm.achat.call_args_list
+    )
+    assert all("find /" not in str(call.kwargs["messages"]) for call in llm.achat.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_only_two_new_search_locations_can_reset_stall():
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo")
+    search = NativeToolSpec(
+        name="grep_source",
+        description="search",
+        schema={"type": "object", "properties": {"pattern": {"type": "string"}}},
+        handler=lambda pattern: {
+            "status": "matches",
+            "matches": [{"file": f"src/{pattern}.c", "line_number": 1}],
+        },
+    )
+    hunter = NativeHunter(
+        llm=llm, prompt="test", tools=[search], ctx=ctx, max_steps=100, agent_mode="deep"
+    )
+    queries = itertools.count()
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[_make_tool_call("grep_source", {"pattern": chr(97 + next(queries))})]
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count == 10  # 2 discoveries plus the eight-step guard
+
+
+@pytest.mark.asyncio
+async def test_exact_repeated_search_still_reaches_eight_step_guard():
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo")
+    search = NativeToolSpec(
+        name="grep_source",
+        description="search",
+        schema={"type": "object", "properties": {"pattern": {"type": "string"}}},
+        handler=lambda pattern: {
+            "status": "matches",
+            "matches": [{"file": "src/gfx.c", "line_number": 12}],
+        },
+    )
+    hunter = NativeHunter(
+        llm=llm, prompt="test", tools=[search], ctx=ctx, max_steps=100, agent_mode="deep"
+    )
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[_make_tool_call("grep_source", {"pattern": "RDPGFX_SURFACE_COMMAND"})]
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count <= 10
+
+
+def _decision_hunter():
+    llm = AsyncMock()
+    ctx = HunterContext(repo_path="/tmp/repo")
+    ctx.potentials.append({"id": "lead-1", "file": "src/Archive.java", "status": "open"})
+    executed: list[str] = []
+
+    def execute(command):
+        executed.append(command)
+        return "PATH TRAVERSAL BYPASS CONFIRMED"
+
+    def record_finding(description):
+        ctx.findings.append({"description": description})
+        return "Finding recorded"
+
+    tools = [
+        NativeToolSpec(
+            name=name,
+            description=name,
+            schema={"type": "object", "properties": {field: {"type": "string"}}},
+            handler=handler,
+        )
+        for name, field, handler in (
+            ("execute", "command", execute),
+            ("update_potential", "observation", lambda observation: "Updated potential"),
+            ("record_finding", "description", record_finding),
+            ("defer_potential", "reason", lambda reason: "Deferred potential"),
+            ("dismiss_potential", "resolution", lambda resolution: "Dismissed potential"),
+        )
+    ]
+    hunter = NativeHunter(
+        llm=llm, prompt="test", tools=tools, ctx=ctx, max_steps=50, agent_mode="deep"
+    )
+    hunter.max_steps_without_progress = 4
+    return hunter, llm, executed
+
+
+@pytest.mark.asyncio
+async def test_junrar_pattern_gets_final_record_finding_choice():
+    hunter, llm, executed = _decision_hunter()
+    llm.achat.side_effect = [
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("execute", {"command": "javac PoC.java && java PoC"})]
+        ),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("update_potential", {"observation": "PoC confirmed"})]
+        ),
+        FakeResponse(
+            tool_calls_list=[
+                _make_tool_call("record_finding", {"description": "Confirmed path traversal"})
+            ]
+        ),
+        FakeResponse(text="Finding recorded and investigation complete."),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert len(result.findings) == 1
+    assert executed == ["javac PoC.java && java PoC"]
+    decision_call = llm.achat.call_args_list[2]
+    assert {tool.name for tool in decision_call.kwargs["tools"]} == {
+        "record_finding",
+        "dismiss_potential",
+        "defer_potential",
+    }
+    assert any(
+        "FINAL LEAD DECISION" in str(message.to_dict().get("content", ""))
+        for message in decision_call.kwargs["messages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_uncertain_final_lead_is_explained_without_promotion():
+    hunter, llm, _ = _decision_hunter()
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("execute", {"command": "inspect one"})]),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("update_potential", {"observation": "unknown"})]
+        ),
+        FakeResponse(text="UNVERIFIED: The caller's path to this sink is not established."),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "completed"
+    assert result.findings == []
+    assert result.potentials[0]["id"] == "lead-1"
+    assert "not established" in result.transcript_summary
+
+
+@pytest.mark.asyncio
+async def test_generic_final_reply_keeps_unresolved_lead_stalled():
+    hunter, llm, _ = _decision_hunter()
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("execute", {"command": "inspect one"})]),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("update_potential", {"observation": "unknown"})]
+        ),
+        FakeResponse(text="done"),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert result.findings == []
+
+
+@pytest.mark.asyncio
+async def test_final_decision_rejects_another_potential_update():
+    hunter, llm, _ = _decision_hunter()
+    update = next(tool for tool in hunter.tools if tool.name == "update_potential")
+    original_handler = update.handler
+    update.handler = MagicMock(side_effect=original_handler)
+    llm.achat.side_effect = [
+        FakeResponse(tool_calls_list=[_make_tool_call("execute", {"command": "inspect one"})]),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("update_potential", {"observation": "PoC confirmed"})]
+        ),
+        FakeResponse(
+            tool_calls_list=[_make_tool_call("update_potential", {"observation": "same claim"})]
+        ),
+    ]
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert result.findings == []
+    assert update.handler.call_count == 1
