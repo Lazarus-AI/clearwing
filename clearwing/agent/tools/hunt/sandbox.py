@@ -30,7 +30,7 @@ class HunterContext:
     repo_path: str  # absolute host path
     sandbox: SandboxInstance | None = None  # primary sandbox; set by hunt loop
     findings: list[Finding] = field(default_factory=list)
-    trace_steps: list = field(default_factory=list)  # accumulator for TraceStep dicts
+    trace_steps: list = field(default_factory=list)  # accumulator for TraceStep instances
     # Per-field character cap for the trace step's `code_snippet` and `note`.
     # Trace steps flow into finding evidence and artifacts; unbounded strings
     # blow up on large repos. 0 or negative disables truncation.
