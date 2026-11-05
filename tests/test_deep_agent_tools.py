@@ -246,9 +246,9 @@ def test_read_file_with_defaults(tools, mock_sandbox):
     cmd = mock_sandbox.exec.call_args[0][0]
     assert "awk" in cmd
     assert "/workspace/foo.c" in cmd
-    # Default offset=0, limit=2000 → start=1, end=2000
+    # Default offset=0, limit=100 → start=1, end=100
     assert "s=1" in cmd
-    assert "e=2000" in cmd
+    assert "e=100" in cmd
     assert "line1" in result
 
 
