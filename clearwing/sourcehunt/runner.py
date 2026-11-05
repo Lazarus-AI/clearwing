@@ -2236,35 +2236,77 @@ class SourceHuntRunner:
             subsystem_spent = hunt_result.subsystem_spent_usd
 
             if not hunt_result.target_plan_completed:
+                # The hunt is incomplete (a hunter stalled, budget ran out, or
+                # verify degraded). Incompleteness still drives run_status and
+                # exit_code via _target_plan_incomplete, but it must NOT discard
+                # verification work: a hunter cut off mid-trace still recorded
+                # real findings, and _verify already degrades gracefully on a
+                # partial hunt and post-budget (it self-guards on
+                # _budget_exhausted()). So the skip is conditioned on having
+                # nothing to verify, not on completion. Exploitation is never
+                # attempted on an incomplete hunt (the partial-verify handler
+                # below keeps exploit skipped).
                 self._target_plan_incomplete = True
-                if historical_db is not None:
-                    historical_db.close()
-                for stage in ("verify", "exploit"):
-                    self._emit_stage(
-                        stage,
-                        "skipped",
-                        findings_so_far=len(all_findings),
-                        detail="Hunter work was incomplete",
-                        files=stage_files,
-                        finding_ids=[finding.id for finding in all_findings],
+                run_verify_on_incomplete = bool(all_findings) and self._stop_after != "hunt"
+                if not run_verify_on_incomplete:
+                    # Nothing to verify (no findings), or --stop-after hunt owns
+                    # the early return below. Preserve the original skip.
+                    if historical_db is not None:
+                        historical_db.close()
+                    for stage in ("verify", "exploit"):
+                        self._emit_stage(
+                            stage,
+                            "skipped",
+                            findings_so_far=len(all_findings),
+                            detail="Hunter work was incomplete",
+                            files=stage_files,
+                            finding_ids=[finding.id for finding in all_findings],
+                        )
+                    return self._finalize_result(
+                        start_time=start_time,
+                        repo_path=repo_path,
+                        findings=all_findings,
+                        verified=[],
+                        exploited=[],
+                        files_ranked=files_ranked,
+                        files_hunted=files_hunted,
+                        spent_per_tier=spent_per_tier,
+                        band_stats=band_stats,
+                        findings_pool=findings_pool,
+                        subsystems_hunted=subsystems_hunted,
+                        subsystem_spent_usd=subsystem_spent,
+                        subsystem_status=hunt_result.subsystem_status,
+                        pipeline_status=pipeline_status,
+                        potentials=all_potentials,
                     )
-                return self._finalize_result(
-                    start_time=start_time,
-                    repo_path=repo_path,
-                    findings=all_findings,
-                    verified=[],
-                    exploited=[],
-                    files_ranked=files_ranked,
-                    files_hunted=files_hunted,
-                    spent_per_tier=spent_per_tier,
-                    band_stats=band_stats,
-                    findings_pool=findings_pool,
-                    subsystems_hunted=subsystems_hunted,
-                    subsystem_spent_usd=subsystem_spent,
-                    subsystem_status=hunt_result.subsystem_status,
-                    pipeline_status=pipeline_status,
-                    potentials=all_potentials,
+                # Incomplete but we have findings: emit a "degraded" verify
+                # marker so the partial hunt is observable, ingest+close the
+                # historical DB here (and null it so the block below does not
+                # double-handle it), then fall through to the normal verify
+                # stage. _verify reports status != "completed", and the handler
+                # at the end of verify emits "exploit: skipped" and returns with
+                # whatever `verified` was produced.
+                self._emit_stage(
+                    "verify",
+                    "degraded",
+                    findings_so_far=len(all_findings),
+                    detail="Hunter work was incomplete; verifying recorded findings",
+                    files=stage_files,
+                    finding_ids=[finding.id for finding in all_findings],
                 )
+                if historical_db is not None:
+                    try:
+                        if self._injected_findings_pool is None:
+                            historical_db.ingest_campaign(
+                                all_findings,
+                                repo_url=self.repo_url,
+                                session_id=self._session_id,
+                            )
+                    except Exception:
+                        logger.warning("Historical DB ingest failed", exc_info=True)
+                    finally:
+                        historical_db.close()
+                        historical_db = None
 
             # 3.5. v0.6: Behavioral monitoring of findings text (spec 013).
             if self._enable_behavior_monitor and all_findings:
@@ -2340,13 +2382,34 @@ class SourceHuntRunner:
             rejected = verification_result.rejected
             if rejected:
                 self._write_rejected_findings(rejected)
-            if verification_result.status != "completed" and not self.no_verify:
-                self._verification_incomplete = True
+            # Skip exploitation when verification did not conclusively process
+            # every finding, OR when the hunt itself was incomplete: a partial
+            # hunt may have verified all the findings it happened to record, but
+            # we must not exploit on an incomplete picture of the target. Verify
+            # is allowed to run on an incomplete hunt (so findings reach
+            # verified===true for remediation); exploitation is not.
+            verify_incomplete = verification_result.status != "completed"
+            # An incomplete hunt blocks exploitation unconditionally: we must not
+            # exploit on a partial picture of the target even under --no-verify
+            # (which otherwise suppresses the verify-incompleteness branch,
+            # because with verification disabled a non-"completed" status is
+            # expected and must not gate exploit on its own).
+            if self._target_plan_incomplete or (verify_incomplete and not self.no_verify):
+                # Only verification actually failing to conclude marks the
+                # verification stage incomplete; an incomplete hunt alone already
+                # drives run_status via _target_plan_incomplete and must not
+                # falsify a verification that did complete.
+                if verify_incomplete and not self.no_verify:
+                    self._verification_incomplete = True
                 self._emit_stage(
                     "exploit",
                     "skipped",
                     findings_so_far=len(verified),
-                    detail="Verification did not conclusively process every finding",
+                    detail=(
+                        "Hunter work was incomplete"
+                        if self._target_plan_incomplete
+                        else "Verification did not conclusively process every finding"
+                    ),
                     files=[str(finding.file or "") for finding in verified],
                     symbols=self._finding_symbols(verified),
                     finding_ids=[finding.id for finding in verified],
@@ -3177,8 +3240,15 @@ class SourceHuntRunner:
                     pipeline_status.record_succeeded("verifier")
             if self._checkpoint is None:
                 raise RuntimeError("verification requires a preprocessing checkpoint")
-            if result.status != "completed":
+            if result.status != "completed" or self._target_plan_incomplete:
                 # Partial, transient, or operational failures are not durable.
+                # Nor is verification run over an INCOMPLETE hunt: those verified
+                # findings are returned in the result for this run, but the
+                # verification checkpoint must not persist. A later resume reruns
+                # hunting; if it now completes with a different finding set, a
+                # stale verification checkpoint keyed to the partial findings
+                # would fail the compatibility check on restore. Clearing it
+                # keeps hunt-completion and verify-completion independent.
                 self._checkpoint.verification = None
                 self._checkpoint.exploitation = None
             else:

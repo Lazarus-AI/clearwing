@@ -855,6 +855,83 @@ async def test_deep_read_repeated_range_does_not_reset_stall():
 
 
 @pytest.mark.asyncio
+async def test_deep_record_trace_step_new_anchor_counts_as_progress():
+    # A hunter building an attacker->sink trace records a NEW (file, line)
+    # anchor each step. That is genuine confirmation work and must reset the
+    # stall counter, so the hunt runs to max_steps rather than being cut off
+    # mid-trace by the stall guard.
+    hunter, llm, ctx = _build_deep_hunter(MagicMock())
+    hunter.max_steps_without_progress = 3
+
+    # Vary non-digit content each step: the duplicate-call guard normalizes
+    # digits away in the dedup key, so a realistic trace varies file/function/
+    # snippet (as a real attacker->sink trace does), not just line numbers.
+    names = itertools.count()
+    llm.achat.side_effect = lambda **_: (
+        lambda n: FakeResponse(
+            tool_calls_list=[
+                _make_tool_call(
+                    "record_trace_step",
+                    {
+                        "file": f"src/step_{chr(97 + n % 26)}{n}.c",
+                        "line": n + 1,
+                        "function": f"fn_{chr(97 + n % 26)}",
+                        "code_snippet": f"sink_{chr(97 + n % 26)}(buf);",
+                        "note": f"propagation via {chr(97 + n % 26)}",
+                    },
+                )
+            ],
+        )
+    )(next(names))
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "max_steps"
+    assert llm.achat.call_count == 20
+    # Every step anchored a distinct (file, line).
+    assert len(ctx.trace_steps) == 20
+
+
+@pytest.mark.asyncio
+async def test_deep_record_trace_step_repeated_anchor_does_not_reset_stall():
+    # Re-recording the SAME (file, line) anchor (with varied notes so the
+    # duplicate-call guard does not preempt it) is not progress: the stall
+    # guard must still terminate the hunt. Anti-abuse for the trace-anchor
+    # progress signal.
+    hunter, llm, ctx = _build_deep_hunter(MagicMock())
+    hunter.max_steps_without_progress = 3
+
+    # Vary the note's non-digit text each step so the duplicate-call guard
+    # (which normalizes digits) sees DISTINCT keys and does not trip
+    # degenerate_loop — isolating the stall guard. The (file, line) anchor is
+    # constant, so no new trace-anchor progress accrues and the hunt must stall.
+    words = itertools.cycle(["alpha", "beta", "gamma", "delta", "epsilon", "zeta"])
+    llm.achat.side_effect = lambda **_: FakeResponse(
+        tool_calls_list=[
+            _make_tool_call(
+                "record_trace_step",
+                {
+                    "file": "src/only_file.c",
+                    "line": 42,
+                    "function": "f",
+                    "code_snippet": "x = buf[i];",
+                    "note": f"revisit {next(words)}",
+                },
+            )
+        ],
+    )
+
+    with patch("clearwing.sourcehunt.hunter.HunterTrajectoryLogger") as mock_traj:
+        mock_traj.for_hunter.return_value = MagicMock()
+        result = await hunter.arun()
+
+    assert result.stop_reason == "stalled"
+    assert llm.achat.call_count < 20
+
+
+@pytest.mark.asyncio
 async def test_deep_execute_failing_does_not_reset_stall():
     # A stream of varied FAILING execute commands (distinct arguments, so not
     # a degenerate_loop) must not reset the stall counter — execute never

@@ -1606,10 +1606,12 @@ class NativeHunter:
         synthesis_injected = False
         step = 0
         # Progress guard: a step counts as progress when it adds a finding, a
-        # potential, reads a previously-unread file, or returns a previously-
-        # unread range from a deep read_file call. A successful execute or
-        # write_file does not count — otherwise a stream of varied failing
-        # commands would silently reset the stall counter.
+        # potential, reads a previously-unread file, returns a previously-
+        # unread range from a deep read_file call, or records a trace step at a
+        # previously-unseen (file, line) anchor. A successful execute or
+        # write_file does not count, and neither does callgraph navigation
+        # (lookup_callers/callees, list_functions, read_function) — otherwise a
+        # stream of varied unproductive calls would silently reset the counter.
         # When nothing advances for max_steps_without_progress steps the hunter
         # stops (see _should_stop). Steps that only reissued an already-
         # throttled call are left to the degenerate_loop terminal, so they do
@@ -1620,9 +1622,21 @@ class NativeHunter:
             len(self.ctx.files_read),
             len(self.ctx.deep_files_read),
             0,
+            0,
         )
         deep_read_ranges: dict[str, list[tuple[int, int]]] = {}
         deep_read_range_progress = 0
+        # A record_trace_step that anchors a (file, line) never traced before
+        # counts as progress: a hunter actively building an attacker->sink
+        # chain is working, even if it is not opening new files. Re-tracing an
+        # already-recorded anchor does not count (anti-abuse), and callgraph
+        # lookups never touch ctx.trace_steps so they are naturally excluded.
+        # max_steps remains the absolute backstop. Seed from any pre-existing
+        # trace steps so a resume does not treat them as fresh progress.
+        trace_anchors: set[tuple[str, int]] = {
+            (step.file, step.line) for step in self.ctx.trace_steps
+        }
+        trace_anchor_progress = 0
         steps_since_progress = 0
         prev_step_had_skip = False
         while True:
@@ -1633,6 +1647,7 @@ class NativeHunter:
                 len(self.ctx.files_read),
                 len(self.ctx.deep_files_read),
                 deep_read_range_progress,
+                trace_anchor_progress,
             )
             if progress_sig != last_progress_sig:
                 last_progress_sig = progress_sig
@@ -1963,6 +1978,7 @@ class NativeHunter:
                         tool_arguments["potential_id"] = active_potential_id
                     potentials_before = len(self.ctx.potentials)
                     findings_before = len(self.ctx.findings)
+                    trace_steps_before = len(self.ctx.trace_steps)
                     dynamic_verification_blocked = (
                         active_potential_id is None
                         and _tool_requires_active_potential(
@@ -2100,6 +2116,20 @@ class NativeHunter:
                                 tool_arguments,
                                 tool_output,
                             )
+                            # A newly-anchored trace step is progress. Read the
+                            # authoritative (file, line) off the model the tool
+                            # actually appended (record_trace_step validates and
+                            # may reject, appending nothing); gating on the
+                            # length growth means a rejected call cannot count.
+                            if (
+                                tool_call.fn_name == "record_trace_step"
+                                and len(self.ctx.trace_steps) > trace_steps_before
+                            ):
+                                newest = self.ctx.trace_steps[-1]
+                                anchor = (newest.file, newest.line)
+                                if anchor not in trace_anchors:
+                                    trace_anchors.add(anchor)
+                                    trace_anchor_progress += 1
                         trajectory.log(
                             "tool_result",
                             {

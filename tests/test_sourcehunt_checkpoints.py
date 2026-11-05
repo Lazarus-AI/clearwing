@@ -862,6 +862,76 @@ async def test_runner_checkpoints_and_restores_verification(tmp_path: Path, monk
     assert restored.verified[0].id == "finding-1"
 
 
+@pytest.mark.asyncio
+async def test_verify_on_incomplete_hunt_does_not_persist_a_checkpoint(tmp_path: Path, monkeypatch):
+    # Regression for the resume interaction of verify-on-incomplete: when the
+    # hunt was incomplete, _verify may fully process the partial findings it was
+    # given (status="completed"), but it must NOT persist a verification
+    # checkpoint. A later resume reruns hunting; if the completed hunt yields a
+    # different finding set, a stale verification checkpoint keyed to the partial
+    # findings would fail the compatibility check on restore. The findings are
+    # still returned for this run; only the durable checkpoint is withheld.
+    finding = Finding(id="finding-1", file="sample.c", severity="high")
+    verifier_client = type(
+        "VerifierClient",
+        (),
+        {"provider_name": "test-provider", "model_name": "test-model"},
+    )()
+    runner = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path),
+        validator_mode="v1",
+        enable_mechanism_memory=False,
+    )
+    runner._checkpoint = SourceHuntCheckpoint()
+    # The hunt did not complete; verification is running over partial findings.
+    runner._target_plan_incomplete = True
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: verifier_client)
+
+    async def verify_once(*args, **kwargs):
+        return [finding]
+
+    monkeypatch.setattr(runner, "_verify_v1", verify_once)
+    result = await runner._verify(
+        [finding], repo_path=str(tmp_path), pipeline_status=PipelineStatus()
+    )
+
+    # Findings are returned for this run, but no verification checkpoint persists.
+    assert result.verified[0].id == "finding-1"
+    assert runner._checkpoint.verification is None
+    assert runner._checkpoint.exploitation is None
+
+
+@pytest.mark.asyncio
+async def test_verify_on_completed_hunt_still_persists_a_checkpoint(tmp_path: Path, monkeypatch):
+    # Guard the above does not regress the normal path: on a COMPLETED hunt, a
+    # completed verification still persists its checkpoint so a resume can reuse
+    # it without re-running the verifier.
+    finding = Finding(id="finding-1", file="sample.c", severity="high")
+    verifier_client = type(
+        "VerifierClient",
+        (),
+        {"provider_name": "test-provider", "model_name": "test-model"},
+    )()
+    runner = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        output_dir=str(tmp_path),
+        validator_mode="v1",
+        enable_mechanism_memory=False,
+    )
+    runner._checkpoint = SourceHuntCheckpoint()
+    runner._target_plan_incomplete = False
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: verifier_client)
+
+    async def verify_once(*args, **kwargs):
+        return [finding]
+
+    monkeypatch.setattr(runner, "_verify_v1", verify_once)
+    await runner._verify([finding], repo_path=str(tmp_path), pipeline_status=PipelineStatus())
+
+    assert isinstance(runner._checkpoint.verification, VerificationCheckpoint)
+
+
 def test_verification_checkpoint_rejects_different_options():
     checkpoint = VerificationCheckpoint.from_result(
         VerificationResult(verified=[], rejected=[]), options={"validator_mode": "v2"}
@@ -1023,7 +1093,17 @@ def test_ordinary_incomplete_hunt_returns_incomplete_not_clean(
         ),
     )
     monkeypatch.setattr(runner, "_write_report", lambda **kwargs: {})
-    verify = AsyncMock(side_effect=AssertionError("Verification must not run"))
+    # An incomplete hunt that produced findings now RUNS verify (so findings can
+    # reach verified===true for remediation) while exploitation stays skipped.
+    # An incomplete hunt with NO findings keeps the original skip-everything path.
+    from clearwing.sourcehunt.checkpoints import VerificationResult
+
+    if with_findings:
+        verify = AsyncMock(
+            return_value=VerificationResult(verified=[], rejected=[], status="incomplete")
+        )
+    else:
+        verify = AsyncMock(side_effect=AssertionError("Verification must not run"))
     exploit = AsyncMock(side_effect=AssertionError("Exploitation must not run"))
     monkeypatch.setattr(runner, "_verify", verify)
     monkeypatch.setattr(runner, "_exploit", exploit)
@@ -1045,10 +1125,16 @@ def test_ordinary_incomplete_hunt_returns_incomplete_not_clean(
     assert result.exit_code == 3
     assert result.findings == findings
     assert result.files_hunted == int(with_findings)
-    verify.assert_not_awaited()
     exploit.assert_not_awaited()
-    assert ("verify", "skipped") in events
-    assert ("exploit", "skipped") in events
+    if with_findings:
+        # Verify ran (degraded) on the recorded findings; exploit stayed skipped.
+        verify.assert_awaited_once()
+        assert ("verify", "degraded") in events
+        assert ("exploit", "skipped") in events
+    else:
+        verify.assert_not_awaited()
+        assert ("verify", "skipped") in events
+        assert ("exploit", "skipped") in events
 
 
 @pytest.mark.asyncio

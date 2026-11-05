@@ -586,6 +586,156 @@ def test_incomplete_target_plan_skips_downstream_and_exits_incomplete(tmp_path: 
     runner._exploit.assert_not_awaited()
 
 
+def _incomplete_runner(tmp_path: Path) -> SourceHuntRunner:
+    source = tmp_path / "target.c"
+    source.write_text("int value;\n")
+    runner = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        local_path=str(tmp_path),
+        target_files=["target.c"],
+        output_dir=str(tmp_path / "results"),
+        no_exploit=True,
+        enable_findings_pool=False,
+        enable_mechanism_memory=False,
+        enable_behavior_monitor=False,
+        enable_knowledge_graph=False,
+    )
+    runner._ensure_sandbox_factory = MagicMock()
+    return runner
+
+
+def test_incomplete_hunt_with_findings_runs_verify_and_skips_exploit(tmp_path: Path) -> None:
+    # An incomplete hunt that recorded findings must NOT discard them: verify
+    # runs so findings can reach verified===true, while exploitation stays
+    # skipped (we never exploit on an incomplete picture of the target).
+    from clearwing.sourcehunt.checkpoints import VerificationResult
+
+    runner = _incomplete_runner(tmp_path)
+    finding = Finding(id="hunt-1", file="target.c", severity="medium")
+    runner._hunt = AsyncMock(
+        return_value=HuntResult(
+            findings=[finding],
+            files_hunted=0,
+            spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+            target_plan_completed=False,
+        )
+    )
+    verified = Finding(id="hunt-1", file="target.c", severity="medium", verified=True)
+    runner._verify = AsyncMock(
+        return_value=VerificationResult(verified=[verified], rejected=[], status="incomplete")
+    )
+    runner._exploit = AsyncMock(side_effect=AssertionError("exploitation must not run"))
+
+    result = runner.run()
+
+    assert result.status == "incomplete"
+    assert result.exit_code == 3
+    runner._verify.assert_awaited_once()
+    runner._exploit.assert_not_awaited()
+    assert [f["id"] for f in result.verified_findings] == ["hunt-1"]
+
+
+def test_incomplete_hunt_without_findings_skips_verify(tmp_path: Path) -> None:
+    # The empty-findings incomplete case keeps the original behavior: nothing
+    # to verify, so verify + exploit are both skipped.
+    runner = _incomplete_runner(tmp_path)
+    runner._hunt = AsyncMock(
+        return_value=HuntResult(
+            findings=[],
+            files_hunted=0,
+            spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+            target_plan_completed=False,
+        )
+    )
+    runner._verify = AsyncMock(side_effect=AssertionError("verification must not run"))
+    runner._exploit = AsyncMock(side_effect=AssertionError("exploitation must not run"))
+
+    result = runner.run()
+
+    assert result.status == "incomplete"
+    assert result.exit_code == 3
+    runner._verify.assert_not_awaited()
+    runner._exploit.assert_not_awaited()
+
+
+def test_incomplete_hunt_under_no_verify_still_skips_exploit(tmp_path: Path) -> None:
+    # Regression: --no-verify makes verification report a non-"completed" status
+    # by design, so the exploit-skip must NOT be gated behind `not self.no_verify`
+    # for the hunt-incompleteness half of the condition. An incomplete hunt with
+    # findings, verification disabled, and exploitation ENABLED must still skip
+    # exploit — we never exploit on an incomplete picture of the target.
+    from clearwing.sourcehunt.checkpoints import VerificationResult
+
+    source = tmp_path / "target.c"
+    source.write_text("int value;\n")
+    runner = SourceHuntRunner(
+        repo_url=str(tmp_path),
+        local_path=str(tmp_path),
+        target_files=["target.c"],
+        output_dir=str(tmp_path / "results"),
+        no_verify=True,
+        no_exploit=False,
+        enable_findings_pool=False,
+        enable_mechanism_memory=False,
+        enable_behavior_monitor=False,
+        enable_knowledge_graph=False,
+    )
+    runner._ensure_sandbox_factory = MagicMock()
+    finding = Finding(id="hunt-1", file="target.c", severity="medium")
+    runner._hunt = AsyncMock(
+        return_value=HuntResult(
+            findings=[finding],
+            files_hunted=0,
+            spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+            target_plan_completed=False,
+        )
+    )
+    # Under --no-verify the verify stage returns the findings unprocessed with a
+    # non-"completed" status; exploitation must not run regardless.
+    runner._verify = AsyncMock(
+        return_value=VerificationResult(verified=[finding], rejected=[], status="incomplete")
+    )
+    runner._exploit = AsyncMock(side_effect=AssertionError("exploitation must not run"))
+
+    result = runner.run()
+
+    assert result.status == "incomplete"
+    assert result.exit_code == 3
+    runner._exploit.assert_not_awaited()
+
+
+def test_incomplete_hunt_skips_exploit_even_when_verify_completes(tmp_path: Path) -> None:
+    # Edge case: on an incomplete hunt, verify may happen to fully process the
+    # few findings it recorded (status="completed"), but exploitation must
+    # STILL be skipped — we never exploit on an incomplete picture of the
+    # target. Guards the `verify_incomplete or self._target_plan_incomplete`
+    # condition.
+    from clearwing.sourcehunt.checkpoints import VerificationResult
+
+    runner = _incomplete_runner(tmp_path)
+    finding = Finding(id="hunt-1", file="target.c", severity="medium")
+    runner._hunt = AsyncMock(
+        return_value=HuntResult(
+            findings=[finding],
+            files_hunted=0,
+            spent_per_tier={"A": 0.0, "B": 0.0, "C": 0.0},
+            target_plan_completed=False,
+        )
+    )
+    verified = Finding(id="hunt-1", file="target.c", severity="medium", verified=True)
+    runner._verify = AsyncMock(
+        return_value=VerificationResult(verified=[verified], rejected=[], status="completed")
+    )
+    runner._exploit = AsyncMock(side_effect=AssertionError("exploitation must not run"))
+
+    result = runner.run()
+
+    assert result.status == "incomplete"
+    assert result.exit_code == 3
+    runner._verify.assert_awaited_once()
+    runner._exploit.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "path",
     [
