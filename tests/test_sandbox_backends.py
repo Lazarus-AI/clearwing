@@ -29,6 +29,7 @@ from clearwing.sandbox.rpc_backend import (
     JsonRpcConnection,
     SandboxRpcError,
     SocketSandboxBackend,
+    SocketSandboxInstance,
 )
 
 
@@ -297,6 +298,39 @@ def test_socket_backend_implements_complete_sandbox_contract():
     finally:
         connection.close()
         peer.close()
+
+
+def test_socket_sandbox_start_allows_for_provider_readiness():
+    connection = MagicMock()
+    connection.call.return_value = {"sandbox_id": "runtime-id", "short_id": "short"}
+    instance = SocketSandboxInstance(
+        connection,
+        "environment:test",
+        SandboxRunConfig(timeout_seconds=90),
+    )
+
+    try:
+        assert instance.start() == "runtime-id"
+        connection.call.assert_called_once_with(
+            "sandbox.start",
+            {
+                "environment_ref": "environment:test",
+                "config": {
+                    "policy": "sourcehunt",
+                    "isolation": "default",
+                    "mounts": [],
+                    "memory_mb": 2048,
+                    "cpus": None,
+                    "timeout_seconds": 90,
+                    "env": {},
+                    "working_dir": "/workspace",
+                    "pids_limit": 512,
+                },
+            },
+            timeout=100,
+        )
+    finally:
+        instance.stop()
 
 
 def test_backend_selection_defaults_to_docker(monkeypatch):

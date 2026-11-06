@@ -431,6 +431,9 @@ class SocketSandboxInstance:
                     "environment_ref": self._environment_ref,
                     "config": asdict(self.config),
                 },
+                timeout=self.config.timeout_seconds + 10
+                if self.config.timeout_seconds > 0
+                else None,
             ),
             "sandbox.start",
         )
